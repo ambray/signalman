@@ -146,6 +146,68 @@ function sanitizeProjectName(name: string): string {
 }
 
 /**
+ * S-18: Validate a health check command string.
+ *
+ * Rejects commands containing obvious injection patterns such as command
+ * substitution (`$()`, backticks), command chaining (`&&`, `||`, `;`),
+ * and pipe operators.
+ */
+function sanitizeHealthCheckCommand(command: string): string {
+  const FORBIDDEN_PATTERNS = /\$\(|`|&&|\|\||;|\|/;
+  if (FORBIDDEN_PATTERNS.test(command)) {
+    throw new Error(
+      `Invalid health check command: contains forbidden shell pattern. ` +
+      `Rejected patterns: $(), backticks, &&, ||, ;, |`,
+    );
+  }
+  if (command.length > 500) {
+    throw new Error(
+      `Health check command too long (${command.length} chars, max 500).`,
+    );
+  }
+  return command;
+}
+
+/**
+ * S-19: Protected environment variable names that must not be overridden
+ * by user-supplied compose env values.
+ */
+const PROTECTED_ENV_KEYS = new Set([
+  "PATH",
+  "HOME",
+  "SYSTEMROOT",
+  "COMSPEC",
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "DYLD_INSERT_LIBRARIES",
+  "DYLD_LIBRARY_PATH",
+  "WINDIR",
+  "SYSTEMDRIVE",
+]);
+
+/**
+ * Validate extra environment variables for Docker Compose.
+ *
+ * Ensures that keys follow the env-var naming convention and that
+ * critical system variables cannot be overridden.
+ */
+function validateExtraEnv(
+  extraEnv: Record<string, string>,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(extraEnv)) {
+    const sanitizedKey = sanitizeEnvKey(key);
+    if (PROTECTED_ENV_KEYS.has(sanitizedKey.toUpperCase())) {
+      throw new Error(
+        `Environment variable '${sanitizedKey}' is a protected system variable and cannot be overridden.`,
+      );
+    }
+    result[sanitizedKey] = value;
+  }
+  return result;
+}
+
+/**
  * Docker CLI client.
  *
  * Wraps the Docker CLI using execFile (not shell strings) for safety.
@@ -194,7 +256,7 @@ export class DockerClient {
 
     if (config.healthCheck) {
       args.push(
-        "--health-cmd", config.healthCheck.command,
+        "--health-cmd", sanitizeHealthCheckCommand(config.healthCheck.command),
         "--health-interval", `${config.healthCheck.intervalMs}ms`,
         "--health-timeout", `${config.healthCheck.timeoutMs}ms`,
         "--health-retries", String(config.healthCheck.retries),
@@ -489,14 +551,18 @@ export class DockerClient {
     args: string[],
     extraEnv?: Record<string, string>,
   ): Promise<{ stdout: string; stderr: string }> {
-    const env = extraEnv
-      ? { ...process.env, ...extraEnv }
-      : process.env;
+    // S-19: Build a new env object instead of spreading into process.env,
+    // and reject keys that would override critical system variables.
+    let env: NodeJS.ProcessEnv = process.env;
+    if (extraEnv) {
+      const sanitizedExtraEnv = validateExtraEnv(extraEnv);
+      env = { ...process.env, ...sanitizedExtraEnv };
+    }
 
     const { stdout, stderr } = await execAsync(this.composePath, args, {
       timeout: DEFAULT_TIMEOUT_MS * 4,
       maxBuffer: 10 * 1024 * 1024,
-      env: env as NodeJS.ProcessEnv,
+      env,
     });
     return { stdout, stderr };
   }

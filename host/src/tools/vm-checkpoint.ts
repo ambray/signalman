@@ -8,6 +8,7 @@
 import type { ToolDefinition, ToolResult } from "./types.js";
 import type { HypervisorBackend } from "../hypervisors/interface.js";
 import { resolveVM } from "../vm-cache.js";
+import { sanitizeVmName, sanitizeLabel } from "../sanitize.js";
 
 /**
  * Creates VM checkpoint tool definitions bound to a backend resolver.
@@ -32,8 +33,9 @@ export function createVmCheckpointTools(
         additionalProperties: false,
       },
       handler: async (params): Promise<ToolResult> => {
-        const name = params.name as string;
-        const label = params.label as string;
+        // Defense-in-depth: sanitize at tool handler level before backend
+        const name = sanitizeVmName(params.name as string);
+        const label = sanitizeLabel(params.label as string);
         const backend = await getBackend();
         const handle = await resolveVM(backend, name);
         const cp = await backend.createCheckpoint(handle, label);
@@ -63,8 +65,9 @@ export function createVmCheckpointTools(
         additionalProperties: false,
       },
       handler: async (params): Promise<ToolResult> => {
-        const name = params.name as string;
-        const label = params.label as string;
+        // Defense-in-depth: sanitize at tool handler level before backend
+        const name = sanitizeVmName(params.name as string);
+        const label = sanitizeLabel(params.label as string);
         const backend = await getBackend();
         const handle = await resolveVM(backend, name);
         const cp = { id: "", vmHandle: handle, label };
@@ -91,7 +94,8 @@ export function createVmCheckpointTools(
         additionalProperties: false,
       },
       handler: async (params): Promise<ToolResult> => {
-        const name = params.name as string;
+        // Defense-in-depth: sanitize at tool handler level before backend
+        const name = sanitizeVmName(params.name as string);
         const backend = await getBackend();
         const handle = await resolveVM(backend, name);
         const checkpoints = await backend.listCheckpoints(handle);

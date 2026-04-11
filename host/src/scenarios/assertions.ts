@@ -555,6 +555,23 @@ export class AssertionEvaluator {
         "stdout_matches assertion missing 'pattern'", severity, start);
     }
 
+    // S-04: Guard against ReDoS — reject excessively long patterns and
+    // validate that the regex compiles before executing it.
+    const MAX_PATTERN_LENGTH = 500;
+    if (pattern.length > MAX_PATTERN_LENGTH) {
+      return this.makeResult(assertion.id, false, undefined, expected,
+        `Regex pattern exceeds maximum length of ${MAX_PATTERN_LENGTH} characters (got ${pattern.length})`,
+        severity, start);
+    }
+
+    let regex: RegExp;
+    try {
+      regex = new RegExp(pattern);
+    } catch (e) {
+      return this.makeResult(assertion.id, false, undefined, expected,
+        `Invalid regex pattern '${pattern}': ${e}`, severity, start);
+    }
+
     const stdout = this.getStdout(source);
     if (stdout === undefined) {
       return this.makeResult(assertion.id, false, undefined, expected,
@@ -562,8 +579,17 @@ export class AssertionEvaluator {
         severity, start);
     }
 
-    const regex = new RegExp(pattern);
-    const matches = regex.test(stdout);
+    // NOTE: Node.js does not support native regex execution timeouts.
+    // The pattern length guard above (500 chars) mitigates the most common
+    // ReDoS vectors.  For full protection, consider the `re2` package.
+    let matches: boolean;
+    try {
+      matches = regex.test(stdout);
+    } catch (e) {
+      return this.makeResult(assertion.id, false, undefined, expected,
+        `Regex execution error on pattern '${pattern}': ${e}`, severity, start);
+    }
+
     const passed = matches === expected;
     const msg = passed
       ? `stdout ${expected ? "matches" : "does not match"} /${pattern}/ as expected`
@@ -630,8 +656,18 @@ export class AssertionEvaluator {
       passed = stdout.includes(expect_.stdout_contains as string);
     }
     if (expect_?.stdout_matches) {
-      const regex = new RegExp(expect_.stdout_matches as string);
-      passed = regex.test(stdout);
+      const pat = expect_.stdout_matches as string;
+      if (pat.length > 500) {
+        return this.makeResult(assertion.id, false, stdout, expect_,
+          `Regex pattern too long (${pat.length} chars, max 500)`, severity, start);
+      }
+      try {
+        const regex = new RegExp(pat);
+        passed = regex.test(stdout);
+      } catch (e) {
+        return this.makeResult(assertion.id, false, stdout, expect_,
+          `Invalid regex pattern '${pat}': ${e}`, severity, start);
+      }
     }
 
     return this.makeResult(assertion.id, passed, stdout, expect_,
