@@ -1,0 +1,72 @@
+# Cursor Restrict Scenario — Setup & Configuration
+#
+# Tests that Cursor IDE functions correctly under the Ospiri agent's
+# Restrict policy. AI features should be blocked while core IDE
+# functionality (file editing, terminal, etc.) remains operational.
+
+name: "Cursor under Restrict policy"
+version: "1.0"
+tags: ["restrict", "cursor", "ai-tools", "network-block"]
+
+# VM configuration
+vms:
+  - name: endpoint-1
+    template: windows-11-clean
+    checkpoint_restore: agent-installed
+    guest_agent_port: 50051
+    network:
+      switch: "InternalSwitch"
+      static_ip: "172.30.0.10"
+
+# Pre-test setup steps (executed sequentially)
+setup:
+  # Install Cursor IDE
+  - action: vm_install
+    vm: endpoint-1
+    package: Cursor.Cursor
+    source: winget
+    timeout_ms: 300000
+
+  # Copy restrict policy
+  - action: vm_copy_file
+    vm: endpoint-1
+    src: ./policies/restrict-ai.rego
+    dest: "C:\\Ospiri\\policies\\restrict-ai.rego"
+
+  # Copy test configuration
+  - action: vm_copy_file
+    vm: endpoint-1
+    src: ./config/test-config.yaml
+    dest: "C:\\Ospiri\\config\\default_config.yaml"
+
+  # Restart agent to pick up new policy
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args: ["-Command", "Restart-Service OspiriAgent"]
+    timeout_ms: 30000
+
+  # Wait for agent to stabilize
+  - action: wait
+    duration_ms: 5000
+
+  # Verify agent is running
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args: ["-Command", "Get-Service OspiriAgent | Select-Object -ExpandProperty Status"]
+    expect_stdout: "Running"
+
+# Post-test teardown
+teardown:
+  # Restore to clean checkpoint
+  - action: vm_restore
+    vm: endpoint-1
+    checkpoint: agent-installed
+
+# Checkpoint strategy
+checkpoints:
+  before_test: true        # Auto-checkpoint before workflow
+  after_setup: true         # Checkpoint after setup (reusable)
+  after_setup_label: "cursor-installed-restrict-active"
+  on_failure: true          # Checkpoint on test failure for debugging

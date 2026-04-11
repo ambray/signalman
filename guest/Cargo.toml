@@ -1,0 +1,51 @@
+[package]
+name = "signalman-guest"
+version = "0.1.0"
+edition = "2021"
+description = "Signalman guest agent — process control, UI automation, and restriction verification inside VMs"
+license = "MIT"
+repository = "https://github.com/nickthecook/signalman"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# gRPC
+tonic = "0.12"
+prost = "0.13"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Networking (for restriction verification)
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+
+# Screenshot
+image = { version = "0.25", optional = true }
+
+# Windows-specific
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_UI_Accessibility",
+    "Win32_Graphics_Gdi",
+] }
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[features]
+default = ["screenshot"]
+screenshot = ["image"]

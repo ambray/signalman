@@ -1,0 +1,81 @@
+# Codex Sandbox Scenario — Setup & Configuration
+#
+# Tests that OpenAI Codex CLI operates correctly under the Ospiri
+# agent's Sandbox policy. Codex should be confined to an AppContainer
+# with network access limited to OpenAI API endpoints only.
+
+name: "Codex CLI under Sandbox policy"
+version: "1.0"
+tags: ["sandbox", "codex", "appcontainer", "network-filter"]
+
+# VM configuration
+vms:
+  - name: endpoint-1
+    template: windows-11-clean
+    checkpoint_restore: agent-installed
+    guest_agent_port: 50051
+    network:
+      switch: "InternalSwitch"
+      static_ip: "172.30.0.10"
+
+# Pre-test setup steps
+setup:
+  # Install Node.js (Codex dependency)
+  - action: vm_install
+    vm: endpoint-1
+    package: OpenJS.NodeJS.LTS
+    source: winget
+    timeout_ms: 300000
+
+  # Install Codex CLI globally
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args: ["-Command", "npm install -g @openai/codex"]
+    timeout_ms: 120000
+
+  # Copy sandbox policy
+  - action: vm_copy_file
+    vm: endpoint-1
+    src: ./policies/sandbox-codex.rego
+    dest: "C:\\Ospiri\\policies\\sandbox-codex.rego"
+
+  # Copy test configuration
+  - action: vm_copy_file
+    vm: endpoint-1
+    src: ./config/test-config.yaml
+    dest: "C:\\Ospiri\\config\\default_config.yaml"
+
+  # Set OpenAI API key (test key, rate-limited)
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args: ["-Command", "[System.Environment]::SetEnvironmentVariable('OPENAI_API_KEY', $env:TEST_OPENAI_KEY, 'User')"]
+    timeout_ms: 10000
+
+  # Restart agent
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args: ["-Command", "Restart-Service OspiriAgent"]
+    timeout_ms: 30000
+
+  - action: wait
+    duration_ms: 5000
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args: ["-Command", "Get-Service OspiriAgent | Select-Object -ExpandProperty Status"]
+    expect_stdout: "Running"
+
+teardown:
+  - action: vm_restore
+    vm: endpoint-1
+    checkpoint: agent-installed
+
+checkpoints:
+  before_test: true
+  after_setup: true
+  after_setup_label: "codex-installed-sandbox-active"
+  on_failure: true

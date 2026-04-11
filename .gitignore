@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+host/node_modules/
+hub/node_modules/
+
+# Build output
+host/dist/
+hub/dist/
+guest/target/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.local
+
+# Test output (root-level only, not src/output/)
+/output/
+*.png
+!scenarios/**/*.png
+
+# Certificates (generated, not committed)
+certs/*.pem
+certs/*.key
+certs/*.crt
+!certs/.gitkeep
