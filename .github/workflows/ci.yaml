@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  host-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install dependencies
+        working-directory: host
+        run: npm install
+      - name: Type check
+        working-directory: host
+        run: npx tsc --noEmit
+
+  guest-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.x"
+      - name: Build guest agent
+        working-directory: guest
+        run: cargo build --release
+      - name: Run tests
+        working-directory: guest
+        run: cargo test --lib
+      - name: Clippy
+        working-directory: guest
+        run: cargo clippy -- -D warnings
+
+  guest-build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.x"
+      - name: Build guest agent
+        working-directory: guest
+        run: cargo build
+      - name: Run tests
+        working-directory: guest
+        run: cargo test --lib
