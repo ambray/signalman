@@ -119,24 +119,36 @@ export interface InstallResult {
   installedPath: string;
 }
 
-// ── Proto Loading ──────────────────────────────────────────────────
+// ── Proto Loading (lazy) ──────────────────────────────────────────
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROTO_PATH = path.resolve(__dirname, "../../../proto/guest.proto");
 
-const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
-  keepCase: false,
-  longs: Number,
-  enums: String,
-  defaults: true,
-  oneofs: true,
-});
-
-const protoDescriptor = grpc.loadPackageDefinition(packageDefinition);
-
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const guestProto = (protoDescriptor.signalman as any).guest as any;
+let _guestProto: any = null;
+
+/**
+ * Lazily loads the proto definition on first use.
+ * This allows tests to mock @grpc/proto-loader and @grpc/grpc-js
+ * before the proto is loaded.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function getGuestProto(): any {
+  if (!_guestProto) {
+    const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
+      keepCase: false,
+      longs: Number,
+      enums: String,
+      defaults: true,
+      oneofs: true,
+    });
+    const protoDescriptor = grpc.loadPackageDefinition(packageDefinition);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    _guestProto = (protoDescriptor.signalman as any).guest as any;
+  }
+  return _guestProto;
+}
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -305,7 +317,8 @@ export class GuestAgentClient {
 
     this._connectionState = "connecting";
     try {
-      this.client = new guestProto.GuestAgent(
+      const proto = getGuestProto();
+      this.client = new proto.GuestAgent(
         this.address,
         credentials,
         channelOptions,

@@ -6,22 +6,19 @@
  * guest agent clients to execute scenario DSL actions.
  */
 
-import * as fs from "node:fs";
-import * as yaml from "yaml";
+import * as path from "node:path";
 import type { HypervisorBackend, VMHandle } from "../hypervisors/interface.js";
 import type { GuestAgentClient } from "../guest/client.js";
 import type { SignalmanConfig } from "../config.js";
 import {
   loadScenario,
   evaluateAssertions,
-  extractToolBlocks,
 } from "./runner.js";
 import type {
   SetupStep,
-  VmConfig,
-  AssertionConfig,
-  AssertionResult as RunnerAssertionResult,
 } from "./runner.js";
+import { writeJunitReport } from "../output/reporter.js";
+import type { TestResult, AssertionResultEntry } from "../output/reporter.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -79,12 +76,23 @@ export interface ScenarioResult {
  * Coordinates the full lifecycle: VM resolution, guest agent readiness,
  * setup steps, workflow execution, assertion evaluation, and teardown.
  */
+/** Options for the ScenarioOrchestrator. */
+export interface OrchestratorOptions {
+  /** Directory for writing output reports (JSON, Markdown, JUnit XML). */
+  outputDir?: string;
+}
+
 export class ScenarioOrchestrator {
+  private readonly outputDir: string | undefined;
+
   constructor(
     private backend: HypervisorBackend,
     private guestClients: Map<string, GuestAgentClient>,
     private config: SignalmanConfig,
-  ) {}
+    options?: OrchestratorOptions,
+  ) {
+    this.outputDir = options?.outputDir;
+  }
 
   /**
    * Execute a complete scenario: setup, workflow, assertions, teardown.
@@ -156,15 +164,51 @@ export class ScenarioOrchestrator {
       error = err instanceof Error ? err.message : String(err);
     }
 
-    return {
+    const durationMs = Date.now() - startTime;
+    const result: ScenarioResult = {
       name: scenarioName,
       status,
-      duration_ms: Date.now() - startTime,
+      duration_ms: durationMs,
       setup_results: setupResults,
       assertion_results: assertionResults,
       teardown_results: teardownResults,
       error,
     };
+
+    // Write JUnit XML report if an output directory is configured
+    if (this.outputDir) {
+      const passedCount = assertionResults.filter((r) => r.passed).length;
+      const total = assertionResults.length;
+      const score = total > 0 ? passedCount / total : 1;
+      const startedAt = new Date(startTime).toISOString();
+      const finishedAt = new Date(startTime + durationMs).toISOString();
+
+      const testResult: TestResult = {
+        scenario: scenarioName,
+        startedAt,
+        finishedAt,
+        durationMs,
+        passed: status === "passed",
+        score,
+        assertions: assertionResults.map(
+          (r): AssertionResultEntry => ({
+            id: r.id,
+            description: r.description,
+            severity: "medium",
+            passed: r.passed,
+            actual: r.actual,
+            error: r.error,
+          }),
+        ),
+        screenshots: [],
+        errors: error ? [error] : [],
+      };
+
+      const scenarioOutputDir = path.join(this.outputDir, scenarioName);
+      writeJunitReport(testResult, scenarioOutputDir);
+    }
+
+    return result;
   }
 
   /**

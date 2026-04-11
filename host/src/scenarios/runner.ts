@@ -118,6 +118,7 @@ export function loadScenario(scenarioDir: string): {
   config: ScenarioConfig;
   assertions: AssertionConfig;
   workflowMarkdown: string;
+  narrative: Narrative | null;
 } {
   // Resolve to absolute path and prevent path traversal outside the
   // project's scenarios/ directory.  We walk up from __dirname (which
@@ -170,7 +171,9 @@ export function loadScenario(scenarioDir: string): {
     workflowMarkdown = fs.readFileSync(workflowPath, "utf-8");
   }
 
-  return { config, assertions, workflowMarkdown };
+  const narrative = workflowMarkdown ? parseNarrative(workflowMarkdown) : null;
+
+  return { config, assertions, workflowMarkdown, narrative };
 }
 
 // ---------------------------------------------------------------------------
@@ -428,14 +431,10 @@ export async function runScenario(
   const outputs = new Map<string, string>();
   const screenshotMap = new Map<string, string>();
 
-  // 1. Load scenario files
-  const { config, assertions, workflowMarkdown } = loadScenario(scenarioDir);
+  // 1. Load scenario files (includes parsed narrative if workflow.md exists)
+  const { config, assertions, workflowMarkdown, narrative } = loadScenario(scenarioDir);
 
-  // 2. Parse narrative from the workflow markdown
-  let narrative: Narrative | null = null;
-  if (workflowMarkdown) {
-    narrative = parseNarrative(workflowMarkdown);
-  }
+  // 2. Narrative is already parsed by loadScenario
 
   // 3. Execute workflow — walk each narrative step's tool blocks
   let setupOk = true;
