@@ -227,35 +227,43 @@ describe('sanitizeUrl', () => {
 });
 
 describe('sanitizeTimeout', () => {
-  it('returns default for undefined', () => {
-    expect(sanitizeTimeout(undefined)).toBe(60000);
+  it('returns default 30000 for undefined', () => {
+    expect(sanitizeTimeout(undefined)).toBe(30000);
   });
 
-  it('accepts valid timeout', () => {
+  it('accepts valid timeout within range', () => {
     expect(sanitizeTimeout(30000)).toBe(30000);
   });
 
-  it('rejects negative', () => {
-    expect(() => sanitizeTimeout(-1)).toThrow();
+  it('clamps below-minimum values up to 1000', () => {
+    expect(sanitizeTimeout(500)).toBe(1000);
+    expect(sanitizeTimeout(0)).toBe(1000);
+    expect(sanitizeTimeout(-1)).toBe(1000);
   });
 
-  it('rejects over max', () => {
-    expect(() => sanitizeTimeout(700000)).toThrow();
+  it('clamps above-max values down to max', () => {
+    expect(sanitizeTimeout(700000)).toBe(600000);
+    expect(sanitizeTimeout(999999)).toBe(600000);
   });
 
-  it('accepts custom max', () => {
+  it('handles NaN by returning default then clamping', () => {
+    expect(sanitizeTimeout(NaN)).toBe(30000);
+  });
+
+  it('accepts custom max and clamps accordingly', () => {
     expect(sanitizeTimeout(500000, 600000)).toBe(500000);
+    expect(sanitizeTimeout(400000, 300000)).toBe(300000);
   });
 
-  it('accepts zero timeout', () => {
-    expect(sanitizeTimeout(0)).toBe(0);
+  it('accepts exactly the min boundary (1000)', () => {
+    expect(sanitizeTimeout(1000)).toBe(1000);
   });
 
-  it('accepts exactly the max', () => {
+  it('accepts exactly the max boundary (600000)', () => {
     expect(sanitizeTimeout(600000)).toBe(600000);
   });
 
-  it('rejects over custom max', () => {
-    expect(() => sanitizeTimeout(400000, 300000)).toThrow();
+  it('clamps negative values to minimum', () => {
+    expect(sanitizeTimeout(-9999)).toBe(1000);
   });
 });
