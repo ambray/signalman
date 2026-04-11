@@ -35,6 +35,21 @@ async function vmrun(
   return stdout.trim();
 }
 
+/**
+ * VMware hypervisor backend.
+ *
+ * SECURITY WARNING (S-14): Guest credentials (`guestUser` / `guestPass`) are
+ * passed as command-line arguments (`-gu` / `-gp`) to vmrun.  This means they
+ * are visible in process listings (e.g. `ps`, Task Manager).  vmrun does NOT
+ * support credential passing via stdin or environment variables.
+ *
+ * Preferred mitigations:
+ * 1. Use vmrun's encrypted credential store (`-vp <path>`) when available.
+ * 2. Restrict process-listing privileges on the host.
+ * 3. Use short-lived, least-privilege guest accounts.
+ *
+ * All logging in this class redacts `guestPass` to prevent credential leakage.
+ */
 export class VmwareBackend implements HypervisorBackend {
   readonly name = "vmware";
   private vmrunPath: string;
@@ -43,8 +58,9 @@ export class VmwareBackend implements HypervisorBackend {
   private guestPass: string;
 
   // WARNING: Guest credentials are passed as command-line arguments to vmrun.
-  // They will be visible in process listings. Consider using vmrun's
-  // credential store (-vp) or environment variables in production.
+  // They will be visible in process listings.  vmrun does not support stdin
+  // or environment-variable credential passing.  See class-level JSDoc for
+  // recommended mitigations.
   constructor(options?: {
     vmrunPath?: string;
     useGovc?: boolean;
@@ -257,10 +273,14 @@ export class VmwareBackend implements HypervisorBackend {
       };
     } catch (err) {
       const e = err as { code?: number; stdout?: string; stderr?: string };
+      // S-14: Redact guest password from any error messages to prevent
+      // credential leakage in logs or stack traces.
+      const rawStderr = e.stderr ?? String(err);
+      const redactedStderr = this.redactCredentials(rawStderr);
       return {
         exitCode: e.code ?? 1,
         stdout: e.stdout ?? "",
-        stderr: e.stderr ?? String(err),
+        stderr: redactedStderr,
         durationMs: Date.now() - startTime,
       };
     }
@@ -291,6 +311,12 @@ export class VmwareBackend implements HypervisorBackend {
     throw new Error(
       `Cannot resolve VMX path for '${handle.name}'. Provide a VMHandle with a .vmx path as id, or ensure the VM is running.`,
     );
+  }
+
+  /** Redact the guest password from a string to prevent credential leakage. */
+  private redactCredentials(text: string): string {
+    if (!this.guestPass || this.guestPass === "guest") return text;
+    return text.replaceAll(this.guestPass, "***REDACTED***");
   }
 
   private async listVmsGovc(): Promise<VMHandle[]> {

@@ -121,6 +121,11 @@ describe('sanitizePath', () => {
     expect(() => sanitizePath('file{test}')).toThrow();
   });
 
+  it('rejects double quotes (PowerShell variable interpolation)', () => {
+    expect(() => sanitizePath('C:\\path\\"$evil"')).toThrow();
+    expect(() => sanitizePath('"test"')).toThrow();
+  });
+
   it('accepts forward slashes', () => {
     expect(sanitizePath('C:/Users/test')).toBe('C:/Users/test');
   });

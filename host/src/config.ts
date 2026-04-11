@@ -317,7 +317,7 @@ export function loadConfig(configPath?: string): SignalmanConfig {
       throw new Error(`Configuration file not found: ${resolved}`);
     }
     const raw = fs.readFileSync(resolved, "utf-8");
-    const parsed = YAML.parse(raw) as Record<string, unknown>;
+    const parsed = YAML.parse(raw, { maxAliasCount: 100 }) as Record<string, unknown>;
     if (parsed && typeof parsed === "object") {
       config = mergeConfig(config, parsed);
     }
@@ -327,7 +327,7 @@ export function loadConfig(configPath?: string): SignalmanConfig {
     for (const candidate of candidates) {
       if (fs.existsSync(candidate)) {
         const raw = fs.readFileSync(candidate, "utf-8");
-        const parsed = YAML.parse(raw) as Record<string, unknown>;
+        const parsed = YAML.parse(raw, { maxAliasCount: 100 }) as Record<string, unknown>;
         if (parsed && typeof parsed === "object") {
           config = mergeConfig(config, parsed);
         }

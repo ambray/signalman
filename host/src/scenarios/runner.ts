@@ -128,9 +128,10 @@ export function loadScenario(scenarioDir: string): {
   const resolvedDir = path.resolve(scenarioDir);
 
   // Normalize both paths so that trailing separators and case (on
-  // Windows) don't cause false negatives.
-  const normalizedResolved = path.normalize(resolvedDir) + path.sep;
-  const normalizedRoot = path.normalize(scenariosRoot) + path.sep;
+  // Windows NTFS, which is case-insensitive) don't cause false negatives.
+  const lower = process.platform === "win32" ? (s: string) => s.toLowerCase() : (s: string) => s;
+  const normalizedResolved = lower(path.normalize(resolvedDir)) + path.sep;
+  const normalizedRoot = lower(path.normalize(scenariosRoot)) + path.sep;
 
   if (!normalizedResolved.startsWith(normalizedRoot)) {
     throw new Error(
@@ -148,7 +149,8 @@ export function loadScenario(scenarioDir: string): {
   }
 
   const config = yaml.parse(
-    fs.readFileSync(setupPath, "utf-8")
+    fs.readFileSync(setupPath, "utf-8"),
+    { maxAliasCount: 100 },
   ) as ScenarioConfig;
 
   let assertions: AssertionConfig = {
@@ -158,7 +160,8 @@ export function loadScenario(scenarioDir: string): {
   };
   if (fs.existsSync(assertionsPath)) {
     assertions = yaml.parse(
-      fs.readFileSync(assertionsPath, "utf-8")
+      fs.readFileSync(assertionsPath, "utf-8"),
+      { maxAliasCount: 100 },
     ) as AssertionConfig;
   }
 
@@ -201,7 +204,7 @@ export function extractToolBlocks(markdown: string): ToolBlock[] {
     const yamlContent = match[1].trim();
 
     try {
-      const parsed = yaml.parse(yamlContent) as Record<string, unknown>;
+      const parsed = yaml.parse(yamlContent, { maxAliasCount: 100 }) as Record<string, unknown>;
       const toolName = Object.keys(parsed)[0];
       const params = (parsed[toolName] as Record<string, unknown>) ?? {};
 
@@ -252,10 +255,17 @@ export function evaluateAssertions(
             );
           }
           if (assertion.expect.stdout_matches) {
-            const regex = new RegExp(
-              assertion.expect.stdout_matches as string
-            );
-            passed = regex.test(output);
+            const pat = assertion.expect.stdout_matches as string;
+            if (pat.length <= 500) {
+              try {
+                const regex = new RegExp(pat);
+                passed = regex.test(output);
+              } catch {
+                error = `Invalid regex pattern: ${pat}`;
+              }
+            } else {
+              error = `Regex pattern too long (${pat.length} chars, max 500)`;
+            }
           }
           break;
         }

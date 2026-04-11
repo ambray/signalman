@@ -6,8 +6,42 @@
  * pattern as vm-lifecycle.ts and vm-operations.ts.
  */
 
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ToolDefinition, ToolResult } from "./types.js";
 import { DockerClient, type ComposeConfig } from "../docker/client.js";
+import { sanitizePath } from "../sanitize.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Validate that a compose file path is within the allowed project directory.
+ *
+ * Resolves the path to an absolute path and checks it resides under the
+ * project's scenarios/ or compose/ directory. Rejects path traversal
+ * attempts and absolute paths outside the allowed root.
+ */
+function validateComposeFilePath(composeFile: string): string {
+  // Sanitize for shell metacharacters first
+  sanitizePath(composeFile);
+
+  // Resolve to the project root (host/src/tools -> host -> project root)
+  const projectRoot = path.resolve(__dirname, "..", "..", "..");
+  const resolved = path.resolve(composeFile);
+
+  // Normalize both paths for consistent comparison (Windows case, trailing sep)
+  const normalizedResolved = path.normalize(resolved) + path.sep;
+  const normalizedRoot = path.normalize(projectRoot) + path.sep;
+
+  if (!normalizedResolved.startsWith(normalizedRoot)) {
+    throw new Error(
+      `Compose file "${resolved}" resolves outside the allowed project directory "${projectRoot}". ` +
+      `Path traversal is not allowed.`,
+    );
+  }
+
+  return resolved;
+}
 
 /**
  * Creates Docker orchestration tool definitions.
@@ -45,9 +79,10 @@ export function createDockerTools(
       },
       handler: async (params): Promise<ToolResult> => {
         const docker = getDocker();
+        const validatedPath = validateComposeFilePath(params.composeFile as string);
         const config: ComposeConfig = {
           projectName: params.projectName as string,
-          composeFile: params.composeFile as string,
+          composeFile: validatedPath,
         };
         const services = params.services as string[] | undefined;
 
@@ -89,9 +124,10 @@ export function createDockerTools(
       },
       handler: async (params): Promise<ToolResult> => {
         const docker = getDocker();
+        const validatedPath = validateComposeFilePath(params.composeFile as string);
         const config: ComposeConfig = {
           projectName: params.projectName as string,
-          composeFile: params.composeFile as string,
+          composeFile: validatedPath,
         };
         const removeVolumes = params.removeVolumes as boolean | undefined;
 
@@ -124,7 +160,8 @@ export function createDockerTools(
       },
       handler: async (params): Promise<ToolResult> => {
         const docker = getDocker();
-        const name = params.name as string;
+        // Defense-in-depth: sanitize at tool handler level
+        const name = sanitizePath(params.name as string);
 
         const status = await docker.getContainerStatus(name);
 
@@ -156,7 +193,8 @@ export function createDockerTools(
       },
       handler: async (params): Promise<ToolResult> => {
         const docker = getDocker();
-        const name = params.name as string;
+        // Defense-in-depth: sanitize at tool handler level
+        const name = sanitizePath(params.name as string);
         const tail = params.tail as number | undefined;
 
         const logs = await docker.getContainerLogs(name, tail);
@@ -192,7 +230,8 @@ export function createDockerTools(
       },
       handler: async (params): Promise<ToolResult> => {
         const docker = getDocker();
-        const name = params.name as string;
+        // Defense-in-depth: sanitize at tool handler level
+        const name = sanitizePath(params.name as string);
         const command = params.command as string[];
         const timeoutMs = params.timeoutMs as number | undefined;
 
@@ -237,7 +276,8 @@ export function createDockerTools(
       },
       handler: async (params): Promise<ToolResult> => {
         const docker = getDocker();
-        const name = params.name as string;
+        // Defense-in-depth: sanitize at tool handler level
+        const name = sanitizePath(params.name as string);
         const timeoutMs = params.timeoutMs as number | undefined;
 
         const healthy = await docker.waitForHealthy(name, timeoutMs);

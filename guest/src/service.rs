@@ -22,6 +22,80 @@ pub mod file_ops;
 /// Timestamp when the service was created, used to compute uptime.
 static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
+/// Maximum number of arguments allowed for `run_command`.
+const MAX_ARG_COUNT: usize = 100;
+
+/// Default command timeout in seconds.
+const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 60;
+
+/// Shell metacharacters that indicate command chaining and are denied in
+/// `run_command` arguments.
+const SHELL_METACHARACTERS: &[char] = &[';', '|', '&'];
+
+/// Dangerous commands that are unconditionally denied.
+const DENIED_COMMANDS: &[&str] = &[
+    "rm -rf /",
+    "rm -rf /*",
+    "format",
+    "del /s /q C:\\",
+    "del /s /q c:\\",
+    "mkfs",
+    "dd if=/dev/zero",
+    ":(){:|:&};:",
+];
+
+/// Validate that a package ID contains only safe characters.
+/// Allows alphanumeric, dots, hyphens, underscores, and forward slashes
+/// (for scoped packages like `@scope/name`).
+#[allow(clippy::result_large_err)] // Status is the standard tonic error type
+fn validate_package_id(id: &str) -> Result<(), Status> {
+    if id.is_empty() {
+        return Err(Status::invalid_argument("package_id must not be empty"));
+    }
+    if id.len() > 256 {
+        return Err(Status::invalid_argument(
+            "package_id exceeds maximum length of 256 characters",
+        ));
+    }
+    for ch in id.chars() {
+        if ch.is_alphanumeric() || ch == '.' || ch == '-' || ch == '_' || ch == '/' || ch == '@' {
+            continue;
+        }
+        return Err(Status::invalid_argument(format!(
+            "package_id contains invalid character: '{ch}'"
+        )));
+    }
+    Ok(())
+}
+
+/// Check if a command + args string matches any denied command pattern.
+fn is_denied_command(command: &str, args: &[String]) -> bool {
+    let full = format!("{} {}", command, args.join(" "));
+    for denied in DENIED_COMMANDS {
+        if full.contains(denied) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if any argument contains shell metacharacters that could chain commands.
+fn contains_shell_metacharacters(command: &str, args: &[String]) -> bool {
+    for ch in SHELL_METACHARACTERS {
+        if command.contains(*ch) {
+            return true;
+        }
+    }
+    for arg in args {
+        for ch in SHELL_METACHARACTERS {
+            if arg.contains(*ch) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// GuestAgent gRPC service implementation.
 pub struct GuestAgentService {
     /// Agent ID assigned during registration (if any).
@@ -147,9 +221,16 @@ impl GuestAgent for GuestAgentService {
             Some(req.working_directory.clone())
         };
 
-        // If wait_for_exit is set, use std::process::Command directly to capture output.
+        // S-08: Use tokio::process::Command for async execution to avoid blocking
+        // the tokio runtime thread.
         if req.wait_for_exit {
-            let mut cmd = std::process::Command::new(&req.path);
+            let timeout = if req.timeout_ms > 0 {
+                Duration::from_millis(req.timeout_ms as u64)
+            } else {
+                Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS)
+            };
+
+            let mut cmd = tokio::process::Command::new(&req.path);
             cmd.args(&req.args);
             if let Some(ref dir) = working_dir {
                 cmd.current_dir(dir);
@@ -158,9 +239,18 @@ impl GuestAgent for GuestAgentService {
                 cmd.env(k, v);
             }
 
-            let output = cmd
-                .output()
-                .map_err(|e| Status::internal(format!("Failed to run process: {e}")))?;
+            let output = match tokio::time::timeout(timeout, cmd.output()).await {
+                Ok(Ok(output)) => output,
+                Ok(Err(e)) => {
+                    return Err(Status::internal(format!("Failed to run process: {e}")));
+                }
+                Err(_) => {
+                    return Err(Status::deadline_exceeded(format!(
+                        "Process execution timed out after {}ms",
+                        timeout.as_millis()
+                    )));
+                }
+            };
 
             return Ok(Response::new(ProcessStartResponse {
                 pid: 0,
@@ -319,13 +409,44 @@ impl GuestAgent for GuestAgentService {
             return Err(Status::invalid_argument("command must not be empty"));
         }
 
+        // S-06: Audit logging for every command execution.
+        warn!(
+            command = %req.command,
+            args = ?req.args,
+            "AUDIT: run_command invoked"
+        );
+
+        // S-06: Enforce maximum argument count.
+        if req.args.len() > MAX_ARG_COUNT {
+            return Err(Status::invalid_argument(format!(
+                "Too many arguments: {} exceeds maximum of {MAX_ARG_COUNT}",
+                req.args.len()
+            )));
+        }
+
+        // S-06: Reject commands containing shell metacharacters for command chaining.
+        if contains_shell_metacharacters(&req.command, &req.args) {
+            return Err(Status::invalid_argument(
+                "Command or arguments contain shell metacharacters (;, &&, ||, |) which are not allowed",
+            ));
+        }
+
+        // S-06: Check against the command denylist.
+        if is_denied_command(&req.command, &req.args) {
+            return Err(Status::permission_denied(
+                "Command matches a denied pattern and cannot be executed",
+            ));
+        }
+
+        // S-07: Enforce timeout (default 60s, configurable via request).
         let timeout = if req.timeout_ms > 0 {
             Duration::from_millis(req.timeout_ms as u64)
         } else {
-            Duration::from_secs(30) // default 30s timeout
+            Duration::from_secs(DEFAULT_COMMAND_TIMEOUT_SECS)
         };
 
-        let mut cmd = std::process::Command::new(&req.command);
+        // S-07 + S-08: Use tokio::process::Command to avoid blocking the runtime.
+        let mut cmd = tokio::process::Command::new(&req.command);
         cmd.args(&req.args);
 
         if !req.working_directory.is_empty() {
@@ -339,31 +460,45 @@ impl GuestAgent for GuestAgentService {
 
         let start = Instant::now();
 
-        // Spawn and wait with timeout.
+        // S-07: Spawn child and wrap with timeout; kill on expiry.
         let child = cmd
             .spawn()
             .map_err(|e| Status::internal(format!("Failed to spawn command: {e}")))?;
 
-        let output = child
-            .wait_with_output()
-            .map_err(|e| Status::internal(format!("Failed to wait for command: {e}")))?;
+        // wait_with_output() takes ownership, so we cannot kill after timeout.
+        // Use a channel to get the result or abort.
+        let child_id = child.id();
+        let output_fut = child.wait_with_output();
 
-        let duration_ms = start.elapsed().as_millis() as u64;
-
-        if duration_ms > timeout.as_millis() as u64 {
-            warn!(
-                command = %req.command,
-                duration_ms,
-                "Command exceeded timeout (ran to completion anyway)"
-            );
+        match tokio::time::timeout(timeout, output_fut).await {
+            Ok(Ok(output)) => {
+                let duration_ms = start.elapsed().as_millis() as u64;
+                Ok(Response::new(RunCommandResponse {
+                    exit_code: output.status.code().unwrap_or(-1),
+                    stdout: String::from_utf8_lossy(&output.stdout).into(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into(),
+                    duration_ms,
+                }))
+            }
+            Ok(Err(e)) => Err(Status::internal(format!(
+                "Failed to wait for command: {e}"
+            ))),
+            Err(_) => {
+                // S-07: Timeout expired — kill the child process via OS PID.
+                if let Some(pid) = child_id {
+                    let _ = crate::process::stop_process(pid, true);
+                }
+                warn!(
+                    command = %req.command,
+                    timeout_ms = timeout.as_millis() as u64,
+                    "Command killed after timeout"
+                );
+                Err(Status::deadline_exceeded(format!(
+                    "Command timed out after {}ms",
+                    timeout.as_millis()
+                )))
+            }
         }
-
-        Ok(Response::new(RunCommandResponse {
-            exit_code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).into(),
-            stderr: String::from_utf8_lossy(&output.stderr).into(),
-            duration_ms,
-        }))
     }
 
     // ── UI Automation (unimplemented) ───────────────────────────
@@ -504,9 +639,16 @@ impl GuestAgent for GuestAgentService {
     ) -> Result<Response<InstallSoftwareResponse>, Status> {
         let req = request.into_inner();
 
-        if req.package_id.is_empty() {
-            return Err(Status::invalid_argument("package_id must not be empty"));
-        }
+        // S-20: Validate package ID format before passing to package managers.
+        validate_package_id(&req.package_id)?;
+
+        // S-20: Audit logging for install operations.
+        warn!(
+            source = %req.source,
+            package = %req.package_id,
+            version = %req.version,
+            "AUDIT: install_software invoked"
+        );
 
         let (program, args) = match req.source.as_str() {
             "winget" | "" => {
@@ -550,9 +692,11 @@ impl GuestAgent for GuestAgentService {
             "Installing software"
         );
 
-        let output = std::process::Command::new(&program)
+        // S-08: Use tokio::process::Command to avoid blocking the runtime.
+        let output = tokio::process::Command::new(&program)
             .args(&args)
             .output()
+            .await
             .map_err(|e| {
                 Status::internal(format!("Failed to run {program}: {e}"))
             })?;
@@ -786,5 +930,193 @@ mod tests {
 
         assert!(r.is_err());
         assert_eq!(r.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    // ── S-06: Command denylist tests ────────────────────────────
+
+    #[tokio::test]
+    async fn test_run_command_denied_rm_rf() {
+        let svc = make_service();
+        let r = svc
+            .run_command(Request::new(RunCommandRequest {
+                command: "rm".into(),
+                args: vec!["-rf".into(), "/".into()],
+                working_directory: String::new(),
+                timeout_ms: 5000,
+                capture_output: false,
+            }))
+            .await;
+
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn test_run_command_denied_format() {
+        let svc = make_service();
+        let r = svc
+            .run_command(Request::new(RunCommandRequest {
+                command: "format".into(),
+                args: vec![],
+                working_directory: String::new(),
+                timeout_ms: 5000,
+                capture_output: false,
+            }))
+            .await;
+
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    // ── S-06: Shell metacharacter rejection tests ───────────────
+
+    #[tokio::test]
+    async fn test_run_command_rejects_semicolon() {
+        let svc = make_service();
+        let r = svc
+            .run_command(Request::new(RunCommandRequest {
+                command: "echo".into(),
+                args: vec!["hello; rm -rf /".into()],
+                working_directory: String::new(),
+                timeout_ms: 5000,
+                capture_output: false,
+            }))
+            .await;
+
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_run_command_rejects_pipe() {
+        let svc = make_service();
+        let r = svc
+            .run_command(Request::new(RunCommandRequest {
+                command: "echo".into(),
+                args: vec!["hello".into(), "|".into(), "rm".into()],
+                working_directory: String::new(),
+                timeout_ms: 5000,
+                capture_output: false,
+            }))
+            .await;
+
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_run_command_rejects_ampersand_chain() {
+        let svc = make_service();
+        let r = svc
+            .run_command(Request::new(RunCommandRequest {
+                command: "echo".into(),
+                args: vec!["hello".into(), "&&".into(), "rm".into()],
+                working_directory: String::new(),
+                timeout_ms: 5000,
+                capture_output: false,
+            }))
+            .await;
+
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    // ── S-06: Argument count limit test ─────────────────────────
+
+    #[tokio::test]
+    async fn test_run_command_too_many_args() {
+        let svc = make_service();
+        let args: Vec<String> = (0..101).map(|i| format!("arg{i}")).collect();
+        let r = svc
+            .run_command(Request::new(RunCommandRequest {
+                command: "echo".into(),
+                args,
+                working_directory: String::new(),
+                timeout_ms: 5000,
+                capture_output: false,
+            }))
+            .await;
+
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    // ── S-07: Timeout enforcement test ──────────────────────────
+
+    #[tokio::test]
+    async fn test_run_command_timeout_enforced() {
+        let svc = make_service();
+
+        // Use a command that takes longer than the timeout.
+        // `waitfor` on Windows blocks forever waiting for a signal name.
+        // `sleep 30` on Linux takes 30 seconds.
+        let (command, args) = if cfg!(target_os = "windows") {
+            ("waitfor".to_string(), vec!["SignalThatNeverComes".to_string()])
+        } else {
+            ("sleep".to_string(), vec!["30".to_string()])
+        };
+
+        let r = svc
+            .run_command(Request::new(RunCommandRequest {
+                command,
+                args,
+                working_directory: String::new(),
+                timeout_ms: 500, // 500ms timeout — command will not finish
+                capture_output: true,
+            }))
+            .await;
+
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().code(), tonic::Code::DeadlineExceeded);
+    }
+
+    // ── S-20: Package ID validation tests ───────────────────────
+
+    #[test]
+    fn test_validate_package_id_valid() {
+        assert!(validate_package_id("Google.Chrome").is_ok());
+        assert!(validate_package_id("git").is_ok());
+        assert!(validate_package_id("Microsoft.VisualStudioCode").is_ok());
+        assert!(validate_package_id("@scope/package-name").is_ok());
+        assert!(validate_package_id("some_package.v2").is_ok());
+    }
+
+    #[test]
+    fn test_validate_package_id_invalid_shell_chars() {
+        assert!(validate_package_id("pkg; rm -rf /").is_err());
+        assert!(validate_package_id("pkg && evil").is_err());
+        assert!(validate_package_id("pkg | evil").is_err());
+        assert!(validate_package_id("pkg`evil`").is_err());
+        assert!(validate_package_id("pkg$(evil)").is_err());
+    }
+
+    #[test]
+    fn test_validate_package_id_empty() {
+        assert!(validate_package_id("").is_err());
+    }
+
+    #[test]
+    fn test_validate_package_id_too_long() {
+        let long_id: String = "a".repeat(257);
+        assert!(validate_package_id(&long_id).is_err());
+    }
+
+    // ── S-06: Helper function unit tests ────────────────────────
+
+    #[test]
+    fn test_is_denied_command() {
+        assert!(is_denied_command("rm", &["-rf".into(), "/".into()]));
+        assert!(is_denied_command("format", &[]));
+        assert!(is_denied_command("del", &["/s".into(), "/q".into(), "C:\\".into()]));
+        assert!(!is_denied_command("echo", &["hello".into()]));
+        assert!(!is_denied_command("ls", &["-la".into()]));
+    }
+
+    #[test]
+    fn test_contains_shell_metacharacters() {
+        assert!(contains_shell_metacharacters("echo", &["hello;world".into()]));
+        assert!(contains_shell_metacharacters("echo", &["a".into(), "|".into(), "b".into()]));
+        assert!(contains_shell_metacharacters("echo", &["a&&b".into()]));
+        assert!(!contains_shell_metacharacters("echo", &["hello".into(), "world".into()]));
     }
 }
