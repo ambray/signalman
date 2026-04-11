@@ -11,9 +11,17 @@
 //! Communicates with the host MCP server via gRPC (mTLS).
 
 use std::net::SocketAddr;
-use tracing::{info, error};
+
+use tonic::transport::Server;
+use tracing::info;
+
+/// Generated protobuf types for the GuestAgent service.
+pub mod guest_proto {
+    tonic::include_proto!("signalman.guest");
+}
 
 mod process;
+mod service;
 mod verification;
 
 /// Default gRPC listen port.
@@ -34,7 +42,13 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(DEFAULT_PORT);
 
-    let addr: SocketAddr = format!("0.0.0.0:{port}").parse()?;
+    // Default to loopback; override with SIGNALMAN_BIND for VM-accessible binding.
+    let bind_addr =
+        std::env::var("SIGNALMAN_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+
+    let addr: SocketAddr = format!("{bind_addr}:{port}").parse()?;
+
+    let svc = service::GuestAgentService::new();
 
     info!(
         address = %addr,
@@ -42,11 +56,15 @@ async fn main() -> anyhow::Result<()> {
         "Signalman guest agent starting"
     );
 
-    // TODO: Start gRPC server with GuestAgent service implementation
-    // For now, just hold the process open
-    info!("Guest agent ready. Press Ctrl+C to stop.");
-    tokio::signal::ctrl_c().await?;
-    info!("Shutting down.");
+    Server::builder()
+        .add_service(
+            guest_proto::guest_agent_server::GuestAgentServer::new(svc),
+        )
+        .serve_with_shutdown(addr, async {
+            tokio::signal::ctrl_c().await.ok();
+            info!("Shutting down.");
+        })
+        .await?;
 
     Ok(())
 }

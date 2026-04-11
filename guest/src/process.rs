@@ -84,8 +84,10 @@ pub fn list_processes(name_filter: Option<&str>) -> anyhow::Result<Vec<ProcessIn
 
         unsafe {
             let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
-            let mut entry = PROCESSENTRY32W::default();
-            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
 
             if Process32FirstW(snapshot, &mut entry).is_ok() {
                 loop {

@@ -16,6 +16,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import type { HypervisorBackend, VMHandle } from "./hypervisors/interface.js";
 import { HyperVBackend } from "./hypervisors/hyperv.js";
+import {
+  sanitizeVmName,
+  sanitizeLabel,
+  sanitizePath,
+  sanitizeCommand,
+  sanitizeUrl,
+  sanitizeTimeout,
+} from "./sanitize.js";
 
 // ── Backend Discovery ─────────────────────────────────────────────
 
@@ -103,6 +111,7 @@ server.tool(
   "Start a virtual machine",
   { name: z.string().describe("VM name") },
   async ({ name }) => {
+    sanitizeVmName(name);
     const backend = await getBackend();
     const handle = await resolveVM(name);
     await backend.startVM(handle);
@@ -120,6 +129,7 @@ server.tool(
     force: z.boolean().optional().describe("Force power off"),
   },
   async ({ name, force }) => {
+    sanitizeVmName(name);
     const backend = await getBackend();
     const handle = await resolveVM(name);
     await backend.stopVM(handle, force);
@@ -134,6 +144,7 @@ server.tool(
   "Get VM status including guest agent health",
   { name: z.string().describe("VM name") },
   async ({ name }) => {
+    sanitizeVmName(name);
     const backend = await getBackend();
     const handle = await resolveVM(name);
     const status = await backend.getStatus(handle);
@@ -156,6 +167,8 @@ server.tool(
     label: z.string().describe("Checkpoint label"),
   },
   async ({ name, label }) => {
+    sanitizeVmName(name);
+    sanitizeLabel(label);
     const backend = await getBackend();
     const handle = await resolveVM(name);
     const cp = await backend.createCheckpoint(handle, label);
@@ -178,6 +191,8 @@ server.tool(
     label: z.string().describe("Checkpoint label to restore"),
   },
   async ({ name, label }) => {
+    sanitizeVmName(name);
+    sanitizeLabel(label);
     const backend = await getBackend();
     const handle = await resolveVM(name);
     const cp = { id: "", vmHandle: handle, label };
@@ -198,6 +213,7 @@ server.tool(
   "List all checkpoints for a VM",
   { name: z.string().describe("VM name") },
   async ({ name }) => {
+    sanitizeVmName(name);
     const backend = await getBackend();
     const handle = await resolveVM(name);
     const checkpoints = await backend.listCheckpoints(handle);
@@ -221,6 +237,9 @@ server.tool(
     dest: z.string().describe("Destination path in VM"),
   },
   async ({ name, src, dest }) => {
+    sanitizeVmName(name);
+    sanitizePath(src);
+    sanitizePath(dest);
     const backend = await getBackend();
     const handle = await resolveVM(name);
     await backend.copyFileToVM(handle, src, dest);
@@ -245,13 +264,16 @@ server.tool(
     timeout_ms: z.number().optional().describe("Timeout in milliseconds"),
   },
   async ({ name, command, args, timeout_ms }) => {
+    sanitizeVmName(name);
+    sanitizeCommand(command);
+    const safeTimeout = sanitizeTimeout(timeout_ms);
     const backend = await getBackend();
     const handle = await resolveVM(name);
     const result = await backend.executeCommand(
       handle,
       command,
       args ?? [],
-      timeout_ms ?? 60_000,
+      safeTimeout,
     );
     return {
       content: [
@@ -276,6 +298,7 @@ server.tool(
       .describe("Package source"),
   },
   async ({ name, package_id, source }) => {
+    sanitizeVmName(name);
     const backend = await getBackend();
     const handle = await resolveVM(name);
 
@@ -292,11 +315,13 @@ server.tool(
         command = "choco";
         args = ["install", package_id, "-y"];
         break;
-      case "direct":
-        // For direct installs, package_id is a URL
+      case "direct": {
+        // For direct installs, package_id is a URL — validate it
+        const safeUrl = sanitizeUrl(package_id);
         command = "powershell";
-        args = ["-Command", `Invoke-WebRequest -Uri '${package_id}' -OutFile $env:TEMP\\installer.exe; Start-Process $env:TEMP\\installer.exe -Wait`];
+        args = ["-Command", `Invoke-WebRequest -Uri '${safeUrl}' -OutFile $env:TEMP\\installer.exe; Start-Process $env:TEMP\\installer.exe -Wait`];
         break;
+      }
     }
 
     const result = await backend.executeCommand(handle, command, args, 300_000);

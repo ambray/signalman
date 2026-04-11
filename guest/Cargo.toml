@@ -45,6 +45,7 @@ windows = { version = "0.58", features = [
 
 [build-dependencies]
 tonic-build = "0.12"
+protoc-bin-vendored = "3"
 
 [features]
 default = ["screenshot"]
