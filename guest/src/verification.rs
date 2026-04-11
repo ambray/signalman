@@ -175,6 +175,138 @@ pub struct FileAccessResult {
     pub error: Option<String>,
 }
 
+/// Result of checking whether specific software is installed.
+#[derive(Debug, Clone)]
+pub struct SoftwareCheckResult {
+    /// Whether the software was found.
+    pub found: bool,
+    /// Version string, if available.
+    pub version: String,
+    /// Install path, if available.
+    pub install_path: String,
+}
+
+/// Check whether a named software package is installed on this system.
+///
+/// On Windows, checks the registry under
+/// `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` (and the
+/// Wow6432Node variant for 32-bit software on 64-bit Windows).
+///
+/// On other platforms, searches PATH for an executable matching `name`.
+pub fn verify_software_installed(name: &str) -> SoftwareCheckResult {
+    #[cfg(target_os = "windows")]
+    {
+        verify_software_installed_windows(name)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        verify_software_installed_unix(name)
+    }
+}
+
+/// Windows implementation: scan Uninstall registry keys.
+#[cfg(target_os = "windows")]
+fn verify_software_installed_windows(name: &str) -> SoftwareCheckResult {
+    use std::process::Command;
+
+    // Use reg query to search both native and Wow6432Node uninstall keys.
+    let registry_paths = [
+        r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    ];
+
+    let name_lower = name.to_lowercase();
+
+    for reg_path in &registry_paths {
+        // Enumerate subkeys.
+        let output = Command::new("reg")
+            .args(["query", reg_path, "/s", "/f", name, "/d"])
+            .output();
+
+        if let Ok(output) = output {
+            let text = String::from_utf8_lossy(&output.stdout);
+            // Parse reg output for DisplayName, DisplayVersion, InstallLocation.
+            let mut version = String::new();
+            let mut install_path = String::new();
+            let mut found = false;
+
+            for line in text.lines() {
+                let line_trimmed = line.trim();
+                if line_trimmed.contains("DisplayName") {
+                    if let Some(val) = line_trimmed.split("REG_SZ").nth(1) {
+                        let val = val.trim();
+                        if val.to_lowercase().contains(&name_lower) {
+                            found = true;
+                        }
+                    }
+                }
+                if found && line_trimmed.contains("DisplayVersion") {
+                    if let Some(val) = line_trimmed.split("REG_SZ").nth(1) {
+                        version = val.trim().to_string();
+                    }
+                }
+                if found && line_trimmed.contains("InstallLocation") {
+                    if let Some(val) = line_trimmed.split("REG_SZ").nth(1) {
+                        install_path = val.trim().to_string();
+                    }
+                }
+            }
+
+            if found {
+                return SoftwareCheckResult {
+                    found: true,
+                    version,
+                    install_path,
+                };
+            }
+        }
+    }
+
+    // Fallback: also check PATH (e.g., cmd.exe, powershell.exe).
+    verify_software_installed_path(name)
+}
+
+/// Unix implementation: search PATH for the executable.
+#[cfg(not(target_os = "windows"))]
+fn verify_software_installed_unix(name: &str) -> SoftwareCheckResult {
+    verify_software_installed_path(name)
+}
+
+/// Shared fallback: search PATH for an executable matching `name`.
+fn verify_software_installed_path(name: &str) -> SoftwareCheckResult {
+    if let Ok(path_var) = std::env::var("PATH") {
+        let separator = if cfg!(target_os = "windows") { ';' } else { ':' };
+        for dir in path_var.split(separator) {
+            let candidate = std::path::Path::new(dir).join(name);
+            if candidate.exists() {
+                return SoftwareCheckResult {
+                    found: true,
+                    version: String::new(),
+                    install_path: candidate.to_string_lossy().into_owned(),
+                };
+            }
+            // On Windows, also try with .exe extension.
+            if cfg!(target_os = "windows") && !name.contains('.') {
+                let candidate_exe = std::path::Path::new(dir).join(format!("{name}.exe"));
+                if candidate_exe.exists() {
+                    return SoftwareCheckResult {
+                        found: true,
+                        version: String::new(),
+                        install_path: candidate_exe.to_string_lossy().into_owned(),
+                    };
+                }
+            }
+        }
+    }
+
+    SoftwareCheckResult {
+        found: false,
+        version: String::new(),
+        install_path: String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +343,25 @@ mod tests {
     fn test_verdict_equality() {
         assert_eq!(Verdict::FullyRestricted, Verdict::FullyRestricted);
         assert_ne!(Verdict::FullyRestricted, Verdict::NotRestricted);
+    }
+
+    #[test]
+    fn test_verify_software_exists() {
+        // cmd.exe exists on Windows, sh exists on Unix — both are in PATH.
+        let name = if cfg!(target_os = "windows") {
+            "cmd"
+        } else {
+            "sh"
+        };
+        let result = verify_software_installed(name);
+        assert!(result.found, "expected to find '{name}' on PATH");
+        assert!(!result.install_path.is_empty());
+    }
+
+    #[test]
+    fn test_verify_software_not_exists() {
+        let result = verify_software_installed("zzz-nonexistent-software-xyz");
+        assert!(!result.found);
+        assert!(result.install_path.is_empty());
     }
 }

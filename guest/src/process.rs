@@ -183,6 +183,170 @@ pub fn registry_len() -> usize {
         .unwrap_or(0)
 }
 
+/// Detailed information about a single process, returned by [`inspect_process`].
+#[derive(Debug, Clone)]
+pub struct ProcessDetail {
+    /// Process ID.
+    pub pid: u32,
+    /// Process executable name.
+    pub name: String,
+    /// Full path to the executable.
+    pub path: String,
+    /// Full command line string.
+    pub command_line: String,
+    /// Parent process ID.
+    pub parent_pid: u32,
+    /// Process start time as seconds since UNIX epoch (0 if unavailable).
+    pub start_time_secs: u64,
+    /// Working set memory in bytes.
+    pub memory_bytes: u64,
+}
+
+/// Inspect a single process by PID, returning detailed information.
+///
+/// On Windows this uses `OpenProcess`, `QueryFullProcessImageNameW`, and
+/// `CreateToolhelp32Snapshot` for parent PID lookup. On other platforms
+/// it reads from `/proc/{pid}/`.
+pub fn inspect_process(pid: u32) -> anyhow::Result<ProcessDetail> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        use windows::Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        // Get parent PID and process name from toolhelp snapshot.
+        let mut parent_pid = 0u32;
+        let mut proc_name = String::new();
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            if Process32FirstW(snapshot, &mut entry).is_ok() {
+                loop {
+                    if entry.th32ProcessID == pid {
+                        parent_pid = entry.th32ParentProcessID;
+                        proc_name = String::from_utf16_lossy(
+                            &entry.szExeFile[..entry
+                                .szExeFile
+                                .iter()
+                                .position(|&c| c == 0)
+                                .unwrap_or(entry.szExeFile.len())],
+                        );
+                        break;
+                    }
+                    if Process32NextW(snapshot, &mut entry).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if proc_name.is_empty() {
+            anyhow::bail!("process with PID {pid} not found");
+        }
+
+        // Get full image path via OpenProcess + QueryFullProcessImageNameW.
+        let mut exe_path = String::new();
+        unsafe {
+            if let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                let safe = SafeHandle::new(handle);
+                let mut buf = [0u16; 1024];
+                let mut len = buf.len() as u32;
+                let pwstr = windows::core::PWSTR(buf.as_mut_ptr());
+                if QueryFullProcessImageNameW(safe.get(), PROCESS_NAME_WIN32, pwstr, &mut len)
+                    .is_ok()
+                {
+                    exe_path = String::from_utf16_lossy(&buf[..len as usize]);
+                }
+            }
+        }
+
+        Ok(ProcessDetail {
+            pid,
+            name: proc_name,
+            path: exe_path,
+            command_line: String::new(), // NtQueryInformationProcess requires NTDLL — deferred
+            parent_pid,
+            start_time_secs: 0, // Process creation time requires GetProcessTimes — deferred
+            memory_bytes: 0,    // Would need GetProcessMemoryInfo
+        })
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::fs;
+        use std::path::PathBuf;
+
+        let proc_dir = PathBuf::from(format!("/proc/{pid}"));
+        if !proc_dir.exists() {
+            anyhow::bail!("process with PID {pid} not found");
+        }
+
+        // /proc/{pid}/comm — process name
+        let name = fs::read_to_string(proc_dir.join("comm"))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
+        // /proc/{pid}/exe — symlink to executable
+        let path = fs::read_link(proc_dir.join("exe"))
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        // /proc/{pid}/cmdline — null-separated
+        let command_line = fs::read(proc_dir.join("cmdline"))
+            .map(|bytes| {
+                bytes
+                    .split(|&b| b == 0)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| String::from_utf8_lossy(s).into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+
+        // /proc/{pid}/stat — fields: pid (comm) state ppid ...
+        let stat = fs::read_to_string(proc_dir.join("stat")).unwrap_or_default();
+        let parent_pid = stat
+            .rfind(')')
+            .and_then(|pos| {
+                let after = &stat[pos + 2..]; // skip ") "
+                let fields: Vec<&str> = after.split_whitespace().collect();
+                // field 0 = state, field 1 = ppid
+                fields.get(1).and_then(|s| s.parse::<u32>().ok())
+            })
+            .unwrap_or(0);
+
+        // /proc/{pid}/statm — first field is total pages
+        let memory_bytes = fs::read_to_string(proc_dir.join("statm"))
+            .ok()
+            .and_then(|s| {
+                s.split_whitespace()
+                    .next()
+                    .and_then(|p| p.parse::<u64>().ok())
+            })
+            .map(|pages| pages * 4096) // assume 4K pages
+            .unwrap_or(0);
+
+        Ok(ProcessDetail {
+            pid,
+            name,
+            path,
+            command_line,
+            parent_pid,
+            start_time_secs: 0,
+            memory_bytes,
+        })
+    }
+}
+
 /// List running processes, optionally filtered by name.
 pub fn list_processes(name_filter: Option<&str>) -> anyhow::Result<Vec<ProcessInfo>> {
     let mut processes = Vec::new();
@@ -335,5 +499,20 @@ mod tests {
 
         let _ = stop_process(pid2, true);
         assert!(!is_in_registry(pid2));
+    }
+
+    #[test]
+    fn test_inspect_current_process() {
+        let my_pid = std::process::id();
+        let detail = inspect_process(my_pid).expect("should inspect self");
+        assert_eq!(detail.pid, my_pid);
+        assert!(!detail.name.is_empty(), "process name should not be empty");
+    }
+
+    #[test]
+    fn test_inspect_nonexistent_pid() {
+        // PID 0xFFFF_FFFE is extremely unlikely to exist.
+        let result = inspect_process(0xFFFF_FFFE);
+        assert!(result.is_err(), "should fail for nonexistent PID");
     }
 }
