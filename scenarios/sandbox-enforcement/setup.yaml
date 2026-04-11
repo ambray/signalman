@@ -1,0 +1,66 @@
+# Sandbox Enforcement E2E Scenario — Setup & Configuration
+#
+# End-to-end test that Cursor IDE is properly sandboxed when the Example
+# agent's sandbox policy is active. Validates that Cursor runs inside a
+# silo with network restrictions on AI endpoints, while core IDE
+# functionality (file editing, terminal, extensions) remains operational.
+
+name: "Sandbox Enforcement E2E"
+version: "1.0"
+tags: ["sandbox", "enforcement", "e2e", "policy"]
+
+# VM configuration
+vms:
+  - name: endpoint-1
+    template: windows-11-clean
+    checkpoint_restore: agent-installed
+    guest_agent_port: 50051
+    network:
+      switch: "InternalSwitch"
+      static_ip: "172.30.0.10"
+
+# Pre-test setup steps (executed sequentially)
+setup:
+  # Install Cursor IDE
+  - action: vm_install
+    vm: endpoint-1
+    package: Cursor.Cursor
+    source: winget
+    timeout_ms: 300000
+
+  # Deploy sandbox enforcement policy
+  - action: vm_copy_file
+    vm: endpoint-1
+    src: ./policies/sandbox-policy.rego
+    dest: "C:\\Example\\policies\\sandbox-policy.rego"
+
+  # Restart agent to pick up new policy
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args: ["-Command", "Restart-Service ExampleAgent"]
+    timeout_ms: 30000
+
+  # Wait for agent to stabilize
+  - action: wait
+    duration_ms: 5000
+
+  # Verify agent is running
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args: ["-Command", "Get-Service ExampleAgent | Select-Object -ExpandProperty Status"]
+    expect_stdout: "Running"
+
+# Post-test teardown
+teardown:
+  - action: vm_restore
+    vm: endpoint-1
+    checkpoint: agent-installed
+
+# Checkpoint strategy
+checkpoints:
+  before_test: true
+  after_setup: true
+  after_setup_label: "cursor-installed-sandbox-active"
+  on_failure: true
