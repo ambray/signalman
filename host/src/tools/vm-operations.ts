@@ -7,7 +7,8 @@
  */
 
 import type { ToolDefinition, ToolResult } from "./types.js";
-import type { HypervisorBackend, VMHandle } from "../hypervisors/interface.js";
+import type { HypervisorBackend } from "../hypervisors/interface.js";
+import { resolveVM } from "../vm-cache.js";
 import {
   sanitizeVmName,
   sanitizePath,
@@ -15,28 +16,6 @@ import {
   sanitizeUrl,
   sanitizeTimeout,
 } from "../sanitize.js";
-
-/** Local VM cache for operation tools. */
-const vmCache = new Map<string, VMHandle>();
-
-function cacheVM(handle: VMHandle): void {
-  vmCache.set(handle.name.toLowerCase(), handle);
-}
-
-async function resolveVM(
-  backend: HypervisorBackend,
-  name: string,
-): Promise<VMHandle> {
-  const cached = vmCache.get(name.toLowerCase());
-  if (cached) return cached;
-
-  const vms = await backend.listVMs();
-  for (const vm of vms) cacheVM(vm);
-
-  const resolved = vmCache.get(name.toLowerCase());
-  if (!resolved) throw new Error(`VM '${name}' not found`);
-  return resolved;
-}
 
 /**
  * Creates VM operation tool definitions bound to a backend resolver.

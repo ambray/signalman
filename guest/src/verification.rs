@@ -8,6 +8,7 @@
 //! - File access restrictions (ACLs)
 //! - DLL injection (restrict hook loaded)
 
+use std::fs::OpenOptions;
 use std::net::{TcpStream, SocketAddr};
 use std::time::Duration;
 
@@ -138,13 +139,20 @@ pub fn test_file_access(path: &str, operation: &str) -> FileAccessResult {
             }
         }
         "write" => {
-            match std::fs::write(path, b"signalman-test") {
-                Ok(_) => {
+            // Use a unique temp file with create_new to avoid overwriting existing data.
+            let random_suffix: u64 = rand::random();
+            let test_path = format!("{path}.signalman-test-{random_suffix:016x}");
+            match OpenOptions::new().write(true).create_new(true).open(&test_path) {
+                Ok(_file) => {
                     // Clean up test file
-                    let _ = std::fs::remove_file(path);
+                    let _ = std::fs::remove_file(&test_path);
                     FileAccessResult { allowed: true, error: None }
                 }
-                Err(e) => FileAccessResult { allowed: false, error: Some(e.to_string()) },
+                Err(e) => {
+                    // Clean up on failure too, in case partial create occurred.
+                    let _ = std::fs::remove_file(&test_path);
+                    FileAccessResult { allowed: false, error: Some(e.to_string()) }
+                }
             }
         }
         "list" => {
