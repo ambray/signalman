@@ -15,6 +15,14 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as yaml from "yaml";
+import { parseNarrative } from "./narrative.js";
+import type { Narrative } from "./narrative.js";
+import {
+  writeJsonReport,
+  writeMarkdownReport,
+  writeJunitReport,
+} from "../output/reporter.js";
+import type { TestResult, AssertionResultEntry } from "../output/reporter.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -105,12 +113,22 @@ export function loadScenario(scenarioDir: string): {
   assertions: AssertionConfig;
   workflowMarkdown: string;
 } {
-  // Resolve to absolute path and prevent path traversal outside cwd
+  // Resolve to absolute path and prevent path traversal outside the
+  // project's scenarios/ directory.  We walk up from __dirname (which
+  // lives inside host/src/scenarios/) to the project root, then anchor
+  // to <projectRoot>/scenarios.
+  const projectRoot = path.resolve(__dirname, "..", "..", "..");
+  const scenariosRoot = path.join(projectRoot, "scenarios");
   const resolvedDir = path.resolve(scenarioDir);
-  const cwd = process.cwd();
-  if (!resolvedDir.startsWith(cwd)) {
+
+  // Normalize both paths so that trailing separators and case (on
+  // Windows) don't cause false negatives.
+  const normalizedResolved = path.normalize(resolvedDir) + path.sep;
+  const normalizedRoot = path.normalize(scenariosRoot) + path.sep;
+
+  if (!normalizedResolved.startsWith(normalizedRoot)) {
     throw new Error(
-      `Scenario directory "${resolvedDir}" resolves outside the working directory "${cwd}". ` +
+      `Scenario directory "${resolvedDir}" resolves outside the allowed scenarios directory "${scenariosRoot}". ` +
       `Path traversal is not allowed.`,
     );
   }
@@ -295,4 +313,153 @@ export function evaluateAssertions(
     meetsThreshold && (!config.critical_must_pass || !criticalFailed);
 
   return { results, passed: overallPassed, score };
+}
+
+// ---------------------------------------------------------------------------
+// Tool executor callback type
+// ---------------------------------------------------------------------------
+
+/**
+ * A function that executes a single MCP tool call and returns its text output.
+ *
+ * Callers provide their own executor that routes to the MCP server or
+ * a direct backend call. This keeps the runner decoupled from the MCP
+ * transport layer.
+ */
+export type ToolExecutor = (
+  toolName: string,
+  params: Record<string, unknown>,
+) => Promise<string>;
+
+// ---------------------------------------------------------------------------
+// Scenario runner — end-to-end execution
+// ---------------------------------------------------------------------------
+
+/**
+ * Run a scenario end-to-end: parse narrative, execute tool blocks, evaluate
+ * assertions, and write reports.
+ *
+ * @param scenarioDir - Path to the scenario directory.
+ * @param executor - Callback that executes a single tool and returns output text.
+ * @param outputDir - Directory for report files. Defaults to `./output`.
+ * @returns The full ScenarioResult.
+ */
+export async function runScenario(
+  scenarioDir: string,
+  executor: ToolExecutor,
+  outputDir = "./output",
+): Promise<ScenarioResult> {
+  const startedAt = new Date().toISOString();
+  const errors: string[] = [];
+  const screenshots: string[] = [];
+  const outputs = new Map<string, string>();
+  const screenshotMap = new Map<string, string>();
+
+  // 1. Load scenario files
+  const { config, assertions, workflowMarkdown } = loadScenario(scenarioDir);
+
+  // 2. Parse narrative from the workflow markdown
+  let narrative: Narrative | null = null;
+  if (workflowMarkdown) {
+    narrative = parseNarrative(workflowMarkdown);
+  }
+
+  // 3. Execute workflow — walk each narrative step's tool blocks
+  let setupOk = true;
+  let workflowOk = true;
+
+  if (narrative) {
+    let stepIndex = 0;
+    for (const step of narrative.steps) {
+      for (const block of step.toolBlocks) {
+        const sourceKey = `step-${stepIndex}`;
+        try {
+          const output = await executor(block.tool, block.params);
+          outputs.set(sourceKey, output);
+
+          // If the tool was a screenshot, track the path
+          if (block.tool === "vm_screenshot" && output) {
+            screenshots.push(output);
+            screenshotMap.set(sourceKey, output);
+          }
+        } catch (e) {
+          const msg = `Tool ${block.tool} failed in step "${step.heading}": ${e}`;
+          errors.push(msg);
+          outputs.set(sourceKey, `ERROR: ${e}`);
+          workflowOk = false;
+        }
+        stepIndex++;
+      }
+    }
+  } else {
+    // Fallback: extract tool blocks directly (flat, no narrative structure)
+    const blocks = extractToolBlocks(workflowMarkdown);
+    for (let i = 0; i < blocks.length; i++) {
+      const block = blocks[i];
+      const sourceKey = `step-${i}`;
+      try {
+        const output = await executor(block.tool, block.params);
+        outputs.set(sourceKey, output);
+      } catch (e) {
+        const msg = `Tool ${block.tool} failed: ${e}`;
+        errors.push(msg);
+        outputs.set(sourceKey, `ERROR: ${e}`);
+        workflowOk = false;
+      }
+    }
+  }
+
+  // 4. Evaluate assertions
+  const { results, passed, score } = evaluateAssertions(
+    assertions,
+    outputs,
+    screenshotMap,
+  );
+
+  const finishedAt = new Date().toISOString();
+
+  const scenarioResult: ScenarioResult = {
+    scenario: config.name,
+    started_at: startedAt,
+    finished_at: finishedAt,
+    setup_ok: setupOk,
+    workflow_ok: workflowOk,
+    assertion_results: results,
+    passed,
+    score,
+    screenshots,
+    errors,
+  };
+
+  // 5. Write reports
+  const durationMs =
+    new Date(finishedAt).getTime() - new Date(startedAt).getTime();
+
+  const testResult: TestResult = {
+    scenario: config.name,
+    startedAt,
+    finishedAt,
+    durationMs,
+    passed,
+    score,
+    assertions: results.map(
+      (r): AssertionResultEntry => ({
+        id: r.assertion.id,
+        description: r.assertion.description,
+        severity: r.assertion.severity,
+        passed: r.passed,
+        actual: r.actual,
+        error: r.error,
+      }),
+    ),
+    screenshots,
+    errors,
+  };
+
+  const scenarioOutputDir = path.join(outputDir, config.name);
+  writeJsonReport(testResult, scenarioOutputDir);
+  writeMarkdownReport(testResult, scenarioOutputDir);
+  writeJunitReport(testResult, scenarioOutputDir);
+
+  return scenarioResult;
 }

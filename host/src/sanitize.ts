@@ -74,14 +74,21 @@ export function sanitizeUrl(url: string): string {
   }
 }
 
-/** Validate timeout is within bounds. */
+/**
+ * Clamp a timeout value between a minimum floor and a maximum ceiling.
+ *
+ * - `undefined` / `NaN` values default to 30_000ms.
+ * - Values below 1_000ms are clamped up to 1_000ms.
+ * - Values above `max` (default 600_000ms) are clamped down to `max`.
+ *
+ * @param timeout  - The raw timeout in milliseconds.
+ * @param max      - Upper bound (default 600_000ms).
+ * @returns A safe integer timeout in [1_000, max].
+ */
 export function sanitizeTimeout(
-  timeoutMs: number | undefined,
+  timeout: number | undefined,
   max = 600_000,
 ): number {
-  const t = timeoutMs ?? 60_000;
-  if (t < 0 || t > max) {
-    throw new Error(`Timeout ${t}ms out of range [0, ${max}]`);
-  }
-  return t;
+  const t = timeout == null || Number.isNaN(timeout) ? 30_000 : timeout;
+  return Math.max(1_000, Math.min(t, max));
 }

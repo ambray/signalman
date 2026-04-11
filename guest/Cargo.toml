@@ -22,9 +22,15 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
 # Error handling
 anyhow = "1"
 thiserror = "1"
+
+# Process registry
+rand = "0.8"
 
 # Networking (for restriction verification)
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
