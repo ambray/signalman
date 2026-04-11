@@ -186,6 +186,16 @@ Each RPC must:
 - Return proper gRPC status codes (not panics)
 - Log structured events via `tracing`
 
+### 3.1a Silo Validation Scenarios (DONE)
+
+Three new test scenarios have been added to `scenarios/`:
+
+- **`silo-validation/`** — Validates Windows Server Silo kernel APIs on Windows 11. Deploys a validation binary that exercises silo creation, process assignment (suspended vs running), handle isolation, ETW visibility from silo'd processes, and AppContainer + Silo composition.
+- **`silo-validation-server2022/`** — Duplicate of the above targeting a Windows Server 2022 VM (`template: windows-server-2022`, `static_ip: 172.30.0.20`). Server 2022 is the primary production target for silo-based sandboxing.
+- **`sandbox-enforcement/`** — Full E2E scenario that installs Cursor IDE, deploys a sandbox policy, and validates that Cursor runs inside a silo with network restrictions on AI endpoints while core IDE features remain operational.
+
+**Server 2022 VM support**: Currently implemented as a duplicate scenario directory with a different VM template and IP. A proper matrix-based approach (single scenario definition, multiple VM targets) is deferred to Phase 4 or later.
+
 ### 3.2 Code Architecture Cleanup
 
 | ID | Severity | Description |
