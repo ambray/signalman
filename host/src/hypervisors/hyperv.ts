@@ -35,22 +35,38 @@ const exec = promisify(execFile);
 
 /** Execute a PowerShell command and return parsed JSON output. */
 async function psJson<T>(script: string, timeoutMs = 30_000): Promise<T> {
-  const { stdout } = await exec(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", script],
-    { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
-  );
-  return JSON.parse(stdout.trim()) as T;
+  try {
+    const { stdout } = await exec(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
+    );
+    return JSON.parse(stdout.trim()) as T;
+  } catch (err: unknown) {
+    const stderr = (err as { stderr?: string }).stderr ?? "";
+    const message = (err as Error).message ?? String(err);
+    throw new Error(
+      `PowerShell command failed: ${message}${stderr ? `\nPowerShell stderr: ${stderr}` : ""}`,
+    );
+  }
 }
 
 /** Execute a PowerShell command, return raw stdout. */
 async function ps(script: string, timeoutMs = 30_000): Promise<string> {
-  const { stdout } = await exec(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", script],
-    { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
-  );
-  return stdout.trim();
+  try {
+    const { stdout } = await exec(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
+    );
+    return stdout.trim();
+  } catch (err: unknown) {
+    const stderr = (err as { stderr?: string }).stderr ?? "";
+    const message = (err as Error).message ?? String(err);
+    throw new Error(
+      `PowerShell command failed: ${message}${stderr ? `\nPowerShell stderr: ${stderr}` : ""}`,
+    );
+  }
 }
 
 /** Map Hyper-V VM state integer to our VMState type. */
@@ -293,5 +309,64 @@ export class HyperVBackend implements HypervisorBackend {
         durationMs: Date.now() - startTime,
       };
     }
+  }
+
+  // ── Extended Operations ───────────────────────────────────────────
+
+  async getVmIpAddress(handle: VMHandle): Promise<string> {
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
+    const script = `
+      $ip = (Get-VM -Name '${safeName}' | Get-VMNetworkAdapter).IPAddresses | Where-Object { $_ -match '^\\d+\\.\\d+\\.\\d+\\.\\d+$' } | Select-Object -First 1
+      if (-not $ip) { throw "No IPv4 address found for VM '${safeName}'" }
+      $ip
+    `;
+    const ip = await ps(script);
+    if (!ip) {
+      throw new Error(`No IPv4 address found for VM '${handle.name}'`);
+    }
+    return ip;
+  }
+
+  async waitForHeartbeat(handle: VMHandle, timeoutMs: number): Promise<boolean> {
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
+    const safeTimeout = sanitizeTimeout(timeoutMs);
+    const pollIntervalMs = 2_000;
+    const deadline = Date.now() + safeTimeout;
+
+    while (Date.now() < deadline) {
+      try {
+        const heartbeat = await ps(
+          `(Get-VM -Name '${safeName}').Heartbeat.ToString()`,
+          10_000,
+        );
+        if (heartbeat === "OkApplicationsHealthy") {
+          return true;
+        }
+      } catch {
+        // VM may not be running yet; keep polling
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(pollIntervalMs, remaining)),
+      );
+    }
+    return false;
+  }
+
+  async setVmMemory(handle: VMHandle, memoryMB: number): Promise<void> {
+    if (!Number.isInteger(memoryMB) || memoryMB < 32 || memoryMB > 1_048_576) {
+      throw new Error(`Invalid memory value: ${memoryMB}MB. Must be 32-1048576.`);
+    }
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
+    await ps(`Set-VMMemory -VMName '${safeName}' -StartupBytes ${memoryMB}MB`);
+  }
+
+  async setVmProcessor(handle: VMHandle, count: number): Promise<void> {
+    if (!Number.isInteger(count) || count < 1 || count > 240) {
+      throw new Error(`Invalid processor count: ${count}. Must be 1-240.`);
+    }
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
+    await ps(`Set-VMProcessor -VMName '${safeName}' -Count ${count}`);
   }
 }

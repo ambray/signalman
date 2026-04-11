@@ -64,6 +64,17 @@ export interface SignalmanConfig {
     /** Hub API key for authentication. */
     apiKey: string;
   };
+  /** Optional Docker configuration for container orchestration. */
+  docker?: {
+    /** Path to docker binary (default: "docker"). */
+    path?: string;
+    /** Path to docker compose binary (default: "docker"). */
+    composePath?: string;
+    /** Default Docker network name for test containers. */
+    defaultNetwork?: string;
+    /** Registry auth token for private registries. */
+    registryAuth?: string;
+  };
 }
 
 // ── Default Configuration ──────────────────────────────────────────
@@ -177,6 +188,24 @@ function mergeConfig(
     };
   }
 
+  if (partial.docker) {
+    result.docker = {
+      ...(result.docker ?? {}),
+    };
+    if (partial.docker.path !== undefined) {
+      result.docker.path = partial.docker.path;
+    }
+    if (partial.docker.composePath !== undefined) {
+      result.docker.composePath = partial.docker.composePath;
+    }
+    if (partial.docker.defaultNetwork !== undefined) {
+      result.docker.defaultNetwork = partial.docker.defaultNetwork;
+    }
+    if (partial.docker.registryAuth !== undefined) {
+      result.docker.registryAuth = partial.docker.registryAuth;
+    }
+  }
+
   return result;
 }
 
@@ -248,6 +277,20 @@ function applyEnvOverrides(config: SignalmanConfig): SignalmanConfig {
       apiUrl: hubUrl ?? result.hub?.apiUrl ?? "",
       apiKey: hubKey ?? result.hub?.apiKey ?? "",
     };
+  }
+
+  const dockerPath = process.env.SIGNALMAN_DOCKER_PATH;
+  const dockerComposePath = process.env.SIGNALMAN_DOCKER_COMPOSE_PATH;
+  const dockerNetwork = process.env.SIGNALMAN_DOCKER_NETWORK;
+  const dockerRegistryAuth = process.env.SIGNALMAN_DOCKER_REGISTRY_AUTH;
+  if (dockerPath || dockerComposePath || dockerNetwork || dockerRegistryAuth) {
+    result.docker = {
+      ...(result.docker ?? {}),
+    };
+    if (dockerPath) result.docker.path = dockerPath;
+    if (dockerComposePath) result.docker.composePath = dockerComposePath;
+    if (dockerNetwork) result.docker.defaultNetwork = dockerNetwork;
+    if (dockerRegistryAuth) result.docker.registryAuth = dockerRegistryAuth;
   }
 
   return result;

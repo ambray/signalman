@@ -174,6 +174,40 @@ export interface HypervisorBackend {
     args?: string[],
     timeoutMs?: number,
   ): Promise<CommandResult>;
+
+  // ── Extended Operations ───────────────────────────────────────────
+
+  /**
+   * Get the primary IPv4 address of a VM.
+   *
+   * Queries the hypervisor's network adapter info. Returns the first
+   * IPv4 address found, or throws if none is available.
+   */
+  getVmIpAddress?(handle: VMHandle): Promise<string>;
+
+  /**
+   * Wait for the VM's heartbeat integration service to report healthy.
+   *
+   * Polls the hypervisor heartbeat status until it reports
+   * "OkApplicationsHealthy" or the timeout expires.
+   *
+   * @returns true if heartbeat became healthy, false on timeout.
+   */
+  waitForHeartbeat?(handle: VMHandle, timeoutMs: number): Promise<boolean>;
+
+  /**
+   * Set the VM's memory allocation.
+   *
+   * The VM should typically be stopped before changing memory.
+   */
+  setVmMemory?(handle: VMHandle, memoryMB: number): Promise<void>;
+
+  /**
+   * Set the VM's virtual processor count.
+   *
+   * The VM should typically be stopped before changing processors.
+   */
+  setVmProcessor?(handle: VMHandle, count: number): Promise<void>;
 }
 
 /** Result of a command execution. */

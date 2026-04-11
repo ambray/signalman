@@ -23,6 +23,12 @@ import {
   writeJunitReport,
 } from "../output/reporter.js";
 import type { TestResult, AssertionResultEntry } from "../output/reporter.js";
+import {
+  AssertionEvaluator,
+  type Assertion as NewAssertion,
+  type AssertionResult as NewAssertionResult,
+  type CommandResult,
+} from "./assertions.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -307,6 +313,63 @@ export function evaluateAssertions(
   // Check critical assertions
   const criticalFailed = results.some(
     (r) => r.assertion.severity === "critical" && !r.passed
+  );
+  const meetsThreshold = score >= config.pass_threshold;
+  const overallPassed =
+    meetsThreshold && (!config.critical_must_pass || !criticalFailed);
+
+  return { results, passed: overallPassed, score };
+}
+
+/**
+ * Evaluate assertions using the enhanced AssertionEvaluator.
+ *
+ * This function provides full support for all assertion types including
+ * json_field, file_exists, process_running, exit_code, network_reachable,
+ * stdout_matches, and stdout_contains, in addition to the legacy types.
+ *
+ * @param config - The assertion configuration from assertions.yaml.
+ * @param commandResults - Map of step id to CommandResult.
+ * @param screenshots - Map of step id to screenshot path.
+ * @param scenarioDir - Path to the scenario directory for resolving relative paths.
+ * @param guestCallbacks - Optional guest VM callbacks for file/process/network checks.
+ * @returns Evaluation results with pass/fail, score, and per-assertion details.
+ */
+export async function evaluateAssertionsV2(
+  config: AssertionConfig,
+  commandResults: Map<string, CommandResult>,
+  screenshots: Map<string, string>,
+  scenarioDir: string,
+  guestCallbacks?: {
+    guestFileExists?: (filePath: string) => Promise<boolean>;
+    guestProcessRunning?: (name: string) => Promise<boolean>;
+    guestNetworkReachable?: (host: string, port: number) => Promise<boolean>;
+  },
+): Promise<{ results: NewAssertionResult[]; passed: boolean; score: number }> {
+  const evaluator = new AssertionEvaluator({
+    commandResults,
+    screenshots,
+    scenarioDir,
+    guestFileExists: guestCallbacks?.guestFileExists,
+    guestProcessRunning: guestCallbacks?.guestProcessRunning,
+    guestNetworkReachable: guestCallbacks?.guestNetworkReachable,
+  });
+
+  const results = await evaluator.evaluateAll(
+    config.assertions as unknown as NewAssertion[],
+  );
+
+  // Calculate score
+  const total = results.length;
+  const passedCount = results.filter((r) => r.passed).length;
+  const score = total > 0 ? passedCount / total : 0;
+
+  // Check critical assertions
+  const criticalFailed = results.some(
+    (r, i) => {
+      const assertion = config.assertions[i];
+      return assertion?.severity === "critical" && !r.passed;
+    },
   );
   const meetsThreshold = score >= config.pass_threshold;
   const overallPassed =

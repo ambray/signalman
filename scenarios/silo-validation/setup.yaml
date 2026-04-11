@@ -1,0 +1,53 @@
+# Silo Validation Scenario — Setup & Configuration
+#
+# Validates that Windows Server Silo APIs are available and functional
+# on the target VM. Deploys a purpose-built validation binary that
+# exercises silo creation, process assignment, handle isolation, ETW
+# visibility, and AppContainer composition.
+
+name: "Server Silo Validation"
+version: "1.0"
+tags: ["silo", "sandbox", "kernel-isolation", "windows-internals"]
+
+# VM configuration
+vms:
+  - name: endpoint-1
+    template: windows-11-clean
+    checkpoint_restore: agent-installed
+    guest_agent_port: 50051
+    network:
+      switch: "InternalSwitch"
+      static_ip: "172.30.0.10"
+
+# Pre-test setup steps (executed sequentially)
+setup:
+  # Deploy the silo validation binary
+  - action: vm_copy_file
+    vm: endpoint-1
+    src: ./artifacts/silo-validation.exe
+    dest: "C:\\Ospiri\\tools\\silo-validation.exe"
+
+  # Run the full validation suite
+  - action: vm_run_command
+    vm: endpoint-1
+    command: "C:\\Ospiri\\tools\\silo-validation.exe"
+    args: ["--all", "--output", "C:\\Ospiri\\logs\\silo-results.json"]
+    timeout_ms: 120000
+
+  # Retrieve results from the VM
+  - action: vm_copy_file
+    vm: endpoint-1
+    src: "C:\\Ospiri\\logs\\silo-results.json"
+    dest: ./results/silo-results.json
+    direction: from_vm
+
+# Post-test teardown
+teardown:
+  - action: vm_restore
+    vm: endpoint-1
+    checkpoint: agent-installed
+
+# Checkpoint strategy
+checkpoints:
+  before_test: true
+  on_failure: true

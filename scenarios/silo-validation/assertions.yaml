@@ -1,0 +1,45 @@
+# Silo Validation Scenario — Assertions
+#
+# Machine-readable assertions validated after the workflow completes.
+# Each assertion references the silo-results.json produced by the
+# validation binary.
+
+assertions:
+  # Silo APIs must be exported on this Windows version
+  - id: silo-apis-available
+    type: json_field
+    source: results/silo-results.json
+    field: "summary.silo_apis_available"
+    expected: true
+    severity: critical
+    description: "ntdll silo APIs must be exported on this Windows version"
+
+  # At least 6 validation tests must pass
+  - id: assign-suspended-works
+    type: json_field
+    source: results/silo-results.json
+    field: "summary.pass"
+    comparison: gte
+    expected: 6
+    severity: high
+    description: "At least 6 of the validation tests must pass"
+
+  # No test should produce an error (crash/exception)
+  - id: no-errors
+    type: json_field
+    source: results/silo-results.json
+    field: "summary.error"
+    expected: 0
+    severity: high
+    description: "No test should produce an error (crash/exception)"
+
+  # AppContainer + Silo composition test must have run
+  - id: composition-viable
+    type: stdout_contains
+    expected: "P1-appcontainer-silo-compose"
+    severity: critical
+    description: "AppContainer + Silo composition test must have run"
+
+# Scoring
+pass_threshold: 0.75
+critical_must_pass: true
