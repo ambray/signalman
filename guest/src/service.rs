@@ -15,6 +15,10 @@ use crate::guest_proto::guest_agent_server::GuestAgent;
 use crate::guest_proto::*;
 use crate::{process, verification};
 
+#[allow(dead_code)]
+#[path = "file_ops.rs"]
+pub mod file_ops;
+
 /// Timestamp when the service was created, used to compute uptime.
 static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
@@ -266,11 +270,41 @@ impl GuestAgent for GuestAgentService {
 
     async fn process_inspect(
         &self,
-        _request: Request<ProcessInspectRequest>,
+        request: Request<ProcessInspectRequest>,
     ) -> Result<Response<ProcessInspectResponse>, Status> {
-        Err(Status::unimplemented(
-            "ProcessInspect requires Win32 token inspection — not yet implemented",
-        ))
+        let req = request.into_inner();
+
+        if req.pid == 0 {
+            return Err(Status::invalid_argument("pid must not be zero"));
+        }
+
+        let detail = process::inspect_process(req.pid)
+            .map_err(|e| Status::not_found(format!("Process not found: {e}")))?;
+
+        Ok(Response::new(ProcessInspectResponse {
+            process: Some(ProcessInfo {
+                pid: detail.pid,
+                name: detail.name,
+                path: detail.path,
+                command_line: detail.command_line,
+                memory_bytes: detail.memory_bytes,
+                cpu_percent: 0.0,
+                user: String::new(),
+                is_appcontainer: false,
+                appcontainer_sid: String::new(),
+                is_low_integrity: false,
+                is_in_job: false,
+            }),
+            integrity_level: String::new(),
+            privileges: vec![],
+            groups: vec![],
+            appcontainer_name: String::new(),
+            capabilities: vec![],
+            job_name: String::new(),
+            job_memory_limit: 0,
+            blocked_domains: vec![],
+            allowed_domains: vec![],
+        }))
     }
 
     // ── Command Execution ───────────────────────────────────────
@@ -694,11 +728,6 @@ mod tests {
         assert_eq!(r.unwrap_err().code(), tonic::Code::Unimplemented);
 
         let r = svc
-            .process_inspect(Request::new(ProcessInspectRequest::default()))
-            .await;
-        assert_eq!(r.unwrap_err().code(), tonic::Code::Unimplemented);
-
-        let r = svc
             .verify_restriction(Request::new(VerifyRestrictionRequest::default()))
             .await;
         assert_eq!(r.unwrap_err().code(), tonic::Code::Unimplemented);
@@ -707,6 +736,40 @@ mod tests {
             .browser_navigate(Request::new(BrowserNavigateRequest::default()))
             .await;
         assert_eq!(r.unwrap_err().code(), tonic::Code::Unimplemented);
+    }
+
+    #[tokio::test]
+    async fn test_process_inspect_current() {
+        let svc = make_service();
+        let my_pid = std::process::id();
+        let resp = svc
+            .process_inspect(Request::new(ProcessInspectRequest { pid: my_pid }))
+            .await
+            .expect("inspect current process should succeed");
+        let result = resp.into_inner();
+        let info = result.process.expect("process info should be present");
+        assert_eq!(info.pid, my_pid);
+        assert!(!info.name.is_empty(), "process name should not be empty");
+    }
+
+    #[tokio::test]
+    async fn test_process_inspect_zero_pid_rejected() {
+        let svc = make_service();
+        let r = svc
+            .process_inspect(Request::new(ProcessInspectRequest { pid: 0 }))
+            .await;
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_process_inspect_nonexistent() {
+        let svc = make_service();
+        let r = svc
+            .process_inspect(Request::new(ProcessInspectRequest { pid: 0xFFFF_FFFE }))
+            .await;
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().code(), tonic::Code::NotFound);
     }
 
     #[tokio::test]
