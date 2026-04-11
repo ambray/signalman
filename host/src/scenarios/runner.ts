@@ -105,12 +105,22 @@ export function loadScenario(scenarioDir: string): {
   assertions: AssertionConfig;
   workflowMarkdown: string;
 } {
-  const setupPath = path.join(scenarioDir, "setup.yaml");
-  const assertionsPath = path.join(scenarioDir, "assertions.yaml");
-  const workflowPath = path.join(scenarioDir, "workflow.md");
+  // Resolve to absolute path and prevent path traversal outside cwd
+  const resolvedDir = path.resolve(scenarioDir);
+  const cwd = process.cwd();
+  if (!resolvedDir.startsWith(cwd)) {
+    throw new Error(
+      `Scenario directory "${resolvedDir}" resolves outside the working directory "${cwd}". ` +
+      `Path traversal is not allowed.`,
+    );
+  }
+
+  const setupPath = path.join(resolvedDir, "setup.yaml");
+  const assertionsPath = path.join(resolvedDir, "assertions.yaml");
+  const workflowPath = path.join(resolvedDir, "workflow.md");
 
   if (!fs.existsSync(setupPath)) {
-    throw new Error(`Missing setup.yaml in ${scenarioDir}`);
+    throw new Error(`Missing setup.yaml in ${resolvedDir}`);
   }
 
   const config = yaml.parse(
