@@ -1,0 +1,321 @@
+syntax = "proto3";
+
+package signalman.guest;
+
+// Guest Agent gRPC service — runs inside each VM.
+// The host MCP server calls these RPCs to control processes,
+// automate UI, and verify restrictions.
+
+service GuestAgent {
+  // ── Health ──────────────────────────────────────────────────
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // ── Registration ────────────────────────────────────────────
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // ── Process Control ─────────────────────────────────────────
+  rpc ProcessStart(ProcessStartRequest) returns (ProcessStartResponse);
+  rpc ProcessStop(ProcessStopRequest) returns (ProcessStopResponse);
+  rpc ProcessList(ProcessListRequest) returns (ProcessListResponse);
+  rpc ProcessInspect(ProcessInspectRequest) returns (ProcessInspectResponse);
+
+  // ── Command Execution ───────────────────────────────────────
+  rpc RunCommand(RunCommandRequest) returns (RunCommandResponse);
+
+  // ── UI Automation ───────────────────────────────────────────
+  rpc UIClick(UIClickRequest) returns (UIActionResponse);
+  rpc UIType(UITypeRequest) returns (UIActionResponse);
+  rpc UIFind(UIFindRequest) returns (UIFindResponse);
+  rpc UIScreenshot(UIScreenshotRequest) returns (UIScreenshotResponse);
+
+  // ── Browser Automation ──────────────────────────────────────
+  rpc BrowserNavigate(BrowserNavigateRequest) returns (BrowserActionResponse);
+  rpc BrowserClick(BrowserClickRequest) returns (BrowserActionResponse);
+  rpc BrowserScreenshot(BrowserScreenshotRequest) returns (BrowserScreenshotResponse);
+
+  // ── Restriction Verification ────────────────────────────────
+  rpc VerifyRestriction(VerifyRestrictionRequest) returns (VerifyRestrictionResponse);
+  rpc TestNetwork(TestNetworkRequest) returns (TestNetworkResponse);
+  rpc TestFileAccess(TestFileAccessRequest) returns (TestFileAccessResponse);
+
+  // ── Software Management ─────────────────────────────────────
+  rpc InstallSoftware(InstallSoftwareRequest) returns (InstallSoftwareResponse);
+}
+
+// ── Health ────────────────────────────────────────────────────────
+
+message HealthRequest {}
+
+message HealthResponse {
+  string hostname = 1;
+  string os = 2;
+  string os_version = 3;
+  string agent_version = 4;
+  uint64 uptime_seconds = 5;
+  repeated string capabilities = 6;  // e.g., ["process", "ui", "browser", "verify"]
+}
+
+// ── Registration ──────────────────────────────────────────────────
+
+message RegisterRequest {
+  string hub_url = 1;
+  string hostname = 2;
+  string os = 3;
+  repeated string capabilities = 4;
+  uint32 grpc_port = 5;
+}
+
+message RegisterResponse {
+  string agent_id = 1;
+  bool accepted = 2;
+}
+
+// ── Process Control ───────────────────────────────────────────────
+
+message ProcessStartRequest {
+  string path = 1;
+  repeated string args = 2;
+  string working_directory = 3;
+  map<string, string> env = 4;
+  bool wait_for_exit = 5;
+  uint32 timeout_ms = 6;
+}
+
+message ProcessStartResponse {
+  uint32 pid = 1;
+  bool started = 2;
+  string error = 3;
+  // If wait_for_exit was true:
+  int32 exit_code = 4;
+  string stdout = 5;
+  string stderr = 6;
+}
+
+message ProcessStopRequest {
+  uint32 pid = 1;
+  string process_name = 2;  // Alternative: stop by name
+  bool force = 3;
+}
+
+message ProcessStopResponse {
+  bool stopped = 1;
+  string error = 2;
+}
+
+message ProcessListRequest {
+  string name_filter = 1;  // Optional: filter by process name
+}
+
+message ProcessInfo {
+  uint32 pid = 1;
+  string name = 2;
+  string path = 3;
+  string command_line = 4;
+  uint64 memory_bytes = 5;
+  double cpu_percent = 6;
+  string user = 7;
+  // Restriction info (Windows-specific)
+  bool is_appcontainer = 8;
+  string appcontainer_sid = 9;
+  bool is_low_integrity = 10;
+  bool is_in_job = 11;
+}
+
+message ProcessListResponse {
+  repeated ProcessInfo processes = 1;
+}
+
+message ProcessInspectRequest {
+  uint32 pid = 1;
+}
+
+message ProcessInspectResponse {
+  ProcessInfo process = 1;
+  // Token details
+  string integrity_level = 2;
+  repeated string privileges = 3;
+  repeated string groups = 4;
+  // AppContainer details
+  string appcontainer_name = 5;
+  repeated string capabilities = 6;
+  // Job object details
+  string job_name = 7;
+  uint64 job_memory_limit = 8;
+  // Network restrictions
+  repeated string blocked_domains = 9;
+  repeated string allowed_domains = 10;
+}
+
+// ── Command Execution ─────────────────────────────────────────────
+
+message RunCommandRequest {
+  string command = 1;
+  repeated string args = 2;
+  string working_directory = 3;
+  uint32 timeout_ms = 4;
+  bool capture_output = 5;
+}
+
+message RunCommandResponse {
+  int32 exit_code = 1;
+  string stdout = 2;
+  string stderr = 3;
+  uint64 duration_ms = 4;
+}
+
+// ── UI Automation ─────────────────────────────────────────────────
+
+message UIClickRequest {
+  string selector = 1;  // UIA selector: "[name='Save']", "[automationId='btn1']"
+  string window_title = 2;  // Optional: target window
+  string click_type = 3;  // "left", "right", "double"
+}
+
+message UITypeRequest {
+  string text = 1;
+  string selector = 2;  // Optional: target element
+  string window_title = 3;
+  bool clear_first = 4;
+}
+
+message UIFindRequest {
+  string selector = 1;
+  string window_title = 2;
+  uint32 timeout_ms = 3;
+}
+
+message UIElement {
+  string name = 1;
+  string automation_id = 2;
+  string control_type = 3;
+  string class_name = 4;
+  bool is_enabled = 5;
+  bool is_visible = 6;
+  int32 x = 7;
+  int32 y = 8;
+  int32 width = 9;
+  int32 height = 10;
+  string value = 11;
+}
+
+message UIFindResponse {
+  repeated UIElement elements = 1;
+}
+
+message UIActionResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message UIScreenshotRequest {
+  string window_title = 1;  // Optional: specific window, or full desktop
+  string format = 2;  // "png" or "jpeg"
+}
+
+message UIScreenshotResponse {
+  bytes image_data = 1;
+  string format = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+}
+
+// ── Browser Automation ────────────────────────────────────────────
+
+message BrowserNavigateRequest {
+  string url = 1;
+  uint32 timeout_ms = 2;
+}
+
+message BrowserClickRequest {
+  string css_selector = 1;
+  uint32 timeout_ms = 2;
+}
+
+message BrowserActionResponse {
+  bool success = 1;
+  string error = 2;
+  string page_title = 3;
+  string page_url = 4;
+}
+
+message BrowserScreenshotRequest {
+  string format = 1;
+  bool full_page = 2;
+}
+
+message BrowserScreenshotResponse {
+  bytes image_data = 1;
+  string format = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+}
+
+// ── Restriction Verification ──────────────────────────────────────
+
+message VerifyRestrictionRequest {
+  uint32 pid = 1;
+  string process_name = 2;  // Alternative: find by name
+}
+
+message VerifyRestrictionResponse {
+  bool is_restricted = 1;
+  string restriction_mode = 2;  // "AppContainer", "Legacy", "None"
+  // Token checks
+  bool has_appcontainer_token = 3;
+  string appcontainer_sid = 4;
+  bool is_low_integrity = 5;
+  // Job object checks
+  bool is_in_job = 6;
+  string job_name = 7;
+  // Firewall checks
+  bool has_firewall_rules = 8;
+  repeated string blocked_domains = 9;
+  // DLL injection check
+  bool has_restrict_dll = 10;
+  string restrict_dll_path = 11;
+  // Overall verdict
+  string verdict = 12;  // "fully_restricted", "partially_restricted", "not_restricted"
+  repeated string issues = 13;
+}
+
+message TestNetworkRequest {
+  string host = 1;
+  uint32 port = 2;
+  string protocol = 3;  // "tcp", "udp", "https"
+  uint32 timeout_ms = 4;
+}
+
+message TestNetworkResponse {
+  bool reachable = 1;
+  uint64 latency_ms = 2;
+  string error = 3;
+  string tls_info = 4;  // TLS version, cipher, cert info
+}
+
+message TestFileAccessRequest {
+  string path = 1;
+  string operation = 2;  // "read", "write", "delete", "list"
+}
+
+message TestFileAccessResponse {
+  bool allowed = 1;
+  string error = 2;
+  string error_code = 3;  // Win32 error code
+}
+
+// ── Software Management ───────────────────────────────────────────
+
+message InstallSoftwareRequest {
+  string package_id = 1;
+  string source = 2;  // "winget", "choco", "direct"
+  string version = 3;  // Optional: specific version
+  bool silent = 4;
+}
+
+message InstallSoftwareResponse {
+  bool success = 1;
+  int32 exit_code = 2;
+  string stdout = 3;
+  string stderr = 4;
+  string installed_path = 5;
+}
