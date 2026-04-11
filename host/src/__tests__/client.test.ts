@@ -144,9 +144,10 @@ describe("GuestAgentClient", () => {
   let GuestAgentClient: any;
 
   beforeEach(async () => {
-    // Create a mock gRPC client constructor
-    mockGuestAgent = vi.fn().mockImplementation(() => ({
-      health: vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+    // Create a mock gRPC client constructor using a regular function
+    // (arrow functions are not constructable and cannot be used with `new`)
+    mockGuestAgent = vi.fn().mockImplementation(function (this: Record<string, unknown>) {
+      this.health = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
         cb(null, {
           hostname: "test-vm",
           os: "windows",
@@ -155,9 +156,9 @@ describe("GuestAgentClient", () => {
           uptimeSeconds: 100,
           capabilities: [],
         });
-      }),
-      close: vi.fn(),
-    }));
+      });
+      this.close = vi.fn();
+    });
 
     // Mock the proto loader and grpc modules
     vi.doMock("@grpc/proto-loader", () => ({
