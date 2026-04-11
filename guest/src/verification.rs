@@ -13,6 +13,7 @@ use std::time::Duration;
 
 /// Restriction verification result.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RestrictionVerdict {
     /// Whether any restriction is active.
     pub is_restricted: bool,
@@ -28,6 +29,7 @@ pub struct RestrictionVerdict {
 
 /// Detected restriction mode.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum RestrictionMode {
     /// AppContainer kernel sandbox (Phase 2+).
     AppContainer { sid: String },
@@ -39,6 +41,7 @@ pub enum RestrictionMode {
 
 /// Overall verdict.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code, clippy::enum_variant_names)]
 pub enum Verdict {
     /// All expected restrictions are active.
     FullyRestricted,
@@ -50,6 +53,7 @@ pub enum Verdict {
 
 /// A single restriction check result.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RestrictionCheck {
     pub name: String,
     pub passed: bool,

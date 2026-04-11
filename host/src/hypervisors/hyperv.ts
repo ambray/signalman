@@ -22,6 +22,14 @@ import type {
   VMState,
   VMStatus,
 } from "./interface.js";
+import {
+  sanitizeVmName,
+  sanitizeLabel,
+  sanitizePath,
+  sanitizeCommand,
+  escapePowerShellArg,
+  sanitizeTimeout,
+} from "../sanitize.js";
 
 const exec = promisify(execFile);
 
@@ -78,9 +86,11 @@ export class HyperVBackend implements HypervisorBackend {
     const memMB = config.memoryMB ?? 4096;
     const cpus = config.cpus ?? 2;
     const switchName = config.network?.switchName ?? "Default Switch";
+    const safeName = escapePowerShellArg(sanitizeVmName(config.name));
+    const safeSwitch = escapePowerShellArg(sanitizeLabel(switchName));
 
     const script = `
-      $vm = New-VM -Name '${config.name}' -MemoryStartupBytes ${memMB}MB -Generation 2 -SwitchName '${switchName}'
+      $vm = New-VM -Name '${safeName}' -MemoryStartupBytes ${memMB}MB -Generation 2 -SwitchName '${safeSwitch}'
       Set-VMProcessor -VM $vm -Count ${cpus}
       $vm | Select-Object Id, Name | ConvertTo-Json
     `;
@@ -90,32 +100,38 @@ export class HyperVBackend implements HypervisorBackend {
   }
 
   async startVM(handle: VMHandle): Promise<void> {
-    await ps(`Start-VM -Name '${handle.name}' -ErrorAction SilentlyContinue`);
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
+    await ps(`Start-VM -Name '${safeName}' -ErrorAction SilentlyContinue`);
   }
 
   async stopVM(handle: VMHandle, force = false): Promise<void> {
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
     const forceFlag = force ? "-TurnOff" : "-Force";
-    await ps(`Stop-VM -Name '${handle.name}' ${forceFlag} -ErrorAction SilentlyContinue`);
+    await ps(`Stop-VM -Name '${safeName}' ${forceFlag} -ErrorAction SilentlyContinue`);
   }
 
   async pauseVM(handle: VMHandle): Promise<void> {
-    await ps(`Suspend-VM -Name '${handle.name}'`);
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
+    await ps(`Suspend-VM -Name '${safeName}'`);
   }
 
   async resumeVM(handle: VMHandle): Promise<void> {
-    await ps(`Resume-VM -Name '${handle.name}'`);
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
+    await ps(`Resume-VM -Name '${safeName}'`);
   }
 
   async deleteVM(handle: VMHandle): Promise<void> {
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
     await ps(`
-      Stop-VM -Name '${handle.name}' -TurnOff -ErrorAction SilentlyContinue
-      Remove-VM -Name '${handle.name}' -Force
+      Stop-VM -Name '${safeName}' -TurnOff -ErrorAction SilentlyContinue
+      Remove-VM -Name '${safeName}' -Force
     `);
   }
 
   async getStatus(handle: VMHandle): Promise<VMStatus> {
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
     const script = `
-      $vm = Get-VM -Name '${handle.name}'
+      $vm = Get-VM -Name '${safeName}'
       $ip = ($vm | Get-VMNetworkAdapter | Select-Object -ExpandProperty IPAddresses | Where-Object { $_ -match '\\d+\\.\\d+\\.\\d+\\.\\d+' } | Select-Object -First 1)
       @{
         State = $vm.State.ToString()
@@ -151,8 +167,10 @@ export class HyperVBackend implements HypervisorBackend {
   // ── Checkpoints ───────────────────────────────────────────────
 
   async createCheckpoint(handle: VMHandle, label: string): Promise<CheckpointHandle> {
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
+    const safeLabel = escapePowerShellArg(sanitizeLabel(label));
     const script = `
-      $cp = Checkpoint-VM -Name '${handle.name}' -SnapshotName '${label}' -Passthru
+      $cp = Checkpoint-VM -Name '${safeName}' -SnapshotName '${safeLabel}' -Passthru
       @{ Id = $cp.Id.ToString(); Name = $cp.Name } | ConvertTo-Json
     `;
     const result = await psJson<{ Id: string; Name: string }>(script);
@@ -160,22 +178,27 @@ export class HyperVBackend implements HypervisorBackend {
   }
 
   async restoreCheckpoint(checkpoint: CheckpointHandle): Promise<void> {
+    const safeName = escapePowerShellArg(sanitizeVmName(checkpoint.vmHandle.name));
+    const safeLabel = escapePowerShellArg(sanitizeLabel(checkpoint.label));
     await ps(`
-      $cp = Get-VMCheckpoint -VMName '${checkpoint.vmHandle.name}' -Name '${checkpoint.label}'
+      $cp = Get-VMCheckpoint -VMName '${safeName}' -Name '${safeLabel}'
       Restore-VMCheckpoint -VMCheckpoint $cp -Confirm:$false
     `);
   }
 
   async deleteCheckpoint(checkpoint: CheckpointHandle): Promise<void> {
+    const safeName = escapePowerShellArg(sanitizeVmName(checkpoint.vmHandle.name));
+    const safeLabel = escapePowerShellArg(sanitizeLabel(checkpoint.label));
     await ps(`
-      $cp = Get-VMCheckpoint -VMName '${checkpoint.vmHandle.name}' -Name '${checkpoint.label}'
+      $cp = Get-VMCheckpoint -VMName '${safeName}' -Name '${safeLabel}'
       Remove-VMCheckpoint -VMCheckpoint $cp -Confirm:$false
     `);
   }
 
   async listCheckpoints(handle: VMHandle): Promise<CheckpointInfo[]> {
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
     const script = `
-      Get-VMCheckpoint -VMName '${handle.name}' |
+      Get-VMCheckpoint -VMName '${safeName}' |
         Select-Object Id, Name, CreationTime, ParentCheckpointId |
         ConvertTo-Json -AsArray
     `;
@@ -204,9 +227,12 @@ export class HyperVBackend implements HypervisorBackend {
     guestPath: string,
     _progress?: ProgressCallback,
   ): Promise<void> {
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
+    const safeHostPath = escapePowerShellArg(sanitizePath(hostPath));
+    const safeGuestPath = escapePowerShellArg(sanitizePath(guestPath));
     // Copy-VMFile requires the VM to be running and have integration services
     await ps(`
-      Copy-VMFile -Name '${handle.name}' -SourcePath '${hostPath}' -DestinationPath '${guestPath}' -FileSource Host -Force
+      Copy-VMFile -Name '${safeName}' -SourcePath '${safeHostPath}' -DestinationPath '${safeGuestPath}' -FileSource Host -Force
     `);
   }
 
@@ -216,10 +242,13 @@ export class HyperVBackend implements HypervisorBackend {
     hostPath: string,
     _progress?: ProgressCallback,
   ): Promise<void> {
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
+    const safeGuestPath = escapePowerShellArg(sanitizePath(guestPath));
+    const safeHostPath = escapePowerShellArg(sanitizePath(hostPath));
     // Use PowerShell Direct to copy file from guest
     await ps(`
-      $session = New-PSSession -VMName '${handle.name}'
-      Copy-Item -FromSession $session -Path '${guestPath}' -Destination '${hostPath}'
+      $session = New-PSSession -VMName '${safeName}'
+      Copy-Item -FromSession $session -Path '${safeGuestPath}' -Destination '${safeHostPath}'
       Remove-PSSession $session
     `, 60_000);
   }
@@ -233,10 +262,13 @@ export class HyperVBackend implements HypervisorBackend {
     timeoutMs = 60_000,
   ): Promise<CommandResult> {
     const startTime = Date.now();
-    const argStr = args.map((a) => `'${a}'`).join(", ");
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
+    const safeCommand = escapePowerShellArg(sanitizeCommand(command));
+    const safeTimeout = sanitizeTimeout(timeoutMs);
+    const argStr = args.map((a) => `'${escapePowerShellArg(a)}'`).join(", ");
     const script = `
-      $result = Invoke-Command -VMName '${handle.name}' -ScriptBlock {
-        $output = & '${command}' ${argStr} 2>&1
+      $result = Invoke-Command -VMName '${safeName}' -ScriptBlock {
+        $output = & '${safeCommand}' ${argStr} 2>&1
         @{
           ExitCode = $LASTEXITCODE
           Output = ($output | Out-String)
@@ -246,7 +278,7 @@ export class HyperVBackend implements HypervisorBackend {
     `;
 
     try {
-      const result = await psJson<{ ExitCode: number; Output: string }>(script, timeoutMs);
+      const result = await psJson<{ ExitCode: number; Output: string }>(script, safeTimeout);
       return {
         exitCode: result.ExitCode ?? 0,
         stdout: result.Output,

@@ -18,6 +18,7 @@ import type {
   VMState,
   VMStatus,
 } from "./interface.js";
+import { sanitizePath, sanitizeLabel, sanitizeTimeout } from "../sanitize.js";
 
 const exec = promisify(execFile);
 
@@ -41,6 +42,9 @@ export class VmwareBackend implements HypervisorBackend {
   private guestUser: string;
   private guestPass: string;
 
+  // WARNING: Guest credentials are passed as command-line arguments to vmrun.
+  // They will be visible in process listings. Consider using vmrun's
+  // credential store (-vp) or environment variables in production.
   constructor(options?: {
     vmrunPath?: string;
     useGovc?: boolean;
@@ -134,26 +138,29 @@ export class VmwareBackend implements HypervisorBackend {
     handle: VMHandle,
     label: string,
   ): Promise<CheckpointHandle> {
+    const safeLabel = sanitizeLabel(label);
     const vmxPath = await this.resolveVmxPath(handle);
-    await vmrun(this.vmrunPath, ["snapshot", vmxPath, label]);
-    return { id: label, vmHandle: handle, label };
+    await vmrun(this.vmrunPath, ["snapshot", vmxPath, safeLabel]);
+    return { id: safeLabel, vmHandle: handle, label: safeLabel };
   }
 
   async restoreCheckpoint(checkpoint: CheckpointHandle): Promise<void> {
+    const safeLabel = sanitizeLabel(checkpoint.label);
     const vmxPath = await this.resolveVmxPath(checkpoint.vmHandle);
     await vmrun(this.vmrunPath, [
       "revertToSnapshot",
       vmxPath,
-      checkpoint.label,
+      safeLabel,
     ]);
   }
 
   async deleteCheckpoint(checkpoint: CheckpointHandle): Promise<void> {
+    const safeLabel = sanitizeLabel(checkpoint.label);
     const vmxPath = await this.resolveVmxPath(checkpoint.vmHandle);
     await vmrun(this.vmrunPath, [
       "deleteSnapshot",
       vmxPath,
-      checkpoint.label,
+      safeLabel,
     ]);
   }
 
@@ -181,6 +188,8 @@ export class VmwareBackend implements HypervisorBackend {
     guestPath: string,
     _progress?: ProgressCallback,
   ): Promise<void> {
+    const safeHostPath = sanitizePath(hostPath);
+    const safeGuestPath = sanitizePath(guestPath);
     const vmxPath = await this.resolveVmxPath(handle);
     await vmrun(this.vmrunPath, [
       "-gu",
@@ -189,8 +198,8 @@ export class VmwareBackend implements HypervisorBackend {
       this.guestPass,
       "copyFileFromHostToGuest",
       vmxPath,
-      hostPath,
-      guestPath,
+      safeHostPath,
+      safeGuestPath,
     ]);
   }
 
@@ -200,6 +209,8 @@ export class VmwareBackend implements HypervisorBackend {
     hostPath: string,
     _progress?: ProgressCallback,
   ): Promise<void> {
+    const safeGuestPath = sanitizePath(guestPath);
+    const safeHostPath = sanitizePath(hostPath);
     const vmxPath = await this.resolveVmxPath(handle);
     await vmrun(this.vmrunPath, [
       "-gu",
@@ -208,8 +219,8 @@ export class VmwareBackend implements HypervisorBackend {
       this.guestPass,
       "copyFileFromGuestToHost",
       vmxPath,
-      guestPath,
-      hostPath,
+      safeGuestPath,
+      safeHostPath,
     ]);
   }
 
@@ -222,6 +233,7 @@ export class VmwareBackend implements HypervisorBackend {
     timeoutMs = 60_000,
   ): Promise<CommandResult> {
     const startTime = Date.now();
+    const safeTimeout = sanitizeTimeout(timeoutMs);
     const vmxPath = await this.resolveVmxPath(handle);
     const fullArgs = [
       "-gu",
@@ -236,7 +248,7 @@ export class VmwareBackend implements HypervisorBackend {
     ];
 
     try {
-      const stdout = await vmrun(this.vmrunPath, fullArgs, timeoutMs);
+      const stdout = await vmrun(this.vmrunPath, fullArgs, safeTimeout);
       return {
         exitCode: 0,
         stdout,
