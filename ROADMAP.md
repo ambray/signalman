@@ -3,418 +3,248 @@
 **Last Updated**: 2026-04-11
 **Current Version**: Pre-release (v0.0.x)
 **Target**: v0.1.0 (first public release)
-
-This roadmap organizes all 33 audit findings and planned features into phased work. Phases 1 and 2 are blockers for v0.1.0. Phases 3-5 follow in priority order.
-
----
-
-## Phase 1: Security Critical (MUST before v0.1.0)
-
-**Estimated Duration**: 3-4 days
-**Priority**: BLOCKER
-
-All command injection, input validation, and default-insecure findings must be resolved before any external usage. A single unescaped VM name can give an attacker full PowerShell execution on the host.
-
-### 1.1 Command Injection Prevention (7 findings)
-
-The most severe class of bugs. Every hypervisor backend and the MCP server itself interpolate untrusted strings directly into shell commands.
-
-| ID | Severity | File | Description |
-|----|----------|------|-------------|
-| S-1 | CRITICAL | `host/src/hypervisors/hyperv.ts` | PowerShell injection via VM name interpolation |
-| S-2 | CRITICAL | `host/src/hypervisors/hyperv.ts` | Command injection in `executeCommand` via string interpolation |
-| S-3 | CRITICAL | `host/src/hypervisors/hyperv.ts` | Checkpoint label injection into PowerShell scripts |
-| S-4 | CRITICAL | `host/src/hypervisors/hyperv.ts` | Path traversal via `copyFileToVM` — no path restriction |
-| S-5 | CRITICAL | `host/src/server.ts` | URL injection in `vm_install` direct mode |
-| S-6 | CRITICAL | `host/src/hypervisors/vmware.ts` | Guest credentials stored in cleartext class fields; command injection in vmrun |
-| S-12 | HIGH | `host/src/server.ts` | `vm_copy_file` accepts arbitrary guest paths without restriction |
-| S-13 | HIGH | `host/src/server.ts` | Scenario loader performs no path validation (path traversal) |
-
-**Fix strategy**:
-
-1. Create a shared `host/src/sanitize.ts` module with:
-   - `sanitizeVmName(name: string): string` — strict regex `^[a-zA-Z0-9_-]+$`, max 100 chars
-   - `sanitizePath(path: string): string` — resolve, normalize, verify within allowed roots
-   - `sanitizeLabel(label: string): string` — alphanumeric + dashes only
-   - `sanitizeUrl(url: string): string` — validate URL parse, restrict to http/https schemes
-
-2. Replace all PowerShell string interpolation with `-ArgumentList` parameter passing:
-   ```typescript
-   // BEFORE (vulnerable)
-   exec(`powershell -Command "Get-VM -Name '${vmName}'"`)
-
-   // AFTER (safe)
-   exec(`powershell -Command "& { param($Name) Get-VM -Name $Name }" -ArgumentList "${sanitizeVmName(vmName)}"`)
-   ```
-
-3. Replace vmrun string interpolation with proper argument array passing.
-
-4. Add path validation to `vm_copy_file` and scenario loader — resolve paths, verify they start with an allowed prefix.
-
-5. Move VMware guest credentials to a secure store or environment variables; never pass as CLI arguments.
-
-6. Validate all MCP tool inputs at the Zod schema level before they reach any hypervisor backend.
-
-### 1.2 Input Validation (3 findings)
-
-| ID | Severity | File | Description |
-|----|----------|------|-------------|
-| S-20 | MEDIUM | multiple | VM name has no format validation at the MCP tool level |
-| S-21 | MEDIUM | multiple | No upper bound on timeout parameters (can block indefinitely) |
-| S-22 | MEDIUM | `host/src/assertions.ts` | Regex DoS in assertion evaluator (user-supplied patterns) |
-
-**Fix strategy**:
-
-1. Add Zod schema constraints to all MCP tool definitions:
-   ```typescript
-   vmName: z.string().min(1).max(100).regex(/^[a-zA-Z0-9_-]+$/)
-   timeout: z.number().int().min(1000).max(600_000).default(30_000)
-   ```
-
-2. Wrap user-supplied regex patterns in a try/catch with a timeout, or use a safe regex library (e.g., `re2`) to prevent catastrophic backtracking.
-
-### 1.3 Guest Agent Default Security (2 findings)
-
-| ID | Severity | File | Description |
-|----|----------|------|-------------|
-| S-8 | HIGH | `guest/src/main.rs` | gRPC server defaults to insecure (no TLS) |
-| S-9 | HIGH | `guest/src/main.rs` | Guest agent binds `0.0.0.0` by default |
-
-**Fix strategy**:
-
-1. Change default bind address to `127.0.0.1:50051`.
-2. Make TLS the default. Require an explicit `--allow-insecure` flag or `allowInsecure: true` config to disable TLS.
-3. Log a warning at startup when running in insecure mode.
+**Test Count**: 59 Rust (guest) + 257 TypeScript (host, 8 files) = 316 tests
+**Repo**: https://github.com/ambray/signalman.git
 
 ---
 
-## Phase 2: Test Coverage (MUST before v0.1.0)
+## What's Been Built (Completed Work)
 
-**Estimated Duration**: 3-4 days
-**Priority**: BLOCKER
+### Host MCP Server (TypeScript)
+- **MCP Protocol Server** (`host/src/server.ts`) — Full MCP server with tool registration, Zod schema validation, JSON schema-to-Zod bridge
+- **Hypervisor Backends**:
+  - Hyper-V (`hypervisors/hyperv.ts`) — Full VM lifecycle, checkpoints, file transfer, command execution, IP address resolution, heartbeat wait, memory/CPU configuration. All PowerShell commands use sanitized parameter passing.
+  - VMware (`hypervisors/vmware.ts`) — Full vmrun backend with checkpoint, file transfer, command execution. Credential redaction in error messages.
+  - Backend interface (`hypervisors/interface.ts`) — Shared types for VM handle, checkpoint, command result, progress callback
+- **Tool System** (`tools/`) — Modular MCP tool architecture:
+  - `vm-lifecycle.ts` — vm_create, vm_start, vm_stop, vm_delete, vm_list, vm_status
+  - `vm-operations.ts` — vm_run_command, vm_copy_file, vm_install, vm_wait_agent
+  - `vm-checkpoint.ts` — vm_checkpoint, vm_restore, vm_list_checkpoints (sanitized)
+  - `docker-tools.ts` — docker_compose_up/down, docker_status, docker_logs, docker_exec, docker_wait_healthy (path-validated)
+- **Input Sanitization** (`sanitize.ts`) — 7 validators: VM names, labels, paths (blocks `"`), commands, PowerShell args, URLs, timeouts
+- **VM Cache** (`vm-cache.ts`) — Shared singleton cache eliminating 4 duplicate instances
+- **Docker Integration** (`docker/`):
+  - `client.ts` — Full Docker client: container lifecycle, compose, health, network, images. Health check command sanitization, protected env keys.
+  - `compose-builder.ts` — Fluent API with `ospiriBackendStack()` factory for correlator E2E
+- **Scenario Engine** (`scenarios/`):
+  - `assertions.ts` — 10 assertion types, JSON path resolution, 7 comparison operators, ReDoS-guarded regex
+  - `orchestrator.ts` — Full lifecycle: resolve VMs → wait agents → setup → assertions → teardown
+  - `runner.ts` — YAML-based scenario loading with case-insensitive path traversal protection
+  - `templates.ts` — VM templates with built-in defaults (win11-base, win10-base, win11-dev)
+  - `narrative.ts` — Markdown workflow parser
+- **Config** (`config.ts`) — YAML config with env overrides, `maxAliasCount: 100` YAML bomb protection
+- **Reporter** (`output/reporter.ts`) — JUnit XML output
+- **gRPC Client** (`guest/client.ts`) — `withRetry()`, connection state tracking, per-RPC timeouts, keepalive
 
-The project currently has zero TypeScript tests and minimal Rust tests. No release should ship without baseline coverage of security-critical paths.
+### Guest Agent (Rust)
+- **gRPC Service** (`service.rs`) — 8 fully implemented RPCs:
+  - Health, Register, ProcessStart/Stop/List, RunCommand, TestNetwork, TestFileAccess
+  - Bearer token authentication interceptor (CLI `--token` or `SIGNALMAN_AUTH_TOKEN` env)
+  - Command denylist + shell metacharacter rejection + audit logging
+  - Async `tokio::process::Command` with timeout enforcement
+  - Package ID validation for install_software
+- **Process Management** (`process.rs`) — Process registry, SafeHandle RAII for Win32, `os_kill` with honest force=false behavior, handle-leak-free `CreateToolhelp32Snapshot`
+- **File Operations** (`file_ops.rs`) — Read (100MB cap, chunked), write (path jail via `SIGNALMAN_WORKSPACE`), list directory. System directory write blocking.
+- **Verification** (`verification.rs`) — Restriction verification logic
+- **CLI** (`main.rs`) — `--bind`, `--token`, `--allow-insecure` flags via clap. Refuses to start without auth unless explicitly insecure.
 
-### 2.1 TypeScript Host Tests
+### Test Scenarios
+- `silo-validation/` �� Win11 silo kernel API validation (8 steps, 4 assertions)
+- `silo-validation-server2022/` — Server 2022 variant
+- `sandbox-enforcement/` — Full E2E: install Cursor, deploy sandbox policy, validate silo + network restrictions (11 assertions)
+- `cursor-restrict/` — Cursor restriction scenario
+- `codex-sandbox/` — Codex sandbox scenario
 
-| ID | Severity | Description |
-|----|----------|-------------|
-| S-11 | HIGH | Zero TypeScript tests in the host package |
-
-**Required test suites** (vitest):
-
-- **`sanitize.test.ts`** — Unit tests for all sanitization functions from Phase 1.1. Cover:
-  - Valid inputs pass through unchanged
-  - Injection payloads are rejected (PowerShell metacharacters, backticks, `$(...)`, semicolons, pipes)
-  - Path traversal attempts (`../`, `..\\`, absolute paths outside allowed roots)
-  - Empty strings, max-length strings, unicode edge cases
-
-- **`config.test.ts`** — Config loading with various file/env combinations:
-  - Default config when no file exists
-  - File-based config override
-  - Environment variable override precedence
-  - Invalid config values produce clear errors
-
-- **`assertions.test.ts`** — Assertion evaluator logic (`evaluateAssertions()`):
-  - Each assertion type (contains, regex, exitCode, fileExists, etc.)
-  - Regex timeout / DoS protection
-  - Malformed assertion objects
-
-- **`narrative.test.ts`** — Narrative parser (`parseNarrative()`):
-  - Valid markdown with steps, assertions, metadata
-  - Empty/malformed input
-  - Edge cases (no steps, duplicate IDs)
-
-- **`tool-blocks.test.ts`** — Tool block extractor (`extractToolBlocks()`):
-  - Standard tool call extraction
-  - Nested blocks, malformed blocks
-
-- **`reporter.test.ts`** — JUnit reporter:
-  - XML escaping of special characters (`<`, `>`, `&`, `"`, `'`)
-  - Empty test suites, failed tests, skipped tests
-
-- **`hyperv.test.ts`** — PowerShell command generation (integration with mocked exec):
-  - Verify generated commands use `-ArgumentList` (post Phase 1.1 fix)
-  - Verify no raw string interpolation of user input
-
-### 2.2 Rust Guest Tests
-
-- **`process.rs`** — `start_process` / `stop_process` / `list_processes` with mocked OS calls
-- **`file.rs`** — `test_file_access` destructive write mode safety (must not corrupt existing files)
-- **`network.rs`** — Network connectivity edge cases (timeout, DNS failure, unreachable host)
-- **`verification.rs`** — Restriction verification logic
-
-### 2.3 CI Pipeline Fixes
-
-| ID | Severity | Description |
-|----|----------|-------------|
-| S-28 | MEDIUM | CI missing lint/test/fmt steps |
-
-**Required CI additions**:
-
-- `npx eslint . --quiet` for the host package
-- `npx vitest run` for TypeScript tests
-- `cargo fmt --check` for the guest crate
-- `cargo clippy -- -D warnings` for the guest crate (Linux cross-compile)
-- Coverage reporting with minimum threshold (target: 80%)
+### Test Infrastructure
+- 8 host test files (257 tests): sanitize, assertions, config, docker, orchestrator, reporter, scenarios, client
+- 59 guest Rust tests
+- TypeScript compilation clean, Clippy clean
 
 ---
 
-## Phase 3: Functional Completion
+## What Remains
+
+### Phase 1: Pre-v0.1.0 Blockers
 
 **Estimated Duration**: 5-7 days
-**Priority**: HIGH
+**Status**: ~70% complete
 
-### 3.1 Guest Agent gRPC Implementation
+#### 1.1 Fix Pre-existing Test Failures
+- **`client.test.ts`** — 8 failing tests related to gRPC client mock setup. Likely a mock/import issue introduced during Phase 4 gRPC hardening.
+- **Effort**: S (< 1 day)
 
-| ID | Severity | Description |
-|----|----------|-------------|
-| S-10 | HIGH | Guest agent gRPC RPCs not implemented |
+#### 1.2 CI Pipeline
+- GitHub Actions workflow for:
+  - `npx tsc --noEmit` (TypeScript)
+  - `npx vitest run` (host tests)
+  - `cargo test` (guest tests)
+  - `cargo clippy -- -D warnings` (guest lint)
+  - `cargo fmt --check` (guest format)
+- Coverage reporting with 80% threshold
+- **Effort**: S
 
-Implement all RPCs defined in `proto/guest.proto`:
+#### 1.3 E2E Test Migration from Correlator
+- Migrate the Hyper-V VM E2E test suite (currently 87 Pester tests + 4 orchestrator scripts) to use Signalman's scenario engine
+- Wire `ScenarioOrchestrator` → `AssertionEvaluator` → `JUnitReporter` into a single `signalman test` CLI command
+- Validate against the existing Win11 VM (DESKTOP-FAF4PL7, 172.30.0.10)
+- **Effort**: L (3-5 days)
+- **Blocked by**: 1.1 (client tests must pass first)
 
-- **Health**: `Ping`, `GetSystemInfo`
-- **Process**: `StartProcess`, `StopProcess`, `ListProcesses`, `RunCommand`
-- **File**: `ReadFile`, `WriteFile`, `TestFileAccess`, `ListDirectory`
-- **UI Automation**: `FindWindow`, `ClickElement`, `TypeText`, `TakeScreenshot` (Windows-only; return `Unimplemented` on Linux)
-- **Browser**: `NavigateTo`, `GetPageContent`
-- **Verification**: `CheckRestriction`, `VerifySoftwareInstalled`
-- **Software**: `InstallSoftware`, `UninstallSoftware`
-
-Each RPC must:
-- Validate all input fields
-- Return proper gRPC status codes (not panics)
-- Log structured events via `tracing`
-
-### 3.1a Silo Validation Scenarios (DONE)
-
-Three new test scenarios have been added to `scenarios/`:
-
-- **`silo-validation/`** — Validates Windows Server Silo kernel APIs on Windows 11. Deploys a validation binary that exercises silo creation, process assignment (suspended vs running), handle isolation, ETW visibility from silo'd processes, and AppContainer + Silo composition.
-- **`silo-validation-server2022/`** — Duplicate of the above targeting a Windows Server 2022 VM (`template: windows-server-2022`, `static_ip: 172.30.0.20`). Server 2022 is the primary production target for silo-based sandboxing.
-- **`sandbox-enforcement/`** — Full E2E scenario that installs Cursor IDE, deploys a sandbox policy, and validates that Cursor runs inside a silo with network restrictions on AI endpoints while core IDE features remain operational.
-
-**Server 2022 VM support**: Currently implemented as a duplicate scenario directory with a different VM template and IP. A proper matrix-based approach (single scenario definition, multiple VM targets) is deferred to Phase 4 or later.
-
-### 3.2 Code Architecture Cleanup
-
-| ID | Severity | Description |
-|----|----------|-------------|
-| S-23 | MEDIUM | Triplicated `vmCache` code across `tools/*.ts` |
-| S-24 | MEDIUM | Dual tool registration — `server.ts` inline vs `tools/` definitions |
-| S-29 | LOW | Narrative parser module exists but is never called |
-| S-30 | LOW | Reporter module exists but is never called |
-
-**Tasks**:
-
-1. Extract `vmCache` into a shared `host/src/vm-cache.ts` module. All tool files import from there.
-2. Resolve dual tool registration: either wire the `tools/` system into `server.ts` or remove the dead `tools/` directory. Do not ship both.
-3. Wire the narrative parser and JUnit reporter into the scenario runner so they are actually used.
-4. Remove any remaining dead code paths.
-
-### 3.3 Resource Leak Fixes
-
-| ID | Severity | File | Description |
-|----|----------|------|-------------|
-| S-17 | MEDIUM | `guest/src/process.rs` | Child process handle leaked — not stored in registry |
-| S-18 | MEDIUM | `guest/src/process.rs` | Windows `HANDLE` not closed in `stop_process` |
-| S-19 | MEDIUM | `guest/src/verification.rs` | `test_file_access` write mode can corrupt existing files |
-
-**Fix strategy**:
-
-1. Store all spawned `Child` handles in a `HashMap<u32, Child>` process registry. Clean up on `stop_process` or agent shutdown.
-2. On Windows, ensure `CloseHandle` is called after `OpenProcess` + `TerminateProcess` in `stop_process`. Use a RAII wrapper.
-3. In `test_file_access`, use `OpenOptions::new().create_new(true)` for write tests (fails if file exists) or write to a temporary file and delete it. Never overwrite existing files.
+#### 1.4 Wire Dead Modules
+- `narrative.ts` (parser) and `reporter.ts` (JUnit) exist but are never called from the scenario runner
+- Wire narrative parser into scenario loading for `.md` workflow files
+- Wire JUnit reporter into orchestrator for test output
+- **Effort**: S
 
 ---
 
-## Phase 4: Production Hardening
+### Phase 2: Docker Integration for Correlator E2E
 
 **Estimated Duration**: 3-4 days
-**Priority**: MEDIUM
+**Status**: Infrastructure built, integration remaining
 
-### 4.1 Authentication and Authorization
+The Docker client and `ComposeBuilder.ospiriBackendStack()` factory are built. What remains:
 
-| ID | Severity | Description |
-|----|----------|-------------|
-| S-7 | HIGH | MCP server has zero authentication |
-| S-15 | MEDIUM | gRPC client has no timeout or retry logic |
-| S-16 | MEDIUM | gRPC client connection resource leak |
+#### 2.1 Compose Stack Validation
+- Test `ospiriBackendStack()` against the real correlator backend Docker image
+- Validate health checks, gRPC connectivity, database initialization
+- **Effort**: M
 
-**Tasks**:
+#### 2.2 Hybrid VM + Docker Scenarios
+- Scenario type that spins up Docker compose (backend) + VM (agent) together
+- Orchestrator needs a "compose" setup step type alongside existing VM steps
+- Add `docker_compose_up` as a first-class setup action in `orchestrator.ts`
+- **Effort**: M
 
-1. Document the MCP security model clearly: stdio transport = trusted (inherits caller's identity), network transport = requires authentication.
-2. Add a VM allow-list configuration so MCP tools can only target approved VMs.
-3. Add connection timeout (default 10s) and retry logic (3 retries with exponential backoff) to the gRPC client.
-4. Ensure gRPC client connections are properly closed on error and on `dispose()`.
-5. Implement guest agent mTLS enforcement: guest checks client certificate against a trusted CA.
-
-### 4.2 Credential Management
-
-| ID | Severity | Description |
-|----|----------|-------------|
-| S-6 | CRITICAL | VMware guest credentials in cleartext class fields (also addressed in 1.1) |
-| S-25 | MEDIUM | Unsafe `any` casting for proto message construction |
-
-**Tasks**:
-
-1. Move VMware credentials to environment variables or a credential store (Windows Credential Manager / keyring).
-2. Document that passwords must never be passed as CLI arguments (visible in process listing).
-3. Replace `any` casts in proto message construction with properly typed builders.
-
-### 4.3 Certificate Improvements
-
-| ID | Severity | Description |
-|----|----------|-------------|
-| S-26 | MEDIUM | RSA 2048 below current recommendations |
-| S-27 | MEDIUM | 365-day certificate with no renewal mechanism |
-| S-33 | LOW | Hardcoded `172.30.0.x` IPs in certificate SANs |
-
-**Tasks**:
-
-1. Upgrade certificate generation from RSA 2048 to ECDSA P-256 (or Ed25519 where supported).
-2. Make SAN IPs configurable via config file or CLI flags instead of hardcoded `172.30.0.x`.
-3. Add certificate expiry warning: log a warning at startup if the cert expires within 30 days.
-4. Implement ACME-based renewal (replace the existing stub) or at minimum a `signalman certs renew` CLI command.
-
-### 4.4 Error Handling
-
-| ID | Severity | Description |
-|----|----------|-------------|
-| S-14 | MEDIUM | `psJson()` swallows PowerShell stdout on JSON parse failure |
-
-**Tasks**:
-
-1. In `psJson()`, include the original stdout (truncated to 1KB) in JSON parse error messages for debuggability.
-2. Add a default 30-second deadline on all unary gRPC calls from the host to the guest.
-3. In the scenario loader, validate file paths by resolving them and checking they start with the scenarios directory.
+#### 2.3 Agent Install + Backend Connect E2E
+- Full scenario: Docker backend starts → VM agent installs → agent registers with backend → policy pushes → enforcement validates
+- This is the critical path for correlator's silo validation testing
+- **Effort**: M
+- **Blocked by**: 2.1, 2.2
 
 ---
 
-## Phase 5: API and Protocol Improvements
+### Phase 3: Production Hardening
+
+**Estimated Duration**: 4-5 days
+**Status**: Partially addressed by audit fixes
+
+#### 3.1 mTLS for Guest Agent
+- Currently: bearer token auth (just shipped)
+- Target: full mTLS with certificate validation
+- Guest checks client certificate against trusted CA
+- Certificate generation tooling already exists in `certs/`
+- **Effort**: M
+
+#### 3.2 MCP Server Authentication
+- Document MCP security model: stdio = trusted, network = requires auth
+- Add VM allow-list so MCP tools can only target approved VMs
+- **Effort**: S
+
+#### 3.3 Certificate Improvements
+- Upgrade from RSA 2048 to ECDSA P-256
+- Make SAN IPs configurable (currently hardcoded `172.30.0.x`)
+- Certificate expiry warnings at startup
+- `signalman certs renew` CLI command
+- **Effort**: M
+
+#### 3.4 VM Cache Improvements (Deferred from audit S-17)
+- TTL-based cache expiry (30 seconds)
+- `invalidate(name)` method called from `vm_delete`
+- Prevent stale handle usage
+- **Effort**: S
+
+#### 3.5 Error Handling Polish
+- `psJson()` includes original stdout in JSON parse errors
+- Default 30-second deadline on all unary gRPC calls
+- Structured error codes in gRPC responses
+- **Effort**: S
+
+---
+
+### Phase 4: Protocol and API Improvements
 
 **Estimated Duration**: 2-3 days
-**Priority**: LOW
+**Status**: Not started
 
-### 5.1 Proto Enhancements
+#### 4.1 Proto Enhancements
+- Split `ProcessStartResponse` into fire-and-forget vs wait response types
+- Add `RunCommandStream` server-streaming RPC for long-running commands
+- Structured error response types
+- **Effort**: M
 
-| ID | Severity | Description |
-|----|----------|-------------|
-| S-31 | LOW | `ProcessStartResponse` overloaded for fire-and-forget vs wait modes |
-| S-32 | LOW | No server-streaming RPCs for long-running commands |
+#### 4.2 Async Client Factory
+- `GuestClient.connect(address, { timeout })` async factory replacing constructor
+- Connection retry configuration
+- **Effort**: S
 
-**Tasks**:
+#### 4.3 Scenario Matrix Support
+- Single scenario definition, multiple VM targets (replace duplicate `silo-validation/` + `silo-validation-server2022/`)
+- Matrix syntax in `setup.yaml`: `targets: [win11-base, windows-server-2022]`
+- **Effort**: M
 
-1. Split `ProcessStartResponse` into two response types:
-   - `ProcessStartResponse` for fire-and-forget (returns PID only)
-   - `ProcessRunResponse` for wait mode (returns PID + exit code + stdout/stderr)
+---
 
-2. Add `RunCommandStream` server-streaming RPC for long-running commands that need incremental output.
+### Phase 5: Ecosystem and Docs
 
-3. Add proper error response types with structured error codes rather than relying solely on gRPC status.
+**Estimated Duration**: 2-3 days
+**Status**: Not started
 
-### 5.2 Async and Performance
+#### 5.1 Documentation
+- README with quickstart, architecture diagram, scenario authoring guide
+- Contributing guide
+- API reference for MCP tools
+- **Effort**: M
 
-**Tasks**:
-
-1. Convert `GuestClient` constructor to an async factory method pattern:
-   ```typescript
-   // BEFORE
-   const client = new GuestClient(address); // blocks, no error handling
-
-   // AFTER
-   const client = await GuestClient.connect(address, { timeout: 10_000 });
-   ```
-
-2. Add connection timeout and retry configuration to `GuestClient.connect()`.
-
-3. Consider async file I/O in config loading (non-blocking startup).
+#### 5.2 npm/crates.io Publishing
+- Package host as `@signalman/host` npm package
+- Package guest as `signalman-guest` crate
+- CLI binary distribution via GitHub releases
+- **Effort**: M
 
 ---
 
 ## Timeline Summary
 
-| Phase | Duration | Priority | Gate |
-|-------|----------|----------|------|
-| Phase 1: Security Critical | 3-4 days | BLOCKER | Must pass before v0.1.0 |
-| Phase 2: Test Coverage | 3-4 days | BLOCKER | Must pass before v0.1.0 |
-| Phase 3: Functional Completion | 5-7 days | HIGH | Should complete for v0.1.0 |
-| Phase 4: Production Hardening | 3-4 days | MEDIUM | Target v0.2.0 |
-| Phase 5: Protocol Improvements | 2-3 days | LOW | Target v0.3.0 |
+| Phase | Duration | Status | Gate |
+|-------|----------|--------|------|
+| Phase 1: Pre-v0.1.0 Blockers | 5-7 days | ~70% done | Must complete for v0.1.0 |
+| Phase 2: Docker E2E Integration | 3-4 days | Infra built | Needed for correlator silo testing |
+| Phase 3: Production Hardening | 4-5 days | ~30% done | Target v0.2.0 |
+| Phase 4: Protocol Improvements | 2-3 days | Not started | Target v0.3.0 |
+| Phase 5: Ecosystem and Docs | 2-3 days | Not started | Target v0.3.0 |
 
-**Total estimated effort**: 16-22 days
-
----
-
-## Finding Cross-Reference
-
-Complete index of all 33 audit findings, sorted by ID.
-
-| ID | Severity | Phase | File(s) | Description |
-|----|----------|-------|---------|-------------|
-| S-1 | CRITICAL | 1.1 | `host/src/hypervisors/hyperv.ts` | PowerShell injection via VM name interpolation |
-| S-2 | CRITICAL | 1.1 | `host/src/hypervisors/hyperv.ts` | Command injection in `executeCommand` string interpolation |
-| S-3 | CRITICAL | 1.1 | `host/src/hypervisors/hyperv.ts` | Checkpoint label injection into PowerShell scripts |
-| S-4 | CRITICAL | 1.1 | `host/src/hypervisors/hyperv.ts` | Path traversal via `copyFileToVM` with no restrictions |
-| S-5 | CRITICAL | 1.1 | `host/src/server.ts` | URL injection in `vm_install` direct mode |
-| S-6 | CRITICAL | 1.1, 4.2 | `host/src/hypervisors/vmware.ts` | Guest credentials in cleartext class fields |
-| S-7 | HIGH | 4.1 | `host/src/server.ts` | MCP server has zero authentication |
-| S-8 | HIGH | 1.3 | `guest/src/main.rs` | gRPC server defaults to insecure (no TLS) |
-| S-9 | HIGH | 1.3 | `guest/src/main.rs` | Guest agent binds `0.0.0.0` by default |
-| S-10 | HIGH | 3.1 | `guest/src/` | Guest agent gRPC RPCs not implemented |
-| S-11 | HIGH | 2.1 | `host/` | Zero TypeScript tests in host package |
-| S-12 | HIGH | 1.1 | `host/src/server.ts` | `vm_copy_file` accepts arbitrary guest paths |
-| S-13 | HIGH | 1.1 | `host/src/server.ts` | Scenario loader performs no path validation |
-| S-14 | MEDIUM | 4.4 | `host/src/hypervisors/hyperv.ts` | `psJson()` swallows stdout on JSON parse failure |
-| S-15 | MEDIUM | 4.1 | `host/src/guest/client.ts` | gRPC client has no timeout or retry logic |
-| S-16 | MEDIUM | 4.1 | `host/src/guest/client.ts` | gRPC client connection resource leak |
-| S-17 | MEDIUM | 3.3 | `guest/src/process.rs` | Child process handle leaked (not stored in registry) |
-| S-18 | MEDIUM | 3.3 | `guest/src/process.rs` | Windows HANDLE not closed in `stop_process` |
-| S-19 | MEDIUM | 3.3 | `guest/src/verification.rs` | `test_file_access` write mode can corrupt existing files |
-| S-20 | MEDIUM | 1.2 | multiple | VM name has no format validation |
-| S-21 | MEDIUM | 1.2 | multiple | No upper bound on timeout parameters |
-| S-22 | MEDIUM | 1.2 | `host/src/assertions.ts` | Regex DoS in assertion evaluator |
-| S-23 | MEDIUM | 3.2 | `host/src/tools/*.ts` | Triplicated `vmCache` code |
-| S-24 | MEDIUM | 3.2 | `host/src/server.ts`, `host/src/tools/` | Dual tool registration (dead code) |
-| S-25 | MEDIUM | 4.2 | `host/src/guest/client.ts` | Unsafe `any` casting for proto messages |
-| S-26 | MEDIUM | 4.3 | `certs/` | RSA 2048 below current recommendations |
-| S-27 | MEDIUM | 4.3 | `certs/` | 365-day certificate with no renewal mechanism |
-| S-28 | MEDIUM | 2.3 | CI config | CI missing lint/test/fmt steps |
-| S-29 | LOW | 3.2 | `host/src/narrative.ts` | Narrative parser module exists but is never called |
-| S-30 | LOW | 3.2 | `host/src/reporter.ts` | Reporter module exists but is never called |
-| S-31 | LOW | 5.1 | `proto/guest.proto` | `ProcessStartResponse` overloaded for two modes |
-| S-32 | LOW | 5.1 | `proto/guest.proto` | No server-streaming RPCs for long commands |
-| S-33 | LOW | 4.3 | `certs/generate.ts` | Hardcoded `172.30.0.x` IPs in certificate SANs |
+**Remaining effort**: ~16-22 days total
+**Critical path**: Phase 1.3 (E2E migration) → Phase 2.3 (hybrid scenarios) → Correlator silo VM testing
 
 ---
 
-## Severity Summary
+## Completed Audit Findings
 
-| Severity | Count | Phases |
-|----------|-------|--------|
-| CRITICAL | 6 | Phase 1 |
-| HIGH | 5 | Phases 1, 2, 3, 4 |
-| MEDIUM | 15 | Phases 1, 2, 3, 4 |
-| LOW | 4 | Phases 3, 5 |
-| **Total** | **33** | |
+All findings from the original 33-item audit + the Sprint 60 steelman audit have been addressed:
 
----
+### Original Audit (33 findings)
+| Status | Count | Details |
+|--------|-------|---------|
+| FIXED | 27 | Phases 1-3 security + functional fixes across 5 development phases |
+| RESOLVED | 4 | S-23 (vmCache dedup), S-24 (tool registration), S-17 (process registry), S-18 (SafeHandle) |
+| DEFERRED | 2 | S-31 (proto split), S-32 (streaming RPC) → Phase 4 |
 
-## Version Milestones
+### Sprint 60 Steelman Audit (20 findings)
+| Status | Count | Details |
+|--------|-------|---------|
+| FIXED | 19 | S-01 through S-20 (all CRITICAL/HIGH/MEDIUM) |
+| DEFERRED | 1 | S-17 (VM cache race) → Phase 3.4 |
 
-### v0.1.0 — Minimum Viable Release
-- All Phase 1 (security critical) findings resolved
-- All Phase 2 (test coverage) findings resolved
-- Phase 3 substantially complete (gRPC RPCs implemented, architecture cleaned up)
-- CI pipeline running lint, test, and fmt checks
-
-### v0.2.0 — Production Ready
-- All Phase 4 (hardening) findings resolved
-- mTLS enforced by default on guest agent
-- Certificate management improved
-- Authentication model documented and enforced
-
-### v0.3.0 — API Stable
-- All Phase 5 (protocol) improvements shipped
-- Proto API considered stable
-- Streaming RPCs available for long-running operations
+### Security Posture
+- Bearer token authentication on guest agent
+- Command denylist + metacharacter rejection
+- Async command execution with enforced timeouts
+- Path jail for file writes
+- 100MB read cap
+- SafeHandle for all Win32 handles
+- Input sanitization at tool handler + backend layers
+- YAML bomb protection
+- ReDoS guards on user-supplied patterns
+- Docker compose path traversal prevention
+- Protected environment variables

@@ -126,6 +126,10 @@ pub fn stop_process(pid: u32, force: bool) -> anyhow::Result<bool> {
 }
 
 /// OS-level process kill fallback.
+///
+/// On Windows, only `force=true` (TerminateProcess) is supported. Calling
+/// with `force=false` returns `Ok(false)` with a warning because Windows
+/// has no standard graceful-shutdown signal equivalent to Unix SIGTERM.
 fn os_kill(pid: u32, force: bool) -> anyhow::Result<bool> {
     #[cfg(target_os = "windows")]
     {
@@ -133,12 +137,20 @@ fn os_kill(pid: u32, force: bool) -> anyhow::Result<bool> {
             OpenProcess, TerminateProcess, PROCESS_TERMINATE,
         };
 
+        if !force {
+            // S-12 FIX: Do not silently claim success when we cannot
+            // actually perform a graceful shutdown on Windows.
+            tracing::warn!(
+                pid,
+                "os_kill: graceful shutdown is not supported on Windows; use force=true to terminate"
+            );
+            return Ok(false);
+        }
+
         unsafe {
             let raw = OpenProcess(PROCESS_TERMINATE, false, pid)?;
             let handle = SafeHandle::new(raw);
-            if force {
-                TerminateProcess(handle.get(), 1)?;
-            }
+            TerminateProcess(handle.get(), 1)?;
             // Handle is closed automatically when `handle` drops.
             Ok(true)
         }
@@ -220,15 +232,17 @@ pub fn inspect_process(pid: u32) -> anyhow::Result<ProcessDetail> {
         };
 
         // Get parent PID and process name from toolhelp snapshot.
+        // S-11 FIX: Wrap snapshot handle in SafeHandle to prevent leak.
         let mut parent_pid = 0u32;
         let mut proc_name = String::new();
         unsafe {
-            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
+            let snapshot_raw = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
+            let snapshot = SafeHandle::new(snapshot_raw);
             let mut entry = PROCESSENTRY32W {
                 dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
                 ..Default::default()
             };
-            if Process32FirstW(snapshot, &mut entry).is_ok() {
+            if Process32FirstW(snapshot.get(), &mut entry).is_ok() {
                 loop {
                     if entry.th32ProcessID == pid {
                         parent_pid = entry.th32ParentProcessID;
@@ -241,11 +255,12 @@ pub fn inspect_process(pid: u32) -> anyhow::Result<ProcessDetail> {
                         );
                         break;
                     }
-                    if Process32NextW(snapshot, &mut entry).is_err() {
+                    if Process32NextW(snapshot.get(), &mut entry).is_err() {
                         break;
                     }
                 }
             }
+            // snapshot (SafeHandle) drops here, closing the HANDLE.
         }
 
         if proc_name.is_empty() {
@@ -358,14 +373,16 @@ pub fn list_processes(name_filter: Option<&str>) -> anyhow::Result<Vec<ProcessIn
             PROCESSENTRY32W, TH32CS_SNAPPROCESS,
         };
 
+        // S-11 FIX: Wrap snapshot handle in SafeHandle to prevent leak.
         unsafe {
-            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
+            let snapshot_raw = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
+            let snapshot = SafeHandle::new(snapshot_raw);
             let mut entry = PROCESSENTRY32W {
                 dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
                 ..Default::default()
             };
 
-            if Process32FirstW(snapshot, &mut entry).is_ok() {
+            if Process32FirstW(snapshot.get(), &mut entry).is_ok() {
                 loop {
                     let name = String::from_utf16_lossy(
                         &entry.szExeFile[..entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len())],
@@ -390,11 +407,12 @@ pub fn list_processes(name_filter: Option<&str>) -> anyhow::Result<Vec<ProcessIn
                         });
                     }
 
-                    if Process32NextW(snapshot, &mut entry).is_err() {
+                    if Process32NextW(snapshot.get(), &mut entry).is_err() {
                         break;
                     }
                 }
             }
+            // snapshot (SafeHandle) drops here, closing the HANDLE.
         }
     }
 
@@ -514,5 +532,30 @@ mod tests {
         // PID 0xFFFF_FFFE is extremely unlikely to exist.
         let result = inspect_process(0xFFFF_FFFE);
         assert!(result.is_err(), "should fail for nonexistent PID");
+    }
+
+    /// S-12: Verify that os_kill with force=false does not silently claim
+    /// success on Windows. Instead it should return Ok(false).
+    #[test]
+    fn test_os_kill_graceful_returns_false_on_windows() {
+        // Spawn a process, remove from registry so stop_process uses os_kill.
+        let pid = start_process(&test_command(), &test_args(), None)
+            .expect("should spawn");
+        let _child = remove_from_registry(pid);
+
+        let result = stop_process(pid, false);
+
+        if cfg!(target_os = "windows") {
+            // On Windows, graceful (force=false) should return Ok(false).
+            let stopped = result.expect("os_kill should not error");
+            assert!(!stopped, "graceful os_kill on Windows must return false, not silently succeed");
+        }
+        // Clean up — force-kill the process.
+        let _ = stop_process(pid, true);
+        // If the child was returned, kill it too.
+        if let Some(mut child) = _child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }

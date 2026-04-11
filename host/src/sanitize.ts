@@ -31,8 +31,8 @@ export function sanitizePath(path: string): string {
   if (path.includes("\0")) {
     throw new Error("Path contains null byte");
   }
-  // Reject PowerShell injection characters
-  if (/[;`$@{}|]/.test(path)) {
+  // Reject PowerShell injection characters (double quotes enable variable interpolation)
+  if (/[;`$@{}|"]/.test(path)) {
     throw new Error(`Path contains dangerous characters: "${path}"`);
   }
   // Reject single quotes (would break PowerShell string escaping)

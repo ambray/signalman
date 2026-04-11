@@ -281,7 +281,13 @@ export class HyperVBackend implements HypervisorBackend {
     const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
     const safeCommand = escapePowerShellArg(sanitizeCommand(command));
     const safeTimeout = sanitizeTimeout(timeoutMs);
-    const argStr = args.map((a) => `'${escapePowerShellArg(a)}'`).join(", ");
+    // Defense-in-depth: each arg element is validated through sanitizeCommand
+    // (rejects shell metacharacters) AND escaped for PowerShell single-quoted
+    // strings.  The sanitizeCommand check guards against injection even if
+    // the PowerShell escaping is somehow bypassed.
+    const argStr = args
+      .map((a) => `'${escapePowerShellArg(sanitizeCommand(a))}'`)
+      .join(", ");
     const script = `
       $result = Invoke-Command -VMName '${safeName}' -ScriptBlock {
         $output = & '${safeCommand}' ${argStr} 2>&1
