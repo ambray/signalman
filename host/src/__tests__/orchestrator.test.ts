@@ -241,7 +241,7 @@ describe("ScenarioOrchestrator", () => {
 
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe("success");
-    expect(mockClient.runCommand).toHaveBeenCalledWith("echo", ["hello"], 5000);
+    expect(mockClient.runCommand).toHaveBeenCalledWith("echo", ["hello"], { timeoutMs: 5000, runAs: undefined });
   });
 
   it("executeSetup handles vm_copy_file host_to_guest", async () => {

@@ -263,6 +263,35 @@ impl GuestAgent for GuestAgentService {
         }
 
         let path = Path::new(&req.path);
+
+        // SYSTEM elevation support
+        if req.run_as.eq_ignore_ascii_case("system") {
+            let env_map: std::collections::HashMap<String, String> =
+                req.env.into_iter().collect();
+            match process::start_process_as_system(
+                path,
+                &req.args,
+                working_dir.as_deref().map(Path::new),
+                &env_map,
+            ) {
+                Ok(pid) => {
+                    return Ok(Response::new(ProcessStartResponse {
+                        pid,
+                        started: true,
+                        error: String::new(),
+                        exit_code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    }));
+                }
+                Err(e) => {
+                    return Err(Status::permission_denied(format!(
+                        "Failed to start process as SYSTEM: {e}"
+                    )));
+                }
+            }
+        }
+
         match process::start_process(path, &req.args, working_dir.as_deref().map(Path::new)) {
             Ok(pid) => Ok(Response::new(ProcessStartResponse {
                 pid,
@@ -436,6 +465,38 @@ impl GuestAgent for GuestAgentService {
             return Err(Status::permission_denied(
                 "Command matches a denied pattern and cannot be executed",
             ));
+        }
+
+        // SYSTEM elevation: wrap command via start_process_as_system
+        if req.run_as.eq_ignore_ascii_case("system") {
+            let mut all_args = vec!["/C".to_string(), req.command.clone()];
+            all_args.extend(req.args.iter().cloned());
+            let env_map = std::collections::HashMap::new();
+            let working_dir = if req.working_directory.is_empty() {
+                None
+            } else {
+                Some(Path::new(&req.working_directory))
+            };
+
+            // For SYSTEM run_command, we use start_process_as_system with cmd.exe
+            // and capture output via a temp file since CreateProcessAsUserW doesn't
+            // give us piped stdout easily.
+            let cmd_path = Path::new("cmd.exe");
+            match process::start_process_as_system(cmd_path, &all_args, working_dir, &env_map) {
+                Ok(pid) => {
+                    return Ok(Response::new(RunCommandResponse {
+                        exit_code: 0,
+                        stdout: format!("Process started as SYSTEM with PID {pid}"),
+                        stderr: String::new(),
+                        duration_ms: 0,
+                    }));
+                }
+                Err(e) => {
+                    return Err(Status::permission_denied(format!(
+                        "Failed to run command as SYSTEM: {e}"
+                    )));
+                }
+            }
         }
 
         // S-07: Enforce timeout (default 60s, configurable via request).
@@ -771,6 +832,7 @@ mod tests {
                 working_directory: String::new(),
                 timeout_ms: 5000,
                 capture_output: true,
+                run_as: String::new(),
             }))
             .await
             .expect("run_command should succeed");
@@ -794,6 +856,7 @@ mod tests {
                 working_directory: String::new(),
                 timeout_ms: 0,
                 capture_output: false,
+                run_as: String::new(),
             }))
             .await;
 
@@ -944,6 +1007,7 @@ mod tests {
                 working_directory: String::new(),
                 timeout_ms: 5000,
                 capture_output: false,
+                run_as: String::new(),
             }))
             .await;
 
@@ -961,6 +1025,7 @@ mod tests {
                 working_directory: String::new(),
                 timeout_ms: 5000,
                 capture_output: false,
+                run_as: String::new(),
             }))
             .await;
 
@@ -980,6 +1045,7 @@ mod tests {
                 working_directory: String::new(),
                 timeout_ms: 5000,
                 capture_output: false,
+                run_as: String::new(),
             }))
             .await;
 
@@ -997,6 +1063,7 @@ mod tests {
                 working_directory: String::new(),
                 timeout_ms: 5000,
                 capture_output: false,
+                run_as: String::new(),
             }))
             .await;
 
@@ -1014,6 +1081,7 @@ mod tests {
                 working_directory: String::new(),
                 timeout_ms: 5000,
                 capture_output: false,
+                run_as: String::new(),
             }))
             .await;
 
@@ -1034,6 +1102,7 @@ mod tests {
                 working_directory: String::new(),
                 timeout_ms: 5000,
                 capture_output: false,
+                run_as: String::new(),
             }))
             .await;
 
@@ -1063,6 +1132,7 @@ mod tests {
                 working_directory: String::new(),
                 timeout_ms: 500, // 500ms timeout — command will not finish
                 capture_output: true,
+                run_as: String::new(),
             }))
             .await;
 

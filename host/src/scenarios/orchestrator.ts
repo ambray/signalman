@@ -13,10 +13,12 @@ import type { SignalmanConfig } from "../config.js";
 import {
   loadScenario,
   evaluateAssertions,
+  extractToolBlocks,
 } from "./runner.js";
 import type {
   SetupStep,
 } from "./runner.js";
+import { parseNarrative } from "./narrative.js";
 import { writeJunitReport } from "../output/reporter.js";
 import type { TestResult, AssertionResultEntry } from "../output/reporter.js";
 
@@ -110,7 +112,8 @@ export class ScenarioOrchestrator {
     let error: string | undefined;
 
     try {
-      const { config: scenarioConfig, assertions } = loadScenario(scenarioPath);
+      const loadResult = loadScenario(scenarioPath);
+      const { config: scenarioConfig, assertions } = loadResult;
       scenarioName = scenarioConfig.name;
 
       // Resolve VMs
@@ -136,11 +139,57 @@ export class ScenarioOrchestrator {
         status = "failed";
       }
 
-      // Evaluate assertions
+      // Execute workflow tool blocks from workflow.md
+      const workflowOutputs = new Map<string, string>();
+      const workflowScreenshots = new Map<string, string>();
+
+      if (loadResult.workflowMarkdown) {
+        const narrative = loadResult.narrative ?? parseNarrative(loadResult.workflowMarkdown);
+        let stepIndex = 0;
+
+        if (narrative.steps.length > 0) {
+          for (const step of narrative.steps) {
+            for (const block of step.toolBlocks) {
+              const sourceKey = `step-${stepIndex}`;
+              try {
+                const output = await this.executeToolBlock(
+                  block.tool,
+                  block.params,
+                  vmMap,
+                );
+                workflowOutputs.set(sourceKey, output);
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                workflowOutputs.set(sourceKey, `ERROR: ${msg}`);
+                status = "failed";
+              }
+              stepIndex++;
+            }
+          }
+        } else {
+          // Fallback: extract tool blocks directly
+          const blocks = extractToolBlocks(loadResult.workflowMarkdown);
+          for (let i = 0; i < blocks.length; i++) {
+            const sourceKey = `step-${i}`;
+            try {
+              const output = await this.executeToolBlock(
+                blocks[i].tool,
+                blocks[i].params,
+                vmMap,
+              );
+              workflowOutputs.set(sourceKey, output);
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              workflowOutputs.set(sourceKey, `ERROR: ${msg}`);
+              status = "failed";
+            }
+          }
+        }
+      }
+
+      // Evaluate assertions against workflow outputs
       if (assertions.assertions.length > 0) {
-        const outputs = new Map<string, string>();
-        const screenshots = new Map<string, string>();
-        const { results } = evaluateAssertions(assertions, outputs, screenshots);
+        const { results } = evaluateAssertions(assertions, workflowOutputs, workflowScreenshots);
         assertionResults = results.map((r) => ({
           id: r.assertion.id,
           description: r.assertion.description,
@@ -287,10 +336,11 @@ export class ScenarioOrchestrator {
             if (!client) throw new Error(`No guest client for VM '${vmName}'`);
             const timeoutMs = (step.timeout_ms as number) ?? 60_000;
             const cmdArgs = (step.args as string[]) ?? [];
+            const runAs = (step.run_as as string) ?? undefined;
             await client.runCommand(
               step.command as string,
               cmdArgs,
-              timeoutMs,
+              { timeoutMs, runAs },
             );
             results.push({
               action: step.action,
@@ -378,6 +428,74 @@ export class ScenarioOrchestrator {
   ): Promise<StepResult[]> {
     // Teardown uses the same logic as setup but swallows errors
     return this.executeSetup(steps, vmMap);
+  }
+
+  /**
+   * Execute a single tool block from a workflow.md narrative.
+   *
+   * Routes tool calls to the appropriate guest client or orchestrator
+   * action and returns the captured stdout/output.
+   */
+  async executeToolBlock(
+    tool: string,
+    params: Record<string, unknown>,
+    vmMap: Map<string, VMHandle>,
+  ): Promise<string> {
+    const vmName = (params.vm as string) ?? vmMap.keys().next().value;
+
+    switch (tool) {
+      case "vm_run_command": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const command = params.command as string;
+        const args = (params.args as string[]) ?? [];
+        const timeoutMs = (params.timeout_ms as number) ?? 60_000;
+        const runAs = (params.run_as as string) ?? undefined;
+        const result = await client.runCommand(command, args, { timeoutMs, runAs });
+        return result.stdout ?? "";
+      }
+
+      case "vm_copy_file": {
+        const handle = vmMap.get(vmName);
+        if (!handle) throw new Error(`VM '${vmName}' not found`);
+        const direction = (params.direction as string) ?? "host_to_guest";
+        if (direction === "host_to_guest") {
+          await this.backend.copyFileToVM(
+            handle,
+            params.host_path as string,
+            params.guest_path as string,
+          );
+        } else {
+          await this.backend.copyFileFromVM(
+            handle,
+            params.guest_path as string,
+            params.host_path as string,
+          );
+        }
+        return "ok";
+      }
+
+      case "vm_install": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        await client.installSoftware(
+          params.package_id as string,
+          (params.source as string) ?? "winget",
+          params.version as string | undefined,
+          params.timeout_ms as number | undefined,
+        );
+        return "installed";
+      }
+
+      case "wait": {
+        const durationMs = (params.duration_ms as number) ?? 1_000;
+        await new Promise((resolve) => setTimeout(resolve, durationMs));
+        return "waited";
+      }
+
+      default:
+        throw new Error(`Unknown workflow tool: ${tool}`);
+    }
   }
 
   /**

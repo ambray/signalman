@@ -24,8 +24,8 @@ setup:
   # Deploy the silo validation binary
   - action: vm_copy_file
     vm: endpoint-1
-    src: ./artifacts/silo-validation.exe
-    dest: "C:\\Example\\tools\\silo-validation.exe"
+    host_path: ./artifacts/silo-validation.exe
+    guest_path: "C:\\Example\\tools\\silo-validation.exe"
 
   # Run the full validation suite
   - action: vm_run_command
@@ -33,12 +33,13 @@ setup:
     command: "C:\\Example\\tools\\silo-validation.exe"
     args: ["--all", "--output", "C:\\Example\\logs\\silo-results.json"]
     timeout_ms: 120000
+    run_as: SYSTEM
 
   # Retrieve results from the VM
   - action: vm_copy_file
     vm: endpoint-1
-    src: "C:\\Example\\logs\\silo-results.json"
-    dest: ./results/silo-results.json
+    guest_path: "C:\\Example\\logs\\silo-results.json"
+    host_path: ./results/silo-results.json
     direction: from_vm
 
 # Post-test teardown

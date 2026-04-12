@@ -79,6 +79,8 @@ message ProcessStartRequest {
   map<string, string> env = 4;
   bool wait_for_exit = 5;
   uint32 timeout_ms = 6;
+  // Privilege context: "" = current user (default), "SYSTEM" = LocalSystem
+  string run_as = 7;
 }
 
 message ProcessStartResponse {
@@ -154,6 +156,8 @@ message RunCommandRequest {
   string working_directory = 3;
   uint32 timeout_ms = 4;
   bool capture_output = 5;
+  // Privilege context: "" = current user (default), "SYSTEM" = LocalSystem
+  string run_as = 6;
 }
 
 message RunCommandResponse {
