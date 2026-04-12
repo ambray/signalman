@@ -406,6 +406,7 @@ export class GuestAgentClient {
       env?: Record<string, string>;
       waitForExit?: boolean;
       timeoutMs?: number;
+      runAs?: string;
     },
     timeoutMs?: number,
   ): Promise<{ pid: number; started: boolean; error: string; exitCode: number; stdout: string; stderr: string }> {
@@ -419,6 +420,7 @@ export class GuestAgentClient {
           env: options?.env ?? {},
           waitForExit: options?.waitForExit ?? false,
           timeoutMs: options?.timeoutMs ?? 0,
+          run_as: options?.runAs ?? "",
         }, deadline),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
@@ -482,9 +484,13 @@ export class GuestAgentClient {
   async runCommand(
     command: string,
     args: string[] = [],
-    timeoutMs?: number,
+    options?: number | {
+      timeoutMs?: number;
+      runAs?: string;
+    },
   ): Promise<CommandResult> {
-    const deadline = timeoutMs ?? this.options.defaultTimeoutMs;
+    const deadline = (typeof options === "number" ? options : options?.timeoutMs) ?? this.options.defaultTimeoutMs;
+    const runAs = (typeof options === "object" && options !== null) ? (options.runAs ?? "") : "";
     return withRetry(
       () =>
         unaryCall(this.client, "runCommand", {
@@ -493,6 +499,7 @@ export class GuestAgentClient {
           workingDirectory: "",
           timeoutMs: deadline,
           captureOutput: true,
+          run_as: runAs,
         }, deadline),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
