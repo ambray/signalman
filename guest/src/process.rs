@@ -97,6 +97,171 @@ pub fn start_process(
     Ok(pid)
 }
 
+/// Start a process as SYSTEM by duplicating the current process token.
+///
+/// Requires the guest agent itself to be running as SYSTEM (e.g., as a Windows service).
+/// Uses `CreateProcessAsUserW` with a duplicated primary token.
+///
+/// # Errors
+/// Returns an error if:
+/// - The current process is not running as SYSTEM
+/// - Token duplication fails
+/// - Process creation fails
+#[cfg(target_os = "windows")]
+pub fn start_process_as_system(
+    path: &Path,
+    args: &[String],
+    working_dir: Option<&Path>,
+    env: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<u32> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{
+        DuplicateTokenEx, SecurityImpersonation, TokenPrimary, TOKEN_ACCESS_MASK,
+        TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
+        TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{
+        CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, PROCESS_INFORMATION,
+        STARTUPINFOW, CREATE_NEW_CONSOLE, CREATE_UNICODE_ENVIRONMENT,
+    };
+
+    // Step 1: Open current process token
+    let mut token = HANDLE::default();
+    unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_DUPLICATE
+                | TOKEN_QUERY
+                | TOKEN_ASSIGN_PRIMARY
+                | TOKEN_ADJUST_DEFAULT
+                | TOKEN_ADJUST_SESSIONID,
+            &mut token,
+        )?;
+    }
+
+    // Step 2: Duplicate as a primary token for CreateProcessAsUserW
+    let mut dup_token = HANDLE::default();
+    let dup_result = unsafe {
+        DuplicateTokenEx(
+            token,
+            TOKEN_ACCESS_MASK(0), // same access
+            None,                 // default security
+            SecurityImpersonation,
+            TokenPrimary,
+            &mut dup_token,
+        )
+    };
+    unsafe {
+        let _ = CloseHandle(token);
+    }
+    dup_result?;
+
+    // Step 3: Build command line as wide string
+    let mut cmd_line = format!("\"{}\"", path.display());
+    for arg in args {
+        cmd_line.push(' ');
+        if arg.contains(' ') || arg.contains('"') {
+            cmd_line.push('"');
+            cmd_line.push_str(&arg.replace('"', "\\\""));
+            cmd_line.push('"');
+        } else {
+            cmd_line.push_str(arg);
+        }
+    }
+    let mut cmd_wide: Vec<u16> = OsStr::new(&cmd_line)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+
+    // Step 4: Build environment block if needed
+    let env_block = if env.is_empty() {
+        None
+    } else {
+        let mut block: Vec<u16> = Vec::new();
+        for (k, v) in env {
+            let entry = format!("{k}={v}");
+            block.extend(OsStr::new(&entry).encode_wide());
+            block.push(0);
+        }
+        block.push(0); // double null terminator
+        Some(block)
+    };
+
+    // Step 5: Set working directory as wide string
+    let work_dir_wide: Option<Vec<u16>> = working_dir.map(|d| {
+        OsStr::new(d.as_os_str())
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
+    });
+    let work_dir_pcwstr = match work_dir_wide.as_ref() {
+        Some(w) => windows::core::PCWSTR(w.as_ptr()),
+        None => windows::core::PCWSTR::null(),
+    };
+
+    // Step 6: Create process
+    let si = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut pi = PROCESS_INFORMATION::default();
+
+    let creation_flags = if env_block.is_some() {
+        CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT
+    } else {
+        CREATE_NEW_CONSOLE
+    };
+
+    let result = unsafe {
+        CreateProcessAsUserW(
+            dup_token,
+            windows::core::PCWSTR::null(), // lpApplicationName (in cmd_line)
+            windows::core::PWSTR(cmd_wide.as_mut_ptr()),
+            None,  // process security
+            None,  // thread security
+            false, // inherit handles
+            creation_flags,
+            env_block
+                .as_ref()
+                .map(|b| b.as_ptr() as *const _),
+            work_dir_pcwstr,
+            &si,
+            &mut pi,
+        )
+    };
+    unsafe {
+        let _ = CloseHandle(dup_token);
+    }
+    result?;
+
+    let pid = pi.dwProcessId;
+
+    // Close thread and process handles — we don't need them
+    unsafe {
+        let _ = CloseHandle(pi.hThread);
+        let _ = CloseHandle(pi.hProcess);
+    }
+
+    tracing::info!(pid, path = %path.display(), "Process started as SYSTEM");
+    Ok(pid)
+}
+
+/// Start a process as SYSTEM (non-Windows stub).
+///
+/// SYSTEM elevation is only supported on Windows. This stub returns an error
+/// on all other platforms.
+#[cfg(not(target_os = "windows"))]
+pub fn start_process_as_system(
+    _path: &Path,
+    _args: &[String],
+    _working_dir: Option<&Path>,
+    _env: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<u32> {
+    anyhow::bail!("SYSTEM elevation is only supported on Windows")
+}
+
 /// Stop a process by PID.
 ///
 /// First checks the process registry for a stored `Child` handle and
