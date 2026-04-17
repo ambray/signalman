@@ -48,8 +48,10 @@ Claude Code / CI Runner
 TypeScript MCP server that provides VM management tools to Claude Code and other MCP-compatible clients. Includes pluggable hypervisor backends.
 
 **Supported Hypervisors:**
-- Hyper-V (Windows)
-- VMware Workstation (Windows/Linux)
+- **Hyper-V** (Windows) — primary backend since 2026-04; required for Ospiri
+  correlator silo validation (agent runs as SYSTEM with `SeTcbPrivilege`,
+  which Hyper-V integration services expose cleanly)
+- VMware Workstation (Windows/Linux) — legacy fallback, still supported
 - Azure VMs (planned)
 - AWS EC2 (planned)
 
