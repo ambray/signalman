@@ -1,0 +1,109 @@
+# Ospiri Agent Service Validation -- Assertions
+#
+# Migrated from: correlator/tests/vm/Invoke-AgentServiceValidation.ps1
+# Maps the 10 Pester checks to Signalman assertion types.
+
+assertions:
+  # Check 1: Service exists
+  - id: service-exists
+    type: json_field
+    source: step-0
+    field: "Exists"
+    expected: true
+    severity: critical
+    description: "OspiriAgent Windows service must be installed"
+
+  # Check 2: Service running
+  - id: service-running
+    type: json_field
+    source: step-1
+    field: "Status"
+    expected: "Running"
+    severity: critical
+    description: "OspiriAgent service must be in Running state"
+
+  # Check 3: ETW session active
+  - id: etw-session-active
+    type: json_field
+    source: step-3
+    field: "HasSession"
+    expected: true
+    severity: critical
+    description: "ETW trace session must be active (logman query -ets)"
+
+  # Check 4: Agent logs
+  - id: agent-logs-present
+    type: json_field
+    source: step-4
+    field: "HasLogs"
+    expected: true
+    severity: high
+    description: "Agent must produce log output (Event Log or file)"
+
+  # Check 5: Process detection
+  - id: process-detection
+    type: json_field
+    source: step-7
+    field: "ProcessDetected"
+    expected: true
+    severity: critical
+    description: "Agent must detect a stub claude.exe via ETW pipeline"
+
+  # Check 6: DNS detection
+  # step-10 = backend query after step-8 triggered DNS + step-9 wait
+  - id: dns-detection
+    type: json_field
+    source: step-10
+    field: "DnsDetected"
+    expected: true
+    severity: high
+    description: "Agent must detect DNS queries to api.anthropic.com"
+
+  # Check 7: Backend registration
+  - id: backend-registered
+    type: json_field
+    source: step-11
+    field: "Registered"
+    expected: true
+    severity: critical
+    description: "Agent must register with the backend"
+
+  # Check 8: Heartbeat flowing
+  - id: heartbeat-flowing
+    type: json_field
+    source: step-12
+    field: "HasHeartbeat"
+    expected: true
+    severity: high
+    description: "Agent heartbeat must be flowing to the backend"
+
+  # Check 9: Telemetry uploaded
+  - id: telemetry-uploaded
+    type: json_field
+    source: step-13
+    field: "HasTelemetry"
+    expected: true
+    severity: high
+    description: "AI tool telemetry must be uploaded to the backend"
+
+  # Check 10: Service lifecycle — step-14 runs stop+restart; step-15 is
+  # the teardown stub cleanup and just echoes "cleaned up".
+  - id: service-lifecycle
+    type: json_field
+    source: step-14
+    field: "RestartClean"
+    expected: true
+    severity: high
+    description: "Service must stop and restart cleanly"
+
+  - id: service-stop-clean
+    type: json_field
+    source: step-14
+    field: "StopClean"
+    expected: true
+    severity: high
+    description: "Service must stop cleanly on request"
+
+# Scoring -- 9/11 must pass (matches original 8/10 threshold approx)
+pass_threshold: 0.80
+critical_must_pass: true
