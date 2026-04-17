@@ -1,10 +1,15 @@
 # Signalman Development Roadmap
 
-**Last Updated**: 2026-04-11
+**Last Updated**: 2026-04-17
 **Current Version**: Pre-release (v0.0.x)
 **Target**: v0.1.0 (first public release)
 **Test Count**: 59 Rust (guest) + 257 TypeScript (host, 8 files) = 316 tests
 **Repo**: https://github.com/ambray/signalman.git
+
+**2026-04-17 change**: Hyper-V is now the primary hypervisor backend (was VMware).
+VMware Workstation remains a working fallback but is no longer the default in
+`buildBackendList` or `signalman.yaml`. This aligns with the Example correlator's
+production deployment target, which assumes Hyper-V integration services.
 
 ---
 
@@ -49,7 +54,7 @@
 - **CLI** (`main.rs`) — `--bind`, `--token`, `--allow-insecure` flags via clap. Refuses to start without auth unless explicitly insecure.
 
 ### Test Scenarios
-- `silo-validation/` �� Win11 silo kernel API validation (8 steps, 4 assertions)
+- `silo-validation/` — Win11 silo kernel API validation (8 steps, 4 assertions)
 - `silo-validation-server2022/` — Server 2022 variant
 - `sandbox-enforcement/` — Full E2E: install Cursor, deploy sandbox policy, validate silo + network restrictions (11 assertions)
 - `cursor-restrict/` — Cursor restriction scenario
@@ -69,9 +74,9 @@
 **Estimated Duration**: 5-7 days
 **Status**: ~70% complete
 
-#### 1.1 Fix Pre-existing Test Failures
-- **`client.test.ts`** — 8 failing tests related to gRPC client mock setup. Likely a mock/import issue introduced during Phase 4 gRPC hardening.
-- **Effort**: S (< 1 day)
+#### 1.1 Fix Pre-existing Test Failures — ✅ DONE (commit 9f44072, 2026-04-12)
+- **`client.test.ts`** — 8 failing tests fixed; full host suite is green (257 tests).
+- **Effort**: S (< 1 day) — completed.
 
 #### 1.2 CI Pipeline
 - GitHub Actions workflow for:
@@ -86,15 +91,32 @@
 #### 1.3 E2E Test Migration from Correlator
 - Migrate the Hyper-V VM E2E test suite (currently 87 Pester tests + 4 orchestrator scripts) to use Signalman's scenario engine
 - Wire `ScenarioOrchestrator` → `AssertionEvaluator` → `JUnitReporter` into a single `signalman test` CLI command
-- Validate against the existing Win11 VM (DESKTOP-FAF4PL7, 172.30.0.10)
+- Validate against the existing Win11 VM (DESKTOP-FAF4PL7, 172.30.0.10) — now Hyper-V-only
 - **Effort**: L (3-5 days)
 - **Blocked by**: 1.1 (client tests must pass first)
 
-#### 1.4 Wire Dead Modules
-- `narrative.ts` (parser) and `reporter.ts` (JUnit) exist but are never called from the scenario runner
-- Wire narrative parser into scenario loading for `.md` workflow files
-- Wire JUnit reporter into orchestrator for test output
-- **Effort**: S
+#### 1.4 Correlator Silo PoC Validation — NEW 2026-04-17
+Scenario harness for the silo-research PoC (correlator `docs/silo-research/kernel-deep-dive/poc-usermode/`).
+
+- New scenario: `scenarios/example-silo-poc/`
+  - VM: `endpoint-1` (Win11 24H2, Containers feature **disabled**)
+  - Setup: copy `silo_poc.exe` into the VM, launch via `psexec -s` as SYSTEM
+  - Assertions:
+    - All 5 silo-build steps return `STATUS_SUCCESS`
+    - Helper process's `Global\ExampleSiloPocMutex_<pid>` is invisible from outside the silo
+    - Exit code = 0
+- New scenario: `scenarios/example-silo-poc-containers-on/`
+  - Same VM template but with Containers feature **enabled** (control)
+  - Confirms behaviour is identical → feature-gate hypothesis falsified
+- **Effort**: M (1-2 days)
+- **Blocked by**: 1.3 (reuses the Hyper-V VM infrastructure)
+- **References**: correlator `docs/silo-research/kernel-deep-dive/07-summary-report.md`,
+  `docs/silo-research/kernel-deep-dive/poc-usermode/README.md`
+
+#### 1.4 Wire Dead Modules — ✅ DONE (commit 9f44072, 2026-04-12)
+- `parseNarrative` is invoked by the scenario runner (`runner.ts:177`) and the orchestrator (`orchestrator.ts:167`).
+- `writeJunitReport` is invoked by the orchestrator (`orchestrator.ts:277`) and the runner (`runner.ts:537`).
+- **Effort**: S — completed.
 
 ---
 
@@ -185,6 +207,67 @@ The Docker client and `ComposeBuilder.exampleBackendStack()` factory are built. 
 
 ---
 
+### Phase 6: Example Correlator V1-V3 Isolation Scenarios — NEW 2026-04-17
+
+**Estimated Duration**: 6-9 days across correlator sprints
+**Status**: Not started, scoped
+
+**Network prerequisite** (captured 2026-04-17 during Win11x64 setup): the
+initial silo-promotion and agent-service validation scenarios run on
+`RevnTestSwitch` (isolated, static `172.30.0.10`) because the agent under
+test does not need external connectivity. **Tool-detection and sandbox /
+restrict scenarios from Phase 6.1 onward require internet access** —
+winget for tool installation, real AI endpoint reachability for DNS + TLS
+fingerprint capture, real policy enforcement against live endpoints.
+
+Options when we reach those scenarios:
+- **(b)** Move the VM to `Default Switch` (NAT, DHCP) and update affected
+  scenarios' `switch:` + `static_ip:` to DHCP
+- **(c)** Give the VM a second NIC: `RevnTestSwitch` for agent↔host
+  telemetry + `Default Switch` for outbound internet
+
+Option (c) is preferred because it preserves the existing host↔guest
+static-IP contract for Signalman gRPC while allowing the guest outbound
+traffic for tool installs. Sprint 60.7+ assumes (c) is in place.
+
+Support scenarios for the correlator's independent isolation engine (design
+doc: `correlator/docs/silo-research/kernel-deep-dive/09-isolation-architecture-design.md`).
+Each V-level maps to a set of Signalman scenarios that validate the agent's
+behaviour on a real Hyper-V endpoint.
+
+#### 6.1 V1 "Observable Silo" Scenarios
+- `scenarios/example-v1-silo-isolation/` — agent launches a monitored AI tool,
+  promotes it to a silo, validates `\BaseNamedObjects` isolation + ETW visibility
+- `scenarios/example-v1-appcontainer-compose/` — confirms silo composes with
+  existing AppContainer token restriction without breaking renderer sandboxes
+- **Assertions**: silo ID queryable; mutex isolation verified; telemetry batch
+  delivered to backend; enforcement record shows `Silo` mode
+- **Effort**: M (2-3 days)
+
+#### 6.2 V2 "Gated Silo" Scenarios
+- `scenarios/example-v2-registry-deny/` — validates ExampleReg driver denies
+  writes to `HKLM\...\Run`, `...\Services`, IFEO, Scheduled Tasks
+- `scenarios/example-v2-network-egress/` — validates ExampleNet WFP callout
+  enforces per-silo egress allow-list + JA4 fingerprint capture
+- **Assertions**: blocked writes emit audit events; allow-listed endpoint
+  reachable; non-allowed endpoint TCP-RST; JA4 hash present in telemetry
+- **Effort**: M (2-3 days)
+- **Blocked by**: 6.1 (V1 must land first)
+
+#### 6.3 V3 "Sandboxed Silo" Scenarios
+- `scenarios/example-v3-fs-isolation/` — ExampleFs minifilter denies read of
+  secret paths (`%LOCALAPPDATA%\Microsoft\Vault`, browser credential caches)
+- `scenarios/example-v3-handle-filter/` — ExampleObj denies cross-silo handle opens
+- `scenarios/example-v3-complex-app/` — contained Claude Cowork scenario:
+  Electron main + child processes + WebView2 + terminal + MCP server spawns
+  all stay within the silo; policy violations fire expected denials
+- **Assertions**: secret path reads return ENOENT; child processes inherit silo;
+  breakaway attempts denied; observability coverage >= 95%
+- **Effort**: L (3-4 days)
+- **Blocked by**: 6.2
+
+---
+
 ### Phase 5: Ecosystem and Docs
 
 **Estimated Duration**: 2-3 days
@@ -208,14 +291,15 @@ The Docker client and `ComposeBuilder.exampleBackendStack()` factory are built. 
 
 | Phase | Duration | Status | Gate |
 |-------|----------|--------|------|
-| Phase 1: Pre-v0.1.0 Blockers | 5-7 days | ~70% done | Must complete for v0.1.0 |
+| Phase 1: Pre-v0.1.0 Blockers (incl. Silo PoC) | 6-9 days | ~70% done | Must complete for v0.1.0 |
 | Phase 2: Docker E2E Integration | 3-4 days | Infra built | Needed for correlator silo testing |
 | Phase 3: Production Hardening | 4-5 days | ~30% done | Target v0.2.0 |
 | Phase 4: Protocol Improvements | 2-3 days | Not started | Target v0.3.0 |
 | Phase 5: Ecosystem and Docs | 2-3 days | Not started | Target v0.3.0 |
+| Phase 6: Correlator V1-V3 Scenarios | 6-9 days | Scoped 2026-04-17 | Runs parallel to correlator V1-V3 sprints |
 
-**Remaining effort**: ~16-22 days total
-**Critical path**: Phase 1.3 (E2E migration) → Phase 2.3 (hybrid scenarios) → Correlator silo VM testing
+**Remaining effort**: ~22-31 days total (was 16-22 before Phase 6)
+**Critical path**: Phase 1.3 → Phase 1.4 (Silo PoC) → Phase 2.3 → Phase 6.1 (V1 scenarios)
 
 ---
 
