@@ -16,7 +16,7 @@ vms:
     checkpoint_restore: agent-installed
     guest_agent_port: 50051
     network:
-      switch: "InternalSwitch"
+      switch: "RevnTestSwitch"
       static_ip: "172.30.0.10"
 
 # Pre-test setup steps (executed sequentially)
