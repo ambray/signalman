@@ -19,21 +19,44 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import type { HypervisorBackend } from "./hypervisors/interface.js";
 import { HyperVBackend } from "./hypervisors/hyperv.js";
+import { VmwareBackend } from "./hypervisors/vmware.js";
+import { loadConfig } from "./config.js";
 import { createAllTools } from "./tools/index.js";
 
 // ── Backend Discovery ─────────────────────────────────────────────
 
-const BACKENDS: HypervisorBackend[] = [
-  new HyperVBackend(),
-  // new VMwareBackend(),  // TODO: Phase P6
-];
+/**
+ * Build the ordered backend list from configuration.
+ *
+ * Hyper-V is the primary backend since 2026-04 (required for Example
+ * correlator silo validation scenarios). VMware remains a legacy
+ * fallback. If the config specifies a preferred backend, it goes first.
+ */
+function buildBackendList(preferredBackend?: string): HypervisorBackend[] {
+  const config = loadConfig();
+  const vmware = new VmwareBackend({
+    vmrunPath: config.hypervisor.vmrunPath,
+    vmDirs: config.hypervisor.vmDirs,
+    guestUser: config.hypervisor.guestCredentials?.username,
+    guestPass: config.hypervisor.guestCredentials?.password,
+  });
+  const hyperv = new HyperVBackend();
+
+  if (preferredBackend === "vmware") return [vmware, hyperv];
+  if (preferredBackend === "hyperv") return [hyperv, vmware];
+  // Default: prefer Hyper-V (changed from VMware-first on 2026-04).
+  return [hyperv, vmware];
+}
 
 let activeBackend: HypervisorBackend | null = null;
 
 async function getBackend(): Promise<HypervisorBackend> {
   if (activeBackend) return activeBackend;
 
-  for (const backend of BACKENDS) {
+  const config = loadConfig();
+  const backends = buildBackendList(config.hypervisor.backend);
+
+  for (const backend of backends) {
     if (await backend.isAvailable()) {
       activeBackend = backend;
       console.error(`[signalman] Using ${backend.name} hypervisor backend`);
