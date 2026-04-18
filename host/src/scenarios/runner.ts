@@ -19,6 +19,10 @@ import * as yaml from "yaml";
 
 const __dirname = import.meta.dirname ?? path.dirname(fileURLToPath(import.meta.url));
 import { parseNarrative } from "./narrative.js";
+import {
+  validateScenarioConfig,
+  validateAssertionConfig,
+} from "./schema.js";
 import type { Narrative } from "./narrative.js";
 import {
   writeJsonReport,
@@ -230,10 +234,18 @@ export function loadScenario(scenarioDir: string): {
     throw new Error(`Missing setup.yaml in ${resolvedDir}`);
   }
 
-  const config = yaml.parse(
+  // Parse + validate setup.yaml via zod. Throws a
+  // `ScenarioValidationError` with path-identified issues on any
+  // shape problem, so typos / missing fields surface at load time
+  // instead of as confusing runtime errors mid-scenario.
+  const rawSetup = yaml.parse(
     fs.readFileSync(setupPath, "utf-8"),
     { maxAliasCount: 100 },
-  ) as ScenarioConfig;
+  );
+  const config = validateScenarioConfig(
+    rawSetup,
+    setupPath,
+  ) as unknown as ScenarioConfig;
 
   let assertions: AssertionConfig = {
     assertions: [],
@@ -241,10 +253,14 @@ export function loadScenario(scenarioDir: string): {
     critical_must_pass: true,
   };
   if (fs.existsSync(assertionsPath)) {
-    assertions = yaml.parse(
+    const rawAssertions = yaml.parse(
       fs.readFileSync(assertionsPath, "utf-8"),
       { maxAliasCount: 100 },
-    ) as AssertionConfig;
+    );
+    assertions = validateAssertionConfig(
+      rawAssertions,
+      assertionsPath,
+    ) as unknown as AssertionConfig;
   }
 
   let workflowMarkdown = "";
