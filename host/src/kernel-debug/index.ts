@@ -86,3 +86,8 @@ export {
   createKernelDebugToolRegistry,
   kernelDebugToolDefinitions,
 } from "./tools.js";
+
+// Default kd factory, split out so orchestrator doesn't import
+// kd-session.ts directly (follow-up 2).
+export { createRealKdSession } from "./factory.js";
+export type { KdSessionFactory } from "./factory.js";
