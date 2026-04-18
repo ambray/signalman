@@ -26,6 +26,10 @@ import { parseNarrative } from "./narrative.js";
 import { BreakLog } from "../kernel-debug/break-log.js";
 import { createKernelDebugToolRegistry } from "../kernel-debug/tools.js";
 import type { ToolRegistry } from "../kernel-debug/tool-registry.js";
+import {
+  KdSession,
+  type KdSessionOptions,
+} from "../kernel-debug/kd-session.js";
 
 /**
  * Local helper so the class body can stay synchronous when wiring a
@@ -47,6 +51,18 @@ function createBreakLog(
 function createInitialToolRegistry(): ToolRegistry {
   return createKernelDebugToolRegistry();
 }
+
+/**
+ * Default KdSession factory — constructs a real session that will
+ * spawn `kd.exe` when started. Tests inject a fake via
+ * `orchestrator.setKdSessionFactory()`.
+ *
+ * Scenarios without any `kernel_debug.enabled: true` VM never call
+ * this factory, so kd.exe is never spawned in that path.
+ */
+function createRealKdSession(opts: KdSessionOptions): KdSession {
+  return new KdSession(opts);
+}
 import { writeJunitReport } from "../output/reporter.js";
 import type { TestResult, AssertionResultEntry } from "../output/reporter.js";
 
@@ -67,6 +83,9 @@ export interface VmDefinition {
     switch: string;
     static_ip: string;
   };
+  /** Kernel-debug config, copied through from setup.yaml. When
+   * `enabled: true`, `resolveVms` spawns a KdSession for this VM. */
+  kernel_debug?: import("./runner.js").KernelDebugConfig;
 }
 
 /** Result of a single setup/teardown step. */
@@ -291,6 +310,103 @@ export class ScenarioOrchestrator {
   }
 
   /**
+   * Full teardown: detach break logs AND stop the underlying
+   * `KdSession` processes. Called by the scenario runner at scenario
+   * end so kd.exe children don't leak across back-to-back scenarios.
+   *
+   * Safe to call even if no sessions were spawned. Best-effort — a
+   * failed detach on one session does not prevent the others from
+   * being cleaned up.
+   */
+  async teardownKernelDebugSessions(): Promise<void> {
+    const errors: unknown[] = [];
+    for (const { session, breakLog } of this.kernelDebug.values()) {
+      breakLog.detach();
+      try {
+        await session.detach();
+      } catch (e) {
+        errors.push(e);
+      }
+    }
+    this.kernelDebug.clear();
+    if (errors.length > 0 && process.env.SIGNALMAN_DEBUG === "1") {
+      // Debug-only surface — most detach failures mean the process
+      // was already dead, which is fine.
+      // eslint-disable-next-line no-console
+      console.error(
+        `[orchestrator] ${errors.length} kernel-debug teardown error(s):`,
+        errors.map((e) => (e instanceof Error ? e.message : String(e))),
+      );
+    }
+  }
+
+  /**
+   * Injection point for `spawnKernelDebugSessions`. Scenarios that
+   * need a custom KdSession construction (mocks in tests, a future
+   * multi-transport deployment) can swap this in via `setKdSessionFactory`.
+   * Default factory is `createRealKdSession` defined below this class.
+   */
+  private kdSessionFactory: (opts: KdSessionOptions) => KdSession =
+    createRealKdSession;
+
+  /**
+   * Override the default kd session factory. Tests call this to
+   * inject a fake that returns a controllable session without
+   * spawning kd.exe. Production code should not need this.
+   */
+  setKdSessionFactory(
+    factory: (opts: KdSessionOptions) => KdSession,
+  ): void {
+    this.kdSessionFactory = factory;
+  }
+
+  /**
+   * For every VM def with `kernel_debug.enabled: true`, construct a
+   * KdSession (via the injectable factory), start it, and attach a
+   * BreakLog via `setKernelDebugSession`. Called once from
+   * `runScenario` after `resolveVms`.
+   *
+   * Scenarios without any kernel_debug VMs never touch this code —
+   * no kd.exe is spawned, no network pipes are opened.
+   */
+  private async spawnKernelDebugSessions(
+    vmDefs: VmDefinition[],
+  ): Promise<void> {
+    for (const def of vmDefs) {
+      const kd = def.kernel_debug;
+      if (!kd || !kd.enabled) continue;
+
+      const pipe = (kd.pipe ?? "\\\\.\\pipe\\kd-{vm_name}").replace(
+        "{vm_name}",
+        def.name,
+      );
+      const symbolPath =
+        kd.symbol_path ??
+        "srv*C:\\Symbols*https://msdl.microsoft.com/download/symbols";
+      const kdExe = kd.kd_exe ?? "kd.exe";
+
+      // Build kd CLI args. Serial-over-pipe is the only supported
+      // transport at the time of writing; decision #2 in the sprint
+      // doc rules out KDNET / KDVM for v1.
+      const kdArgs = [
+        "-k",
+        `com:pipe,port=${pipe},baud=115200,reconnect`,
+        "-y",
+        symbolPath,
+      ];
+
+      const session = this.kdSessionFactory({
+        kdExe,
+        kdArgs,
+        breakOnLoad: kd.break_on_load,
+        breakOnBugcheck: kd.break_on_bugcheck,
+      });
+      await session.start();
+      this.setKernelDebugSession(def.name, session);
+    }
+  }
+
+  /**
    * Return the DockerClient or throw a descriptive error.
    *
    * Called by docker_compose_up / docker_compose_down handlers so that
@@ -334,8 +450,15 @@ export class ScenarioOrchestrator {
         checkpoint_restore: vm.checkpoint_restore,
         guest_agent_port: vm.guest_agent_port,
         network: vm.network,
+        kernel_debug: vm.kernel_debug,
       }));
       const vmMap = await this.resolveVms(vmDefs);
+
+      // Phase 1e/follow-up C — spawn per-VM KdSession when
+      // `kernel_debug.enabled: true` is set in setup.yaml. The
+      // handlers (`kernel_expect_bugcheck` / `kernel_break_on`) look
+      // these up via `orchestrator.getKernelDebug(vmName)`.
+      await this.spawnKernelDebugSessions(vmDefs);
 
       // Wait for guest agents
       await this.waitForGuestAgents(vmMap, vmDefs);
@@ -469,6 +592,20 @@ export class ScenarioOrchestrator {
     } catch (err) {
       status = "error";
       error = err instanceof Error ? err.message : String(err);
+    } finally {
+      // Always tear down kd sessions — even if the scenario errored
+      // mid-run, we don't want orphan kd.exe processes for subsequent
+      // scenarios to inherit. Follow-up C.
+      try {
+        await this.teardownKernelDebugSessions();
+      } catch (e) {
+        // Detach failures here are benign (most mean the kd process
+        // already exited); suppress rather than overwrite the outer
+        // scenario error.
+        if (!error && process.env.SIGNALMAN_DEBUG === "1") {
+          error = `kd teardown failed: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
     }
 
     const durationMs = Date.now() - startTime;
