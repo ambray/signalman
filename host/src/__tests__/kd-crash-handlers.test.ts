@@ -255,6 +255,16 @@ describe("BreakLog — querying", () => {
     expect(log.find({ bugcheckCode: "0xd1" })).toEqual([]);
   });
 
+  it("normalizes all-zero bugcheck codes to 0x0", () => {
+    const s = makeSession();
+    const log = new BreakLog(s as unknown as KdSession);
+    s.emitBreak("bugcheck", "0x00000000");
+    // Search with short form; the "|| '0'" fallback in the
+    // normalization helper ensures both sides compact to "0x0".
+    expect(log.find({ bugcheckCode: "0x0" }).length).toBe(1);
+    expect(log.find({ bugcheckCode: "0" }).length).toBe(1);
+  });
+
   it("latest() returns the most recent entry", () => {
     const s = makeSession();
     const log = new BreakLog(s as unknown as KdSession);
@@ -367,6 +377,30 @@ describe("handleKernelExpectBugcheck — match path", () => {
     expect(r.analyze_v).toBe("analyze-data");
     expect(r.all_stacks).toBeUndefined();
     expect(r.message).toContain("captureAllStacks");
+  });
+
+  it("reports captureStack failure individually", async () => {
+    const { ctx } = makeCtx(s);
+    s.emitBreak("bugcheck", "0xd1");
+    s.setCaptureResponse("stack", new Error("stack-timeout"));
+    s.setCaptureResponse("all_stacks", "all-data");
+    s.setCaptureResponse("analyze", "analyze-data");
+    const r = await handleKernelExpectBugcheck(ctx, { bugcheck_code: "0xd1" });
+    expect(r.matched).toBe(true);
+    expect(r.stack).toBeUndefined();
+    expect(r.message).toContain("captureStack");
+  });
+
+  it("reports captureAnalyze failure individually", async () => {
+    const { ctx } = makeCtx(s);
+    s.emitBreak("bugcheck", "0xd1");
+    s.setCaptureResponse("stack", "kn-data");
+    s.setCaptureResponse("all_stacks", "all-data");
+    s.setCaptureResponse("analyze", new Error("analyze-timeout"));
+    const r = await handleKernelExpectBugcheck(ctx, { bugcheck_code: "0xd1" });
+    expect(r.matched).toBe(true);
+    expect(r.analyze_v).toBeUndefined();
+    expect(r.message).toContain("captureAnalyze");
   });
 
   it("saves a dump when dump_path is specified", async () => {
