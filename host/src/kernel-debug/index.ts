@@ -65,3 +65,24 @@ export type {
 // Break-event log backing the kernel handlers.
 export { BreakLog } from "./break-log.js";
 export type { BreakLogEntry, BreakLogQuery } from "./break-log.js";
+
+// Pluggable tool-registry + factory that populates it with the
+// kernel-debug tools. Sprint 60.8 adds more tools by calling
+// `registry.register(...)` from its own module rather than editing
+// orchestrator.ts's switch statement.
+export {
+  ToolRegistry,
+  ToolAlreadyRegisteredError,
+  UnknownToolError,
+} from "./tool-registry.js";
+export type {
+  ToolContext,
+  ToolDefinition,
+  ToolHandler,
+  ToolOrchestratorView,
+  KernelDebugBinding,
+} from "./tool-registry.js";
+export {
+  createKernelDebugToolRegistry,
+  kernelDebugToolDefinitions,
+} from "./tools.js";
