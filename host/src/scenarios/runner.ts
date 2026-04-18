@@ -14,7 +14,10 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { fileURLToPath } from "url";
 import * as yaml from "yaml";
+
+const __dirname = import.meta.dirname ?? path.dirname(fileURLToPath(import.meta.url));
 import { parseNarrative } from "./narrative.js";
 import type { Narrative } from "./narrative.js";
 import {
@@ -34,6 +37,13 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
+/**
+ * Ospiri sandbox enforcement modes. Sprint 60 Phase 5 scenarios run once
+ * per declared mode and the orchestrator compares sandboxed results
+ * against the `none` baseline to surface regressions.
+ */
+export type SandboxMode = "none" | "legacy" | "appcontainer" | "silo";
+
 export interface ScenarioConfig {
   name: string;
   version: string;
@@ -42,6 +52,17 @@ export interface ScenarioConfig {
   setup: SetupStep[];
   teardown: SetupStep[];
   checkpoints: CheckpointConfig;
+  /**
+   * Sprint 60 Phase 5, Story 5.2 — list of sandbox enforcement modes to
+   * run this scenario under. If omitted or empty, the scenario runs once
+   * without a mode context (legacy behavior). When present, the
+   * orchestrator runs setup → workflow → assertions once per mode with
+   * snapshot revert between runs.
+   *
+   * Each setup step and tool block parameter string has `${SANDBOX_MODE}`
+   * substituted with the active mode name before execution.
+   */
+  sandbox_modes?: SandboxMode[];
 }
 
 export interface VmConfig {
@@ -53,6 +74,66 @@ export interface VmConfig {
     switch: string;
     static_ip: string;
   };
+  /**
+   * Kernel-debug configuration. When `enabled: true`, the orchestrator
+   * spawns a `KdSession` for this VM during `resolveVms()` and attaches
+   * a `BreakLog` so the `kernel_expect_bugcheck` and `kernel_break_on`
+   * tool blocks can target it. Detached at scenario teardown.
+   *
+   * Requires the VM to be in a `debug-enabled`-ancestry checkpoint
+   * (see `docs/milestones/runbooks/driver-testing-runbook.md` §3)
+   * so the COM1 pipe is wired to kd on startup.
+   */
+  kernel_debug?: KernelDebugConfig;
+}
+
+/**
+ * Kernel-debug configuration block for a scenario VM. Mirrors the
+ * options `KdSession` accepts, but scoped to the subset scenario
+ * authors control via YAML.
+ */
+export interface KernelDebugConfig {
+  /**
+   * When false or omitted, the orchestrator skips kd entirely and
+   * scenarios for this VM behave as if kernel_debug weren't present.
+   * This lets authors leave the block in place during refactors
+   * without triggering the kd spawn every run.
+   */
+  enabled: boolean;
+  /**
+   * Transport kd should use. Serial-over-named-pipe is the only form
+   * supported today (per Sprint 60.7.5 decision #2). KDNET / KDVM are
+   * deliberately not on the v1 surface.
+   */
+  transport?: "serial";
+  /**
+   * Named pipe path the host listens on. Supports the `{vm_name}`
+   * placeholder which the orchestrator expands to the scenario's
+   * VM name at resolve time (so `\\.\pipe\kd-{vm_name}` ->
+   * `\\.\pipe\kd-Win11x64` for a VM aliased to Win11x64).
+   */
+  pipe?: string;
+  /**
+   * Symbol path passed to kd via `-y`. Defaults to the Microsoft
+   * public symbol server with a local cache in `C:\Symbols`.
+   */
+  symbol_path?: string;
+  /**
+   * Modules to break on as they load, e.g. `["ospiri.sys"]`. Sent to
+   * kd as `sxe ld <module>` during session startup.
+   */
+  break_on_load?: string[];
+  /**
+   * Whether to break into the debugger on bugcheck. Default true —
+   * catching the crash is almost always the point.
+   */
+  break_on_bugcheck?: boolean;
+  /**
+   * Path to kd.exe. Defaults to `kd.exe` (looked up on PATH). Override
+   * for hosts that have Windows Debugging Tools in a non-standard
+   * location.
+   */
+  kd_exe?: string;
 }
 
 export interface SetupStep {
@@ -310,6 +391,12 @@ export function evaluateAssertions(
           }
           break;
         }
+
+        // Note: `json_field`, `file_exists`, `process_running`, `exit_code`,
+        // `network_reachable`, `stdout_matches`, and `stdout_contains`
+        // are handled by the V2 evaluator (see evaluateAssertionsV2 below
+        // and scenarios/orchestrator.ts which dispatches to V2 when any
+        // assertion uses a non-legacy type).
       }
     } catch (e) {
       error = `Assertion evaluation error: ${e}`;
