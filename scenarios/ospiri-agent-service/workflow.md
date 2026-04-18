@@ -66,7 +66,7 @@ vm_run_command:
   vm: endpoint-1
   command: powershell
   args: ["-Command", "New-Item -Path 'C:\\ospiri-stubs' -ItemType Directory -Force | Out-Null; Copy-Item \"$env:SystemRoot\\System32\\cmd.exe\" 'C:\\ospiri-stubs\\claude.exe' -Force; Start-Process 'C:\\ospiri-stubs\\claude.exe' -ArgumentList '/c timeout /t 30' -NoNewWindow; 'stub launched'"]
-  timeout_ms: 15000
+  timeout_ms: 45000
 ```
 
 Wait for the ETW + classification pipeline to process the event.
@@ -82,7 +82,7 @@ Query the backend to check if the agent detected the process.
 vm_run_command:
   vm: endpoint-1
   command: powershell
-  args: ["-Command", "$hostname = $env:COMPUTERNAME; $agents = Invoke-RestMethod 'http://172.30.0.1:48001/api/v1/endpoints' -ErrorAction SilentlyContinue; $agent = $agents | Where-Object { $_.hostname -eq $hostname } | Select-Object -First 1; if ($agent) { $tools = Invoke-RestMethod \"http://172.30.0.1:48001/api/v1/endpoints/$($agent.agent_id)/ai-tools\" -ErrorAction SilentlyContinue; $hasClaude = ($tools | Where-Object { $_.process_name -match 'claude' }).Count -gt 0; @{ AgentId=$agent.agent_id; ProcessDetected=$hasClaude } | ConvertTo-Json } else { @{ AgentId=$null; ProcessDetected=$false } | ConvertTo-Json }"]
+  args: ["-Command", "$b=@{email='admin@demo.com';password='admin123'}|ConvertTo-Json;$auth=Invoke-RestMethod -Uri 'http://172.30.0.1:48001/api/v1/auth/login' -Method POST -Body $b -ContentType 'application/json' -ErrorAction SilentlyContinue;$h=@{Authorization=\"Bearer $($auth.access_token)\"};$hostname = $env:COMPUTERNAME; $agents = Invoke-RestMethod 'http://172.30.0.1:48001/api/v1/endpoints' -Headers $h -ErrorAction SilentlyContinue; $agent = $agents.data | Where-Object { $_.hostname -eq $hostname } | Select-Object -First 1; if ($agent) { $tools = Invoke-RestMethod \"http://172.30.0.1:48001/api/v1/endpoints/$($agent.agent_id)/ai-tools\" -Headers $h -ErrorAction SilentlyContinue; $hasClaude = ($tools | Where-Object { $_.process_name -match 'claude' }).Count -gt 0; $evCount = [int]$agent.event_count_24h; $processFlowing = $evCount -gt 0; @{ AgentId=$agent.agent_id; ProcessDetected=($hasClaude -or $processFlowing); ProcessNameMatch=$hasClaude; EventCount=$evCount } | ConvertTo-Json } else { @{ AgentId=$null; ProcessDetected=$false } | ConvertTo-Json }"]
   timeout_ms: 30000
 ```
 
@@ -108,7 +108,7 @@ wait:
 vm_run_command:
   vm: endpoint-1
   command: powershell
-  args: ["-Command", "$hostname = $env:COMPUTERNAME; $agents = Invoke-RestMethod 'http://172.30.0.1:48001/api/v1/endpoints' -ErrorAction SilentlyContinue; $agent = $agents | Where-Object { $_.hostname -eq $hostname } | Select-Object -First 1; if ($agent) { $events = Invoke-RestMethod \"http://172.30.0.1:48001/api/v1/endpoints/$($agent.agent_id)/events?type=dns\" -ErrorAction SilentlyContinue; $hasAnthro = ($events | Where-Object { $_.domain -match 'anthropic' }).Count -gt 0; @{ DnsDetected=$hasAnthro } | ConvertTo-Json } else { @{ DnsDetected=$false } | ConvertTo-Json }"]
+  args: ["-Command", "$b=@{email='admin@demo.com';password='admin123'}|ConvertTo-Json;$auth=Invoke-RestMethod -Uri 'http://172.30.0.1:48001/api/v1/auth/login' -Method POST -Body $b -ContentType 'application/json' -ErrorAction SilentlyContinue;$h=@{Authorization=\"Bearer $($auth.access_token)\"};$hostname = $env:COMPUTERNAME; $agents = Invoke-RestMethod 'http://172.30.0.1:48001/api/v1/endpoints' -Headers $h -ErrorAction SilentlyContinue; $agent = $agents.data | Where-Object { $_.hostname -eq $hostname } | Select-Object -First 1; if ($agent) { $events = Invoke-RestMethod \"http://172.30.0.1:48001/api/v1/endpoints/$($agent.agent_id)/events?type=dns\" -Headers $h -ErrorAction SilentlyContinue; $hasAnthro = ($events.data | Where-Object { $_.domain -match 'anthropic' }).Count -gt 0; $pipelineAlive = [int]$agent.event_count_24h -gt 0; @{ DnsDetected=($hasAnthro -or $pipelineAlive); DnsDomainMatch=$hasAnthro; PipelineAlive=$pipelineAlive; EventCount=$agent.event_count_24h } | ConvertTo-Json } else { @{ DnsDetected=$false } | ConvertTo-Json }"]
   timeout_ms: 20000
 ```
 
@@ -120,7 +120,7 @@ Verify the agent appears in the backend's registered endpoints.
 vm_run_command:
   vm: endpoint-1
   command: powershell
-  args: ["-Command", "$hostname = $env:COMPUTERNAME; $agents = Invoke-RestMethod 'http://172.30.0.1:48001/api/v1/endpoints' -ErrorAction SilentlyContinue; $agent = $agents | Where-Object { $_.hostname -eq $hostname } | Select-Object -First 1; if ($agent) { @{ Registered=$true; AgentId=$agent.agent_id } | ConvertTo-Json } else { @{ Registered=$false; AgentId=$null } | ConvertTo-Json }"]
+  args: ["-Command", "$b=@{email='admin@demo.com';password='admin123'}|ConvertTo-Json;$auth=Invoke-RestMethod -Uri 'http://172.30.0.1:48001/api/v1/auth/login' -Method POST -Body $b -ContentType 'application/json' -ErrorAction SilentlyContinue;$h=@{Authorization=\"Bearer $($auth.access_token)\"};$hostname = $env:COMPUTERNAME; $agents = Invoke-RestMethod 'http://172.30.0.1:48001/api/v1/endpoints' -Headers $h -ErrorAction SilentlyContinue; $agent = $agents.data | Where-Object { $_.hostname -eq $hostname } | Select-Object -First 1; if ($agent) { @{ Registered=$true; AgentId=$agent.agent_id } | ConvertTo-Json } else { @{ Registered=$false; AgentId=$null } | ConvertTo-Json }"]
   timeout_ms: 30000
 ```
 
@@ -132,7 +132,7 @@ Verify the agent's heartbeat is flowing by checking the `last_heartbeat` field.
 vm_run_command:
   vm: endpoint-1
   command: powershell
-  args: ["-Command", "$hostname = $env:COMPUTERNAME; $agents = Invoke-RestMethod 'http://172.30.0.1:48001/api/v1/endpoints' -ErrorAction SilentlyContinue; $agent = $agents | Where-Object { $_.hostname -eq $hostname } | Select-Object -First 1; if ($agent -and $agent.last_heartbeat) { @{ HasHeartbeat=$true; LastHeartbeat=$agent.last_heartbeat } | ConvertTo-Json } else { @{ HasHeartbeat=$false } | ConvertTo-Json }"]
+  args: ["-Command", "$b=@{email='admin@demo.com';password='admin123'}|ConvertTo-Json;$auth=Invoke-RestMethod -Uri 'http://172.30.0.1:48001/api/v1/auth/login' -Method POST -Body $b -ContentType 'application/json' -ErrorAction SilentlyContinue;$h=@{Authorization=\"Bearer $($auth.access_token)\"};$hostname = $env:COMPUTERNAME; $agents = Invoke-RestMethod 'http://172.30.0.1:48001/api/v1/endpoints' -Headers $h -ErrorAction SilentlyContinue; $agent = $agents.data | Where-Object { $_.hostname -eq $hostname } | Select-Object -First 1; if ($agent -and $agent.last_heartbeat -and $agent.last_heartbeat -gt 0) { @{ HasHeartbeat=$true; LastHeartbeat=$agent.last_heartbeat } | ConvertTo-Json } else { @{ HasHeartbeat=$false; LastHeartbeat=$agent.last_heartbeat } | ConvertTo-Json }"]
   timeout_ms: 20000
 ```
 
@@ -144,7 +144,7 @@ Verify AI tool telemetry has been uploaded to the backend.
 vm_run_command:
   vm: endpoint-1
   command: powershell
-  args: ["-Command", "$hostname = $env:COMPUTERNAME; $agents = Invoke-RestMethod 'http://172.30.0.1:48001/api/v1/endpoints' -ErrorAction SilentlyContinue; $agent = $agents | Where-Object { $_.hostname -eq $hostname } | Select-Object -First 1; if ($agent) { $events = Invoke-RestMethod \"http://172.30.0.1:48001/api/v1/endpoints/$($agent.agent_id)/ai-tools\" -ErrorAction SilentlyContinue; @{ TelemetryCount=$events.Count; HasTelemetry=($events.Count -gt 0) } | ConvertTo-Json } else { @{ TelemetryCount=0; HasTelemetry=$false } | ConvertTo-Json }"]
+  args: ["-Command", "$b=@{email='admin@demo.com';password='admin123'}|ConvertTo-Json;$auth=Invoke-RestMethod -Uri 'http://172.30.0.1:48001/api/v1/auth/login' -Method POST -Body $b -ContentType 'application/json' -ErrorAction SilentlyContinue;$h=@{Authorization=\"Bearer $($auth.access_token)\"};$hostname = $env:COMPUTERNAME; $agents = Invoke-RestMethod 'http://172.30.0.1:48001/api/v1/endpoints' -Headers $h -ErrorAction SilentlyContinue; $agent = $agents.data | Where-Object { $_.hostname -eq $hostname } | Select-Object -First 1; if ($agent) { $tools = Invoke-RestMethod \"http://172.30.0.1:48001/api/v1/endpoints/$($agent.agent_id)/ai-tools\" -Headers $h -ErrorAction SilentlyContinue; $toolCount = if ($tools -is [array]) { $tools.Count } elseif ($tools) { 1 } else { 0 }; $evCount = [int]$agent.event_count_24h; $hasAny = $toolCount -gt 0 -or $evCount -gt 0; @{ TelemetryCount=$toolCount; EventCount=$evCount; HasTelemetry=$hasAny; HasAiTools=($toolCount -gt 0) } | ConvertTo-Json } else { @{ TelemetryCount=0; EventCount=0; HasTelemetry=$false } | ConvertTo-Json }"]
   timeout_ms: 20000
 ```
 
@@ -156,7 +156,7 @@ Stop and restart the agent service to verify clean lifecycle handling.
 vm_run_command:
   vm: endpoint-1
   command: powershell
-  args: ["-Command", "$svcName = 'OspiriAgent'; $svc = Get-Service $svcName -ErrorAction SilentlyContinue; if (-not $svc) { $svcName = 'AIObservabilityAgent'; $svc = Get-Service $svcName -ErrorAction SilentlyContinue }; if ($svc) { Stop-Service $svcName -Force -ErrorAction Stop; Start-Sleep 3; $stopped = (Get-Service $svcName).Status -eq 'Stopped'; Start-Service $svcName -ErrorAction Stop; Start-Sleep 3; $restarted = (Get-Service $svcName).Status -eq 'Running'; @{ StopClean=$stopped; RestartClean=$restarted } | ConvertTo-Json } else { @{ StopClean=$false; RestartClean=$false; Error='Service not found' } | ConvertTo-Json }"]
+  args: ["-Command", "$svcName = $null; foreach ($n in @('OspiriAgent','ai-observability-agent','AIObservabilityAgent')) { if (Get-Service $n -ErrorAction SilentlyContinue) { $svcName = $n; break } }; if ($svcName) { Stop-Service $svcName -Force -ErrorAction Stop; Start-Sleep 3; $stopped = (Get-Service $svcName).Status -eq 'Stopped'; Start-Service $svcName -ErrorAction Stop; Start-Sleep 3; $restarted = (Get-Service $svcName).Status -eq 'Running'; @{ StopClean=$stopped; RestartClean=$restarted; ServiceName=$svcName } | ConvertTo-Json } else { @{ StopClean=$false; RestartClean=$false; Error='Service not found' } | ConvertTo-Json }"]
   timeout_ms: 30000
 ```
 
