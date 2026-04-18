@@ -631,6 +631,41 @@ describe("KdSession — detach()", () => {
   });
 });
 
+// ─── once() + stdin-destroyed paths ────────────────────────────────
+
+describe("KdSession — typed once() + raw-line send guard", () => {
+  let cap: { proc: FakeChildProcess | null };
+  beforeEach(() => {
+    cap = { proc: null };
+  });
+
+  it("once() fires exactly once and removes its listener", async () => {
+    const s = new KdSession({ kdArgs: ["-k"], spawnFn: makeFakeSpawn(cap) });
+    let calls = 0;
+    s.once("break", () => {
+      calls++;
+    });
+    await s.start();
+    cap.proc!.emitStdout("*** Fatal System Error: 0xd1\n");
+    await flush();
+    // Second break — once() listener should NOT fire again.
+    cap.proc!.emitStdout("*** Fatal System Error: 0x7e\n");
+    await flush();
+    expect(calls).toBe(1);
+  });
+
+  it("run() rejects when stdin is destroyed mid-session", async () => {
+    const s = new KdSession({ kdArgs: ["-k"], spawnFn: makeFakeSpawn(cap) });
+    await s.start();
+    // Destroy stdin — simulates the subprocess having closed its
+    // input side (e.g. the kd process has exited but we haven't
+    // observed the 'exit' event yet).
+    cap.proc!.stdin.destroy();
+    await flush();
+    await expect(s.run("kn")).rejects.toThrow(/kd stdin is not available/);
+  });
+});
+
 // ─── Spawn error handling ───────────────────────────────────────────
 
 describe("KdSession — spawn error paths", () => {
