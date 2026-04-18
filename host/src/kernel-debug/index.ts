@@ -31,3 +31,20 @@ export {
 } from "./parser.js";
 
 export type { KdSignal } from "./parser.js";
+
+export {
+  handleDriverLoad,
+  handleDriverUnload,
+  handleDriverIoctl,
+  parseScQueryState,
+} from "./handlers.js";
+
+export type {
+  DriverHandlerContext,
+  DriverLoadParams,
+  DriverLoadResult,
+  DriverUnloadParams,
+  DriverUnloadResult,
+  DriverIoctlParams,
+  DriverIoctlResult,
+} from "./handlers.js";
