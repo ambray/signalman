@@ -10,13 +10,17 @@ import * as path from "node:path";
 import type { HypervisorBackend, VMHandle } from "../hypervisors/interface.js";
 import type { GuestAgentClient } from "../guest/client.js";
 import type { SignalmanConfig } from "../config.js";
+import type { DockerClient, ComposeConfig } from "../docker/client.js";
 import {
   loadScenario,
   evaluateAssertions,
+  evaluateAssertionsV2,
   extractToolBlocks,
 } from "./runner.js";
+import type { CommandResult } from "../guest/client.js";
 import type {
   SetupStep,
+  SandboxMode,
 } from "./runner.js";
 import { parseNarrative } from "./narrative.js";
 import { writeJunitReport } from "../output/reporter.js";
@@ -68,6 +72,66 @@ export interface ScenarioResult {
   assertion_results: AssertionResult[];
   teardown_results: StepResult[];
   error?: string;
+  /**
+   * Sandbox enforcement mode this run executed under.
+   *
+   * Populated when the scenario's `sandbox_modes:` list is used (Sprint
+   * 60 Phase 5, Story 5.2). Absent for single-mode runs.
+   */
+  sandbox_mode?: SandboxMode;
+}
+
+/**
+ * Aggregated results from running a scenario across multiple sandbox modes.
+ *
+ * Produced by `ScenarioOrchestrator.runScenarioMultiMode` when the
+ * scenario's `setup.yaml` declares a `sandbox_modes:` list. The Phase 5
+ * regression detector consumes this shape to diff sandboxed runs against
+ * the `none` baseline.
+ *
+ * # Sprint Reference
+ * Sprint 60, Phase 5, Story 5.2.
+ */
+export interface MultiModeResult {
+  scenario: string;
+  /** One entry per mode in the order declared by the scenario config. */
+  runs: Array<{
+    mode: SandboxMode;
+    result: ScenarioResult;
+  }>;
+  total_duration_ms: number;
+}
+
+// ── Template variable substitution (Story 5.2) ────────────────────
+
+/**
+ * Substitute `${VAR_NAME}` tokens in a value recursively.
+ *
+ * Walks strings (replace), arrays (map), and plain objects (clone keys).
+ * Non-string primitives pass through unchanged. Used by the multi-mode
+ * scenario runner to stamp `${SANDBOX_MODE}` into setup steps and tool
+ * block parameters.
+ */
+export function substituteVarsDeep(
+  value: unknown,
+  vars: Record<string, string>,
+): unknown {
+  if (typeof value === "string") {
+    return value.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/g, (match, name: string) => {
+      return Object.prototype.hasOwnProperty.call(vars, name) ? vars[name] : match;
+    });
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => substituteVarsDeep(v, vars));
+  }
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = substituteVarsDeep(v, vars);
+    }
+    return out;
+  }
+  return value;
 }
 
 // ── Orchestrator ───────────────────────────────────────────────────
@@ -86,14 +150,33 @@ export interface OrchestratorOptions {
 
 export class ScenarioOrchestrator {
   private readonly outputDir: string | undefined;
+  private readonly docker: DockerClient | undefined;
 
   constructor(
     private backend: HypervisorBackend,
     private guestClients: Map<string, GuestAgentClient>,
     private config: SignalmanConfig,
-    options?: OrchestratorOptions,
+    options?: OrchestratorOptions & { docker?: DockerClient },
   ) {
     this.outputDir = options?.outputDir;
+    this.docker = options?.docker;
+  }
+
+  /**
+   * Return the DockerClient or throw a descriptive error.
+   *
+   * Called by docker_compose_up / docker_compose_down handlers so that
+   * the orchestrator still works without a Docker client for VM-only
+   * scenarios.
+   */
+  private requireDocker(): DockerClient {
+    if (!this.docker) {
+      throw new Error(
+        "Docker action requested but no DockerClient was provided to the orchestrator. " +
+        "Pass a DockerClient via the `docker` option in the constructor.",
+      );
+    }
+    return this.docker;
   }
 
   /**
@@ -187,16 +270,63 @@ export class ScenarioOrchestrator {
         }
       }
 
-      // Evaluate assertions against workflow outputs
+      // Evaluate assertions against workflow outputs.
+      //
+      // The legacy evaluator only handles {command_output, screenshot_check,
+      // process_state}. Scenarios using json_field, exit_code, file_exists,
+      // etc. need the V2 evaluator. Route to V2 when any assertion uses a
+      // modern type; otherwise stay on legacy for backwards compat.
       if (assertions.assertions.length > 0) {
-        const { results } = evaluateAssertions(assertions, workflowOutputs, workflowScreenshots);
-        assertionResults = results.map((r) => ({
-          id: r.assertion.id,
-          description: r.assertion.description,
-          passed: r.passed,
-          actual: r.actual,
-          error: r.error,
-        }));
+        const needsV2 = assertions.assertions.some(
+          (a) => !["command_output", "screenshot_check", "process_state"].includes(a.type as string),
+        );
+
+        // The V1 and V2 evaluators return different result shapes. We
+        // normalize to a shared record so downstream consumers don't need
+        // to care which evaluator produced the result.
+        let normalized: AssertionResultEntry[];
+
+        if (needsV2) {
+          // Convert workflowOutputs (Map<string,string>) into CommandResult shape.
+          const commandResults = new Map<string, CommandResult>();
+          for (const [key, value] of workflowOutputs.entries()) {
+            commandResults.set(key, {
+              stdout: value,
+              stderr: "",
+              exit_code: value.startsWith("ERROR:") ? 1 : 0,
+              error: "",
+            } as unknown as CommandResult);
+          }
+          const { results: v2Results } = await evaluateAssertionsV2(
+            assertions,
+            commandResults,
+            workflowScreenshots,
+            scenarioPath,
+          );
+          // V2 result: { id, description, passed, actual, error }
+          normalized = v2Results.map((r, i) => ({
+            id: (r as { id: string }).id,
+            description: (r as { description?: string }).description ?? "",
+            passed: r.passed,
+            actual: typeof r.actual === "string" ? r.actual : r.actual === undefined ? undefined : JSON.stringify(r.actual),
+            error: (r as { error?: string }).error,
+            severity: ((assertions.assertions[i] as { severity?: string })?.severity ?? "medium") as AssertionResultEntry["severity"],
+          }));
+        } else {
+          const { results: v1Results } = evaluateAssertions(
+            assertions, workflowOutputs, workflowScreenshots,
+          );
+          // V1 result: { assertion, passed, actual, error }
+          normalized = v1Results.map((r) => ({
+            id: r.assertion.id,
+            description: r.assertion.description,
+            passed: r.passed,
+            actual: r.actual,
+            error: r.error,
+            severity: (r.assertion.severity ?? "medium") as AssertionResultEntry["severity"],
+          }));
+        }
+        assertionResults = normalized;
 
         const anyFailed = assertionResults.some((r) => !r.passed);
         if (anyFailed) {
@@ -261,6 +391,119 @@ export class ScenarioOrchestrator {
   }
 
   /**
+   * Execute a scenario across multiple sandbox enforcement modes.
+   *
+   * Reads the `sandbox_modes:` list from the scenario's `setup.yaml`. If
+   * absent or empty, falls back to a single `runScenario` invocation
+   * wrapped in a `MultiModeResult` (preserves backward compatibility).
+   *
+   * Between modes the orchestrator reverts every VM to the checkpoint
+   * declared by `VmConfig.checkpoint_restore` before the next run. If a
+   * VM has no checkpoint declared, revert is skipped with a warning —
+   * the run will still execute but state may leak between modes.
+   *
+   * Each setup step parameter and tool block parameter has
+   * `${SANDBOX_MODE}` substituted with the active mode name, so the
+   * same scenario file can parameterize per-mode behavior (e.g.
+   * `example-cli set-mode ${SANDBOX_MODE}`).
+   *
+   * # Sprint Reference
+   * Sprint 60, Phase 5, Story 5.2.
+   */
+  async runScenarioMultiMode(scenarioPath: string): Promise<MultiModeResult> {
+    const startTime = Date.now();
+
+    let declaredModes: SandboxMode[] | undefined;
+    let scenarioName = "unknown";
+    try {
+      const loaded = loadScenario(scenarioPath);
+      declaredModes = loaded.config.sandbox_modes;
+      scenarioName = loaded.config.name;
+    } catch {
+      // If scenario fails to load we still want runScenario's error handling
+      // to produce the failure record, so fall through to a single run.
+    }
+
+    const modes: SandboxMode[] =
+      declaredModes && declaredModes.length > 0 ? declaredModes : (["none"] as SandboxMode[]);
+
+    const runs: Array<{ mode: SandboxMode; result: ScenarioResult }> = [];
+    for (let i = 0; i < modes.length; i++) {
+      const mode = modes[i];
+      if (i > 0) {
+        // Between modes: revert every VM to its declared checkpoint so
+        // the next run starts from the same state as the first.
+        await this.revertVmsToCheckpoints(scenarioPath);
+      }
+
+      // Set the mode context so that setup/workflow steps can substitute
+      // `${SANDBOX_MODE}` before execution.
+      this.currentSandboxMode = mode;
+      try {
+        const result = await this.runScenario(scenarioPath);
+        result.sandbox_mode = mode;
+        runs.push({ mode, result });
+      } finally {
+        this.currentSandboxMode = undefined;
+      }
+    }
+
+    return {
+      scenario: scenarioName,
+      runs,
+      total_duration_ms: Date.now() - startTime,
+    };
+  }
+
+  /**
+   * The mode currently being executed by `runScenarioMultiMode`, if any.
+   * Read by `substituteSandboxMode` at step-dispatch time.
+   */
+  private currentSandboxMode: SandboxMode | undefined;
+
+  /**
+   * Recursively substitute `${SANDBOX_MODE}` in all string values of a
+   * setup step or tool block parameter map. Returns a new object; the
+   * input is not mutated.
+   */
+  protected substituteSandboxMode<T>(value: T): T {
+    const mode = this.currentSandboxMode;
+    if (mode === undefined) return value;
+    return substituteVarsDeep(value, { SANDBOX_MODE: mode }) as T;
+  }
+
+  /**
+   * Revert every VM declared by the scenario to its `checkpoint_restore`
+   * label. Used between sandbox-mode runs.
+   */
+  private async revertVmsToCheckpoints(scenarioPath: string): Promise<void> {
+    const { config } = loadScenario(scenarioPath);
+    for (const vm of config.vms) {
+      if (!vm.checkpoint_restore) {
+        console.warn(
+          `[orchestrator] VM '${vm.name}' has no checkpoint_restore declared — ` +
+            `state may leak between sandbox modes`,
+        );
+        continue;
+      }
+      const handle = await this.backend
+        .listVMs()
+        .then((vms) => vms.find((v) => v.name === vm.template));
+      if (!handle) {
+        console.warn(
+          `[orchestrator] could not resolve VM '${vm.template}' for revert; skipping`,
+        );
+        continue;
+      }
+      await this.backend.restoreCheckpoint({
+        id: "",
+        vmHandle: handle,
+        label: vm.checkpoint_restore,
+      });
+    }
+  }
+
+  /**
    * Execute setup steps sequentially.
    *
    * Supported actions:
@@ -270,6 +513,8 @@ export class ScenarioOrchestrator {
    * - vm_restore: Restore a VM checkpoint
    * - vm_checkpoint: Create a VM checkpoint
    * - wait: Sleep for a duration
+   * - docker_compose_up: Start a Docker Compose stack (requires DockerClient)
+   * - docker_compose_down: Stop a Docker Compose stack (requires DockerClient)
    */
   async executeSetup(
     steps: SetupStep[],
@@ -277,7 +522,10 @@ export class ScenarioOrchestrator {
   ): Promise<StepResult[]> {
     const results: StepResult[] = [];
 
-    for (const step of steps) {
+    for (const rawStep of steps) {
+      // Story 5.2: substitute ${SANDBOX_MODE} etc. before dispatch so the
+      // existing per-action handlers see the resolved values.
+      const step = this.substituteSandboxMode(rawStep) as SetupStep;
       const vmName = (step.vm as string) ?? "";
       const startTime = Date.now();
 
@@ -395,6 +643,57 @@ export class ScenarioOrchestrator {
             break;
           }
 
+          case "docker_compose_up": {
+            const docker = this.requireDocker();
+            const composeConfig: ComposeConfig = {
+              projectName: step.project_name as string,
+              composeFile: step.compose_file as string,
+              env: step.env as Record<string, string> | undefined,
+            };
+            await docker.composeUp(composeConfig, step.services as string[] | undefined);
+
+            // Optionally wait for all services to become healthy
+            if (step.wait_healthy) {
+              const timeoutMs = (step.timeout_ms as number) ?? 60_000;
+              const containers = await docker.composePs(composeConfig);
+              for (const container of containers) {
+                if (container.state === "running") {
+                  const healthy = await docker.waitForHealthy(container.name, timeoutMs);
+                  if (!healthy) {
+                    throw new Error(
+                      `Container '${container.name}' did not become healthy within ${timeoutMs}ms`,
+                    );
+                  }
+                }
+              }
+            }
+
+            results.push({
+              action: step.action,
+              vm: vmName,
+              status: "success",
+              duration_ms: Date.now() - startTime,
+            });
+            break;
+          }
+
+          case "docker_compose_down": {
+            const docker = this.requireDocker();
+            const composeConfig: ComposeConfig = {
+              projectName: step.project_name as string,
+              composeFile: (step.compose_file as string) ?? "",
+              env: step.env as Record<string, string> | undefined,
+            };
+            await docker.composeDown(composeConfig, step.remove_volumes as boolean | undefined);
+            results.push({
+              action: step.action,
+              vm: vmName,
+              status: "success",
+              duration_ms: Date.now() - startTime,
+            });
+            break;
+          }
+
           default: {
             results.push({
               action: step.action,
@@ -438,9 +737,12 @@ export class ScenarioOrchestrator {
    */
   async executeToolBlock(
     tool: string,
-    params: Record<string, unknown>,
+    rawParams: Record<string, unknown>,
     vmMap: Map<string, VMHandle>,
   ): Promise<string> {
+    // Story 5.2: substitute ${SANDBOX_MODE} across tool block parameters
+    // before any handler reads them.
+    const params = this.substituteSandboxMode(rawParams) as Record<string, unknown>;
     const vmName = (params.vm as string) ?? vmMap.keys().next().value;
 
     switch (tool) {
@@ -493,6 +795,187 @@ export class ScenarioOrchestrator {
         return "waited";
       }
 
+      case "docker_compose_up": {
+        const docker = this.requireDocker();
+        const composeConfig: ComposeConfig = {
+          projectName: params.project_name as string,
+          composeFile: params.compose_file as string,
+          env: params.env as Record<string, string> | undefined,
+        };
+        await docker.composeUp(composeConfig, params.services as string[] | undefined);
+
+        if (params.wait_healthy) {
+          const timeoutMs = (params.timeout_ms as number) ?? 60_000;
+          const containers = await docker.composePs(composeConfig);
+          for (const container of containers) {
+            if (container.state === "running") {
+              const healthy = await docker.waitForHealthy(container.name, timeoutMs);
+              if (!healthy) {
+                throw new Error(
+                  `Container '${container.name}' did not become healthy within ${timeoutMs}ms`,
+                );
+              }
+            }
+          }
+        }
+
+        return "compose stack started";
+      }
+
+      case "docker_compose_down": {
+        const docker = this.requireDocker();
+        const composeConfig: ComposeConfig = {
+          projectName: params.project_name as string,
+          composeFile: (params.compose_file as string) ?? "",
+          env: params.env as Record<string, string> | undefined,
+        };
+        await docker.composeDown(composeConfig, params.remove_volumes as boolean | undefined);
+        return "compose stack stopped";
+      }
+
+      // ── UI automation (Sprint 60 Phase 5, Story 5.5 prep) ────────
+      // Each case returns a JSON-stringified result so spec authors can
+      // pipe it into the standard `json_field` / `stdout_contains`
+      // assertions.
+
+      case "ui_click": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const selector = params.selector as string;
+        if (!selector) throw new Error(`ui_click missing 'selector'`);
+        const result = await client.uiClick(selector, {
+          windowTitle: params.window_title as string | undefined,
+          clickType: params.click_type as "left" | "right" | "double" | undefined,
+          timeoutMs: params.timeout_ms as number | undefined,
+        });
+        return JSON.stringify(result);
+      }
+
+      case "ui_type": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const text = params.text as string;
+        if (text === undefined || text === null) {
+          throw new Error(`ui_type missing 'text'`);
+        }
+        const result = await client.uiType(text, {
+          selector: params.selector as string | undefined,
+          windowTitle: params.window_title as string | undefined,
+          clearFirst: params.clear_first as boolean | undefined,
+          timeoutMs: params.timeout_ms as number | undefined,
+        });
+        return JSON.stringify(result);
+      }
+
+      case "ui_find": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const selector = params.selector as string;
+        if (!selector) throw new Error(`ui_find missing 'selector'`);
+        const elements = await client.uiFind(selector, {
+          windowTitle: params.window_title as string | undefined,
+          findTimeoutMs: params.find_timeout_ms as number | undefined,
+          timeoutMs: params.timeout_ms as number | undefined,
+        });
+        // Return a structured result so `json_field` assertions can
+        // query e.g. `count` or `elements[0].is_enabled`.
+        return JSON.stringify({ count: elements.length, elements });
+      }
+
+      case "ui_screenshot": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const buffer = await client.screenshot(
+          params.window_title as string | undefined,
+          (params.format as string) ?? "png",
+          params.timeout_ms as number | undefined,
+        );
+        // Optional persistence to disk for visual debugging — when
+        // `output` is set, write the bytes there. Either way return
+        // size metadata so assertions can sanity-check the capture.
+        let savedPath: string | undefined;
+        if (typeof params.output === "string" && params.output.length > 0) {
+          const fs = await import("node:fs");
+          fs.mkdirSync(path.dirname(params.output), { recursive: true });
+          fs.writeFileSync(params.output, buffer);
+          savedPath = params.output;
+        }
+        return JSON.stringify({
+          bytes: buffer.length,
+          saved_path: savedPath ?? null,
+        });
+      }
+
+      // ── driver / kernel-debug tool blocks (Sprint 60.7.5) ─────────
+      //
+      // These thin dispatch stubs delegate to pure handler functions in
+      // `kernel-debug/handlers.ts`. Keeping the handler logic outside
+      // this switch keeps the orchestrator readable and the handlers
+      // unit-testable without instantiating the orchestrator.
+
+      case "driver_load": {
+        const guestClient = this.guestClients.get(vmName);
+        if (!guestClient) {
+          throw new Error(`No guest client for VM '${vmName}'`);
+        }
+        const { handleDriverLoad } = await import("../kernel-debug/handlers.js");
+        const result = await handleDriverLoad(
+          { guestClient, vmName },
+          {
+            service: params.service as string,
+            expect_status: params.expect_status as number | undefined,
+            timeout_ms: params.timeout_ms as number | undefined,
+          },
+        );
+        return JSON.stringify(result);
+      }
+
+      case "driver_unload": {
+        const guestClient = this.guestClients.get(vmName);
+        if (!guestClient) {
+          throw new Error(`No guest client for VM '${vmName}'`);
+        }
+        const { handleDriverUnload } = await import(
+          "../kernel-debug/handlers.js"
+        );
+        const result = await handleDriverUnload(
+          { guestClient, vmName },
+          {
+            service: params.service as string,
+            expect_status: params.expect_status as number | undefined,
+            timeout_ms: params.timeout_ms as number | undefined,
+          },
+        );
+        return JSON.stringify(result);
+      }
+
+      case "driver_ioctl": {
+        const guestClient = this.guestClients.get(vmName);
+        if (!guestClient) {
+          throw new Error(`No guest client for VM '${vmName}'`);
+        }
+        const { handleDriverIoctl } = await import(
+          "../kernel-debug/handlers.js"
+        );
+        const result = await handleDriverIoctl(
+          { guestClient, vmName },
+          {
+            device: params.device as string,
+            control_code: params.control_code as number,
+            input_hex: params.input_hex as string | undefined,
+            input_file: params.input_file as string | undefined,
+            expect_status: params.expect_status as string | undefined,
+            expect_output_hex: params.expect_output_hex as string | undefined,
+            expect_output_size_min: params.expect_output_size_min as
+              | number
+              | undefined,
+            timeout_ms: params.timeout_ms as number | undefined,
+            harness_path: params.harness_path as string | undefined,
+          },
+        );
+        return JSON.stringify(result);
+      }
+
       default:
         throw new Error(`Unknown workflow tool: ${tool}`);
     }
@@ -511,11 +994,19 @@ export class ScenarioOrchestrator {
     const allVms = await this.backend.listVMs();
 
     for (const def of vmDefs) {
+      // Resolve alias: check config.vmAliases first, then use the logical name
+      const physicalName = this.config.vmAliases?.[def.name] ?? def.name;
       const existing = allVms.find(
-        (vm) => vm.name.toLowerCase() === def.name.toLowerCase(),
+        (vm) => vm.name.toLowerCase() === physicalName.toLowerCase(),
       );
       if (!existing) {
-        throw new Error(`VM '${def.name}' not found in hypervisor`);
+        const aliasHint = physicalName !== def.name
+          ? ` (alias for '${physicalName}')`
+          : "";
+        throw new Error(
+          `VM '${def.name}'${aliasHint} not found in hypervisor. ` +
+          `Available VMs: ${allVms.map((v) => v.name).join(", ")}`,
+        );
       }
       vmMap.set(def.name, existing);
 
