@@ -24,6 +24,8 @@ import type {
 } from "./runner.js";
 import { parseNarrative } from "./narrative.js";
 import { BreakLog } from "../kernel-debug/break-log.js";
+import { createKernelDebugToolRegistry } from "../kernel-debug/tools.js";
+import type { ToolRegistry } from "../kernel-debug/tool-registry.js";
 
 /**
  * Local helper so the class body can stay synchronous when wiring a
@@ -34,6 +36,16 @@ function createBreakLog(
   session: import("../kernel-debug/kd-session.js").KdSession,
 ): BreakLog {
   return new BreakLog(session);
+}
+
+/**
+ * Build the orchestrator's initial tool registry — starts with the
+ * kernel-debug tools registered by `tools.ts`. Future sprints can
+ * extend by calling `orchestrator.tools.register(...)` from their
+ * own modules after construction.
+ */
+function createInitialToolRegistry(): ToolRegistry {
+  return createKernelDebugToolRegistry();
 }
 import { writeJunitReport } from "../output/reporter.js";
 import type { TestResult, AssertionResultEntry } from "../output/reporter.js";
@@ -179,6 +191,18 @@ export class ScenarioOrchestrator {
     }
   > = new Map();
 
+  /**
+   * Pluggable tool registry — handles the driver_* / kernel_* tool
+   * blocks added in Sprint 60.7.5 and anything subsequent sprints
+   * register. Consulted by `executeToolBlock` before the legacy
+   * switch's default branch.
+   *
+   * Existing tools (`vm_run_command`, `wait`, `ui_*`, `docker_*`,
+   * etc.) stay in the switch for now; they're already working and
+   * migrating them is a separate refactor with its own risk budget.
+   */
+  private readonly toolRegistry: import("../kernel-debug/tool-registry.js").ToolRegistry;
+
   constructor(
     private backend: HypervisorBackend,
     private guestClients: Map<string, GuestAgentClient>,
@@ -187,6 +211,40 @@ export class ScenarioOrchestrator {
   ) {
     this.outputDir = options?.outputDir;
     this.docker = options?.docker;
+    // Lazy-import-compatible initializer — the import below is static
+    // so there's no circular-dep risk (kernel-debug doesn't import
+    // orchestrator).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    this.toolRegistry = createInitialToolRegistry();
+  }
+
+  /**
+   * Narrow accessor used by the pluggable tool registry; returns
+   * `undefined` when no guest client is registered for the given VM.
+   *
+   * Public so tools (`kernel-debug/tools.ts`) can look up
+   * dependencies without needing the full orchestrator surface.
+   */
+  getGuestClient(vmName: string): GuestAgentClient | undefined {
+    return this.guestClients.get(vmName);
+  }
+
+  /**
+   * Narrow accessor for the kernel-debug binding on a given VM, or
+   * `undefined` when none exists. Counterpart to `getGuestClient`.
+   */
+  getKernelDebug(
+    vmName: string,
+  ): import("../kernel-debug/tool-registry.js").KernelDebugBinding | undefined {
+    return this.kernelDebug.get(vmName);
+  }
+
+  /**
+   * Access the tool registry. Primarily for tests; most callers reach
+   * tools via `executeToolBlock`.
+   */
+  get tools(): import("../kernel-debug/tool-registry.js").ToolRegistry {
+    return this.toolRegistry;
   }
 
   /**
@@ -976,132 +1034,18 @@ export class ScenarioOrchestrator {
         });
       }
 
-      // ── driver / kernel-debug tool blocks (Sprint 60.7.5) ─────────
-      //
-      // These thin dispatch stubs delegate to pure handler functions in
-      // `kernel-debug/handlers.ts`. Keeping the handler logic outside
-      // this switch keeps the orchestrator readable and the handlers
-      // unit-testable without instantiating the orchestrator.
-
-      case "driver_load": {
-        const guestClient = this.guestClients.get(vmName);
-        if (!guestClient) {
-          throw new Error(`No guest client for VM '${vmName}'`);
-        }
-        const { handleDriverLoad } = await import(
-          "../kernel-debug/driver-handlers.js"
-        );
-        const result = await handleDriverLoad(
-          { guestClient, vmName },
-          {
-            service: params.service as string,
-            expect_status: params.expect_status as number | undefined,
-            timeout_ms: params.timeout_ms as number | undefined,
-          },
-        );
-        return JSON.stringify(result);
-      }
-
-      case "driver_unload": {
-        const guestClient = this.guestClients.get(vmName);
-        if (!guestClient) {
-          throw new Error(`No guest client for VM '${vmName}'`);
-        }
-        const { handleDriverUnload } = await import(
-          "../kernel-debug/driver-handlers.js"
-        );
-        const result = await handleDriverUnload(
-          { guestClient, vmName },
-          {
-            service: params.service as string,
-            expect_status: params.expect_status as number | undefined,
-            timeout_ms: params.timeout_ms as number | undefined,
-          },
-        );
-        return JSON.stringify(result);
-      }
-
-      case "driver_ioctl": {
-        const guestClient = this.guestClients.get(vmName);
-        if (!guestClient) {
-          throw new Error(`No guest client for VM '${vmName}'`);
-        }
-        const { handleDriverIoctl } = await import(
-          "../kernel-debug/driver-handlers.js"
-        );
-        const result = await handleDriverIoctl(
-          { guestClient, vmName },
-          {
-            device: params.device as string,
-            control_code: params.control_code as number,
-            input_hex: params.input_hex as string | undefined,
-            input_file: params.input_file as string | undefined,
-            expect_status: params.expect_status as string | undefined,
-            expect_output_hex: params.expect_output_hex as string | undefined,
-            expect_output_size_min: params.expect_output_size_min as
-              | number
-              | undefined,
-            timeout_ms: params.timeout_ms as number | undefined,
-            harness_path: params.harness_path as string | undefined,
-          },
-        );
-        return JSON.stringify(result);
-      }
-
-      case "kernel_expect_bugcheck": {
-        const kd = this.kernelDebug.get(vmName);
-        if (!kd) {
-          throw new Error(
-            `No kernel_debug session for VM '${vmName}' — enable kernel_debug in setup.yaml or call orchestrator.setKernelDebugSession()`,
-          );
-        }
-        const { handleKernelExpectBugcheck } = await import(
-          "../kernel-debug/kernel-handlers.js"
-        );
-        const result = await handleKernelExpectBugcheck(
-          {
-            kdSession: kd.session,
-            breakLog: kd.breakLog,
-            vmName,
-          },
-          {
-            bugcheck_code: params.bugcheck_code as string,
-            within_ms: params.within_ms as number | undefined,
-            capture_stack: params.capture_stack as boolean | undefined,
-            dump_path: params.dump_path as string | undefined,
-            capture_timeout_ms: params.capture_timeout_ms as number | undefined,
-          },
-        );
-        return JSON.stringify(result);
-      }
-
-      case "kernel_break_on": {
-        const kd = this.kernelDebug.get(vmName);
-        if (!kd) {
-          throw new Error(
-            `No kernel_debug session for VM '${vmName}' — enable kernel_debug in setup.yaml or call orchestrator.setKernelDebugSession()`,
-          );
-        }
-        const { handleKernelBreakOn } = await import(
-          "../kernel-debug/kernel-handlers.js"
-        );
-        const result = await handleKernelBreakOn(
-          {
-            kdSession: kd.session,
-            breakLog: kd.breakLog,
-            vmName,
-          },
-          {
-            symbol: params.symbol as string,
-            capture: params.capture as string | undefined,
-            timeout_ms: params.timeout_ms as number | undefined,
-            resume_after: params.resume_after as boolean | undefined,
-          },
-        );
-        return JSON.stringify(result);
-      }
-
       default:
+        // Pluggable tool registry (Sprint 60.7.5 follow-up B). Tools
+        // registered via `this.tools.register(...)` — currently the
+        // kernel-debug set — are resolved here. Unknown tools fall
+        // through to the error below.
+        if (this.toolRegistry.has(tool)) {
+          return this.toolRegistry.execute(
+            tool,
+            { vmName, vmMap, orchestrator: this },
+            params,
+          );
+        }
         throw new Error(`Unknown workflow tool: ${tool}`);
     }
   }
