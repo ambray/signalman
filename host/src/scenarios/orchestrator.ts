@@ -26,10 +26,14 @@ import { parseNarrative } from "./narrative.js";
 import { BreakLog } from "../kernel-debug/break-log.js";
 import { createKernelDebugToolRegistry } from "../kernel-debug/tools.js";
 import type { ToolRegistry } from "../kernel-debug/tool-registry.js";
-import {
+import type {
   KdSession,
-  type KdSessionOptions,
+  KdSessionOptions,
 } from "../kernel-debug/kd-session.js";
+import {
+  createRealKdSession,
+  type KdSessionFactory,
+} from "../kernel-debug/factory.js";
 
 /**
  * Local helper so the class body can stay synchronous when wiring a
@@ -52,17 +56,10 @@ function createInitialToolRegistry(): ToolRegistry {
   return createKernelDebugToolRegistry();
 }
 
-/**
- * Default KdSession factory — constructs a real session that will
- * spawn `kd.exe` when started. Tests inject a fake via
- * `orchestrator.setKdSessionFactory()`.
- *
- * Scenarios without any `kernel_debug.enabled: true` VM never call
- * this factory, so kd.exe is never spawned in that path.
- */
-function createRealKdSession(opts: KdSessionOptions): KdSession {
-  return new KdSession(opts);
-}
+// `createRealKdSession` moved to `kernel-debug/factory.ts` (follow-up
+// 2). Imported at the top of this file so the class body can use it
+// as the default kdSessionFactory without touching the concrete
+// KdSession constructor.
 import { writeJunitReport } from "../output/reporter.js";
 import type { TestResult, AssertionResultEntry } from "../output/reporter.js";
 
@@ -346,17 +343,14 @@ export class ScenarioOrchestrator {
    * multi-transport deployment) can swap this in via `setKdSessionFactory`.
    * Default factory is `createRealKdSession` defined below this class.
    */
-  private kdSessionFactory: (opts: KdSessionOptions) => KdSession =
-    createRealKdSession;
+  private kdSessionFactory: KdSessionFactory = createRealKdSession;
 
   /**
    * Override the default kd session factory. Tests call this to
    * inject a fake that returns a controllable session without
    * spawning kd.exe. Production code should not need this.
    */
-  setKdSessionFactory(
-    factory: (opts: KdSessionOptions) => KdSession,
-  ): void {
+  setKdSessionFactory(factory: KdSessionFactory): void {
     this.kdSessionFactory = factory;
   }
 
