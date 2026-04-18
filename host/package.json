@@ -38,6 +38,7 @@
     "eslint": "^9.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
+    "typescript-eslint": "^8.58.2",
     "vitest": "^3.0.0"
   }
 }

@@ -85,9 +85,9 @@ const server = new McpServer({
  * converts each property at registration time.
  */
 /** VM name regex: alphanumeric, dashes, dots, underscores. */
-const VM_NAME_RE = /^[a-zA-Z0-9_.\-]+$/;
+const VM_NAME_RE = /^[a-zA-Z0-9_.-]+$/;
 /** Label regex: same character set as VM names. */
-const LABEL_RE = /^[a-zA-Z0-9_.\-]+$/;
+const LABEL_RE = /^[a-zA-Z0-9_.-]+$/;
 
 function jsonSchemaPropertyToZod(
   schema: { type: string; description?: string; enum?: string[]; items?: { type: string } },

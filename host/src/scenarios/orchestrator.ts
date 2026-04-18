@@ -26,10 +26,9 @@ import { parseNarrative } from "./narrative.js";
 import { BreakLog } from "../kernel-debug/break-log.js";
 import { createKernelDebugToolRegistry } from "../kernel-debug/tools.js";
 import type { ToolRegistry } from "../kernel-debug/tool-registry.js";
-import type {
-  KdSession,
-  KdSessionOptions,
-} from "../kernel-debug/kd-session.js";
+// KdSession type is only referenced via `import("...")` in member
+// signatures, so no value import is needed here. The factory module
+// provides the default constructor wrapper.
 import {
   createRealKdSession,
   type KdSessionFactory,
@@ -230,7 +229,7 @@ export class ScenarioOrchestrator {
     // Lazy-import-compatible initializer — the import below is static
     // so there's no circular-dep risk (kernel-debug doesn't import
     // orchestrator).
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+     
     this.toolRegistry = createInitialToolRegistry();
   }
 
@@ -329,7 +328,7 @@ export class ScenarioOrchestrator {
     if (errors.length > 0 && process.env.SIGNALMAN_DEBUG === "1") {
       // Debug-only surface — most detach failures mean the process
       // was already dead, which is fine.
-      // eslint-disable-next-line no-console
+       
       console.error(
         `[orchestrator] ${errors.length} kernel-debug teardown error(s):`,
         errors.map((e) => (e instanceof Error ? e.message : String(e))),
