@@ -36,6 +36,8 @@ export {
   handleDriverLoad,
   handleDriverUnload,
   handleDriverIoctl,
+  handleKernelExpectBugcheck,
+  handleKernelBreakOn,
   parseScQueryState,
 } from "./handlers.js";
 
@@ -47,4 +49,12 @@ export type {
   DriverUnloadResult,
   DriverIoctlParams,
   DriverIoctlResult,
+  KernelHandlerContext,
+  KernelExpectBugcheckParams,
+  KernelExpectBugcheckResult,
+  KernelBreakOnParams,
+  KernelBreakOnResult,
 } from "./handlers.js";
+
+export { BreakLog } from "./break-log.js";
+export type { BreakLogEntry, BreakLogQuery } from "./break-log.js";
