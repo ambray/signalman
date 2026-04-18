@@ -23,6 +23,18 @@ import type {
   SandboxMode,
 } from "./runner.js";
 import { parseNarrative } from "./narrative.js";
+import { BreakLog } from "../kernel-debug/break-log.js";
+
+/**
+ * Local helper so the class body can stay synchronous when wiring a
+ * kernel-debug session. Importing BreakLog at the top is cheap (no
+ * side effects, no Win32 touch) so static import is fine.
+ */
+function createBreakLog(
+  session: import("../kernel-debug/kd-session.js").KdSession,
+): BreakLog {
+  return new BreakLog(session);
+}
 import { writeJunitReport } from "../output/reporter.js";
 import type { TestResult, AssertionResultEntry } from "../output/reporter.js";
 
@@ -152,6 +164,21 @@ export class ScenarioOrchestrator {
   private readonly outputDir: string | undefined;
   private readonly docker: DockerClient | undefined;
 
+  /**
+   * Per-VM kernel-debug sessions + break logs, populated by
+   * `setKernelDebugSession()` when `kernel_debug.enabled: true` is
+   * configured in setup.yaml. Missing when kernel debugging isn't
+   * enabled for a VM; tool blocks that require it throw a clear
+   * error. Sprint 60.7.5 Phase 1e.
+   */
+  private kernelDebug: Map<
+    string,
+    {
+      session: import("../kernel-debug/kd-session.js").KdSession;
+      breakLog: import("../kernel-debug/break-log.js").BreakLog;
+    }
+  > = new Map();
+
   constructor(
     private backend: HypervisorBackend,
     private guestClients: Map<string, GuestAgentClient>,
@@ -160,6 +187,49 @@ export class ScenarioOrchestrator {
   ) {
     this.outputDir = options?.outputDir;
     this.docker = options?.docker;
+  }
+
+  /**
+   * Attach a kernel-debug session to a named VM. Creates the matching
+   * {@link BreakLog} and subscribes it to the session's `break`
+   * events. Idempotent — re-calling for the same vmName replaces the
+   * existing session (detaching the prior break log first).
+   *
+   * Scenarios with `kernel_debug.enabled: true` in setup.yaml have
+   * the orchestrator's lifecycle wiring call this during VM
+   * resolution; tests can call it directly to drive the handlers
+   * without the full lifecycle scaffolding.
+   */
+  setKernelDebugSession(
+    vmName: string,
+    session: import("../kernel-debug/kd-session.js").KdSession,
+  ): void {
+    // Lazy import to avoid circular dep at module init.
+    // BreakLog is tiny — the dynamic-import cost here is trivial.
+    const prior = this.kernelDebug.get(vmName);
+    if (prior) {
+      prior.breakLog.detach();
+    }
+    // Synchronous construction — imported via the static type above.
+    // We use a require-like trick via the top-level TS imports below.
+    this.kernelDebug.set(vmName, {
+      session,
+      breakLog: createBreakLog(session),
+    });
+  }
+
+  /**
+   * Detach all kernel-debug break logs. Called at scenario teardown.
+   * Does NOT kill the kd sessions themselves — the orchestrator
+   * owns the break-log subscription, not the kd lifecycle (which is
+   * the caller's responsibility, so the session survives across
+   * multiple scenarios if the caller wants).
+   */
+  detachKernelDebugSessions(): void {
+    for (const { breakLog } of this.kernelDebug.values()) {
+      breakLog.detach();
+    }
+    this.kernelDebug.clear();
   }
 
   /**
@@ -971,6 +1041,59 @@ export class ScenarioOrchestrator {
               | undefined,
             timeout_ms: params.timeout_ms as number | undefined,
             harness_path: params.harness_path as string | undefined,
+          },
+        );
+        return JSON.stringify(result);
+      }
+
+      case "kernel_expect_bugcheck": {
+        const kd = this.kernelDebug.get(vmName);
+        if (!kd) {
+          throw new Error(
+            `No kernel_debug session for VM '${vmName}' — enable kernel_debug in setup.yaml or call orchestrator.setKernelDebugSession()`,
+          );
+        }
+        const { handleKernelExpectBugcheck } = await import(
+          "../kernel-debug/handlers.js"
+        );
+        const result = await handleKernelExpectBugcheck(
+          {
+            kdSession: kd.session,
+            breakLog: kd.breakLog,
+            vmName,
+          },
+          {
+            bugcheck_code: params.bugcheck_code as string,
+            within_ms: params.within_ms as number | undefined,
+            capture_stack: params.capture_stack as boolean | undefined,
+            dump_path: params.dump_path as string | undefined,
+            capture_timeout_ms: params.capture_timeout_ms as number | undefined,
+          },
+        );
+        return JSON.stringify(result);
+      }
+
+      case "kernel_break_on": {
+        const kd = this.kernelDebug.get(vmName);
+        if (!kd) {
+          throw new Error(
+            `No kernel_debug session for VM '${vmName}' — enable kernel_debug in setup.yaml or call orchestrator.setKernelDebugSession()`,
+          );
+        }
+        const { handleKernelBreakOn } = await import(
+          "../kernel-debug/handlers.js"
+        );
+        const result = await handleKernelBreakOn(
+          {
+            kdSession: kd.session,
+            breakLog: kd.breakLog,
+            vmName,
+          },
+          {
+            symbol: params.symbol as string,
+            capture: params.capture as string | undefined,
+            timeout_ms: params.timeout_ms as number | undefined,
+            resume_after: params.resume_after as boolean | undefined,
           },
         );
         return JSON.stringify(result);
