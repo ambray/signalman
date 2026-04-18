@@ -988,7 +988,9 @@ export class ScenarioOrchestrator {
         if (!guestClient) {
           throw new Error(`No guest client for VM '${vmName}'`);
         }
-        const { handleDriverLoad } = await import("../kernel-debug/handlers.js");
+        const { handleDriverLoad } = await import(
+          "../kernel-debug/driver-handlers.js"
+        );
         const result = await handleDriverLoad(
           { guestClient, vmName },
           {
@@ -1006,7 +1008,7 @@ export class ScenarioOrchestrator {
           throw new Error(`No guest client for VM '${vmName}'`);
         }
         const { handleDriverUnload } = await import(
-          "../kernel-debug/handlers.js"
+          "../kernel-debug/driver-handlers.js"
         );
         const result = await handleDriverUnload(
           { guestClient, vmName },
@@ -1025,7 +1027,7 @@ export class ScenarioOrchestrator {
           throw new Error(`No guest client for VM '${vmName}'`);
         }
         const { handleDriverIoctl } = await import(
-          "../kernel-debug/handlers.js"
+          "../kernel-debug/driver-handlers.js"
         );
         const result = await handleDriverIoctl(
           { guestClient, vmName },
@@ -1054,7 +1056,7 @@ export class ScenarioOrchestrator {
           );
         }
         const { handleKernelExpectBugcheck } = await import(
-          "../kernel-debug/handlers.js"
+          "../kernel-debug/kernel-handlers.js"
         );
         const result = await handleKernelExpectBugcheck(
           {
@@ -1081,7 +1083,7 @@ export class ScenarioOrchestrator {
           );
         }
         const { handleKernelBreakOn } = await import(
-          "../kernel-debug/handlers.js"
+          "../kernel-debug/kernel-handlers.js"
         );
         const result = await handleKernelBreakOn(
           {

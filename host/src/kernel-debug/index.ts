@@ -32,15 +32,13 @@ export {
 
 export type { KdSignal } from "./parser.js";
 
+// User-mode driver handlers (sc.exe start/stop + silo-test-harness).
 export {
   handleDriverLoad,
   handleDriverUnload,
   handleDriverIoctl,
-  handleKernelExpectBugcheck,
-  handleKernelBreakOn,
   parseScQueryState,
-} from "./handlers.js";
-
+} from "./driver-handlers.js";
 export type {
   DriverHandlerContext,
   DriverLoadParams,
@@ -49,12 +47,21 @@ export type {
   DriverUnloadResult,
   DriverIoctlParams,
   DriverIoctlResult,
+} from "./driver-handlers.js";
+
+// Kernel-debug handlers (kernel_expect_bugcheck / kernel_break_on).
+export {
+  handleKernelExpectBugcheck,
+  handleKernelBreakOn,
+} from "./kernel-handlers.js";
+export type {
   KernelHandlerContext,
   KernelExpectBugcheckParams,
   KernelExpectBugcheckResult,
   KernelBreakOnParams,
   KernelBreakOnResult,
-} from "./handlers.js";
+} from "./kernel-handlers.js";
 
+// Break-event log backing the kernel handlers.
 export { BreakLog } from "./break-log.js";
 export type { BreakLogEntry, BreakLogQuery } from "./break-log.js";
