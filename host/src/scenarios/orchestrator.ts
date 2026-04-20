@@ -6,6 +6,7 @@
  * guest agent clients to execute scenario DSL actions.
  */
 
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { HypervisorBackend, VMHandle } from "../hypervisors/interface.js";
 import type { GuestAgentClient } from "../guest/client.js";
@@ -430,6 +431,10 @@ export class ScenarioOrchestrator {
     let scenarioName = "unknown";
     let status: "passed" | "failed" | "error" = "passed";
     let error: string | undefined;
+    // Hoisted so the post-run JUnit/report block (after the outer try)
+    // can snapshot workflow step outputs into workflow-outputs.json for
+    // post-mortem when assertions fail.
+    const workflowOutputsSnapshot = new Map<string, string>();
 
     try {
       const loadResult = loadScenario(scenarioPath);
@@ -467,7 +472,7 @@ export class ScenarioOrchestrator {
       }
 
       // Execute workflow tool blocks from workflow.md
-      const workflowOutputs = new Map<string, string>();
+      const workflowOutputs = workflowOutputsSnapshot;
       const workflowScreenshots = new Map<string, string>();
 
       if (loadResult.workflowMarkdown) {
@@ -643,6 +648,24 @@ export class ScenarioOrchestrator {
 
       const scenarioOutputDir = path.join(this.outputDir, scenarioName);
       writeJunitReport(testResult, scenarioOutputDir);
+
+      // Persist workflow step outputs for post-run diagnosis. Without
+      // this, silent tool-block failures produce no artifact to inspect.
+      try {
+        if (!fs.existsSync(scenarioOutputDir)) {
+          fs.mkdirSync(scenarioOutputDir, { recursive: true });
+        }
+        const workflowDump: Record<string, string> = {};
+        for (const [k, v] of workflowOutputsSnapshot.entries()) {
+          workflowDump[k] = v;
+        }
+        fs.writeFileSync(
+          path.join(scenarioOutputDir, "workflow-outputs.json"),
+          JSON.stringify(workflowDump, null, 2),
+        );
+      } catch {
+        // Non-fatal; JUnit report is still written above.
+      }
     }
 
     return result;
@@ -1238,7 +1261,11 @@ export class ScenarioOrchestrator {
     vmMap: Map<string, VMHandle>,
     vmDefs: VmDefinition[],
   ): Promise<void> {
-    const timeoutMs = 30_000;
+    // 30s was too tight for cold-boot scenarios (Win11 Gen-2 with
+    // vTPM disabled: BIOS + OS + service-startup ~ 60-90s). Bumped
+    // to 3 min; the poll interval stays at 2s so we still notice
+    // startup within a few seconds of the guest actually being ready.
+    const timeoutMs = 180_000;
     const pollIntervalMs = 2_000;
 
     for (const def of vmDefs) {
