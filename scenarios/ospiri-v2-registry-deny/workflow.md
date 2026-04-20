@@ -1,0 +1,94 @@
+# Example v2 Registry Rule Deny — Workflow
+
+> **Narrator**: This scenario proves the scope-based registry enforcement
+> introduced in Sprint 60.8a Phase 6. Our driver owns a scope primitive
+> (a `u32` ScopeId + per-scope rule table + PID→ScopeId map) that lives
+> entirely inside the driver — no dependency on Windows Containers or
+> kernel silos.
+
+## Prerequisites confirmed by setup.yaml
+- `test-signing-enabled` checkpoint restored on `endpoint-1`
+- `C:\Example\drv\example.sys` (test-signed, `/INTEGRITYCHECK`-linked) deployed
+- `C:\Example\tools\silo-spawn-helper.exe` deployed
+- `sc create example type=kernel start=demand` ran; service is STOPPED
+
+## Step 1: Load the driver
+
+```tool
+driver_load:
+  service: example
+  expect_status: 0
+  timeout_ms: 15000
+```
+
+## Step 2: Run the scope-based enforcement sequence
+
+`silo-spawn-helper.exe --mode orchestrator` performs (in order):
+
+| Sub-step | Call                                                     | Expect                  |
+| -------- | -------------------------------------------------------- | ----------------------- |
+| a        | `CreateFileW("\\\\.\\example")`                           | success                 |
+| b        | `IOCTL_OSP_REG_INIT_SCOPE` (ScopeId=0x42)                | STATUS_SUCCESS          |
+| c        | `IOCTL_OSP_REG_ADD_RULE` (DENY+PREFIX, `ExampleV2RegDeny`) | STATUS_SUCCESS, RuleId  |
+| d        | `IOCTL_OSP_REG_LIST_RULES`                               | RuleCount == 1          |
+| e        | `CreateProcessW` (CREATE_SUSPENDED)                      | success                 |
+| f        | `IOCTL_OSP_REG_BIND_PROCESS` (ScopeId=0x42, pid=worker)  | STATUS_SUCCESS          |
+| g        | `ResumeThread`                                           | success                 |
+| h        | (worker inside) `RegCreateKeyExW HKLM\Software\ExampleV2RegDeny\Created` | ERROR_ACCESS_DENIED (5) |
+| i        | (worker inside) `RegCreateKeyExW HKLM\Software\ExampleV2RegAllow\Created` | ERROR_SUCCESS           |
+| j        | `IOCTL_OSP_REG_DESTROY_SCOPE`                            | STATUS_SUCCESS          |
+
+The orchestrator exits 0 iff every sub-step matched its expected
+outcome. Non-zero exit fails this scenario.
+
+```tool
+vm_run_command:
+  vm: endpoint-1
+  command: "C:\\Example\\tools\\silo-spawn-helper.exe"
+  args: ["--mode", "orchestrator", "--verbose", "--output", "C:\\Example\\logs\\silo-spawn-worker.json"]
+  expect_exit_code: 0
+  timeout_ms: 60000
+  run_as: SYSTEM
+```
+
+## Step 3: Capture worker report for post-run inspection
+
+The orchestrator wrote `C:\Example\logs\silo-spawn-worker.json` with
+the worker's per-step pass/fail matrix. Pull it back to the host so
+signalman can surface the details via `stdout_contains` on the step
+output.
+
+```tool
+vm_run_command:
+  vm: endpoint-1
+  command: powershell
+  args: ["-NoProfile", "-Command", "Get-Content -Raw -Path 'C:\\Example\\logs\\silo-spawn-worker.json'"]
+  expect_exit_code: 0
+  timeout_ms: 10000
+  run_as: SYSTEM
+```
+
+## Step 4: Driver unload
+
+Driver Verifier runs leak-check on unload — any scope state,
+process-map entry, or RCU-freed rule-table leak would bugcheck here.
+
+```tool
+driver_unload:
+  service: example
+  expect_status: 0
+  timeout_ms: 15000
+```
+
+## Expected outcomes
+
+| Step | Check                                     | Expected          |
+| ---- | ----------------------------------------- | ----------------- |
+| 1    | driver_load                               | exit 0, Running   |
+| 2    | silo-spawn-helper orchestrator + worker   | exit 0            |
+| 3a   | DRAIN_EVIDENCE                            | STATUS_SUCCESS    |
+| 3b   | driver_unload                             | exit 0, Stopped   |
+
+A green run proves ExampleReg scope-based enforcement works on stock
+Win11 24H2 under Driver Verifier with **zero** dependency on the
+Windows Containers feature.
