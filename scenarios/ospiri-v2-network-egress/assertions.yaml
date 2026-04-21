@@ -1,6 +1,7 @@
 # Example v2 Network Egress IOCTL Surface — Assertions
 #
-# Sprint 60.11 C-2 (scope-based ExampleNet control plane, pre-WFP).
+# Sprint 60.11 C-2 + Sprint 60.8b Phase 2 commit 5 (scope-based
+# ExampleNet control plane + live WFP classify callback).
 #
 # The workflow.md tool blocks carry inline `expect_exit_code` /
 # `expect_status` params that fail the tool-block on mismatch. Those

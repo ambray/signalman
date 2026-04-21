@@ -1,24 +1,26 @@
-# Example v2 — Network Egress IOCTL Surface (scope-based, pre-WFP)
+# Example v2 — Network Egress IOCTL Surface (scope-based, WFP-live)
 #
-# Sprint 60.11 C-2. Exercises the ExampleNet scope primitive
-# end-to-end:
+# Sprint 60.11 C-2 + Sprint 60.8b Phase 2 commit 5. Exercises the
+# ExampleNet scope primitive end-to-end AND the live WFP classify
+# callback:
 #
 #   * INIT_SCOPE / ADD_RULE / LIST_RULES / BIND_PROCESS /
 #     UNBIND_PROCESS / DESTROY_SCOPE IOCTLs functional on the
 #     network-egress control device
 #   * V2 wire format encoder/decoder round-trips rules correctly
 #   * PID -> scope binding is observable from inside the bound
-#     child (child's LIST_RULES sees the same 2 rules orchestrator
+#     child (child's LIST_RULES sees the same 3 rules orchestrator
 #     installed)
-#   * New ETW emissions in net_ioctl.c (NetScopeCreated,
-#     NetScopeDestroyed, NetRuleAdded, NetProcessBound,
-#     NetProcessUnbound, NetRulesListed) reach user-mode
-#
-# **No WFP dependency yet.** This scenario proves the user-mode
-# control plane + in-driver scope primitive. The WFP classify
-# callback that emits NetRuleMatched lands in queue item 4; this
-# scenario deliberately expects 0 NetRuleMatched events so it
-# documents the pre-WFP cut-line.
+#   * Live connect() calls from the bound worker:
+#       - DENY rule target -> WFP BLOCK surfaces as WSAEACCES
+#         (10013) or WSAEHOSTUNREACH (10065)
+#       - ALLOW rule target -> WFP CONTINUE (no WSAEACCES)
+#   * ETW emissions reach user-mode:
+#       - SCOPE keyword (0x4): NetScopeCreated/Destroyed,
+#         NetProcessBound/Unbound
+#       - RULES keyword (0x8): NetRuleAdded, NetRulesListed
+#       - ENFORCEMENT keyword (0x10): NetRuleMatched, fired by
+#         the kernel classifyFn on the DENY connect()
 #
 # Uses the `test-signing-warm` checkpoint (running-state child of
 # `test-signing-enabled`) for fast restore: ~2 s to guest-agent-
