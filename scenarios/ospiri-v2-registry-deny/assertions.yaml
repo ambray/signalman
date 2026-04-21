@@ -74,31 +74,49 @@ assertions:
     severity: critical
     description: "Worker step 'create_allowed_path' received ERROR_SUCCESS (no false positive)"
 
-  # Sprint 60.11: ETW event assertion — the headline audit-gap closer.
+  # Sprint 60.11: ETW event assertions — the headline audit-gap closer.
   # Enforcement keyword (0x10) captures RuleMatched events only. The
-  # worker's sequence triggers exactly one RuleMatched: on the open
-  # of \REGISTRY\MACHINE\SOFTWARE\OspiriV2RegDeny (DENY+PREFIX match).
-  # The allow-path traversal matches no rules and emits no RuleMatched.
+  # worker's DENY traversal generates CM-callback invocations at each
+  # component of the denied path (SOFTWARE\OspiriV2RegDeny\Created),
+  # plus PRE/POST pairs per access — empirically 4 RuleMatched events
+  # emitted per denied CreateKey on Win11 24H2. The allow-path
+  # traversal matches no rules and emits no RuleMatched.
   #
-  # This is the FIRST automated assertion anywhere in the codebase
-  # that verifies an ETW event actually fired — previously we only
-  # knew enforcement worked because the worker's RegCreateKeyExW
-  # returned ACCESS_DENIED. If the driver silently stopped emitting
-  # RuleMatched tomorrow (regression in reg_callback.c's emission),
-  # THIS assertion would catch it.
-  - id: etw-rule-matched-fired
+  # These are the FIRST automated assertions anywhere in the codebase
+  # that verify an ETW event actually fired — previously we only knew
+  # enforcement worked because the worker's RegCreateKeyExW returned
+  # ACCESS_DENIED. If the driver silently stopped emitting RuleMatched
+  # (regression in reg_callback.c), THESE assertions would catch it.
+  #
+  # Event-name decoding is deliberately not asserted on: TraceLogging
+  # event names live in metadata extensions that Get-WinEvent + TDH
+  # don't surface via `.TaskDisplayName` for runtime-registered
+  # providers (returns the literal "None"). We assert on the
+  # structural signals that ARE surfaced: keyword mask (0x10 =
+  # ENFORCEMENT) and event level (4 = Information), plus the total
+  # count. Proper event-name decoding requires tracerpt.exe or a TDH-
+  # aware parser — deferred work, not relevant for the regression
+  # coverage this scenario provides.
+  - id: etw-enforcement-keyword-captured
     type: stdout_contains
     source: step-3
-    expected: "\"RuleMatched\":1"
+    expected: "\"keywords\":\"0x0000000000000010\""
     severity: critical
-    description: "ETW capture saw exactly 1 RuleMatched event (the worker's DENY traversal)"
+    description: "ETW capture saw at least one event with ENFORCEMENT keyword 0x10 (proves RuleMatched emission path is live)"
+
+  - id: etw-enforcement-level-info
+    type: stdout_contains
+    source: step-3
+    expected: "\"level\":4"
+    severity: high
+    description: "ETW enforcement events are at Level 4 (Information) — matches OSP_ETW_INFO_ENFORCEMENT macro"
 
   - id: etw-total-events-nonzero
     type: stdout_contains
     source: step-3
-    expected: "\"total_events\":1"
+    expected: "\"total_events\":4"
     severity: high
-    description: "ETW total event count matches expected (1 from ENFORCEMENT keyword)"
+    description: "ETW total event count matches expected (4 RuleMatched events per DENY CreateKey — PRE+POST × component depth on Win11 24H2)"
 
   - id: driver-unloaded-stopped
     type: stdout_contains
