@@ -1262,10 +1262,11 @@ export class ScenarioOrchestrator {
     vmDefs: VmDefinition[],
   ): Promise<void> {
     // 30s was too tight for cold-boot scenarios (Win11 Gen-2 with
-    // vTPM disabled: BIOS + OS + service-startup ~ 60-90s). Bumped
-    // to 3 min; the poll interval stays at 2s so we still notice
-    // startup within a few seconds of the guest actually being ready.
-    const timeoutMs = 180_000;
+    // vTPM disabled: BIOS + OS + service-startup ~ 60-90s, observed
+    // up to 240s under Hyper-V contention). Bumped to 5 min; the
+    // poll interval stays at 2s so we still notice startup within
+    // a few seconds of the guest actually being ready.
+    const timeoutMs = 300_000;
     const pollIntervalMs = 2_000;
 
     for (const def of vmDefs) {
