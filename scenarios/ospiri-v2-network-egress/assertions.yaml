@@ -1,0 +1,129 @@
+# Ospiri v2 Network Egress IOCTL Surface — Assertions
+#
+# Sprint 60.11 C-2 (scope-based OspriNet control plane, pre-WFP).
+#
+# The workflow.md tool blocks carry inline `expect_exit_code` /
+# `expect_status` params that fail the tool-block on mismatch. Those
+# failures already mark the scenario FAILED at the orchestrator level.
+# However the CLI/XML reporter only surfaces named assertions, so we
+# also add one explicit assertion per workflow step to get per-step
+# pass/fail visibility in the JUnit report.
+#
+# Step map (parsed from workflow.md by signalman's narrative parser):
+#   step-0: driver_load              (stdout = JSON {status, service_state, ...})
+#   step-1: kernel_etw_start         (stdout = JSON {status, etl_path, stdout, stderr})
+#   step-2: net-spawn-helper         (stdout empty; inline expect_exit_code: 0)
+#   step-3: kernel_etw_stop          (stdout = JSON {event_counts, total_events, events, ...})
+#   step-4: Get-Content worker.json  (worker JSON report)
+#   step-5: driver_unload            (stdout = JSON {status, service_state, ...})
+#
+# Note on assertion type choice: signalman's V2 evaluator's
+# `exit_code` type reads `CommandResult.exitCode` (camelCase) but the
+# orchestrator's workflow->CommandResult adapter writes `exit_code`
+# (snake_case), so `exit_code` assertions never match for workflow
+# tool-blocks. `stdout_contains` is the reliable path — workflow tool
+# blocks capture their stdout verbatim into the source map, and any
+# inline `expect_exit_code` on the tool block itself already fails
+# the block before we even reach this assertion pass.
+#
+# Why no etw-net-rules-listed assertion: NetRulesListed fires on
+# both the orchestrator's LIST (sub-step e) AND the worker's LIST
+# (sub-step w1). Count depends on whether STATUS_BUFFER_TOO_SMALL
+# probes happened (which do not emit). Asserting a specific count
+# here is brittle, so we omit it entirely. The 11 critical-severity
+# assertions below prove end-to-end.
+
+assertions:
+  - id: driver-loaded-status-running
+    type: stdout_contains
+    source: step-0
+    expected: "\"service_state\":\"Running\""
+    severity: critical
+    description: "OspriReg driver service loaded and reports Running"
+
+  - id: etw-capture-started
+    type: stdout_contains
+    source: step-1
+    expected: "\"status\":0"
+    severity: critical
+    description: "kernel_etw_start opened a WPR recording session"
+
+  - id: worker-report-matched
+    type: stdout_contains
+    source: step-4
+    expected: "\"matched\": true"
+    severity: critical
+    description: "Worker JSON report has matched=true (all sub-steps passed)"
+
+  - id: worker-report-no-mismatches
+    type: stdout_contains
+    source: step-4
+    expected: "\"mismatches\": []"
+    severity: critical
+    description: "Worker JSON report shows zero per-step mismatches"
+
+  - id: worker-list-rules-step-passed
+    type: stdout_contains
+    source: step-4
+    expected: "list_rules_as_bound_child"
+    severity: high
+    description: "Worker step name appears in report (confirms worker ran the bound-LIST assertion)"
+
+  - id: worker-foreign-init-step-passed
+    type: stdout_contains
+    source: step-4
+    expected: "init_foreign_scope"
+    severity: high
+    description: "Worker ran the foreign-scope INIT assertion"
+
+  # Sprint 60.11 C-2: ETW event-count assertions. These prove that
+  # the new NetScope*/NetRule*/NetProcess* emissions in net_ioctl.c
+  # actually reach user-mode, not just that the IOCTLs returned
+  # STATUS_SUCCESS. If the driver silently stopped emitting any of
+  # these tomorrow (regression in net_ioctl.c), the corresponding
+  # assertion below catches it.
+
+  - id: etw-net-scope-created
+    type: stdout_contains
+    source: step-3
+    expected: "\"NetScopeCreated\":2"
+    severity: critical
+    description: "ETW saw 2 NetScopeCreated events (orchestrator 0x42 + worker 0xDEAD)"
+
+  - id: etw-net-rule-added
+    type: stdout_contains
+    source: step-3
+    expected: "\"NetRuleAdded\":2"
+    severity: critical
+    description: "ETW saw 2 NetRuleAdded events (DENY+ALLOW rules from orchestrator)"
+
+  - id: etw-net-process-bound
+    type: stdout_contains
+    source: step-3
+    expected: "\"NetProcessBound\":1"
+    severity: critical
+    description: "ETW saw 1 NetProcessBound event (orchestrator bound worker)"
+
+  - id: etw-net-process-unbound
+    type: stdout_contains
+    source: step-3
+    expected: "\"NetProcessUnbound\":1"
+    severity: critical
+    description: "ETW saw 1 NetProcessUnbound event (orchestrator explicit unbind)"
+
+  - id: etw-net-scope-destroyed
+    type: stdout_contains
+    source: step-3
+    expected: "\"NetScopeDestroyed\":2"
+    severity: critical
+    description: "ETW saw 2 NetScopeDestroyed events (orchestrator 0x42 + worker 0xDEAD)"
+
+  - id: driver-unloaded-stopped
+    type: stdout_contains
+    source: step-5
+    expected: "\"service_state\":\"Stopped\""
+    severity: critical
+    description: "OspriReg driver unloaded cleanly (no Driver Verifier bugcheck on unload)"
+
+pass_threshold: 1.0
+critical_must_pass: true

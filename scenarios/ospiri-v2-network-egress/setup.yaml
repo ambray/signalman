@@ -1,0 +1,122 @@
+# Ospiri v2 — Network Egress IOCTL Surface (scope-based, pre-WFP)
+#
+# Sprint 60.11 C-2. Exercises the OspriNet scope primitive
+# end-to-end:
+#
+#   * INIT_SCOPE / ADD_RULE / LIST_RULES / BIND_PROCESS /
+#     UNBIND_PROCESS / DESTROY_SCOPE IOCTLs functional on the
+#     network-egress control device
+#   * V2 wire format encoder/decoder round-trips rules correctly
+#   * PID -> scope binding is observable from inside the bound
+#     child (child's LIST_RULES sees the same 2 rules orchestrator
+#     installed)
+#   * New ETW emissions in net_ioctl.c (NetScopeCreated,
+#     NetScopeDestroyed, NetRuleAdded, NetProcessBound,
+#     NetProcessUnbound, NetRulesListed) reach user-mode
+#
+# **No WFP dependency yet.** This scenario proves the user-mode
+# control plane + in-driver scope primitive. The WFP classify
+# callback that emits NetRuleMatched lands in queue item 4; this
+# scenario deliberately expects 0 NetRuleMatched events so it
+# documents the pre-WFP cut-line.
+#
+# The test runs on the same `test-signing-enabled` checkpoint as
+# ospiri-driver-smoke and ospiri-v2-registry-deny.
+
+name: "Ospiri v2 Network Egress IOCTL Surface (scope-based, pre-WFP)"
+version: "1.0"
+tags: ["driver", "kernel", "ospiri-sys", "scope", "network", "sprint-60.11"]
+
+vms:
+  - name: endpoint-1
+    template: windows-11-clean
+    # Same snapshot the ospiri-driver-smoke scenario uses. No
+    # Containers-feature enablement required - Phase 6 moved us to
+    # a driver-owned scope primitive that works on stock Win11.
+    checkpoint_restore: test-signing-enabled
+    guest_agent_port: 50051
+    network:
+      switch: "RevnTestSwitch"
+      static_ip: "172.30.0.10"
+
+setup:
+  # Host-side directory tree. First post-restore command can take
+  # 50-120 seconds on this VM because Hyper-V + integration services
+  # are still settling; override the 60s default so the scenario
+  # doesn't flake.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    timeout_ms: 300000
+    args:
+      [
+        "-Command",
+        "New-Item -ItemType Directory -Force -Path 'C:\\Ospiri\\drv','C:\\Ospiri\\tools','C:\\Ospiri\\logs' | Out-Null",
+      ]
+
+  # Driver package (binary + catalogue + INF). Filenames stay drv.*
+  # per the vcxproj name even though the deployed copy is ospiri.sys.
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.sys"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.sys"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.cat"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.cat"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.inf"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.inf"
+
+  # net-spawn-helper.exe - Sprint 60.11 C-2 orchestrator + worker for
+  # the OspriNet egress control plane.
+  # Build:
+  #   cargo build --release --target x86_64-pc-windows-msvc \
+  #               --package net-spawn-helper
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\target\\x86_64-pc-windows-msvc\\release\\net-spawn-helper.exe"
+    guest_path: "C:\\Ospiri\\tools\\net-spawn-helper.exe"
+
+  # Register the driver service (kernel, demand-start).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args:
+      ["create", "ospiri", "type=", "kernel", "start=", "demand", "binPath=", "C:\\Ospiri\\drv\\ospiri.sys"]
+    run_as: SYSTEM
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["query", "ospiri"]
+    expect_stdout: "STOPPED"
+
+teardown:
+  # Stop + delete the driver service.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_restore
+    vm: endpoint-1
+    checkpoint: test-signing-enabled
+
+checkpoints:
+  before_test: true
+  on_failure: true
