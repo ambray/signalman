@@ -80,5 +80,21 @@ assertions:
     severity: critical
     description: "ExampleReg driver unloaded cleanly (no Driver Verifier bugcheck on unload)"
 
+  # Sprint 60.8b Phase 2a diagnostic — silo-spawn-helper queries
+  # IOCTL_OSP_REG_DIAG_LAST_PATH and writes the driver's resolved
+  # full path into step-2's JSON as `driver_last_resolved_path`. The
+  # assertion just asserts the field is present — the actual value
+  # is visible in workflow-outputs.json for debug. Phase 2c will
+  # tighten this once we confirm the driver resolves to
+  # "\REGISTRY\MACHINE\SOFTWARE\ExampleV2RegDeny..." as expected, at
+  # which point the component-rule fallback in reg_callback.c can
+  # be removed.
+  - id: driver-last-path-captured
+    type: stdout_contains
+    source: step-2
+    expected: "driver_last_resolved_path"
+    severity: high
+    description: "DIAG_LAST_PATH IOCTL returned a resolved path; see workflow-outputs.json for value"
+
 pass_threshold: 1.0
 critical_must_pass: true
