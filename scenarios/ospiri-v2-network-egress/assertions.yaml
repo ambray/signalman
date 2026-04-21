@@ -30,8 +30,11 @@
 # both the orchestrator's LIST (sub-step e) AND the worker's LIST
 # (sub-step w1). Count depends on whether STATUS_BUFFER_TOO_SMALL
 # probes happened (which do not emit). Asserting a specific count
-# here is brittle, so we omit it entirely. The 11 critical-severity
-# assertions below prove end-to-end.
+# here is brittle, so we omit it entirely. The critical + high
+# severity assertions below (14 total after Sprint 60.8b Phase 2
+# commit 5 added 3 new: worker-connect-denied-step-passed,
+# worker-connect-allowed-step-passed, etw-net-rule-matched-fired)
+# prove end-to-end.
 
 assertions:
   - id: driver-loaded-status-running
@@ -76,6 +79,29 @@ assertions:
     severity: high
     description: "Worker ran the foreign-scope INIT assertion"
 
+  # Sprint 60.8b Phase 2 commit 5: live WFP classify callback assertions.
+  # The worker now does real connect() calls against DENY + ALLOW rule
+  # targets. WFP BLOCK surfaces as WSAEACCES (10013) on most builds and
+  # sometimes WSAEHOSTUNREACH (10065) on Win10 builds where the block
+  # fires before a source address is chosen; the worker's step helper
+  # accepts either as a block verdict. ALLOW must merely NOT surface
+  # WSAEACCES — 10.0.0.1 has no listener on the test network so
+  # WSAETIMEDOUT / WSAECONNREFUSED / WSAEHOSTUNREACH are all fine.
+
+  - id: worker-connect-denied-step-passed
+    type: stdout_contains
+    source: step-4
+    expected: connect_expect_block_denied_host
+    severity: critical
+    description: "Worker's connect to denied host step ran (WFP BLOCK verdict accepted as WSAEACCES 10013 or WSAEHOSTUNREACH 10065 — surface varies by Windows build)"
+
+  - id: worker-connect-allowed-step-passed
+    type: stdout_contains
+    source: step-4
+    expected: connect_expect_allow_allowed_host
+    severity: high
+    description: "Worker's connect to allowed host step ran (WFP must not return WSAEACCES for the ALLOW rule's target)"
+
   # Sprint 60.11 C-2: ETW event-count + keyword assertions. These prove
   # the new NetScope*/NetRule*/NetProcess* emissions in net_ioctl.c
   # actually reach user-mode, not just that the IOCTLs returned
@@ -112,6 +138,13 @@ assertions:
     expected: "\"keywords\":\"0x0000000000000008\""
     severity: critical
     description: "ETW captured at least one event with RULES keyword 0x8 (NetRuleAdded/NetRulesListed emission path)"
+
+  - id: etw-net-rule-matched-fired
+    type: stdout_contains
+    source: step-3
+    expected: "\"keywords\":\"0x0000000000000010\""
+    severity: critical
+    description: "ETW captured at least one ENFORCEMENT-keyword (0x10) event — NetRuleMatched on the worker's DENY connect(). Proves Sprint 60.8b Phase 2 commit 5's live WFP classify callback both fires AND emits telemetry user-mode can read."
 
   - id: etw-info-level
     type: stdout_contains

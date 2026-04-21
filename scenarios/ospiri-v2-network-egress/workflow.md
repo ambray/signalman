@@ -1,13 +1,15 @@
 # Example v2 Network Egress IOCTL Surface — Workflow
 
 > **Narrator**: This scenario proves the scope-based network-egress
-> control plane introduced in Sprint 60.11 C-2. Our driver owns an
-> ExampleNet scope primitive (a `u32` ScopeId + per-scope V2 rule table
-> + PID->ScopeId map, parallel to ExampleReg's primitive). This scenario
-> is deliberately **pre-WFP** — it exercises the IOCTL dispatcher,
-> V2 wire format, and PID->scope binding, but does **not** test the
-> classify callback that will emit NetRuleMatched. That lands in
-> queue item 4.
+> control plane introduced in Sprint 60.11 C-2 AND the live WFP
+> classify callback wired in Sprint 60.8b Phase 2 commit 5. Our driver
+> owns an ExampleNet scope primitive (a `u32` ScopeId + per-scope V2 rule
+> table + PID->ScopeId map, parallel to ExampleReg's primitive), and the
+> WFP filter on ALE_AUTH_CONNECT_V4/V6 now actively consults that
+> table on every outbound connect(). This scenario exercises the IOCTL
+> dispatcher, V2 wire format, PID->scope binding, AND real connect()
+> block/allow outcomes — plus the `NetRuleMatched` ETW event (keyword
+> 0x10 = ENFORCEMENT) that fires on each BLOCK verdict.
 
 ## Prerequisites confirmed by setup.yaml
 - `test-signing-enabled` checkpoint restored on `endpoint-1`
@@ -38,12 +40,12 @@ capture three keywords:
 Combined mask: `0x1C`.
 
 Unlike the registry-deny scenario, we capture SCOPE + RULES keywords
-so the scope/rule IOCTL lifecycle events surface. ENFORCEMENT is
-pre-included but the scenario expects 0 NetRuleMatched events until
-WFP wire-up (queue item 4) activates the classify callback. Pre-
-including the keyword here means queue item 4 only needs to add a
-single NetRuleMatched assertion — no workflow.md profile changes
-required at that point.
+so the scope/rule IOCTL lifecycle events surface. The ENFORCEMENT
+keyword (0x10) is now **actively** monitored because Sprint 60.8b
+Phase 2 commit 5 wired the live WFP classify callback — the worker's
+connect() to the DENY target fires a `NetRuleMatched` event per
+BLOCK verdict. assertions.yaml keys off the 0x10 keyword to prove
+those events reach user-mode.
 
 ```tool
 kernel_etw_start:
@@ -63,7 +65,8 @@ kernel_etw_start:
 | b        | `IOCTL_OSP_NET_INIT_SCOPE` (ScopeId=0x42)                | STATUS_SUCCESS          |
 | c        | `IOCTL_OSP_NET_ADD_RULE` (DENY+DOMAIN_SUFFIX example.invalid, port 0) | STATUS_SUCCESS, RuleId  |
 | d        | `IOCTL_OSP_NET_ADD_RULE` (ALLOW+EXACT_V4 10.0.0.1, port 443) | STATUS_SUCCESS, RuleId  |
-| e        | `IOCTL_OSP_NET_LIST_RULES`                               | RuleCount == 2          |
+| d2       | `IOCTL_OSP_NET_ADD_RULE` (DENY+EXACT_V4 93.184.216.34, port 443) | STATUS_SUCCESS, RuleId  |
+| e        | `IOCTL_OSP_NET_LIST_RULES`                               | RuleCount == 3          |
 | f        | `CreateProcessW` worker (CREATE_SUSPENDED)               | success                 |
 | g        | `IOCTL_OSP_NET_BIND_PROCESS` (ScopeId=0x42, pid=worker)  | STATUS_SUCCESS          |
 | h        | `ResumeThread`                                           | success                 |
@@ -76,12 +79,14 @@ performs:
 
 | Sub-step | Call                                                     | Expect                  |
 | -------- | -------------------------------------------------------- | ----------------------- |
-| w1       | `list_rules_as_bound_child`: LIST_RULES on 0x42          | RuleCount == 2          |
+| w1       | `list_rules_as_bound_child`: LIST_RULES on 0x42          | RuleCount == 3          |
 | w2       | `init_foreign_scope`: INIT_SCOPE on 0xDEAD               | STATUS_SUCCESS          |
 | w3       | `destroy_foreign_scope`: DESTROY_SCOPE on 0xDEAD         | STATUS_SUCCESS          |
+| w4       | `connect(93.184.216.34:443)` from bound worker           | WSAEACCES (10013) — WFP BLOCK verdict surfaced (also accept WSAEHOSTUNREACH 10065 on pre-block-before-sourceaddr builds) |
+| w5       | `connect(10.0.0.1:443)` from bound worker                | NOT WSAEACCES — WFP permitted; network-level failure (timeout/refused/unreachable) expected since 10.0.0.1 has no listener |
 
 The worker writes `{matched, steps[], mismatches[], scope_id, device}`
-JSON to `--output` and exits 0 iff all 3 sub-steps passed. The
+JSON to `--output` and exits 0 iff all 5 sub-steps passed. The
 orchestrator exits 0 iff every sub-step (orchestrator + worker)
 matched its expected outcome.
 
@@ -105,12 +110,12 @@ expect (per-event-name counts):
 | Event              | Expected | Why                                                  |
 | ------------------ | -------- | ---------------------------------------------------- |
 | NetScopeCreated    | 2        | orchestrator INIT 0x42 + worker INIT 0xDEAD          |
-| NetRuleAdded       | 2        | orchestrator's DENY + ALLOW rules                    |
+| NetRuleAdded       | 3        | orchestrator's DENY (DOMAIN) + ALLOW + DENY (EXACT_V4) |
 | NetProcessBound    | 1        | orchestrator BIND worker to 0x42                     |
 | NetProcessUnbound  | 1        | orchestrator explicit UNBIND                         |
 | NetScopeDestroyed  | 2        | orchestrator DESTROY 0x42 + worker DESTROY 0xDEAD    |
 | NetRulesListed     | >=2      | orchestrator LIST + worker LIST (diag only)          |
-| NetRuleMatched     | 0        | WFP classify callback not wired yet (queue item 4)   |
+| NetRuleMatched     | >=1      | WFP classify callback fires on worker's DENY connect |
 
 The timeout budget is generous (180 s) because on a cold-booted VM
 `Get-WinEvent` has to load its ETW parser cache before it can read
@@ -175,7 +180,8 @@ A green run proves:
   (b) the V2 wire format encoder/decoder round-trips cleanly
   (c) PID -> scope binding is observable from inside the bound child
   (d) the new ETW emissions in net_ioctl.c reach user-mode
-
-...with **zero** dependency on WFP. Queue item 4 adds the classify
-callback and a single new `NetRuleMatched` assertion to prove
-enforcement actually fires on a real connect() attempt.
+  (e) the live WFP ALE_AUTH_CONNECT_V4 classify callback blocks the
+      DENY target's connect() AND lets the ALLOW target's connect()
+      through (Sprint 60.8b Phase 2 commit 5)
+  (f) NetRuleMatched (keyword 0x10 = ENFORCEMENT) fires per BLOCK
+      verdict and the event reaches user-mode
