@@ -1,6 +1,7 @@
 # Ospiri v2 Registry Rule Deny — Assertions
 #
-# Sprint 60.8a Phase 6 (scope-based enforcement), Phase 7 verification.
+# Sprint 60.8a Phase 6 (scope-based enforcement) + Phase 7 + Sprint
+# 60.11 ETW integration.
 #
 # The workflow.md tool blocks carry inline `expect_exit_code` /
 # `expect_status` params that fail the tool-block on mismatch. Those
@@ -9,35 +10,24 @@
 # also add one explicit assertion per workflow step to get per-step
 # pass/fail visibility in the JUnit report.
 #
-# step indexing (parsed from workflow.md by signalman):
-#   step-0: driver_load
-#   step-1: vm_run_command (silo-spawn-helper orchestrator)
-#   step-2: driver_ioctl (DRAIN_EVIDENCE)
-#   step-3: driver_unload
+# Step map (parsed from workflow.md by signalman's narrative parser):
+#   step-0: driver_load              (stdout = JSON {status, service_state, ...})
+#   step-1: kernel_etw_start         (stdout = JSON {status, etl_path, stdout, stderr})
+#   step-2: silo-spawn-helper        (stdout empty; inline expect_exit_code: 0)
+#   step-3: kernel_etw_stop          (stdout = JSON {event_counts, total_events, events, ...})
+#   step-4: Get-Content worker.json  (worker JSON report)
+#   step-5: driver_unload            (stdout = JSON {status, service_state, ...})
 #
-# step-1 is the meat: silo-spawn-helper exits 0 only when every IOCTL
-# succeeded AND the worker also exited 0 (denied path -> ERROR_ACCESS_DENIED,
-# allowed path -> ERROR_SUCCESS). Its stderr contains a "matched=true"
-# line from the worker summary when all sub-steps passed.
+# Note on assertion type choice: signalman's V2 evaluator's
+# `exit_code` type reads `CommandResult.exitCode` (camelCase) but the
+# orchestrator's workflow→CommandResult adapter writes `exit_code`
+# (snake_case), so `exit_code` assertions never match for workflow
+# tool-blocks. `stdout_contains` is the reliable path — workflow tool
+# blocks capture their stdout verbatim into the source map, and any
+# inline `expect_exit_code` on the tool block itself already fails
+# the block before we even reach this assertion pass.
 
 assertions:
-  # Note on assertion type choice: signalman's V2 evaluator's
-  # `exit_code` type reads `CommandResult.exitCode` (camelCase) but the
-  # orchestrator's workflow→CommandResult adapter writes `exit_code`
-  # (snake_case), so `exit_code` assertions never match for workflow
-  # tool-blocks. `stdout_contains` is the reliable path — workflow tool
-  # blocks capture their stdout verbatim into the source map, and any
-  # inline `expect_exit_code` on the tool block itself already fails
-  # the block before we even reach this assertion pass.
-  #
-  # Step map (parsed from workflow.md):
-  #   step-0: driver_load (stdout = JSON {status, service_state, ...})
-  #   step-1: silo-spawn-helper orchestrator (stdout empty; its
-  #           inline expect_exit_code: 0 is the assertion — any non-zero
-  #           exit throws the tool block, marking the scenario failed)
-  #   step-2: Get-Content silo-spawn-worker.json (worker JSON report)
-  #   step-3: driver_unload (stdout = JSON {status, service_state, ...})
-
   - id: driver-loaded-status-running
     type: stdout_contains
     source: step-0
@@ -45,47 +35,77 @@ assertions:
     severity: critical
     description: "OspiriReg driver service loaded and reports Running"
 
+  # Sprint 60.11: ETW capture assertions.
+  # step-1 (kernel_etw_start) returns {etl_path, status:0, ...}; we
+  # just assert it reached success status. No sideband state to verify
+  # here — the real payoff is the step-3 count below.
+  - id: etw-capture-started
+    type: stdout_contains
+    source: step-1
+    expected: "\"status\":0"
+    severity: critical
+    description: "kernel_etw_start opened a WPR recording session"
+
   - id: worker-report-matched
     type: stdout_contains
-    source: step-2
+    source: step-4
     expected: "\"matched\": true"
     severity: critical
     description: "Worker JSON report has matched=true (all sub-steps passed)"
 
   - id: worker-report-no-mismatches
     type: stdout_contains
-    source: step-2
+    source: step-4
     expected: "\"mismatches\": []"
     severity: critical
     description: "Worker JSON report shows zero per-step mismatches"
 
   - id: worker-report-deny-step-passed
     type: stdout_contains
-    source: step-2
+    source: step-4
     expected: "denied as expected"
     severity: critical
     description: "Worker step 'create_denied_path' received ERROR_ACCESS_DENIED from CM callback"
 
   - id: worker-report-allow-step-passed
     type: stdout_contains
-    source: step-2
+    source: step-4
     expected: "succeeded as expected"
     severity: critical
     description: "Worker step 'create_allowed_path' received ERROR_SUCCESS (no false positive)"
 
-  - id: driver-unloaded-stopped
+  # Sprint 60.11: ETW event assertion — the headline audit-gap closer.
+  # Enforcement keyword (0x10) captures RuleMatched events only. The
+  # worker's sequence triggers exactly one RuleMatched: on the open
+  # of \REGISTRY\MACHINE\SOFTWARE\OspiriV2RegDeny (DENY+PREFIX match).
+  # The allow-path traversal matches no rules and emits no RuleMatched.
+  #
+  # This is the FIRST automated assertion anywhere in the codebase
+  # that verifies an ETW event actually fired — previously we only
+  # knew enforcement worked because the worker's RegCreateKeyExW
+  # returned ACCESS_DENIED. If the driver silently stopped emitting
+  # RuleMatched tomorrow (regression in reg_callback.c's emission),
+  # THIS assertion would catch it.
+  - id: etw-rule-matched-fired
     type: stdout_contains
     source: step-3
+    expected: "\"RuleMatched\":1"
+    severity: critical
+    description: "ETW capture saw exactly 1 RuleMatched event (the worker's DENY traversal)"
+
+  - id: etw-total-events-nonzero
+    type: stdout_contains
+    source: step-3
+    expected: "\"total_events\":1"
+    severity: high
+    description: "ETW total event count matches expected (1 from ENFORCEMENT keyword)"
+
+  - id: driver-unloaded-stopped
+    type: stdout_contains
+    source: step-5
     expected: "\"service_state\":\"Stopped\""
     severity: critical
     description: "OspiriReg driver unloaded cleanly (no Driver Verifier bugcheck on unload)"
-
-  # Sprint 60.11: DIAG_LAST_PATH diagnostic IOCTL retired — the
-  # `driver-last-path-captured` assertion was dropped along with it.
-  # The driver now emits ETW `RuleMatched` events (keyword=ENFORCEMENT)
-  # that the Sprint-60.11-P4 `kernel_etw` signalman tool will capture
-  # via `wpr` + `Get-WinEvent`. Scenario-level ETW assertion lands in
-  # P4.
 
 pass_threshold: 1.0
 critical_must_pass: true

@@ -186,9 +186,9 @@ describe("ToolRegistry — execute", () => {
 // ─── Factory: createKernelDebugToolRegistry ────────────────────────
 
 describe("createKernelDebugToolRegistry", () => {
-  it("registers exactly five tools", () => {
+  it("registers exactly seven tools", () => {
     const r = createKernelDebugToolRegistry();
-    expect(r.size).toBe(5);
+    expect(r.size).toBe(7);
   });
 
   it("registers the expected names", () => {
@@ -199,6 +199,8 @@ describe("createKernelDebugToolRegistry", () => {
       "driver_ioctl",
       "kernel_expect_bugcheck",
       "kernel_break_on",
+      "kernel_etw_start",
+      "kernel_etw_stop",
     ]);
   });
 
@@ -440,9 +442,11 @@ describe("ScenarioOrchestrator — tool registry integration", () => {
       {} as never,
       {},
     );
-    expect(orchestrator.tools.size).toBe(5);
+    expect(orchestrator.tools.size).toBe(7);
     expect(orchestrator.tools.has("driver_load")).toBe(true);
     expect(orchestrator.tools.has("kernel_break_on")).toBe(true);
+    expect(orchestrator.tools.has("kernel_etw_start")).toBe(true);
+    expect(orchestrator.tools.has("kernel_etw_stop")).toBe(true);
   });
 
   it("getGuestClient returns undefined for a missing VM", async () => {
