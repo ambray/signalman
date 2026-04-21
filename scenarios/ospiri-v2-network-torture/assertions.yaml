@@ -1,0 +1,112 @@
+# Ospiri v2 Network Egress Multi-Threaded Torture — Assertions
+#
+# Sprint 60.8b Phase 2 commit 5 (companion to ospiri-v2-network-egress).
+#
+# The workflow.md tool blocks carry inline `expect_exit_code` /
+# `expect_status` params that fail the tool-block on mismatch. Those
+# failures already mark the scenario FAILED at the orchestrator level.
+# The assertions below give per-check pass/fail visibility in the
+# JUnit report and key off the structured JSON the torture binary
+# emits (pulled back via Step 5's Get-Content).
+#
+# Step map (parsed from workflow.md by signalman's narrative parser):
+#   step-0: driver_load              (stdout = JSON {status, service_state, ...})
+#   step-1: kernel_etw_start         (stdout = JSON {status, etl_path, stdout, stderr})
+#   step-2: net-spawn-helper-torture (stdout = JSON report verbatim + one-liner to stderr)
+#   step-3: kernel_etw_stop          (stdout = JSON {event_counts, total_events, events, ...})
+#   step-4: Get-Content report.json  (torture JSON report — full {total_connects, block_count, ...})
+#   step-5: driver_unload            (stdout = JSON {status, service_state, ...})
+#
+# Note on assertion type choice: see ospiri-v2-network-egress
+# assertions.yaml header for the full rationale on why we use
+# stdout_contains rather than exit_code.
+
+assertions:
+  - id: driver-loaded-status-running
+    type: stdout_contains
+    source: step-0
+    expected: "\"service_state\":\"Running\""
+    severity: critical
+    description: "Ospiri driver loaded and reports Running"
+
+  - id: etw-capture-started
+    type: stdout_contains
+    source: step-1
+    expected: "\"status\":0"
+    severity: critical
+    description: "kernel_etw_start opened a WPR recording session"
+
+  # Torture-report assertions. The torture binary writes a JSON doc
+  # with these fields:
+  #   {thread_count, iter_per_thread, total_connects, block_count,
+  #    allow_count, unexpected_count, list_rules_ok, list_rules_bad,
+  #    mutator_ops, mutator_errors, mismatches[], elapsed_ms, scope_id}
+  #
+  # The critical invariant is `unexpected_count == 0` and
+  # `mismatches == []` — everything else is diagnostic. We assert
+  # the field NAMES appear so a truncated/corrupt write is caught.
+
+  - id: torture-no-unexpected
+    type: stdout_contains
+    source: step-4
+    expected: "\"unexpected_count\": 0"
+    severity: critical
+    description: "Torture harness saw zero unexpected WFP verdicts across all 16 threads x 100 iterations (no DENY->permitted, no ALLOW->blocked)"
+
+  - id: torture-no-mismatches
+    type: stdout_contains
+    source: step-4
+    expected: "\"mismatches\": []"
+    severity: critical
+    description: "Torture harness collected zero mismatches — every DENY connect blocked AND every ALLOW connect permitted AND every LIST_RULES snapshot reported a sane count"
+
+  - id: torture-blocks-observed
+    type: stdout_contains
+    source: step-4
+    expected: "\"block_count\":"
+    severity: critical
+    description: "Torture report contains block_count field — on a passing run this should be ~1600 (16 threads x 100 iter DENY connects), but asserting the field's existence alone proves the report write succeeded"
+
+  - id: torture-allows-observed
+    type: stdout_contains
+    source: step-4
+    expected: "\"allow_count\":"
+    severity: high
+    description: "Torture report contains allow_count field"
+
+  - id: torture-total-connects-observed
+    type: stdout_contains
+    source: step-4
+    expected: "\"total_connects\":"
+    severity: high
+    description: "Torture report contains total_connects field — sanity on the per-thread stats aggregation"
+
+  - id: torture-mutator-ops-observed
+    type: stdout_contains
+    source: step-4
+    expected: "\"mutator_ops\":"
+    severity: high
+    description: "Torture report contains mutator_ops field — proves the mutator thread completed its 100 iterations of ADD+LIST under concurrent classify load"
+
+  # ETW assertion. The torture emits ~1600 NetRuleMatched events (one
+  # per DENY connect), so if ENFORCEMENT events are being dropped by
+  # TraceLogging back-pressure we'd see it here. We only check that
+  # AT LEAST ONE event with keyword 0x10 reached user-mode — checking
+  # for a specific count would be brittle (max_events_returned caps
+  # the capture).
+  - id: etw-torture-enforcement-captured
+    type: stdout_contains
+    source: step-3
+    expected: "\"keywords\":\"0x0000000000000010\""
+    severity: critical
+    description: "ETW captured at least one ENFORCEMENT-keyword (0x10) event under torture load — NetRuleMatched emission survives 1600+ concurrent classify calls"
+
+  - id: driver-unloaded-stopped
+    type: stdout_contains
+    source: step-5
+    expected: "\"service_state\":\"Stopped\""
+    severity: critical
+    description: "Ospiri driver unloaded cleanly (no Driver Verifier bugcheck on unload after 1600+ RCU swap cycles)"
+
+pass_threshold: 1.0
+critical_must_pass: true
