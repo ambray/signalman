@@ -26,7 +26,7 @@
 # ospiri-v2-registry-deny/setup.yaml for the rationale + warm-
 # checkpoint harvest procedure.
 
-name: "Ospiri v2 Network Egress IOCTL Surface (scope-based, pre-WFP)"
+name: "Ospiri v2 Network Egress IOCTL Surface (scope-based, WFP-live)"
 version: "1.0"
 tags: ["driver", "kernel", "ospiri-sys", "scope", "network", "sprint-60.11"]
 
