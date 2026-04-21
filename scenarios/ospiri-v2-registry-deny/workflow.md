@@ -21,7 +21,25 @@ driver_load:
   timeout_ms: 15000
 ```
 
-## Step 2: Run the scope-based enforcement sequence
+## Step 2: Start ETW capture targeting Example.Driver's ENFORCEMENT stream
+
+Sprint 60.11 landed the `Example.Driver` TraceLogging provider
+(`{5B7E6A1C-9F42-4D8B-A8B9-3E5C2D7F4A10}`). Keyword 0x10 =
+ENFORCEMENT = `RuleMatched` events only (one per DENY verdict).
+kernel_etw_stop (Step 4 below) returns per-event-name counts that
+assertions.yaml keys on — this is how we prove ETW-level enforcement
+telemetry actually reaches user-mode, not just that the worker's
+RegCreateKeyExW returned ACCESS_DENIED.
+
+```tool
+kernel_etw_start:
+  provider_guid: "{5B7E6A1C-9F42-4D8B-A8B9-3E5C2D7F4A10}"
+  keywords: "0x10"
+  level: 5
+  timeout_ms: 180000
+```
+
+## Step 3: Run the scope-based enforcement sequence
 
 `silo-spawn-helper.exe --mode orchestrator` performs (in order):
 
@@ -51,7 +69,29 @@ vm_run_command:
   run_as: SYSTEM
 ```
 
-## Step 3: Capture worker report for post-run inspection
+## Step 4: Stop ETW capture and parse events
+
+`kernel_etw_stop` runs `logman stop <session> -ets`, pulls events via
+`Get-WinEvent -Path <etl>`, filters to the Example.Driver GUID, and
+returns `event_counts` as structured JSON. For this scenario we
+expect exactly **1** `RuleMatched` (one CM callback fires DENY when
+the worker tries to open `\REGISTRY\MACHINE\SOFTWARE\ExampleV2RegDeny`;
+no other scoped process is active so no other RuleMatched events
+fire).
+
+The timeout budget is generous (180 s) because on a cold-booted VM
+`Get-WinEvent` has to load its ETW parser cache before it can read
+the ETL; first invocation after boot can take 30-60 s, subsequent
+ones are sub-second.
+
+```tool
+kernel_etw_stop:
+  provider_guid: "{5B7E6A1C-9F42-4D8B-A8B9-3E5C2D7F4A10}"
+  max_events_returned: 20
+  timeout_ms: 180000
+```
+
+## Step 5: Capture worker report for post-run inspection
 
 The orchestrator wrote `C:\Example\logs\silo-spawn-worker.json` with
 the worker's per-step pass/fail matrix. Pull it back to the host so
@@ -64,11 +104,11 @@ vm_run_command:
   command: powershell
   args: ["-NoProfile", "-Command", "Get-Content -Raw -Path 'C:\\Example\\logs\\silo-spawn-worker.json'"]
   expect_exit_code: 0
-  timeout_ms: 10000
+  timeout_ms: 60000
   run_as: SYSTEM
 ```
 
-## Step 4: Driver unload
+## Step 6: Driver unload
 
 Driver Verifier runs leak-check on unload — any scope state,
 process-map entry, or RCU-freed rule-table leak would bugcheck here.
