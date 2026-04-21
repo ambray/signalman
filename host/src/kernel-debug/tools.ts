@@ -28,14 +28,21 @@ import {
   type KernelExpectBugcheckParams,
 } from "./kernel-handlers.js";
 import {
+  handleKernelEtwStart,
+  handleKernelEtwStop,
+  type KernelEtwStartParams,
+  type KernelEtwStopParams,
+} from "./etw-handlers.js";
+import {
   ToolRegistry,
   type ToolContext,
   type ToolDefinition,
 } from "./tool-registry.js";
 
 /**
- * Returns a fresh `ToolRegistry` populated with the five kernel-debug
- * tools. Callers typically build one registry per orchestrator
+ * Returns a fresh `ToolRegistry` populated with the seven kernel-debug
+ * tools (5 from Sprint 60.7.5 + 2 ETW from Sprint 60.11 telemetry
+ * assertions). Callers typically build one registry per orchestrator
  * instance and stash it on the orchestrator for `executeToolBlock`
  * to query.
  */
@@ -77,6 +84,18 @@ export function kernelDebugToolDefinitions(): ToolDefinition[] {
       name: "kernel_break_on",
       description: "Install a kd breakpoint and capture state when it fires",
       handler: kernelBreakOnHandler,
+    },
+    {
+      name: "kernel_etw_start",
+      description:
+        "Start an ETW capture session (via `logman create trace -ets`) targeting a provider GUID + keyword mask",
+      handler: kernelEtwStartHandler,
+    },
+    {
+      name: "kernel_etw_stop",
+      description:
+        "Stop the ETW session (via `logman stop -ets`), parse events by provider, return counts + first N events",
+      handler: kernelEtwStopHandler,
     },
   ];
 }
@@ -180,6 +199,46 @@ async function kernelBreakOnHandler(
       capture: p.capture,
       timeout_ms: p.timeout_ms,
       resume_after: p.resume_after,
+    },
+  );
+  return JSON.stringify(result);
+}
+
+async function kernelEtwStartHandler(
+  ctx: ToolContext,
+  params: Record<string, unknown>,
+): Promise<string> {
+  const guestClient = requireGuestClient(ctx);
+  const p = params as unknown as KernelEtwStartParams;
+  const result = await handleKernelEtwStart(
+    { guestClient, vmName: ctx.vmName },
+    {
+      provider_guid: p.provider_guid,
+      keywords: p.keywords,
+      level: p.level,
+      session_name: p.session_name,
+      profile_path: p.profile_path,
+      etl_path: p.etl_path,
+      timeout_ms: p.timeout_ms,
+    },
+  );
+  return JSON.stringify(result);
+}
+
+async function kernelEtwStopHandler(
+  ctx: ToolContext,
+  params: Record<string, unknown>,
+): Promise<string> {
+  const guestClient = requireGuestClient(ctx);
+  const p = params as unknown as KernelEtwStopParams;
+  const result = await handleKernelEtwStop(
+    { guestClient, vmName: ctx.vmName },
+    {
+      provider_guid: p.provider_guid,
+      session_name: p.session_name,
+      etl_path: p.etl_path,
+      max_events_returned: p.max_events_returned,
+      timeout_ms: p.timeout_ms,
     },
   );
   return JSON.stringify(result);
