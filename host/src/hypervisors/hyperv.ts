@@ -9,8 +9,9 @@
  * Requires: Hyper-V role enabled, running as Administrator.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
+import { existsSync } from "node:fs";
 import type {
   CheckpointHandle,
   CheckpointInfo,
@@ -33,12 +34,134 @@ import {
 
 const exec = promisify(execFile);
 
+// ── Elevation Helpers ─────────────────────────────────────────────
+
+/** Well-known gsudo install locations on Windows. */
+const GSUDO_PATHS = [
+  "C:\\Program Files\\gsudo\\Current\\gsudo.exe",
+  "C:\\Program Files (x86)\\gsudo\\Current\\gsudo.exe",
+];
+
+/** Cached elevation state — computed once on first use. */
+let _isElevated: boolean | null = null;
+let _gsudoPath: string | null = null;
+let _elevationChecked = false;
+
+/**
+ * Check whether the current process is running elevated (Administrator).
+ * Result is cached for the lifetime of the process.
+ */
+function isElevated(): boolean {
+  if (_isElevated !== null) return _isElevated;
+  try {
+    execFileSync("net", ["session"], {
+      stdio: "ignore",
+      windowsHide: true,
+      timeout: 5_000,
+    });
+    _isElevated = true;
+  } catch {
+    _isElevated = false;
+  }
+  return _isElevated;
+}
+
+/**
+ * Find gsudo on the system. Checks well-known paths and PATH.
+ * Returns the full path to gsudo.exe, or null if not found.
+ * Result is cached.
+ */
+function findGsudo(): string | null {
+  if (_elevationChecked) return _gsudoPath;
+  _elevationChecked = true;
+
+  // Check well-known install locations
+  for (const p of GSUDO_PATHS) {
+    if (existsSync(p)) {
+      _gsudoPath = p;
+      console.error(`[signalman] Found gsudo at: ${p}`);
+      return _gsudoPath;
+    }
+  }
+
+  // Check PATH
+  try {
+    const result = execFileSync(
+      process.platform === "win32" ? "where" : "which",
+      ["gsudo"],
+      { stdio: "pipe", timeout: 5_000, windowsHide: true },
+    );
+    const found = result.toString().trim().split(/\r?\n/)[0];
+    if (found && existsSync(found)) {
+      _gsudoPath = found;
+      console.error(`[signalman] Found gsudo in PATH: ${found}`);
+      return _gsudoPath;
+    }
+  } catch {
+    // gsudo not in PATH
+  }
+
+  return null;
+}
+
+/**
+ * Resolve the command and args to use for running a PowerShell script.
+ *
+ * If already elevated: runs powershell.exe directly.
+ * If not elevated but gsudo is available: wraps via gsudo for transparent
+ * elevation. gsudo caches credentials so only the first call prompts UAC.
+ * If neither: runs powershell.exe directly (will fail on Hyper-V cmdlets
+ * that require admin, but non-admin cmdlets still work).
+ */
+function resolvePsCommand(): { cmd: string; prefixArgs: string[] } {
+  if (isElevated()) {
+    return { cmd: "powershell.exe", prefixArgs: [] };
+  }
+
+  const gsudo = findGsudo();
+  if (gsudo) {
+    return {
+      cmd: gsudo,
+      prefixArgs: ["powershell.exe"],
+    };
+  }
+
+  // Fall through — no elevation available, commands may fail
+  return { cmd: "powershell.exe", prefixArgs: [] };
+}
+
+// ── PowerShell Execution ──────────────────────────────────────────
+
+/**
+ * Build the args array for running a PowerShell script.
+ *
+ * When gsudo is in the chain, using `-Command` causes `$` variables to be
+ * stripped by the intermediate shell. We avoid this by encoding the script
+ * as UTF-16LE Base64 and passing it via `-EncodedCommand`, which PowerShell
+ * decodes internally with no shell interpolation.
+ *
+ * All scripts are prefixed with `$ProgressPreference = 'SilentlyContinue'`
+ * to suppress CLIXML progress output on stderr, which would otherwise cause
+ * Node's execFile to treat successful commands as failures.
+ */
+function buildPsArgs(prefixArgs: string[], script: string): string[] {
+  const wrapped = `$ProgressPreference = 'SilentlyContinue'; ${script}`;
+  const needsEncoding = prefixArgs.length > 0; // gsudo in chain
+  if (needsEncoding) {
+    const encoded = Buffer.from(wrapped, "utf16le").toString("base64");
+    return [...prefixArgs, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded];
+  }
+  return [...prefixArgs, "-NoProfile", "-NonInteractive", "-Command", wrapped];
+}
+
 /** Execute a PowerShell command and return parsed JSON output. */
 async function psJson<T>(script: string, timeoutMs = 30_000): Promise<T> {
+  const { cmd, prefixArgs } = resolvePsCommand();
+  const args = buildPsArgs(prefixArgs, script);
   try {
     const { stdout } = await exec(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", script],
+      cmd,
+      args,
       { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
     );
     return JSON.parse(stdout.trim()) as T;
@@ -53,10 +176,12 @@ async function psJson<T>(script: string, timeoutMs = 30_000): Promise<T> {
 
 /** Execute a PowerShell command, return raw stdout. */
 async function ps(script: string, timeoutMs = 30_000): Promise<string> {
+  const { cmd, prefixArgs } = resolvePsCommand();
+  const args = buildPsArgs(prefixArgs, script);
   try {
     const { stdout } = await exec(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", script],
+      cmd,
+      args,
       { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
     );
     return stdout.trim();
@@ -96,6 +221,65 @@ export class HyperVBackend implements HypervisorBackend {
     }
   }
 
+  // ── Stable-state wait ──────────────────────────────────────────
+  //
+  // Hyper-V's state-change cmdlets (Restore-VMCheckpoint, Start-VM,
+  // Stop-VM, Checkpoint-VM) refuse to run when the VM is in a
+  // transition state (Starting, Stopping, Saving, Pausing, Resuming).
+  // These transitions can be triggered externally (admin tools, other
+  // test runs, Hyper-V's own housekeeping after a previous checkpoint
+  // operation), so signalman may arrive at a mutation call with the
+  // VM mid-transition.
+  //
+  // The event-driven primitive is the CIM indication on
+  // `Msvm_ComputerSystem.EnabledState`. Subscribe first, read the
+  // current state, and if it's already stable — we're done. Otherwise
+  // wait for the next state-change indication and re-check.
+  //
+  // No polling, no fixed sleep — just a bounded event wait.
+
+  private async waitForStableState(handle: VMHandle): Promise<void> {
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
+    // Pure event-driven wait. Subscribe to the CIM state-change
+    // indication for this VM, then block on Wait-Event with no
+    // timeout — it parks until the CIM subsystem delivers an
+    // indication. When the indication fires, re-check the state;
+    // if stable, return; otherwise loop and wait for the next
+    // indication.
+    //
+    // No Start-Sleep, no Get-Date deadline, no polling. The outer
+    // ps() call has a generous dead-man process timeout to catch
+    // truly-broken Hyper-V (kernel stuck, CIM broker dead); that
+    // safety net is NOT part of the coordination protocol, it
+    // exists only to prevent the Node process hanging forever on
+    // infrastructure failures.
+    await ps(`
+      $stable = @('Off','Running','Saved','Paused')
+      $current = (Get-VM -Name '${safeName}').State.ToString()
+      if ($stable -contains $current) { return }
+
+      $query = @"
+SELECT * FROM __InstanceModificationEvent WITHIN 1
+  WHERE TargetInstance ISA 'Msvm_ComputerSystem'
+    AND TargetInstance.ElementName = '${safeName}'
+"@
+      $sourceId = "signalman-vmstate-$([guid]::NewGuid())"
+      Register-CimIndicationEvent -Query $query -Namespace 'root\virtualization\v2' -SourceIdentifier $sourceId | Out-Null
+      try {
+        while ($true) {
+          # Wait-Event with no -Timeout blocks until the CIM broker
+          # delivers the next indication. Event-driven, no poll.
+          Wait-Event -SourceIdentifier $sourceId | Out-Null
+          Remove-Event -SourceIdentifier $sourceId -ErrorAction SilentlyContinue
+          $current = (Get-VM -Name '${safeName}').State.ToString()
+          if ($stable -contains $current) { return }
+        }
+      } finally {
+        Unregister-Event -SourceIdentifier $sourceId -ErrorAction SilentlyContinue
+      }
+    `, 900_000);  // 15-min dead-man safety net on the PS process.
+  }
+
   // ── VM Lifecycle ──────────────────────────────────────────────
 
   async createVM(config: VMConfig): Promise<VMHandle> {
@@ -117,13 +301,42 @@ export class HyperVBackend implements HypervisorBackend {
 
   async startVM(handle: VMHandle): Promise<void> {
     const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
-    await ps(`Start-VM -Name '${safeName}' -ErrorAction SilentlyContinue`);
+    await this.waitForStableState(handle);
+    // -AsJob + Wait-Job: the job represents the full Starting → Running
+    // transition; Wait-Job blocks on the job's completion event (event-
+    // driven, no polling). Idempotent if already Running.
+    // 10-min ceiling: covers Hyper-V's worst-case Starting transition
+    // (cold boot with 4+ GB memory footprint on a contested host).
+    await ps(`
+      $vm = Get-VM -Name '${safeName}'
+      if ($vm.State -eq 'Running') { return }
+      $job = Start-VM -Name '${safeName}' -AsJob
+      Wait-Job -Job $job | Out-Null
+      if ($job.State -ne 'Completed') {
+        $err = ($job | Receive-Job 2>&1 | Out-String)
+        throw "Start-VM job ended in state '$($job.State)': $err"
+      }
+      Remove-Job -Job $job
+    `, 600_000);
   }
 
   async stopVM(handle: VMHandle, force = false): Promise<void> {
     const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
+    await this.waitForStableState(handle);
+    // force=true  ⇒ -TurnOff  (immediate power-off, simulates pulling power)
+    // force=false ⇒ -Force    (skip confirmation but still graceful shutdown)
     const forceFlag = force ? "-TurnOff" : "-Force";
-    await ps(`Stop-VM -Name '${safeName}' ${forceFlag} -ErrorAction SilentlyContinue`);
+    await ps(`
+      $vm = Get-VM -Name '${safeName}'
+      if ($vm.State -eq 'Off') { return }
+      $job = Stop-VM -Name '${safeName}' ${forceFlag} -AsJob
+      Wait-Job -Job $job | Out-Null
+      if ($job.State -ne 'Completed') {
+        $err = ($job | Receive-Job 2>&1 | Out-String)
+        throw "Stop-VM job ended in state '$($job.State)': $err"
+      }
+      Remove-Job -Job $job
+    `, 300_000);  // 5 min graceful shutdown ceiling
   }
 
   async pauseVM(handle: VMHandle): Promise<void> {
@@ -175,7 +388,7 @@ export class HyperVBackend implements HypervisorBackend {
   }
 
   async listVMs(): Promise<VMHandle[]> {
-    const script = `Get-VM | Select-Object Id, Name | ConvertTo-Json -AsArray`;
+    const script = `$r = @(Get-VM | Select-Object Id, Name); if ($r.Count -eq 0) { '[]' } else { ConvertTo-Json $r }`;
     const vms = await psJson<Array<{ Id: string; Name: string }>>(script);
     return vms.map((vm) => ({ id: vm.Id, name: vm.Name, backend: this.name }));
   }
@@ -185,21 +398,69 @@ export class HyperVBackend implements HypervisorBackend {
   async createCheckpoint(handle: VMHandle, label: string): Promise<CheckpointHandle> {
     const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
     const safeLabel = escapePowerShellArg(sanitizeLabel(label));
+    await this.waitForStableState(handle);
+    // Checkpoint-VM supports -AsJob, but its -Passthru + -AsJob
+    // combination is fiddly. Use the two-step form: create via
+    // job, then Get-VMCheckpoint to fetch the result. This avoids
+    // returning before the state-transition tail completes.
     const script = `
-      $cp = Checkpoint-VM -Name '${safeName}' -SnapshotName '${safeLabel}' -Passthru
+      $job = Checkpoint-VM -Name '${safeName}' -SnapshotName '${safeLabel}' -AsJob
+      Wait-Job -Job $job | Out-Null
+      if ($job.State -ne 'Completed') {
+        $err = ($job | Receive-Job 2>&1 | Out-String)
+        throw "Checkpoint-VM job ended in state '$($job.State)': $err"
+      }
+      Remove-Job -Job $job
+      $cp = Get-VMCheckpoint -VMName '${safeName}' -Name '${safeLabel}'
       @{ Id = $cp.Id.ToString(); Name = $cp.Name } | ConvertTo-Json
     `;
-    const result = await psJson<{ Id: string; Name: string }>(script);
+    // 10-min ceiling: checkpointing a Running VM flushes memory to
+    // the .vsv file, which on Win11 with 4 GB memory is typically
+    // 20-60s but can stretch to several minutes on a contested host.
+    const result = await psJson<{ Id: string; Name: string }>(script, 600_000);
     return { id: result.Id, vmHandle: handle, label: result.Name };
   }
 
   async restoreCheckpoint(checkpoint: CheckpointHandle): Promise<void> {
     const safeName = escapePowerShellArg(sanitizeVmName(checkpoint.vmHandle.name));
     const safeLabel = escapePowerShellArg(sanitizeLabel(checkpoint.label));
+    await this.waitForStableState(checkpoint.vmHandle);
+
+    // Hyper-V's Restore-VMCheckpoint on a Running VM takes the slow
+    // save-then-apply path (must dispose current running state before
+    // applying the checkpoint — observed 2-4 min on a warm-checkpoint
+    // restore, vs. ~2 s when VM is already Off). Stop the VM first;
+    // Stop-VM -TurnOff is effectively instant. The caller's contract
+    // for restoreCheckpoint doesn't require the current state to be
+    // preserved (it's getting obliterated either way), so the stop is
+    // functionally free.
+    await this.stopVM(checkpoint.vmHandle, /* force */ true);
+
+    // -AsJob + Wait-Job: Hyper-V's state-change cmdlets all expose
+    // -AsJob, and the returned CIM job represents the FULL operation
+    // including its state-transition tail. Wait-Job blocks on the job's
+    // completion event (event-driven, no polling).
+    //
+    // The default synchronous form of Restore-VMCheckpoint returns
+    // before the transition tail completes, so a subsequent Start-VM /
+    // state query races the tail and hits
+    //   "InvalidState: The operation cannot be performed while the
+    //   object is in its current state".
+    // -AsJob + Wait-Job closes that race.
+    // 10-min ceiling: warm-checkpoint restore from Off is ~2s, but
+    // restoring a large checkpoint on a contested host has been
+    // observed at 3+ min. Leave generous headroom so the Wait-Job
+    // isn't racing exec()'s process-level timeout.
     await ps(`
       $cp = Get-VMCheckpoint -VMName '${safeName}' -Name '${safeLabel}'
-      Restore-VMCheckpoint -VMCheckpoint $cp -Confirm:$false
-    `);
+      $job = Restore-VMCheckpoint -VMCheckpoint $cp -Confirm:$false -AsJob
+      Wait-Job -Job $job | Out-Null
+      if ($job.State -ne 'Completed') {
+        $err = ($job | Receive-Job 2>&1 | Out-String)
+        throw "Restore-VMCheckpoint job ended in state '$($job.State)': $err"
+      }
+      Remove-Job -Job $job
+    `, 600_000);
   }
 
   async deleteCheckpoint(checkpoint: CheckpointHandle): Promise<void> {
@@ -214,9 +475,9 @@ export class HyperVBackend implements HypervisorBackend {
   async listCheckpoints(handle: VMHandle): Promise<CheckpointInfo[]> {
     const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
     const script = `
-      Get-VMCheckpoint -VMName '${safeName}' |
-        Select-Object Id, Name, CreationTime, ParentCheckpointId |
-        ConvertTo-Json -AsArray
+      $r = @(Get-VMCheckpoint -VMName '${safeName}' |
+        Select-Object Id, Name, CreationTime, ParentCheckpointId);
+      if ($r.Count -eq 0) { '[]' } else { ConvertTo-Json $r }
     `;
     const cps = await psJson<
       Array<{

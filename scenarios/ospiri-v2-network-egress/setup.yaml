@@ -20,8 +20,11 @@
 # scenario deliberately expects 0 NetRuleMatched events so it
 # documents the pre-WFP cut-line.
 #
-# The test runs on the same `test-signing-enabled` checkpoint as
-# example-driver-smoke and example-v2-registry-deny.
+# Uses the `test-signing-warm` checkpoint (running-state child of
+# `test-signing-enabled`) for fast restore: ~2 s to guest-agent-
+# reachable vs. 6-10+ min cold boot. See
+# example-v2-registry-deny/setup.yaml for the rationale + warm-
+# checkpoint harvest procedure.
 
 name: "Example v2 Network Egress IOCTL Surface (scope-based, pre-WFP)"
 version: "1.0"
@@ -33,7 +36,7 @@ vms:
     # Same snapshot the example-driver-smoke scenario uses. No
     # Containers-feature enablement required - Phase 6 moved us to
     # a driver-owned scope primitive that works on stock Win11.
-    checkpoint_restore: test-signing-enabled
+    checkpoint_restore: test-signing-warm
     guest_agent_port: 50051
     network:
       switch: "RevnTestSwitch"
@@ -115,7 +118,7 @@ teardown:
 
   - action: vm_restore
     vm: endpoint-1
-    checkpoint: test-signing-enabled
+    checkpoint: test-signing-warm
 
 checkpoints:
   before_test: true
