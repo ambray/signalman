@@ -73,6 +73,19 @@ export interface VmConfig {
   name: string;
   template: string;
   checkpoint_restore?: string;
+  /**
+   * Whether `checkpoint_restore` names a warm-state (Running-state)
+   * checkpoint. Defaults to `true` — the schema layer fills in the
+   * default when scenarios don't set the field. See the schema for
+   * the full rationale (warm restore is ~2 s to a responsive guest;
+   * cold restore can take 6-10+ minutes to stabilise).
+   *
+   * Surface here is plain optional so the runner doesn't reject
+   * legacy scenario shapes loaded outside the validator's path; the
+   * orchestrator treats `undefined` as `true` to match the schema
+   * default and keep the code paths aligned.
+   */
+  warm_checkpoint?: boolean;
   guest_agent_port: number;
   network?: {
     switch: string;

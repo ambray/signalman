@@ -73,6 +73,19 @@ export interface VmDefinition {
   template: string;
   /** Checkpoint to restore before the test starts. */
   checkpoint_restore?: string;
+  /**
+   * Whether `checkpoint_restore` names a warm-state checkpoint. Defaults
+   * to `true` (the schema layer applies that default for parsed scenarios;
+   * `resolveVms` re-applies it for direct construction in tests).
+   *
+   * The flag exists primarily as a contract marker today: every
+   * `restoreCheckpoint` call goes through the optimised stop-then-restore
+   * path in `hyperv.ts`. When `false`, the orchestrator emits a warning so
+   * the slow-stabilisation expectation is visible in scenario logs — that
+   * surfaces drift as scenarios are migrated to warm checkpoints over time
+   * (see Sprint 60 P2 follow-up).
+   */
+  warm_checkpoint?: boolean;
   /** Guest agent gRPC port (default: 50051). */
   guest_agent_port: number;
   /** Network configuration. */
@@ -446,6 +459,11 @@ export class ScenarioOrchestrator {
         name: vm.name,
         template: vm.template,
         checkpoint_restore: vm.checkpoint_restore,
+        // Default to warm-checkpoint semantics. The schema layer
+        // already applies this default for validator-parsed scenarios;
+        // re-apply here so direct construction (tests, future loaders)
+        // gets the same behavior.
+        warm_checkpoint: vm.warm_checkpoint ?? true,
         guest_agent_port: vm.guest_agent_port,
         network: vm.network,
         kernel_debug: vm.kernel_debug,
@@ -1234,6 +1252,19 @@ export class ScenarioOrchestrator {
 
       // Restore checkpoint if specified
       if (def.checkpoint_restore) {
+        // P2 follow-up: warm-checkpoint is the default. When a scenario
+        // explicitly opts out (`warm_checkpoint: false`), emit a one-line
+        // warning so the slow-stabilisation path is visible in run output.
+        // The actual restore call is the same either way — the optimised
+        // stop-then-restore semantics live in `hyperv.ts:restoreCheckpoint`.
+        const warm = def.warm_checkpoint ?? true;
+        if (!warm) {
+          console.warn(
+            `[orchestrator] VM '${def.name}' has warm_checkpoint: false — ` +
+              `expect a slower stabilisation budget after ` +
+              `'${def.checkpoint_restore}' restore`,
+          );
+        }
         await this.backend.restoreCheckpoint({
           id: "",
           vmHandle: existing,
