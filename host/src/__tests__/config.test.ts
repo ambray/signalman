@@ -7,7 +7,10 @@ describe('defaultConfig', () => {
     expect(config.hypervisor.backend).toBe('hyperv');
     expect(config.guestAgent.defaultPort).toBe(50051);
     expect(config.guestAgent.tls.enabled).toBe(false);
-    expect(config.scenarios.dir).toBe('./scenarios');
+    // v0.1.0: default scenario path is `.signalman/scenarios` (P0 MCP
+    // Surface Inversion). Legacy `./scenarios` still resolves via
+    // src/scenarios/project-layout.ts when present.
+    expect(config.scenarios.dir).toBe('./.signalman/scenarios');
     expect(config.scenarios.outputDir).toBe('./output');
   });
 

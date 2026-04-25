@@ -117,6 +117,48 @@ export const checkpointConfigSchema = z
   })
   .passthrough();
 
+// ── P4-reserved blocks (accept-but-don't-enforce) ─────────────────
+
+/**
+ * `capabilities` block — reserved for P4. Documents what the scenario
+ * is allowed to touch. v0.1.0 parses but does not enforce; P4 flips
+ * the runner to refuse any action outside the declared set.
+ *
+ * `.passthrough()` keeps unknown sub-fields so authors can experiment
+ * before P4 lands.
+ */
+export const capabilitiesSchema = z
+  .object({
+    hosts: z.array(z.string()).optional(),
+    networks: z.array(z.string()).optional(),
+    vms: z.array(z.string()).optional(),
+    host_paths: z
+      .object({
+        read: z.array(z.string()).optional(),
+        write: z.array(z.string()).optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+/**
+ * `parameters` block — declares parameter names and (optional)
+ * defaults that callers can override via `signalman.run`'s
+ * `parameters` arg or the CLI `--param k=v` flag.
+ *
+ * Per resolved Question 2 (option (a) — strict, doc-able through
+ * `signalman.describe`), v0.1.0 records the declared shape. Reference
+ * syntax `${param:NAME}` and `${secret:NAME}` is reserved and accepted
+ * here without resolution; the runtime substitution implementation
+ * lands alongside P4 secret resolution. Until then, scenarios that
+ * use `${secret:NAME}` get a `plan`-time warning.
+ *
+ * Values are free-form (string, number, boolean, object) so authors
+ * can declare nested-shape parameters without Zod limiting them.
+ */
+export const parametersSchema = z.record(z.string(), z.unknown());
+
 // ── top-level scenario config ─────────────────────────────────────
 
 /**
@@ -134,6 +176,10 @@ export const scenarioConfigSchema = z
     teardown: z.array(setupStepSchema).default([]),
     checkpoints: checkpointConfigSchema.default({}),
     sandbox_modes: z.array(z.string()).optional(),
+    /** Reserved for P4 — see {@link capabilitiesSchema}. */
+    capabilities: capabilitiesSchema.optional(),
+    /** Reserved for P4 — see {@link parametersSchema}. */
+    parameters: parametersSchema.optional(),
   })
   .passthrough();
 
