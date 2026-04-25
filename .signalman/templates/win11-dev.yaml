@@ -1,0 +1,11 @@
+# Built-in template: win11-dev
+# Extracted from host/src/scenarios/templates.ts (P0 MCP Surface Inversion).
+
+name: win11-dev
+generation: 2
+memoryMB: 8192
+processorCount: 4
+networkSwitch: "Default Switch"
+checkpoints:
+  clean: "Windows 11 with development tools"
+  with-agent: "Windows 11 with Ospiri agent installed"

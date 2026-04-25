@@ -4,11 +4,17 @@
  * Loads configuration from YAML files with the following precedence:
  * 1. Explicit path passed to loadConfig()
  * 2. SIGNALMAN_CONFIG environment variable
- * 3. ./signalman.yaml in the current working directory
- * 4. ~/.signalman/config.yaml in the user's home directory
+ * 3. ./.signalman/config.yaml in the current working directory
+ * 4. Legacy fallback (deprecated, removed in v0.2.0): ./signalman.yaml
+ * 5. ~/.signalman/config.yaml in the user's home directory
  *
  * Environment variable overrides are supported for sensitive or
  * deployment-specific values.
+ *
+ * The .signalman/ layout was introduced in v0.1.0 (P0 MCP Surface
+ * Inversion); see docs/design/p0-mcp-surface.md §2. The legacy
+ * `signalman.yaml` continues to work with a deprecation warning until
+ * v0.2.0.
  */
 
 import fs from "node:fs";
@@ -75,6 +81,19 @@ export interface SignalmanConfig {
     /** Registry auth token for private registries. */
     registryAuth?: string;
   };
+  /**
+   * Optional logical-to-physical VM-name aliases.
+   *
+   * Scenarios reference VMs by stable logical names ("endpoint-1");
+   * the actual hypervisor name varies per machine. The orchestrator
+   * (see scenarios/orchestrator.ts:1220) consults this map when
+   * resolving a scenario's `vms[]` entry against `backend.listVMs()`.
+   *
+   * The field was used by user configs (e.g. signalman.yaml) before
+   * P0; making it part of the typed schema closes a long-standing
+   * tsc error in the orchestrator.
+   */
+  vmAliases?: Record<string, string>;
 }
 
 // ── Default Configuration ──────────────────────────────────────────
@@ -97,7 +116,10 @@ export function defaultConfig(): SignalmanConfig {
       },
     },
     scenarios: {
-      dir: "./scenarios",
+      // v0.1.0 default — see docs/design/p0-mcp-surface.md §2.
+      // Legacy `./scenarios` is still honored by the runner via the
+      // project-layout fallback in src/scenarios/project-layout.ts.
+      dir: "./.signalman/scenarios",
       outputDir: "./output",
       screenshotDir: "./output/screenshots",
     },
@@ -105,6 +127,9 @@ export function defaultConfig(): SignalmanConfig {
 }
 
 // ── Configuration Loading ──────────────────────────────────────────
+
+/** One-time deprecation warning latch for legacy `signalman.yaml`. */
+let warnedLegacyConfig = false;
 
 /** Candidate paths to search for the config file. */
 function configSearchPaths(): string[] {
@@ -116,7 +141,10 @@ function configSearchPaths(): string[] {
     paths.push(path.resolve(envPath));
   }
 
-  // CWD
+  // CWD — `.signalman/config.yaml` takes precedence over the legacy
+  // `signalman.yaml`. The legacy path stays accessible during v0.1.0
+  // for backwards compat; v0.2.0 will drop it (TODO marker).
+  paths.push(path.resolve(process.cwd(), ".signalman", "config.yaml"));
   paths.push(path.resolve(process.cwd(), "signalman.yaml"));
 
   // Home directory
@@ -186,6 +214,10 @@ function mergeConfig(
       apiUrl: partial.hub.apiUrl ?? "",
       apiKey: partial.hub.apiKey ?? "",
     };
+  }
+
+  if (partial.vmAliases && typeof partial.vmAliases === "object") {
+    result.vmAliases = { ...(result.vmAliases ?? {}), ...partial.vmAliases };
   }
 
   if (partial.docker) {
@@ -326,6 +358,20 @@ export function loadConfig(configPath?: string): SignalmanConfig {
     const candidates = configSearchPaths();
     for (const candidate of candidates) {
       if (fs.existsSync(candidate)) {
+        // Emit a one-time deprecation warning when the legacy
+        // top-level signalman.yaml is the chosen file. TODO(v0.2.0):
+        // drop the legacy file entirely.
+        if (
+          !warnedLegacyConfig &&
+          path.basename(candidate) === "signalman.yaml" &&
+          path.basename(path.dirname(candidate)) !== ".signalman"
+        ) {
+          warnedLegacyConfig = true;
+          console.error(
+            `[signalman] DEPRECATION: ${candidate} is the legacy config location. ` +
+              `Move it to .signalman/config.yaml; the legacy fallback is removed in v0.2.0.`,
+          );
+        }
         const raw = fs.readFileSync(candidate, "utf-8");
         const parsed = YAML.parse(raw, { maxAliasCount: 100 }) as Record<string, unknown>;
         if (parsed && typeof parsed === "object") {
