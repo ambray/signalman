@@ -7,53 +7,116 @@ on:
     branches: [main]
 
 jobs:
-  host-typecheck:
+  host:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
+          cache-dependency-path: host/package-lock.json
       - name: Install dependencies
         working-directory: host
-        run: npm install
+        run: npm ci || npm install
       - name: Type check
         working-directory: host
         run: npx tsc --noEmit
+      - name: Lint
+        working-directory: host
+        run: npx eslint src/
+      - name: Tests
+        working-directory: host
+        run: npx vitest run
+      - name: Coverage
+        working-directory: host
+        run: npx vitest run --coverage --coverage.reporter=text --coverage.reporter=lcov
+        continue-on-error: true # Threshold enforcement enabled in P3 once envelope tests stabilize.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: host-coverage
+          path: host/coverage/
+          if-no-files-found: ignore
 
-  guest-build:
+  guest-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: guest -> target
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           version: "25.x"
+      - name: Format check
+        working-directory: guest
+        run: cargo fmt --check
       - name: Build guest agent
         working-directory: guest
         run: cargo build --release
-      - name: Run tests
+      - name: Tests
         working-directory: guest
         run: cargo test --lib
       - name: Clippy
         working-directory: guest
         run: cargo clippy -- -D warnings
 
-  guest-build-linux:
+  guest-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: guest -> target
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           version: "25.x"
+      - name: Format check
+        working-directory: guest
+        run: cargo fmt --check
       - name: Build guest agent
         working-directory: guest
         run: cargo build
-      - name: Run tests
+      - name: Tests
         working-directory: guest
         run: cargo test --lib
+      - name: Clippy
+        working-directory: guest
+        run: cargo clippy -- -D warnings
+
+  # Service crate is added in P1 (worktree-agent-a3d5e2170a2a260d8). When that
+  # worktree merges, uncomment the service-windows job below.
+  #
+  # service-windows:
+  #   runs-on: windows-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #       with:
+  #         targets: x86_64-pc-windows-msvc
+  #         components: rustfmt, clippy
+  #     - uses: Swatinem/rust-cache@v2
+  #       with:
+  #         workspaces: . -> target
+  #     - name: Install protoc
+  #       uses: arduino/setup-protoc@v3
+  #       with:
+  #         version: "25.x"
+  #     - name: Format check
+  #       run: cargo fmt -p signalman-service --check
+  #     - name: Build service
+  #       run: cargo build -p signalman-service --release
+  #     - name: Tests
+  #       run: cargo test -p signalman-service
+  #     - name: Clippy
+  #       run: cargo clippy -p signalman-service --all-targets -- -D warnings
