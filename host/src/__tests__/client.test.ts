@@ -274,3 +274,178 @@ describe("ConnectionState", () => {
     expect(states).toHaveLength(4);
   });
 });
+
+// ── parseEndpoint tests ───────────────────────────────────────────
+
+describe("parseEndpoint", () => {
+  // Import lazily because the existing GuestAgentClient suite uses
+  // vi.doMock and we want to test the real (unmocked) helper.
+  it("treats bare host as host:default-port without TLS", async () => {
+    const { parseEndpoint } = await import("../guest/client.js");
+    expect(parseEndpoint("172.30.0.10", 50051)).toEqual({
+      target: "172.30.0.10:50051",
+      tls: false,
+    });
+  });
+
+  it("preserves explicit host:port and reports no TLS", async () => {
+    const { parseEndpoint } = await import("../guest/client.js");
+    expect(parseEndpoint("vm.local:51234", 50051)).toEqual({
+      target: "vm.local:51234",
+      tls: false,
+    });
+  });
+
+  it("flags https:// URL as TLS", async () => {
+    const { parseEndpoint } = await import("../guest/client.js");
+    expect(parseEndpoint("https://vm.local:50051", 9000)).toEqual({
+      target: "vm.local:50051",
+      tls: true,
+    });
+  });
+
+  it("flags grpcs:// URL as TLS", async () => {
+    const { parseEndpoint } = await import("../guest/client.js");
+    expect(parseEndpoint("grpcs://vm.local:50051", 9000)).toEqual({
+      target: "vm.local:50051",
+      tls: true,
+    });
+  });
+
+  it("treats http:// URL as plaintext", async () => {
+    const { parseEndpoint } = await import("../guest/client.js");
+    expect(parseEndpoint("http://vm.local:50051", 9000)).toEqual({
+      target: "vm.local:50051",
+      tls: false,
+    });
+  });
+
+  it("falls back to default port when URL omits one", async () => {
+    const { parseEndpoint } = await import("../guest/client.js");
+    expect(parseEndpoint("http://vm.local", 9000)).toEqual({
+      target: "vm.local:9000",
+      tls: false,
+    });
+  });
+});
+
+// ── mTLS option handling ──────────────────────────────────────────
+
+describe("GuestAgentClient TLS handling", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let mockGuestAgent: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let GuestAgentClient: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let createSslSpy: any;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.restoreAllMocks();
+
+    mockGuestAgent = vi.fn().mockImplementation(function (this: Record<string, unknown>) {
+      this.health = vi.fn();
+      this.close = vi.fn();
+    });
+
+    createSslSpy = vi.fn().mockReturnValue("ssl-creds");
+
+    vi.doMock("@grpc/proto-loader", () => ({
+      loadSync: vi.fn().mockReturnValue({}),
+    }));
+
+    vi.doMock("@grpc/grpc-js", async () => {
+      const actual = await vi.importActual<typeof grpc>("@grpc/grpc-js");
+      return {
+        ...actual,
+        loadPackageDefinition: vi.fn().mockReturnValue({
+          signalman: { guest: { GuestAgent: mockGuestAgent } },
+        }),
+        credentials: {
+          ...actual.credentials,
+          createSsl: createSslSpy,
+          createInsecure: vi.fn().mockReturnValue("insecure-creds"),
+        },
+      };
+    });
+
+    // Mock fs.readFileSync so the test does not need real cert files.
+    vi.doMock("node:fs", () => ({
+      default: {
+        readFileSync: vi.fn((p: string) => Buffer.from(`pem-for-${p}`)),
+      },
+      readFileSync: vi.fn((p: string) => Buffer.from(`pem-for-${p}`)),
+    }));
+
+    const mod = await import("../guest/client.js");
+    GuestAgentClient = mod.GuestAgentClient;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+    vi.doUnmock("node:fs");
+  });
+
+  it("uses insecure credentials when no TLS configured", () => {
+    new GuestAgentClient("127.0.0.1", 50051);
+    expect(createSslSpy).not.toHaveBeenCalled();
+  });
+
+  it("uses Ssl credentials when caPath is provided", () => {
+    new GuestAgentClient("127.0.0.1", 50051, { caPath: "/etc/signalman/ca.pem" });
+    expect(createSslSpy).toHaveBeenCalledTimes(1);
+    const args = createSslSpy.mock.calls[0];
+    expect(args[0]).toEqual(Buffer.from("pem-for-/etc/signalman/ca.pem"));
+    // No client identity supplied -> args[1] (key) and args[2] (cert) are null.
+    expect(args[1]).toBeNull();
+    expect(args[2]).toBeNull();
+  });
+
+  it("uses Ssl credentials with client identity for full mTLS", () => {
+    new GuestAgentClient("127.0.0.1", 50051, {
+      caPath: "/ca.pem",
+      certPath: "/host.pem",
+      keyPath: "/host.key",
+    });
+    expect(createSslSpy).toHaveBeenCalledTimes(1);
+    const args = createSslSpy.mock.calls[0];
+    expect(args[0]).toEqual(Buffer.from("pem-for-/ca.pem"));
+    expect(args[1]).toEqual(Buffer.from("pem-for-/host.key"));
+    expect(args[2]).toEqual(Buffer.from("pem-for-/host.pem"));
+  });
+
+  it("rejects partial mTLS identity (cert without key)", () => {
+    expect(() => {
+      new GuestAgentClient("127.0.0.1", 50051, {
+        caPath: "/ca.pem",
+        certPath: "/host.pem",
+      });
+    }).toThrow(/certPath and keyPath/);
+  });
+
+  it("rejects partial mTLS identity (key without cert)", () => {
+    expect(() => {
+      new GuestAgentClient("127.0.0.1", 50051, {
+        caPath: "/ca.pem",
+        keyPath: "/host.key",
+      });
+    }).toThrow(/certPath and keyPath/);
+  });
+
+  it("auto-enables TLS for https:// URLs", () => {
+    new GuestAgentClient("https://vm.local:50051");
+    expect(createSslSpy).toHaveBeenCalledTimes(1);
+    // No tlsOptions => CA arg is null (system roots).
+    expect(createSslSpy.mock.calls[0][0]).toBeNull();
+  });
+
+  it("https:// URL strips scheme from gRPC target", () => {
+    new GuestAgentClient("https://172.30.0.10:50051");
+    expect(mockGuestAgent).toHaveBeenCalledWith(
+      "172.30.0.10:50051",
+      expect.anything(),
+      expect.any(Object),
+    );
+  });
+});
