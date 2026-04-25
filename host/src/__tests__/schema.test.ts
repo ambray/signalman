@@ -172,6 +172,42 @@ describe("validateScenarioConfig — happy paths", () => {
     );
     expect(r.sandbox_modes).toEqual(["v1", "v2"]);
   });
+
+  // P0 MCP Surface Inversion (v0.1.0) — reserved blocks for P4.
+  // These fields are accepted by the schema but the runner does not
+  // enforce them yet; tests pin the accept-but-don't-enforce contract.
+  it("accepts the P4-reserved capabilities block", () => {
+    const r = validateScenarioConfig(
+      {
+        ...validScenario(),
+        capabilities: {
+          hosts: ["endpoint-1"],
+          networks: ["RevnTestSwitch"],
+          host_paths: { read: ["./artifacts/**"], write: [] },
+        },
+      },
+      "setup.yaml",
+    );
+    expect(r.capabilities?.hosts).toEqual(["endpoint-1"]);
+  });
+
+  it("accepts the P4-reserved parameters block (free-form values)", () => {
+    const r = validateScenarioConfig(
+      {
+        ...validScenario(),
+        parameters: {
+          api_key: "${secret:EXAMPLE_API_KEY}",
+          endpoint: "${param:endpoint:-https://default.example}",
+          retries: 3,
+        },
+      },
+      "setup.yaml",
+    );
+    expect(r.parameters).toBeDefined();
+    expect((r.parameters as Record<string, unknown>).api_key).toBe(
+      "${secret:EXAMPLE_API_KEY}",
+    );
+  });
 });
 
 // ─── scenarioConfigSchema — rejection ──────────────────────────────
