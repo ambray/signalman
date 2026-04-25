@@ -57,6 +57,25 @@ export const vmConfigSchema = z
     name: z.string().min(1, "VM name must be non-empty"),
     template: z.string().min(1, "VM template must be non-empty"),
     checkpoint_restore: z.string().optional(),
+    /**
+     * Whether the named `checkpoint_restore` is a warm-state checkpoint
+     * (taken while the VM was Running with the guest agent stable and
+     * Hyper-V integration services healthy).
+     *
+     * When `true` (the default), the orchestrator assumes a fast restore
+     * path: ~2 s to apply, ~300 ms to first PowerShell call, vs. 6-10+
+     * minutes for a cold checkpoint that has to JIT-warm everything on
+     * every restore. New scenarios that take a Running-state checkpoint
+     * (see `host/scripts/harvest-warm-checkpoint.ps1`) inherit this
+     * default automatically.
+     *
+     * Set to `false` for legacy scenarios whose `checkpoint_restore`
+     * names a cold (Off-state, freshly-provisioned) checkpoint and
+     * therefore needs the longer post-restore stabilisation budget.
+     * The orchestrator surfaces a warning so the slow path is visible
+     * in scenario output.
+     */
+    warm_checkpoint: z.boolean().default(true),
     guest_agent_port: z
       .number()
       .int()
