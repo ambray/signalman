@@ -28,6 +28,7 @@ import { z } from "zod";
 import type { HypervisorBackend } from "./hypervisors/interface.js";
 import { HyperVBackend } from "./hypervisors/hyperv.js";
 import { VmwareBackend } from "./hypervisors/vmware.js";
+import { ServiceBackend } from "./hypervisors/service.js";
 import { loadConfig } from "./config.js";
 import { createAllTools } from "./tools/index.js";
 import { runList } from "./verbs/list.js";
@@ -43,9 +44,15 @@ import { createDefaultExecutor } from "./verbs/default-executor.js";
 /**
  * Build the ordered backend list from configuration.
  *
- * Hyper-V is the primary backend since 2026-04 (required for Example
- * correlator silo validation scenarios). VMware remains a legacy
- * fallback. If the config specifies a preferred backend, it goes first.
+ * Selection order (P1, 2026-04): service > hyperv (direct/gsudo) > vmware.
+ *
+ * The `service` backend talks to the privileged `signalman-service`
+ * daemon over mTLS gRPC, eliminating per-call gsudo elevation. If the
+ * daemon isn't installed (or its cert bundle isn't readable), the
+ * direct Hyper-V backend takes over via its existing Direct-COM /
+ * gsudo path. VMware remains a legacy fallback.
+ *
+ * If the config specifies a preferred backend, it goes first.
  */
 function buildBackendList(preferredBackend?: string): HypervisorBackend[] {
   const config = loadConfig();
@@ -55,11 +62,14 @@ function buildBackendList(preferredBackend?: string): HypervisorBackend[] {
     guestPass: config.hypervisor.guestCredentials?.password,
   });
   const hyperv = new HyperVBackend();
+  const service = new ServiceBackend();
 
-  if (preferredBackend === "vmware") return [vmware, hyperv];
-  if (preferredBackend === "hyperv") return [hyperv, vmware];
-  // Default: prefer Hyper-V (changed from VMware-first on 2026-04).
-  return [hyperv, vmware];
+  if (preferredBackend === "vmware") return [vmware, service, hyperv];
+  if (preferredBackend === "hyperv") return [hyperv, service, vmware];
+  if (preferredBackend === "service") return [service, hyperv, vmware];
+  // Default: prefer service (P1, 2026-04). Falls through to direct
+  // Hyper-V (gsudo) when the service isn't installed.
+  return [service, hyperv, vmware];
 }
 
 let activeBackend: HypervisorBackend | null = null;
