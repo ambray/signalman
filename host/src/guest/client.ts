@@ -638,6 +638,61 @@ export class GuestAgentClient {
     );
     return Buffer.from(response.imageData);
   }
+
+  // ── UI automation surface (Sprint 60 Phase 5, Story 5.5 prep) ────
+  // The orchestrator's `ui_click`/`ui_type`/`ui_find` workflow tools
+  // call these methods. The proto-level RPCs aren't wired yet (Story
+  // 5.5); these stubs document the expected shape and keep the host
+  // tsc green. Replace once the guest UI agent gRPC surface lands.
+
+  /** Click a UI element identified by `selector`. */
+  async uiClick(
+    selector: string,
+    options: {
+      windowTitle?: string;
+      clickType?: "left" | "right" | "double";
+      timeoutMs?: number;
+    } = {},
+  ): Promise<{ ok: boolean; selector: string; clickType: string }> {
+    void options;
+    throw new Error(
+      `uiClick(${selector}) is not yet implemented; UI automation is reserved for Sprint 60 Phase 5 Story 5.5. ` +
+        `The host-side surface exists so scenarios can declare ui_* tool blocks now and run once the guest RPCs land.`,
+    );
+  }
+
+  /** Type `text` into a UI element. */
+  async uiType(
+    text: string,
+    options: {
+      selector?: string;
+      windowTitle?: string;
+      clearFirst?: boolean;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<{ ok: boolean; chars: number }> {
+    void options;
+    void text;
+    throw new Error(
+      `uiType is not yet implemented; UI automation is reserved for Sprint 60 Phase 5 Story 5.5.`,
+    );
+  }
+
+  /** Find UI elements matching `selector`. */
+  async uiFind(
+    selector: string,
+    options: {
+      windowTitle?: string;
+      findTimeoutMs?: number;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<Array<{ selector: string; is_enabled: boolean; bounds?: { x: number; y: number; w: number; h: number } }>> {
+    void options;
+    void selector;
+    throw new Error(
+      `uiFind is not yet implemented; UI automation is reserved for Sprint 60 Phase 5 Story 5.5.`,
+    );
+  }
 }
 
 // ── Internal Helpers ───────────────────────────────────────────────
