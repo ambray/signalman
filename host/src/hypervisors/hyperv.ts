@@ -597,28 +597,54 @@ SELECT * FROM __InstanceModificationEvent WITHIN 1
   async waitForHeartbeat(handle: VMHandle, timeoutMs: number): Promise<boolean> {
     const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
     const safeTimeout = sanitizeTimeout(timeoutMs);
-    const pollIntervalMs = 2_000;
-    const deadline = Date.now() + safeTimeout;
+    // Pure event-driven wait, modelled on `waitForStableState` above.
+    // Subscribe to `Msvm_ComputerSystem` modification indications for
+    // this VM (the heartbeat status surfaces as a property change on
+    // the same VM CIM instance) and re-check `(Get-VM).Heartbeat`
+    // each time the broker delivers an indication. No Start-Sleep,
+    // no Get-Date deadline — the outer ps() process has the dead-man
+    // ceiling, that's the only safety net needed and it exists only
+    // for catastrophic CIM-broker failure, not for coordination.
+    //
+    // The "ready" condition is preserved: heartbeat string equals
+    // 'OkApplicationsHealthy' (Hyper-V Heartbeat Service running and
+    // responsive). Any other value, including throws while the VM is
+    // still mid-boot, means "not yet" and we wait for the next event.
+    //
+    // Returns 'true' when ready, 'false' when the dead-man timeout
+    // fires (no heartbeat indication delivered within the window).
+    // Maps the PowerShell exit-code-style payload to a boolean here
+    // so callers' contract is unchanged.
+    const result = await ps(`
+      $safeName = '${safeName}'
+      $ready = 'OkApplicationsHealthy'
+      $current = $null
+      try { $current = (Get-VM -Name $safeName).Heartbeat.ToString() } catch {}
+      if ($current -eq $ready) { 'READY'; return }
 
-    while (Date.now() < deadline) {
+      $query = @"
+SELECT * FROM __InstanceModificationEvent WITHIN 1
+  WHERE TargetInstance ISA 'Msvm_ComputerSystem'
+    AND TargetInstance.ElementName = '${safeName}'
+"@
+      $sourceId = "signalman-vmheartbeat-$([guid]::NewGuid())"
+      Register-CimIndicationEvent -Query $query -Namespace 'root\\virtualization\\v2' -SourceIdentifier $sourceId | Out-Null
       try {
-        const heartbeat = await ps(
-          `(Get-VM -Name '${safeName}').Heartbeat.ToString()`,
-          10_000,
-        );
-        if (heartbeat === "OkApplicationsHealthy") {
-          return true;
+        while ($true) {
+          # Wait-Event with no -Timeout blocks until the CIM broker
+          # delivers the next indication. Event-driven, no poll. The
+          # outer ps() ceiling is the dead-man on the whole call.
+          Wait-Event -SourceIdentifier $sourceId | Out-Null
+          Remove-Event -SourceIdentifier $sourceId -ErrorAction SilentlyContinue
+          $current = $null
+          try { $current = (Get-VM -Name $safeName).Heartbeat.ToString() } catch {}
+          if ($current -eq $ready) { 'READY'; return }
         }
-      } catch {
-        // VM may not be running yet; keep polling
+      } finally {
+        Unregister-Event -SourceIdentifier $sourceId -ErrorAction SilentlyContinue
       }
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) break;
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.min(pollIntervalMs, remaining)),
-      );
-    }
-    return false;
+    `, safeTimeout);
+    return result.trim() === "READY";
   }
 
   async setVmMemory(handle: VMHandle, memoryMB: number): Promise<void> {
