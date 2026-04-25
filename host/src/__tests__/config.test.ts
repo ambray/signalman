@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { defaultConfig } from '../config.js';
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { defaultConfig, loadConfig } from '../config.js';
 
 describe('defaultConfig', () => {
   it('returns valid config structure', () => {
@@ -48,5 +51,114 @@ describe('defaultConfig', () => {
   it('has no guest credentials by default', () => {
     const config = defaultConfig();
     expect(config.hypervisor.guestCredentials).toBeUndefined();
+  });
+});
+
+// ── guestAgent.tls block ──────────────────────────────────────────
+
+describe('loadConfig — guestAgent.tls', () => {
+  let tmpDir: string;
+  const savedEnv: Record<string, string | undefined> = {};
+  const TLS_ENV_KEYS = [
+    'SIGNALMAN_GUEST_TLS',
+    'SIGNALMAN_GUEST_CA',
+    'SIGNALMAN_GUEST_CERT',
+    'SIGNALMAN_GUEST_KEY',
+    'SIGNALMAN_CONFIG',
+  ] as const;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'signalman-cfg-'));
+    for (const k of TLS_ENV_KEYS) {
+      savedEnv[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    for (const k of TLS_ENV_KEYS) {
+      if (savedEnv[k] === undefined) {
+        delete process.env[k];
+      } else {
+        process.env[k] = savedEnv[k];
+      }
+    }
+  });
+
+  it('loads guestAgent.tls block from YAML', () => {
+    const cfgPath = path.join(tmpDir, 'signalman.yaml');
+    fs.writeFileSync(
+      cfgPath,
+      [
+        'guestAgent:',
+        '  defaultPort: 50051',
+        '  tls:',
+        '    enabled: true',
+        '    caPath: /etc/signalman/ca.pem',
+        '    certPath: /etc/signalman/host.pem',
+        '    keyPath: /etc/signalman/host.key',
+      ].join('\n'),
+    );
+    const cfg = loadConfig(cfgPath);
+    expect(cfg.guestAgent.tls.enabled).toBe(true);
+    expect(cfg.guestAgent.tls.caPath).toBe('/etc/signalman/ca.pem');
+    expect(cfg.guestAgent.tls.certPath).toBe('/etc/signalman/host.pem');
+    expect(cfg.guestAgent.tls.keyPath).toBe('/etc/signalman/host.key');
+  });
+
+  it('allows TLS block with only caPath (server-auth-only)', () => {
+    const cfgPath = path.join(tmpDir, 'signalman.yaml');
+    fs.writeFileSync(
+      cfgPath,
+      [
+        'guestAgent:',
+        '  tls:',
+        '    enabled: true',
+        '    caPath: /etc/signalman/ca.pem',
+      ].join('\n'),
+    );
+    const cfg = loadConfig(cfgPath);
+    expect(cfg.guestAgent.tls.enabled).toBe(true);
+    expect(cfg.guestAgent.tls.caPath).toBe('/etc/signalman/ca.pem');
+    expect(cfg.guestAgent.tls.certPath).toBeUndefined();
+    expect(cfg.guestAgent.tls.keyPath).toBeUndefined();
+  });
+
+  it('environment variables override YAML', () => {
+    const cfgPath = path.join(tmpDir, 'signalman.yaml');
+    fs.writeFileSync(
+      cfgPath,
+      [
+        'guestAgent:',
+        '  tls:',
+        '    enabled: false',
+        '    caPath: /yaml/ca.pem',
+      ].join('\n'),
+    );
+    process.env.SIGNALMAN_GUEST_TLS = 'true';
+    process.env.SIGNALMAN_GUEST_CA = '/env/ca.pem';
+    process.env.SIGNALMAN_GUEST_CERT = '/env/host.pem';
+    process.env.SIGNALMAN_GUEST_KEY = '/env/host.key';
+
+    const cfg = loadConfig(cfgPath);
+    expect(cfg.guestAgent.tls.enabled).toBe(true);
+    expect(cfg.guestAgent.tls.caPath).toBe('/env/ca.pem');
+    expect(cfg.guestAgent.tls.certPath).toBe('/env/host.pem');
+    expect(cfg.guestAgent.tls.keyPath).toBe('/env/host.key');
+  });
+
+  it('preserves existing tls fields when YAML omits them', () => {
+    const cfgPath = path.join(tmpDir, 'signalman.yaml');
+    fs.writeFileSync(
+      cfgPath,
+      [
+        'hypervisor:',
+        '  backend: hyperv',
+      ].join('\n'),
+    );
+    const cfg = loadConfig(cfgPath);
+    expect(cfg.guestAgent.tls.enabled).toBe(false);
+    expect(cfg.guestAgent.tls.caPath).toBeUndefined();
   });
 });
