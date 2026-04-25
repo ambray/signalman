@@ -28,8 +28,13 @@ import YAML from "yaml";
 export interface SignalmanConfig {
   /** Hypervisor backend settings. */
   hypervisor: {
-    /** Which hypervisor backend to use. */
-    backend: "hyperv" | "vmware";
+    /** Which hypervisor backend to prefer.
+     *
+     * - "service": the signalman-service daemon (preferred-when-available, P1)
+     * - "hyperv": direct PowerShell + gsudo elevation
+     * - "vmware": VMware Workstation via vmrun
+     */
+    backend: "service" | "hyperv" | "vmware";
     /** Path to vmrun executable (VMware only). */
     vmrunPath?: string;
     /** Default guest credentials for hypervisor-level operations. */
@@ -262,7 +267,7 @@ function applyEnvOverrides(config: SignalmanConfig): SignalmanConfig {
   const result = structuredClone(config);
 
   const backend = process.env.SIGNALMAN_BACKEND;
-  if (backend === "hyperv" || backend === "vmware") {
+  if (backend === "hyperv" || backend === "vmware" || backend === "service") {
     result.hypervisor.backend = backend;
   }
 
