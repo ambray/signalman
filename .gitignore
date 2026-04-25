@@ -7,6 +7,8 @@ hub/node_modules/
 host/dist/
 hub/dist/
 guest/target/
+# Cargo workspace target (P1 service crate)
+target/
 
 # OS files
 .DS_Store

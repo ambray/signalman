@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Signalman service MSI definition.
+
+  Builds an installer that:
+    1. Drops signalman-service.exe under %ProgramFiles%\Signalman\service\
+    2. Invokes the binary's `install` sub-command on first install
+       (which registers the service with the SCM and generates dev certs).
+    3. Invokes `uninstall` on removal.
+
+  This file is a hand-rolled WiX descriptor. To compile:
+
+    candle -arch x64 product.wxs
+    light -ext WixUtilExtension product.wixobj -o signalman-service.msi
+
+  -or- via cargo-wix (auto-detects this file when run from the
+  service crate root):
+
+    cargo wix init   # one-time
+    cargo wix        # build the MSI
+
+  v0.1.0 ships dev-signed only. Code signing is a separate pickup.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <Product Id="*"
+           Name="Signalman Service"
+           Language="1033"
+           Version="0.1.0.0"
+           Manufacturer="Signalman"
+           UpgradeCode="6f7e6e6c-9a2f-4cda-8e2d-c4a2a8d6e3b1">
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Description="Signalman Hyper-V Control Plane service"
+             Manufacturer="Signalman" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Signalman Service is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="ProductFeature" Title="Signalman Service" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+    </Feature>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Signalman">
+          <Directory Id="ServiceFolder" Name="service" />
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <ComponentGroup Id="ProductComponents" Directory="ServiceFolder">
+      <Component Id="ServiceBinary" Guid="3a4d3b27-d7e7-49a2-9b4d-0c87b2f6e3a5">
+        <File Id="SignalmanServiceExe"
+              Source="$(var.BinDir)\signalman-service.exe"
+              KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- Custom actions: register / unregister with the SCM and ensure
+         certs.  We use the binary's own install/uninstall sub-commands
+         rather than the WiX ServiceInstall element so the cert-
+         provisioning logic in main.rs stays in one place. -->
+    <CustomAction Id="DoServiceInstall"
+                  FileKey="SignalmanServiceExe"
+                  ExeCommand="install"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <CustomAction Id="DoServiceUninstall"
+                  FileKey="SignalmanServiceExe"
+                  ExeCommand="uninstall"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="DoServiceStart"
+                  FileKey="SignalmanServiceExe"
+                  ExeCommand="start"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="DoServiceInstall" After="InstallFiles">NOT Installed</Custom>
+      <Custom Action="DoServiceStart" After="DoServiceInstall">NOT Installed</Custom>
+      <Custom Action="DoServiceUninstall" Before="RemoveFiles">Installed AND NOT UPGRADINGPRODUCTCODE</Custom>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>
