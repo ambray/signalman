@@ -206,23 +206,30 @@ export function loadScenario(scenarioDir: string): {
   narrative: Narrative | null;
 } {
   // Resolve to absolute path and prevent path traversal outside the
-  // project's scenarios/ directory.  We walk up from __dirname (which
-  // lives inside host/src/scenarios/) to the project root, then anchor
-  // to <projectRoot>/scenarios.
+  // project's scenarios root. v0.1.0 supports both the canonical
+  // `.signalman/scenarios/` layout and the legacy top-level
+  // `scenarios/` directory (via project-layout.ts). Either root is
+  // acceptable; anything else is rejected as path traversal.
   const projectRoot = path.resolve(__dirname, "..", "..", "..");
-  const scenariosRoot = path.join(projectRoot, "scenarios");
+  const candidateRoots = [
+    path.join(projectRoot, ".signalman", "scenarios"),
+    path.join(projectRoot, "scenarios"),
+  ];
   const resolvedDir = path.resolve(scenarioDir);
 
   // Normalize both paths so that trailing separators and case (on
   // Windows NTFS, which is case-insensitive) don't cause false negatives.
   const lower = process.platform === "win32" ? (s: string) => s.toLowerCase() : (s: string) => s;
   const normalizedResolved = lower(path.normalize(resolvedDir)) + path.sep;
-  const normalizedRoot = lower(path.normalize(scenariosRoot)) + path.sep;
+  const insideAnyRoot = candidateRoots.some((root) => {
+    const normalizedRoot = lower(path.normalize(root)) + path.sep;
+    return normalizedResolved.startsWith(normalizedRoot);
+  });
 
-  if (!normalizedResolved.startsWith(normalizedRoot)) {
+  if (!insideAnyRoot) {
     throw new Error(
-      `Scenario directory "${resolvedDir}" resolves outside the allowed scenarios directory "${scenariosRoot}". ` +
-      `Path traversal is not allowed.`,
+      `Scenario directory "${resolvedDir}" resolves outside the allowed scenarios directories ` +
+      `(${candidateRoots.join(", ")}). Path traversal is not allowed.`,
     );
   }
 

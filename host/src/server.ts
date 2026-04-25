@@ -5,6 +5,14 @@
  * Provides VM management tools to Claude Code and other MCP-compatible clients.
  * Discovers available hypervisor backends and exposes a unified tool interface.
  *
+ * v0.1.0 (P0 MCP Surface Inversion, see docs/design/p0-mcp-surface.md):
+ *   - Six high-level verbs (`signalman_list`, `signalman_describe`,
+ *     `signalman_plan`, `signalman_run`, `signalman_record`,
+ *     `signalman_status`) are the default agent surface.
+ *   - The legacy ~25 fine-grained tools live behind a
+ *     `signalman_advanced_` prefix. Their old names remain registered
+ *     as deprecated aliases for one release; v0.2.0 removes them.
+ *
  * Tool implementations live in tools/*.ts; this file handles MCP server setup,
  * backend discovery, and tool registration.
  *
@@ -22,6 +30,13 @@ import { HyperVBackend } from "./hypervisors/hyperv.js";
 import { VmwareBackend } from "./hypervisors/vmware.js";
 import { loadConfig } from "./config.js";
 import { createAllTools } from "./tools/index.js";
+import { runList } from "./verbs/list.js";
+import { runDescribe } from "./verbs/describe.js";
+import { runPlan } from "./verbs/plan.js";
+import { runRun } from "./verbs/run.js";
+import { runStatus } from "./verbs/status.js";
+import { runRecord } from "./verbs/record.js";
+import { createDefaultExecutor } from "./verbs/default-executor.js";
 
 // ── Backend Discovery ─────────────────────────────────────────────
 
@@ -36,7 +51,6 @@ function buildBackendList(preferredBackend?: string): HypervisorBackend[] {
   const config = loadConfig();
   const vmware = new VmwareBackend({
     vmrunPath: config.hypervisor.vmrunPath,
-    vmDirs: config.hypervisor.vmDirs,
     guestUser: config.hypervisor.guestCredentials?.username,
     guestPass: config.hypervisor.guestCredentials?.password,
   });
@@ -75,7 +89,7 @@ const server = new McpServer({
   version: "0.1.0",
 });
 
-// ── Register Tools from Modular Definitions ───────────────────────
+// ── JSON Schema → Zod bridge ──────────────────────────────────────
 
 /**
  * Convert a JSON Schema property definition to a Zod type.
@@ -150,7 +164,25 @@ function jsonSchemaPropertyToZod(
   return field;
 }
 
+// ── Advanced tools (renamed) + deprecated aliases ─────────────────
+
 const allTools = createAllTools(getBackend);
+
+/**
+ * One-time deprecation warning per legacy tool name. The first call
+ * to any old `vm_*` / `docker_*` / `kernel_*` / `driver_*` name
+ * prints a warning to stderr; subsequent calls don't repeat. v0.2.0
+ * drops the legacy names entirely.
+ */
+const warnedLegacyNames = new Set<string>();
+function warnLegacyToolName(legacy: string, replacement: string) {
+  if (warnedLegacyNames.has(legacy)) return;
+  warnedLegacyNames.add(legacy);
+  console.error(
+    `[signalman] DEPRECATION: tool "${legacy}" is renamed to "${replacement}" in v0.1.0; ` +
+      `the old name is removed in v0.2.0. Update Claude Code permissions and any direct callers.`,
+  );
+}
 
 for (const tool of allTools) {
   const props = (tool.inputSchema.properties ?? {}) as Record<
@@ -165,16 +197,117 @@ for (const tool of allTools) {
   }
 
   const handler = tool.handler;
-  server.tool(tool.name, tool.description, zodShape, async (params) => {
-    const result = await handler(params as Record<string, unknown>);
+  const advancedName = `signalman_advanced_${tool.name}`;
+  const wrappedHandler = async (params: Record<string, unknown>) => {
+    const result = await handler(params);
     return {
       content: result.content.map((c) => ({
         type: c.type as "text",
         text: c.text ?? "",
       })),
     };
-  });
+  };
+
+  server.tool(advancedName, tool.description, zodShape, wrappedHandler);
+
+  // Deprecated alias under the old name. Emits a one-time warning per
+  // process so legacy callers still work for one release.
+  server.tool(
+    tool.name,
+    `[DEPRECATED — renamed to ${advancedName} in v0.1.0; old name removed in v0.2.0] ${tool.description}`,
+    zodShape,
+    async (params: Record<string, unknown>) => {
+      warnLegacyToolName(tool.name, advancedName);
+      return wrappedHandler(params);
+    },
+  );
 }
+
+// ── Six high-level verbs ──────────────────────────────────────────
+
+const defaultRunExecutor = createDefaultExecutor();
+
+/**
+ * Wrap a verb handler in an MCP-shaped result so tool registration
+ * stays one-line per verb. Errors thrown by the verb implementation
+ * propagate as MCP-level `isError: true` results.
+ */
+function asMcpResult(value: unknown) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
+  };
+}
+
+server.tool(
+  "signalman_list",
+  "List all scenarios under .signalman/scenarios/. Returns id, name, tags, scenario_hash, and last_run if available.",
+  {
+    tag: z.string().optional().describe("Filter by tag."),
+    pattern: z.string().optional().describe("Glob pattern matching the scenario id (e.g. 'example/**')."),
+  },
+  async (params) => asMcpResult(runList(params as { tag?: string; pattern?: string })),
+);
+
+server.tool(
+  "signalman_describe",
+  "Return the contents of a scenario without executing it. Returns parsed setup, assertions, and workflow markdown.",
+  {
+    id: z.string().describe("Scenario id (e.g. 'example/v2/network-egress')."),
+  },
+  async (params) => asMcpResult(runDescribe(params as { id: string })),
+);
+
+server.tool(
+  "signalman_plan",
+  "Dry-run a scenario: load, validate, expand parameters, return resolved step plan and affected resources. No state mutation.",
+  {
+    id: z.string().describe("Scenario id."),
+    parameters: z.record(z.string(), z.unknown()).optional().describe("Caller-supplied parameter overrides."),
+  },
+  async (params) =>
+    asMcpResult(runPlan(params as { id: string; parameters?: Record<string, unknown> })),
+);
+
+server.tool(
+  "signalman_run",
+  "Execute a scenario. Returns a run handle synchronously; events stream via signalman_status long-poll.",
+  {
+    id: z.string().describe("Scenario id."),
+    parameters: z.record(z.string(), z.unknown()).optional().describe("Caller-supplied parameter overrides."),
+    network_class: z.enum(["isolated", "nat", "internet"]).optional().describe("Reserved for P4 — declared, not enforced in v0.1.0."),
+  },
+  async (params) =>
+    asMcpResult(
+      await runRun(
+        params as { id: string; parameters?: Record<string, unknown>; network_class?: "isolated" | "nat" | "internet" },
+        defaultRunExecutor,
+      ),
+    ),
+);
+
+server.tool(
+  "signalman_status",
+  "Environment + run status. Without run_id: host health and recent runs. With run_id: drain events and (when terminal) full envelope.",
+  {
+    run_id: z.string().optional().describe("Run handle from signalman_run."),
+    since_event_seq: z.number().int().min(0).optional().describe("Drain events with seq >= this value."),
+    wait_ms: z.number().int().min(0).max(30_000).optional().describe("Long-poll up to this many ms for the next event."),
+  },
+  async (params) =>
+    asMcpResult(
+      await runStatus(params as { run_id?: string; since_event_seq?: number; wait_ms?: number }),
+    ),
+);
+
+server.tool(
+  "signalman_record",
+  "[v0.2.0 stub] Capture the next N MCP calls into .signalman/recordings/<run_id>/ as a candidate scenario.",
+  {
+    name: z.string().describe("Scenario name to record under."),
+    duration_seconds: z.number().int().min(1).optional().describe("Max recording duration; default 600s."),
+  },
+  async (params) => asMcpResult(runRecord(params as { name: string; duration_seconds?: number })),
+);
 
 // ── Start Server ──────────────────────────────────────────────────
 
@@ -184,7 +317,15 @@ async function main() {
   console.error("[signalman] Host MCP server started");
 }
 
-main().catch((err) => {
-  console.error("[signalman] Fatal:", err);
-  process.exit(1);
-});
+// Only run main() if this file is the entry point (not when imported by tests).
+const isEntryPoint =
+  import.meta.url === `file://${process.argv[1]?.replace(/\\/g, "/")}` ||
+  process.argv[1]?.endsWith("server.ts") ||
+  process.argv[1]?.endsWith("server.js");
+
+if (isEntryPoint) {
+  main().catch((err) => {
+    console.error("[signalman] Fatal:", err);
+    process.exit(1);
+  });
+}
