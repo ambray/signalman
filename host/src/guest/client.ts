@@ -13,15 +13,27 @@
 
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 // ── Types ──────────────────────────────────────────────────────────
 
-/** TLS options for connecting to the guest agent. */
+/**
+ * TLS options for connecting to the guest agent.
+ *
+ * - Provide just `caPath` to verify a guest server cert against a private CA
+ *   (server-auth-only TLS).
+ * - Provide all three to perform full mTLS — the host presents `certPath`/
+ *   `keyPath` as its identity and validates the server against `caPath`.
+ *
+ * If a TLS-prefixed endpoint URL (`https://...`) is passed without any
+ * `caPath`, system trust roots are used (suitable for public CAs but not
+ * for the typical Signalman in-VM deployment).
+ */
 export interface TlsOptions {
-  /** Path to CA certificate (PEM). */
-  caPath: string;
+  /** Path to CA certificate (PEM). When omitted, system roots are used. */
+  caPath?: string;
   /** Path to client certificate (PEM) for mTLS. */
   certPath?: string;
   /** Path to client private key (PEM) for mTLS. */
@@ -276,8 +288,21 @@ export class GuestAgentClient {
   /**
    * Creates a new GuestAgentClient.
    *
-   * @param address - The guest agent IP address or hostname.
-   * @param port - The guest agent gRPC port (default 50051).
+   * Two address forms are accepted:
+   * 1. A bare host (e.g. `"172.30.0.10"`) plus a `port` argument. TLS is
+   *    used iff `tlsOptions` is supplied.
+   * 2. A URL string with `grpc://`, `http://`, or `https://` scheme. The
+   *    `https://` prefix forces TLS even when no `tlsOptions.caPath` is
+   *    given (system roots are then used).
+   *
+   * mTLS is requested by supplying both `certPath` and `keyPath` in
+   * `tlsOptions` — the agent will reject the connection at TLS handshake
+   * time if no client cert is presented and the agent was started with
+   * `--tls-ca`.
+   *
+   * @param address - The guest agent IP/hostname or `grpc[s]://...` URL.
+   * @param port - The guest agent gRPC port (default 50051). Ignored when
+   *               `address` already contains a port.
    * @param tlsOptions - Optional TLS configuration for secure connections.
    * @param clientOptions - Optional timeout, retry, and keepalive settings.
    */
@@ -287,17 +312,33 @@ export class GuestAgentClient {
     tlsOptions?: TlsOptions,
     clientOptions?: ClientOptions,
   ) {
-    this.address = `${address}:${port}`;
+    const parsed = parseEndpoint(address, port);
+    this.address = parsed.target;
     this.options = { ...DEFAULT_OPTIONS, ...clientOptions };
 
+    // TLS is requested if the endpoint URL declares it, OR if the caller
+    // supplied any TLS material. Either path produces an Ssl credential.
+    const wantsTls = parsed.tls || tlsOptions !== undefined;
+
     let credentials: grpc.ChannelCredentials;
-    if (tlsOptions) {
-      const fs = await_import_fs();
-      const rootCert = fs.readFileSync(tlsOptions.caPath);
-      const clientCert = tlsOptions.certPath
+    if (wantsTls) {
+      const rootCert = tlsOptions?.caPath
+        ? fs.readFileSync(tlsOptions.caPath)
+        : null;
+      // mTLS requires *both* client cert and key. Supplying only one is a
+      // configuration error — surface it now rather than at handshake.
+      if (
+        (tlsOptions?.certPath && !tlsOptions.keyPath) ||
+        (tlsOptions?.keyPath && !tlsOptions.certPath)
+      ) {
+        throw new Error(
+          "GuestAgentClient TLS: certPath and keyPath must be specified together",
+        );
+      }
+      const clientCert = tlsOptions?.certPath
         ? fs.readFileSync(tlsOptions.certPath)
         : null;
-      const clientKey = tlsOptions.keyPath
+      const clientKey = tlsOptions?.keyPath
         ? fs.readFileSync(tlsOptions.keyPath)
         : null;
       credentials = grpc.credentials.createSsl(
@@ -697,11 +738,60 @@ export class GuestAgentClient {
 
 // ── Internal Helpers ───────────────────────────────────────────────
 
+/** Result of parsing an endpoint string into a gRPC target + TLS hint. */
+interface ParsedEndpoint {
+  /** `host:port` ready to hand to `@grpc/grpc-js`. */
+  target: string;
+  /** Whether the URL scheme requested TLS (`https://` or `grpcs://`). */
+  tls: boolean;
+}
+
 /**
- * Synchronously imports the fs module. Avoids top-level import so the
- * module can be loaded in environments where fs is not needed.
+ * Parses an address into a gRPC target string and a TLS-hint flag.
+ *
+ * Accepts:
+ *   - bare host: `"172.30.0.10"` -> uses the supplied default port.
+ *   - host:port: `"vm.local:51000"` -> uses the embedded port verbatim.
+ *   - URL: `"https://vm.local:50051"` -> sets `tls=true`; uses port 443
+ *     by default if not given (matching @grpc/grpc-js URL semantics).
+ *
+ * Anything else falls through as a plain string with no TLS hint.
  */
-function await_import_fs(): typeof import("node:fs") {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require("node:fs");
+export function parseEndpoint(
+  address: string,
+  defaultPort: number,
+): ParsedEndpoint {
+  // URL scheme branch — only attempt URL parsing when an explicit scheme
+  // is present so we do not misinterpret IPv6 host:port pairs.
+  const schemeMatch = /^([a-z][a-z0-9+.-]*):\/\//i.exec(address);
+  if (schemeMatch) {
+    const scheme = schemeMatch[1].toLowerCase();
+    let url: URL;
+    try {
+      url = new URL(address);
+    } catch {
+      return { target: address, tls: scheme === "https" || scheme === "grpcs" };
+    }
+    const tls = scheme === "https" || scheme === "grpcs";
+    const port = url.port
+      ? Number(url.port)
+      : tls
+        ? 443
+        : defaultPort;
+    return { target: `${url.hostname}:${port}`, tls };
+  }
+
+  // Bare host or host:port. We assume an embedded port is present iff
+  // there is exactly one colon AND the right side is all digits — this
+  // avoids treating IPv6 addresses (which have many colons) as host:port.
+  const lastColon = address.lastIndexOf(":");
+  const firstColon = address.indexOf(":");
+  if (
+    lastColon !== -1 &&
+    lastColon === firstColon &&
+    /^\d+$/.test(address.slice(lastColon + 1))
+  ) {
+    return { target: address, tls: false };
+  }
+  return { target: `${address}:${defaultPort}`, tls: false };
 }
