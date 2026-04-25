@@ -1,0 +1,13 @@
+# Built-in template: win11-base
+# Extracted from host/src/scenarios/templates.ts (P0 MCP Surface Inversion).
+#
+# Loaded by host/src/scenarios/templates.ts when present; falls back to
+# the in-code default if absent.
+
+name: win11-base
+generation: 2
+memoryMB: 4096
+processorCount: 2
+networkSwitch: "Default Switch"
+checkpoints:
+  clean: "Freshly installed Windows 11 with updates"

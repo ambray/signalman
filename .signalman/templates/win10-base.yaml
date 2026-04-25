@@ -1,0 +1,10 @@
+# Built-in template: win10-base
+# Extracted from host/src/scenarios/templates.ts (P0 MCP Surface Inversion).
+
+name: win10-base
+generation: 2
+memoryMB: 4096
+processorCount: 2
+networkSwitch: "Default Switch"
+checkpoints:
+  clean: "Freshly installed Windows 10 with updates"

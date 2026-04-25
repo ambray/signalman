@@ -6,7 +6,9 @@
  */
 
 import * as fs from "node:fs";
+import * as path from "node:path";
 import * as yaml from "yaml";
+import { resolveLayout } from "./project-layout.js";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -76,24 +78,54 @@ function defaultTemplates(): Map<string, VmTemplate> {
 /**
  * Load VM templates from a YAML config file, merged with defaults.
  *
- * If no configPath is provided, returns only the built-in defaults.
- * File format:
+ * Resolution (in order, first wins per template name):
+ *   1. Built-in defaults (win11-base, win10-base, win11-dev).
+ *   2. `.signalman/templates/<name>.yaml` files (one template per file)
+ *      — extracted from this file in v0.1.0; see design doc §2.
+ *   3. The optional `configPath` (legacy multi-template YAML); kept for
+ *      callers that pre-date the .signalman/templates layout.
+ *
+ * Per-file YAML format (preferred):
  * ```yaml
- * templates:
- *   - name: custom-vm
- *     generation: 2
- *     memoryMB: 8192
- *     processorCount: 4
- *     networkSwitch: "Custom Switch"
- *     checkpoints:
- *       clean: "Fresh install"
+ * name: custom-vm
+ * generation: 2
+ * memoryMB: 8192
+ * processorCount: 4
+ * networkSwitch: "Custom Switch"
+ * checkpoints:
+ *   clean: "Fresh install"
  * ```
  *
- * @param configPath - Optional path to a YAML file with template definitions.
+ * @param configPath - Optional legacy multi-template YAML file path.
  * @returns Map of template name to VmTemplate.
  */
 export function loadTemplates(configPath?: string): Map<string, VmTemplate> {
   const templates = defaultTemplates();
+
+  // .signalman/templates/<name>.yaml — one template per file.
+  const layout = resolveLayout();
+  if (layout.templatesDir && fs.existsSync(layout.templatesDir)) {
+    const entries = fs.readdirSync(layout.templatesDir, { withFileTypes: true });
+    for (const e of entries) {
+      if (!e.isFile() || !/\.ya?ml$/i.test(e.name)) continue;
+      const filePath = path.join(layout.templatesDir, e.name);
+      const raw = fs.readFileSync(filePath, "utf-8");
+      const parsed = yaml.parse(raw) as VmTemplate | { templates?: VmTemplate[] } | null;
+      if (parsed && typeof parsed === "object") {
+        if (Array.isArray((parsed as { templates?: VmTemplate[] }).templates)) {
+          // Multi-template file; merge each.
+          for (const tmpl of (parsed as { templates: VmTemplate[] }).templates) {
+            if (!tmpl.name) {
+              throw new Error(`Template entry missing required 'name' field in ${filePath}`);
+            }
+            templates.set(tmpl.name, tmpl);
+          }
+        } else if ((parsed as VmTemplate).name) {
+          templates.set((parsed as VmTemplate).name, parsed as VmTemplate);
+        }
+      }
+    }
+  }
 
   if (configPath) {
     if (!fs.existsSync(configPath)) {

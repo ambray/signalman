@@ -1,0 +1,17 @@
+# Signalman host config — v0.1.0 .signalman/ layout.
+#
+# Replaces the legacy top-level signalman.yaml. Same schema (see
+# host/src/config.ts).
+
+hypervisor:
+  backend: hyperv
+
+guestAgent:
+  defaultPort: 50051
+  tls:
+    enabled: false
+
+scenarios:
+  dir: ./.signalman/scenarios
+  outputDir: ./output
+  screenshotDir: ./output/screenshots
