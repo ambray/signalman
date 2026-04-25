@@ -7,13 +7,13 @@
 
 import type { ToolDefinition, ToolResult } from "./types.js";
 import type { HypervisorBackend } from "../hypervisors/interface.js";
-import { cacheVM, resolveVM } from "../vm-cache.js";
+import { cacheVM, globalVmCache, resolveVM } from "../vm-cache.js";
 
 /**
  * Creates VM lifecycle tool definitions bound to a backend resolver.
  *
  * @param getBackend - Async function that returns the active hypervisor backend.
- * @returns Array of ToolDefinition objects for vm_list, vm_start, vm_stop, vm_status.
+ * @returns Array of ToolDefinition objects for vm_list, vm_start, vm_stop, vm_delete, vm_status.
  */
 export function createVmLifecycleTools(
   getBackend: () => Promise<HypervisorBackend>,
@@ -92,6 +92,31 @@ export function createVmLifecycleTools(
         await backend.stopVM(handle, force);
         return {
           content: [{ type: "text", text: `VM '${name}' stopped.` }],
+        };
+      },
+    },
+    {
+      name: "vm_delete",
+      description: "Delete a virtual machine (irreversible)",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const name = params.name as string;
+        const backend = await getBackend();
+        const handle = await resolveVM(backend, name);
+        await backend.deleteVM(handle);
+        // Evict the cached handle — the underlying VM is gone, so any
+        // subsequent lookup must refresh from the backend rather than
+        // returning a handle pointing at a deleted resource.
+        globalVmCache.invalidate(name);
+        return {
+          content: [{ type: "text", text: `VM '${name}' deleted.` }],
         };
       },
     },

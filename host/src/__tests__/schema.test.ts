@@ -399,6 +399,27 @@ describe("exported zod schemas", () => {
     expect(parsed.name).toBe("x");
   });
 
+  it("vmConfigSchema defaults warm_checkpoint to true", () => {
+    // P2 follow-up: warm-checkpoint is opt-out, not opt-in. Scenarios
+    // that don't set the field inherit the fast restore semantics.
+    const parsed = vmConfigSchema.parse({
+      name: "x",
+      template: "win11",
+      guest_agent_port: 50051,
+    });
+    expect(parsed.warm_checkpoint).toBe(true);
+  });
+
+  it("vmConfigSchema accepts warm_checkpoint: false (explicit opt-out)", () => {
+    const parsed = vmConfigSchema.parse({
+      name: "x",
+      template: "win11",
+      guest_agent_port: 50051,
+      warm_checkpoint: false,
+    });
+    expect(parsed.warm_checkpoint).toBe(false);
+  });
+
   it("kernelDebugConfigSchema parses a standalone kernel_debug", () => {
     const parsed = kernelDebugConfigSchema.parse({
       enabled: true,
