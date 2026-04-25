@@ -1,0 +1,244 @@
+syntax = "proto3";
+
+package signalman.service;
+
+// Signalman host control-plane service.
+//
+// This service mirrors the host-side `HypervisorBackend` TypeScript
+// interface so a privileged daemon can perform hypervisor operations
+// on behalf of unelevated clients, replacing per-call gsudo prompts
+// with a one-time install-time elevation.
+//
+// Wire shape is hypervisor-agnostic by design — `backend` strings
+// are opaque to the protocol. v0.1.0 ships a Hyper-V dispatcher only,
+// but libvirt / vmrun dispatchers (v0.3.0+) can be added without a
+// proto break.
+
+service ControlPlane {
+  // Returns service health and the set of available backends.
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Returns the active backend name selected by service auto-discovery.
+  rpc GetActiveBackend(GetActiveBackendRequest) returns (GetActiveBackendResponse);
+
+  // ── VM Lifecycle ──────────────────────────────────────────────────
+  rpc VmCreate(VmCreateRequest) returns (VmHandleResponse);
+  rpc VmStart(VmHandleRequest) returns (Empty);
+  rpc VmStop(VmStopRequest) returns (Empty);
+  rpc VmPause(VmHandleRequest) returns (Empty);
+  rpc VmResume(VmHandleRequest) returns (Empty);
+  rpc VmDelete(VmHandleRequest) returns (Empty);
+  rpc VmGetStatus(VmHandleRequest) returns (VmStatusResponse);
+  rpc VmList(VmListRequest) returns (VmListResponse);
+
+  // ── Checkpoints ───────────────────────────────────────────────────
+  rpc CheckpointCreate(CheckpointCreateRequest) returns (CheckpointHandleResponse);
+  rpc CheckpointRestore(CheckpointHandleMessage) returns (Empty);
+  rpc CheckpointDelete(CheckpointHandleMessage) returns (Empty);
+  rpc CheckpointList(VmHandleRequest) returns (CheckpointListResponse);
+
+  // ── File Transfer (server-streaming for progress) ────────────────
+  rpc VmCopyFile(VmCopyFileRequest) returns (stream VmCopyFileEvent);
+
+  // ── Command Execution (server-streaming for incremental output) ─
+  rpc VmRunCommand(VmRunCommandRequest) returns (stream VmRunCommandEvent);
+
+  // ── Extended Operations ───────────────────────────────────────────
+  rpc VmGetIp(VmHandleRequest) returns (VmIpResponse);
+  // Server-streaming so the client can observe heartbeat polling
+  // progress without holding a unary RPC open for minutes.
+  rpc VmWaitAgent(VmWaitAgentRequest) returns (stream VmWaitAgentEvent);
+  rpc VmSetMemory(VmSetMemoryRequest) returns (Empty);
+  rpc VmSetProcessor(VmSetProcessorRequest) returns (Empty);
+
+  // Server-streaming wrapper around package install — wraps
+  // executeCommand with per-source argument construction so the
+  // client need not duplicate that logic.
+  rpc VmInstall(VmInstallRequest) returns (stream VmRunCommandEvent);
+}
+
+// ── Common ───────────────────────────────────────────────────────────
+
+message Empty {}
+
+message VmHandle {
+  string id = 1;
+  string name = 2;
+  string backend = 3;
+}
+
+message NetworkConfig {
+  string switch_name = 1;
+  string static_ip = 2;
+  string subnet_mask = 3;
+  string gateway = 4;
+}
+
+message VmConfig {
+  string name = 1;
+  string template = 2;
+  uint32 cpus = 3;
+  uint32 memory_mb = 4;
+  uint32 disk_gb = 5;
+  NetworkConfig network = 6;
+  uint32 guest_agent_port = 7;
+}
+
+message CheckpointInfo {
+  string id = 1;
+  string label = 2;
+  // RFC3339 string. The TS client parses with `new Date(...)`.
+  string created_at = 3;
+  string parent_id = 4;
+}
+
+message CheckpointHandleMessage {
+  string id = 1;
+  VmHandle vm_handle = 2;
+  string label = 3;
+}
+
+// ── Health ───────────────────────────────────────────────────────────
+
+message HealthRequest {}
+
+message HealthResponse {
+  string version = 1;
+  uint64 uptime_seconds = 2;
+  // Names of backends the service can dispatch to (e.g. "hyperv").
+  repeated string available_backends = 3;
+  string active_backend = 4;
+}
+
+message GetActiveBackendRequest {}
+message GetActiveBackendResponse { string name = 1; }
+
+// ── VM Lifecycle ─────────────────────────────────────────────────────
+
+message VmCreateRequest { VmConfig config = 1; }
+message VmHandleRequest { VmHandle handle = 1; }
+message VmHandleResponse { VmHandle handle = 1; }
+
+message VmStopRequest {
+  VmHandle handle = 1;
+  bool force = 2;
+}
+
+message VmStatusResponse {
+  VmHandle handle = 1;
+  // "stopped" | "running" | "paused" | "saved" | "unknown"
+  string state = 2;
+  string ip_address = 3;
+  bool guest_agent_reachable = 4;
+  uint64 uptime_seconds = 5;
+  uint64 memory_used_mb = 6;
+}
+
+message VmListRequest {}
+message VmListResponse { repeated VmHandle handles = 1; }
+
+// ── Checkpoints ──────────────────────────────────────────────────────
+
+message CheckpointCreateRequest {
+  VmHandle handle = 1;
+  string label = 2;
+}
+
+message CheckpointHandleResponse { CheckpointHandleMessage handle = 1; }
+
+message CheckpointListResponse { repeated CheckpointInfo checkpoints = 1; }
+
+// ── File Transfer ────────────────────────────────────────────────────
+
+message VmCopyFileRequest {
+  VmHandle handle = 1;
+  string host_path = 2;
+  string guest_path = 3;
+  // false = host -> guest; true = guest -> host
+  bool from_guest = 4;
+}
+
+message VmCopyFileEvent {
+  oneof event {
+    CopyProgress progress = 1;
+    CopyComplete complete = 2;
+  }
+}
+
+message CopyProgress {
+  uint64 bytes_transferred = 1;
+  uint64 total_bytes = 2;
+}
+
+message CopyComplete {}
+
+// ── Command Execution ────────────────────────────────────────────────
+
+message VmRunCommandRequest {
+  VmHandle handle = 1;
+  string command = 2;
+  repeated string args = 3;
+  uint32 timeout_ms = 4;
+}
+
+message VmRunCommandEvent {
+  oneof event {
+    RunStart start = 1;
+    RunOutput stdout_chunk = 2;
+    RunOutput stderr_chunk = 3;
+    RunResult result = 4;
+  }
+}
+
+message RunStart { uint64 started_at_unix_ms = 1; }
+message RunOutput { bytes data = 1; }
+
+message RunResult {
+  int32 exit_code = 1;
+  string stdout = 2;
+  string stderr = 3;
+  uint64 duration_ms = 4;
+}
+
+// ── Extended Operations ──────────────────────────────────────────────
+
+message VmIpResponse { string ip_address = 1; }
+
+message VmWaitAgentRequest {
+  VmHandle handle = 1;
+  uint32 timeout_ms = 2;
+}
+
+message VmWaitAgentEvent {
+  oneof event {
+    AgentHeartbeat heartbeat = 1;
+    AgentReady ready = 2;
+    AgentTimeout timeout = 3;
+  }
+}
+
+message AgentHeartbeat {
+  string heartbeat_state = 1;
+  uint64 elapsed_ms = 2;
+}
+
+message AgentReady {}
+message AgentTimeout {}
+
+message VmSetMemoryRequest {
+  VmHandle handle = 1;
+  uint32 memory_mb = 2;
+}
+
+message VmSetProcessorRequest {
+  VmHandle handle = 1;
+  uint32 count = 2;
+}
+
+message VmInstallRequest {
+  VmHandle handle = 1;
+  string package_id = 2;
+  // "winget" | "choco" | "direct"
+  string source = 3;
+  uint32 timeout_ms = 4;
+}
