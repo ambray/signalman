@@ -33,6 +33,8 @@ export type EnvelopeEventType =
   | "step.started"
   | "step.completed"
   | "step.failed"
+  | "step.skipped"
+  | "step.retry_started"
   | "assertion.passed"
   | "assertion.failed"
   | "vm.state_changed"
@@ -59,6 +61,21 @@ export interface EnvelopeEventInput {
   ts?: string;
   [field: string]: unknown;
 }
+
+/**
+ * Sink for live envelope events (P3.c). The runner pushes into this as
+ * scenario execution progresses, eliminating the post-hoc replay pattern
+ * that the audit C2 finding called out: previously
+ * `default-executor.ts` translated `ScenarioResult` into events *after*
+ * `runScenario` returned synchronously, so every event was dated to the
+ * same instant.
+ *
+ * Implementations are expected to be synchronous and side-effect-only —
+ * the orchestrator does not await them. The MCP path forwards into a
+ * per-run `EventQueue`; the Loom plugin's P5.3 EventBus integration
+ * forwards into Loom's EventBus.
+ */
+export type EnvelopeEventEmitter = (event: EnvelopeEventInput) => void;
 
 /** Per-assertion result row in the envelope. */
 export interface EnvelopeAssertionResult {

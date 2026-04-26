@@ -24,6 +24,7 @@ import type {
   SandboxMode,
 } from "./runner.js";
 import type { ValidatedRetryPolicy } from "./schema.js";
+import type { EnvelopeEventEmitter } from "../output/envelope.js";
 import { parseNarrative } from "./narrative.js";
 import { BreakLog } from "../kernel-debug/break-log.js";
 import { createKernelDebugToolRegistry } from "../kernel-debug/tools.js";
@@ -485,9 +486,22 @@ export class ScenarioOrchestrator {
    * Execute a complete scenario: setup, workflow, assertions, teardown.
    *
    * @param scenarioPath - Path to the scenario directory.
+   * @param emit - Optional live event emitter (P3.c). When provided, the
+   *               orchestrator pushes step lifecycle events
+   *               (`step.started`, `step.completed`, `step.failed`,
+   *               `step.skipped`, `step.retry_started`) and assertion
+   *               results (`assertion.passed`, `assertion.failed`) as
+   *               they happen — replacing the legacy retrospective-
+   *               replay pattern in `default-executor.ts`. The
+   *               `signalman.run` path forwards events into the run's
+   *               `EventQueue`; the Loom plugin's P5.3 work routes into
+   *               Loom's `EventBus`.
    * @returns The full ScenarioResult.
    */
-  async runScenario(scenarioPath: string): Promise<ScenarioResult> {
+  async runScenario(
+    scenarioPath: string,
+    emit?: EnvelopeEventEmitter,
+  ): Promise<ScenarioResult> {
     const startTime = Date.now();
     const setupResults: StepResult[] = [];
     const teardownResults: StepResult[] = [];
@@ -539,6 +553,7 @@ export class ScenarioOrchestrator {
         setupSteps,
         vmMap,
         scenarioRetry,
+        emit,
       );
       setupResults.push(...sResults);
 
@@ -653,6 +668,23 @@ export class ScenarioOrchestrator {
         }
         assertionResults = normalized;
 
+        // P3.c: emit per-assertion events so agents see results as they
+        // resolve, not just in the final envelope. Pass/fail is the
+        // discriminator; failed events carry actual + error for the
+        // consumer to render without parsing the assertion_results array.
+        for (const r of assertionResults) {
+          emit?.(
+            r.passed
+              ? { type: "assertion.passed", id: r.id }
+              : {
+                  type: "assertion.failed",
+                  id: r.id,
+                  actual: r.actual,
+                  error: r.error,
+                },
+          );
+        }
+
         const anyFailed = assertionResults.some((r) => !r.passed);
         if (anyFailed) {
           status = "failed";
@@ -661,7 +693,12 @@ export class ScenarioOrchestrator {
 
       // Execute teardown
       const teardownSteps = scenarioConfig.teardown ?? [];
-      const tResults = await this.executeTeardown(teardownSteps, vmMap);
+      const tResults = await this.executeTeardown(
+        teardownSteps,
+        vmMap,
+        scenarioRetry,
+        emit,
+      );
       teardownResults.push(...tResults);
     } catch (err) {
       status = "error";
@@ -877,15 +914,27 @@ export class ScenarioOrchestrator {
     steps: SetupStep[],
     vmMap: Map<string, VMHandle>,
     scenarioRetry?: ValidatedRetryPolicy,
+    emit?: EnvelopeEventEmitter,
   ): Promise<StepResult[]> {
     const results: StepResult[] = [];
 
-    for (const rawStep of steps) {
+    for (let stepIndex = 0; stepIndex < steps.length; stepIndex++) {
+      const rawStep = steps[stepIndex];
       // Story 5.2: substitute ${SANDBOX_MODE} etc. before dispatch so the
       // existing per-action handlers see the resolved values.
       const step = this.substituteSandboxMode(rawStep) as SetupStep;
       const vmName = (step.vm as string) ?? "";
       const startTime = Date.now();
+
+      // P3.c: emit step.started before any work begins. Live events
+      // replace the post-hoc replay in default-executor.ts; agents
+      // subscribed to signalman.status see this immediately.
+      emit?.({
+        type: "step.started",
+        step_index: stepIndex,
+        kind: step.action,
+        vm: vmName,
+      });
 
       // P3.b: resolve effective retry policy: per-step beats scenario-
       // level beats none. `count: 0` is explicit no-retry; absent
@@ -908,6 +957,18 @@ export class ScenarioOrchestrator {
           if (attempt < maxAttempts) {
             attemptFailures.push(msg);
             const delay = computeBackoff(retryPolicy!, attempt);
+            // P3.c: surface retries as their own event so consumers can
+            // see flaky-but-recovered runs without parsing attempt_failures.
+            emit?.({
+              type: "step.retry_started",
+              step_index: stepIndex,
+              kind: step.action,
+              vm: vmName,
+              attempt: attempt + 1,
+              of: maxAttempts,
+              previous_error: msg,
+              backoff_ms: delay,
+            });
             if (delay > 0) {
               await new Promise((resolve) => setTimeout(resolve, delay));
             }
@@ -931,13 +992,35 @@ export class ScenarioOrchestrator {
             ? { attempt_failures: attemptFailures }
             : {}),
         });
+        // P3.c: terminal event — completed for actual work, skipped
+        // for unknown actions. Consumers can branch on type without
+        // reading the StepResult.
+        if (outcome.status === "skipped") {
+          emit?.({
+            type: "step.skipped",
+            step_index: stepIndex,
+            kind: step.action,
+            vm: vmName,
+            reason: outcome.error,
+          });
+        } else {
+          emit?.({
+            type: "step.completed",
+            step_index: stepIndex,
+            kind: step.action,
+            vm: vmName,
+            duration_ms,
+            ...(recordAttempts ? { attempts: totalAttempts } : {}),
+          });
+        }
       } else {
+        const errMsg = lastError instanceof Error ? lastError.message : String(lastError);
         results.push({
           action: step.action,
           vm: vmName,
           status: "failed",
           duration_ms,
-          error: lastError instanceof Error ? lastError.message : String(lastError),
+          error: errMsg,
           ...(recordAttempts ? { attempts: totalAttempts } : {}),
           // attempt_failures excludes the final attempt's error since
           // it already appears in `error`; only intermediate failures
@@ -945,6 +1028,17 @@ export class ScenarioOrchestrator {
           ...(attemptFailures.length > 0
             ? { attempt_failures: attemptFailures }
             : {}),
+        });
+        // P3.c: failed terminal event with the final error and retry
+        // bookkeeping for consumers that don't ingest the full envelope.
+        emit?.({
+          type: "step.failed",
+          step_index: stepIndex,
+          kind: step.action,
+          vm: vmName,
+          duration_ms,
+          error: errMsg,
+          ...(recordAttempts ? { attempts: totalAttempts } : {}),
         });
       }
     }
@@ -1101,11 +1195,12 @@ export class ScenarioOrchestrator {
     steps: SetupStep[],
     vmMap: Map<string, VMHandle>,
     scenarioRetry?: ValidatedRetryPolicy,
+    emit?: EnvelopeEventEmitter,
   ): Promise<StepResult[]> {
     // Teardown uses the same logic as setup but swallows errors. P3.b:
     // retry policy threads through identically — flaky teardowns can
-    // also benefit from retry.
-    return this.executeSetup(steps, vmMap, scenarioRetry);
+    // also benefit from retry. P3.c: live events emit identically too.
+    return this.executeSetup(steps, vmMap, scenarioRetry, emit);
   }
 
   /**
