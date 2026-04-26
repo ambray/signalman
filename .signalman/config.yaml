@@ -15,3 +15,9 @@ scenarios:
   dir: ./.signalman/scenarios
   outputDir: ./output
   screenshotDir: ./output/screenshots
+
+# Maps logical scenario VM names to physical Hyper-V VM names.
+# Scenarios use stable names like "endpoint-1"; actual VM names vary per machine.
+vmAliases:
+  endpoint-1: "Win11x64"
+  server-2022: "Win11x64"  # no separate server VM yet; reuse

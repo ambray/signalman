@@ -1,0 +1,177 @@
+# Ospiri Driver v3 — 10l ETW Diagnostic
+#
+# Sprint 60.9 Phase B.3c.4k validation. Captures Ospiri.Driver ETW events
+# during the redirect-write-prefix-whiteout-end-to-end scenario to confirm
+# B.3c.4k (stale-context defensive reset) resolves bug 10l.
+#
+# Prerequisites in `driver-ready` checkpoint:
+#   - Trusted WDKTestCert (LocalMachine\Root)
+#   - bcdedit testsigning on
+#   - Autologon for aaron (survives reboot)
+#   - SignalmanGuest running on 172.30.0.10:50051
+#   - Firewall open on 50051
+#   - C:\Ospiri\drv\ exists
+
+name: "Ospiri Driver v3 FS 10l ETW Diagnostic"
+version: "1.0"
+tags: ["driver", "kernel", "diagnostic", "ospiri-sys", "fs-minifilter", "sprint-60.9", "10l"]
+
+vms:
+  - name: endpoint-1
+    template: windows-11-clean
+    checkpoint_restore: driver-ready
+    guest_agent_port: 50051
+    network:
+      switch: "RevnTestSwitch"
+      static_ip: "172.30.0.10"
+
+setup:
+  # 0. Pre-cleanup: stop + delete any leftover ospiri service that may
+  #    have been baked into the driver-ready checkpoint from a prior
+  #    aborted scenario run.  Both commands are idempotent:
+  #      sc stop  → 1062 if already stopped (benign)
+  #      sc delete → 1060 if service not found (benign)
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "ospiri"]
+    ignore_exit_code: true
+
+  # 1. Stage the test-signed driver binaries. Host path points at the
+  #    Release build that contains B.3c.4k.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args:
+      - "-Command"
+      - "New-Item -ItemType Directory -Force -Path 'C:\\Ospiri\\drv' | Out-Null"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Release\\drv\\drv.sys"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.sys"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Release\\drv\\drv.cat"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.cat"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Release\\drv\\drv.inf"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.inf"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\target\\debug\\silo-test-harness.exe"
+    guest_path: "C:\\Ospiri\\silo-test-harness.exe"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\target\\debug\\silo-fs-test.exe"
+    guest_path: "C:\\Ospiri\\silo-fs-test.exe"
+
+  # 2. Register ospiri as type=filesys (critical — FltMgr won't attach
+  #    a minifilter whose service type is type=kernel).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args:
+      ["create", "ospiri", "type=", "filesys", "start=", "demand",
+       "binPath=", "C:\\Ospiri\\drv\\ospiri.sys",
+       "DisplayName=", "Ospiri Observability Driver",
+       "group=", "FSFilter Activity Monitor"]
+    run_as: SYSTEM
+
+  # 3. Populate Instances regkey (mirrors drv.inf's AddReg stanza).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Inner-Instance", "/v", "Altitude", "/t", "REG_SZ", "/d", "370000", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Inner-Instance", "/v", "Flags", "/t", "REG_DWORD", "/d", "0x0", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Outer-Instance", "/v", "Altitude", "/t", "REG_SZ", "/d", "370100", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Outer-Instance", "/v", "Flags", "/t", "REG_DWORD", "/d", "0x0", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances", "/v", "DefaultInstance", "/t", "REG_SZ", "/d", "OspriFs-Inner-Instance", "/f"]
+    run_as: SYSTEM
+
+  # 4. Confirm service is registered but not yet started.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["query", "ospiri"]
+    expect_stdout: "STOPPED"
+
+  # 5. Create scripts + logs dirs via PowerShell New-Item (clean, no
+  #    cmd.exe metacharacter pitfalls).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args:
+      - "-Command"
+      - "New-Item -ItemType Directory -Force -Path 'C:\\Ospiri\\scripts' | Out-Null"
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args:
+      - "-Command"
+      - "New-Item -ItemType Directory -Force -Path 'C:\\Ospiri\\logs' | Out-Null"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    # Absolute path — the signalman-service runs as LocalSystem with CWD
+    # of C:\WINDOWS\system32, so relative paths resolve incorrectly.
+    host_path: "E:\\source\\repos\\signalman\\.claude\\worktrees\\merge-staging\\.signalman\\scenarios\\ospiri-driver-v3-fs-10l-etw\\parse-etl.ps1"
+    guest_path: "C:\\Ospiri\\scripts\\parse-etl.ps1"
+
+teardown:
+  # Stop + delete the service. sc stop on an already-stopped service
+  # returns 1062 (benign — the delete still works).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "ospiri"]
+    ignore_exit_code: true
+
+  # Roll back to driver-ready for the next run.
+  - action: vm_restore
+    vm: endpoint-1
+    checkpoint: driver-ready
+
+checkpoints:
+  before_test: true
+  on_failure: true
