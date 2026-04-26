@@ -94,29 +94,32 @@ jobs:
         working-directory: guest
         run: cargo clippy -- -D warnings
 
-  # Service crate is added in P1 (worktree-agent-a3d5e2170a2a260d8). When that
-  # worktree merges, uncomment the service-windows job below.
-  #
-  # service-windows:
-  #   runs-on: windows-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@stable
-  #       with:
-  #         targets: x86_64-pc-windows-msvc
-  #         components: rustfmt, clippy
-  #     - uses: Swatinem/rust-cache@v2
-  #       with:
-  #         workspaces: . -> target
-  #     - name: Install protoc
-  #       uses: arduino/setup-protoc@v3
-  #       with:
-  #         version: "25.x"
-  #     - name: Format check
-  #       run: cargo fmt -p signalman-service --check
-  #     - name: Build service
-  #       run: cargo build -p signalman-service --release
-  #     - name: Tests
-  #       run: cargo test -p signalman-service
-  #     - name: Clippy
-  #       run: cargo clippy -p signalman-service --all-targets -- -D warnings
+  # Hyper-V control-plane service crate (P1, merged 3828913). Re-enabled
+  # 2026-04-26 per audit A1: the comment-out marker outlived the worktree
+  # merge that produced it. Builds, tests, and clippies the service
+  # crate on a Windows runner — covers the named-pipe smoke test in
+  # service/tests/named_pipe_smoke.rs which is #![cfg(target_os = "windows")]
+  # and was not exercised in CI before this lane re-opened.
+  service-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.x"
+      - name: Format check
+        run: cargo fmt -p signalman-service --check
+      - name: Build service
+        run: cargo build -p signalman-service --release
+      - name: Tests
+        run: cargo test -p signalman-service
+      - name: Clippy
+        run: cargo clippy -p signalman-service --all-targets -- -D warnings

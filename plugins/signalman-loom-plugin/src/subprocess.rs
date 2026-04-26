@@ -20,10 +20,14 @@
 //!     events stream via Loom's [`EventBus`] (P5.3), the long-poll
 //!     contract makes timeouts well-defined. Loom's plugin host is the
 //!     outer guard until then.
-//!   * **Env-var tests are not serialized.** The two `SIGNALMAN_CMD`
-//!     manipulating tests below could race if cargo runs them in parallel.
-//!     Acceptable for v0.1.0; the P7 test-pyramid work introduces
-//!     `serial_test` (or equivalent) for env-touching tests.
+//!   * **Env-var tests are colocated to avoid intra-suite races.** The
+//!     SIGNALMAN_CMD lifecycle is exercised in a single test
+//!     (`resolve_command_handles_env_var_lifecycle`) that checks both
+//!     the unset-default and space-split paths back-to-back. Cargo's
+//!     parallel test runner can't race a single test against itself, so
+//!     this is a sufficient lightweight serialization for v0.1.0;
+//!     adding `serial_test` is reserved for P7 if more env-touching
+//!     tests appear.
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -117,32 +121,45 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
 
+    /// Both env-var paths in one test so cargo's parallel runner can't
+    /// race two SIGNALMAN_CMD-mutating tests against each other. The
+    /// previous separate-test design save/restored env state but that
+    /// only protects the cleanup, not the read in the middle.
+    ///
+    /// SAFETY (Rust 2024+): `std::env::set_var` / `remove_var` are
+    /// unsafe because they're not thread-safe. Within a single test
+    /// running serially through this code, mutations are observed only
+    /// by `resolve_command()` which we call synchronously.
     #[test]
-    fn resolve_command_defaults_to_signalman_when_env_unset() {
-        // SAFETY: tests run on the same process; we save/restore.
+    fn resolve_command_handles_env_var_lifecycle() {
         let saved = std::env::var(ENV_CMD).ok();
+
+        // Unset → default to plain `signalman` on PATH, no prefix args.
         unsafe {
             std::env::remove_var(ENV_CMD);
         }
         let (program, prefix) = resolve_command();
         assert_eq!(program, "signalman");
         assert!(prefix.is_empty());
-        if let Some(s) = saved {
-            unsafe {
-                std::env::set_var(ENV_CMD, s);
-            }
-        }
-    }
 
-    #[test]
-    fn resolve_command_splits_space_separated_env() {
-        let saved = std::env::var(ENV_CMD).ok();
+        // Set to a space-separated command line → first token is program,
+        // remainder is prefix args (matching `node host/dist/cli.js`).
         unsafe {
             std::env::set_var(ENV_CMD, "node /opt/host/dist/cli.js");
         }
         let (program, prefix) = resolve_command();
         assert_eq!(program, "node");
         assert_eq!(prefix, vec!["/opt/host/dist/cli.js".to_string()]);
+
+        // Empty/whitespace-only env value → fall back to default.
+        unsafe {
+            std::env::set_var(ENV_CMD, "   ");
+        }
+        let (program, prefix) = resolve_command();
+        assert_eq!(program, "signalman");
+        assert!(prefix.is_empty());
+
+        // Restore prior state so we don't leak across tests.
         match saved {
             Some(s) => unsafe { std::env::set_var(ENV_CMD, s) },
             None => unsafe { std::env::remove_var(ENV_CMD) },
