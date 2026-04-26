@@ -55,9 +55,13 @@ export function createDefaultExecutor(): RunExecutor {
     // and assertion events arrive in the run's EventQueue as they
     // happen, not retrospectively after runScenario returns. The
     // synchronous translation block this used to do is gone.
+    // P3.d: thread the trace context (traceId, runId) through so every
+    // gRPC call the orchestrator makes carries `signalman-trace-id`,
+    // `signalman-run-id`, and (per-call) `signalman-vm-name` metadata.
     const scenarioResult = await orchestrator.runScenario(
       ctx.scenarioDir,
       ctx.emit,
+      { traceId: ctx.traceId, runId: ctx.runId },
     );
 
     // Build the per-assertion summary from the orchestrator's normalised

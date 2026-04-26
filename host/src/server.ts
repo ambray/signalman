@@ -285,11 +285,21 @@ server.tool(
     id: z.string().describe("Scenario id."),
     parameters: z.record(z.string(), z.unknown()).optional().describe("Caller-supplied parameter overrides."),
     network_class: z.enum(["isolated", "nat", "internet"]).optional().describe("Reserved for P4 — declared, not enforced in v0.1.0."),
+    trace_id: z.string().optional().describe(
+      "P3.d: optional 32-char hex (or dashed UUID) correlation root. " +
+      "When omitted, Signalman generates one and surfaces it on the run handle. " +
+      "Upstream orchestrators (Loom plugin, CI) supply this so log streams across host/service/guest correlate by `grep $trace_id`.",
+    ),
   },
   async (params) =>
     asMcpResult(
       await runRun(
-        params as { id: string; parameters?: Record<string, unknown>; network_class?: "isolated" | "nat" | "internet" },
+        params as {
+          id: string;
+          parameters?: Record<string, unknown>;
+          network_class?: "isolated" | "nat" | "internet";
+          trace_id?: string;
+        },
         defaultRunExecutor,
       ),
     ),

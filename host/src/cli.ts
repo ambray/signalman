@@ -11,7 +11,7 @@
  *   signalman list [--tag T] [--pattern P] [--format json]
  *   signalman describe <id> [--workflow] [--format json]
  *   signalman plan <id> [--param k=v]... [--format json]
- *   signalman run <id> [--param k=v]... [--follow] [--format json]
+ *   signalman run <id> [--param k=v]... [--trace-id HEX] [--follow] [--format json]
  *   signalman status [--run RUN_ID] [--wait N]
  *   signalman record <name> [--duration N]
  */
@@ -176,10 +176,22 @@ async function cmdRun(args: ParsedArgs): Promise<number> {
   const id = args.positional[0];
   if (!id) usageError("run requires <id>");
   const network_class = args.options.get("network-class") as "isolated" | "nat" | "internet" | undefined;
-  const handle = await runRun(
-    { id, parameters: args.params, network_class },
-    createDefaultExecutor(),
-  );
+  // P3.d: --trace-id allows external orchestrators (CI, the Loom plugin)
+  // to inject a correlation root. runRun validates the format; a
+  // malformed value bubbles up as a usage error.
+  const trace_id = args.options.get("trace-id");
+  let handle;
+  try {
+    handle = await runRun(
+      { id, parameters: args.params, network_class, trace_id },
+      createDefaultExecutor(),
+    );
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("trace_id")) {
+      usageError(err.message);
+    }
+    throw err;
+  }
   // Default behavior: follow events to stderr, write envelope to stdout
   // when terminal. `--no-follow` returns immediately with the handle.
   if (args.flags.has("no-follow")) {
