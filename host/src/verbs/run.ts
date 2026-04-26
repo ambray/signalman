@@ -17,7 +17,9 @@ import {
   EventQueue,
   agentVersion,
   computeScenarioHash,
+  envelopeErrorFromThrown,
   exitCodeFor,
+  type EnvelopeError,
   type EnvelopeEventInput,
   type EnvelopeResult,
   type ResultEnvelope,
@@ -35,7 +37,17 @@ import { ScenarioNotFoundError } from "./describe.js";
  * the legacy `ScenarioOrchestrator`; see `defaultRunExecutor` below.
  */
 export interface RunExecutor {
-  (ctx: RunExecutorContext): Promise<{ result: EnvelopeResult; assertions: ResultEnvelope["assertions"]; errors: string[]; breakdown?: ExitBreakdown }>;
+  (ctx: RunExecutorContext): Promise<{
+    result: EnvelopeResult;
+    assertions: ResultEnvelope["assertions"];
+    /**
+     * Structured failure records (P3.a). Empty array on success. Each
+     * entry carries a machine-readable [`EnvelopeError.code`] so agents
+     * can branch on failure type without parsing message strings.
+     */
+    errors: EnvelopeError[];
+    breakdown?: ExitBreakdown;
+  }>;
 }
 
 export interface RunExecutorContext {
@@ -106,7 +118,12 @@ export async function runRun(
   // outer caller already received its run_id.
   void (async () => {
     const network_class = params.network_class ?? "isolated";
-    let outcome: { result: EnvelopeResult; assertions: ResultEnvelope["assertions"]; errors: string[]; breakdown?: ExitBreakdown };
+    let outcome: {
+      result: EnvelopeResult;
+      assertions: ResultEnvelope["assertions"];
+      errors: EnvelopeError[];
+      breakdown?: ExitBreakdown;
+    };
     try {
       outcome = await executor({
         scenarioId: params.id,
@@ -117,12 +134,23 @@ export async function runRun(
         emit: (e) => queue.push(e),
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      queue.push({ type: "log", level: "error", message });
+      // Executor itself threw — wrap as an INTERNAL_ERROR with infra
+      // category. If the executor produced an EnvelopeError instance,
+      // envelopeErrorFromThrown unwraps it without re-wrapping.
+      const enveloped = envelopeErrorFromThrown(err, {
+        code: "INTERNAL_ERROR",
+        category: "infra",
+      });
+      queue.push({
+        type: "log",
+        level: "error",
+        message: enveloped.message,
+        error_code: enveloped.code,
+      });
       outcome = {
         result: "error",
         assertions: { total: 0, passed: 0, failed: 0, results: [] },
-        errors: [message],
+        errors: [enveloped],
         breakdown: "infra",
       };
     }
