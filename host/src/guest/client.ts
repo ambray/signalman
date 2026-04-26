@@ -54,6 +54,8 @@ export interface ClientOptions {
   initialRetryDelayMs?: number;
   /** Maximum retry delay in milliseconds (default 2000). */
   maxRetryDelayMs?: number;
+  /** Bearer token sent as `Authorization: Bearer <token>` on every RPC. */
+  authToken?: string;
 }
 
 /** Connection state of the gRPC client. */
@@ -133,6 +135,14 @@ export interface InstallResult {
   installedPath: string;
 }
 
+/** Directory entry returned by the guest file API. */
+export interface GuestDirectoryEntry {
+  name: string;
+  size: number;
+  isDir: boolean;
+  modifiedUnixSecs: number;
+}
+
 // ── Proto Loading (lazy) ──────────────────────────────────────────
 
 const __filename = fileURLToPath(import.meta.url);
@@ -173,6 +183,7 @@ const DEFAULT_OPTIONS: Required<ClientOptions> = {
   maxRetries: 3,
   initialRetryDelayMs: 200,
   maxRetryDelayMs: 2_000,
+  authToken: "",
 };
 
 /**
@@ -250,6 +261,7 @@ function unaryCall<TReq, TRes>(
   method: string,
   request: TReq,
   deadlineMs?: number,
+  authToken?: string,
 ): Promise<TRes> {
   return new Promise((resolve, reject) => {
     const options: grpc.CallOptions = {};
@@ -261,7 +273,7 @@ function unaryCall<TReq, TRes>(
     // runWithTrace) sets the context; we don't otherwise touch the
     // call signature so existing call sites are unchanged.
     const trace = currentTrace();
-    const metadata = trace ? buildTraceMetadata(trace) : undefined;
+    const metadata = buildRpcMetadata(trace, authToken);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const cb = (err: grpc.ServiceError | null, response: any) => {
@@ -283,15 +295,23 @@ function unaryCall<TReq, TRes>(
 }
 
 /**
- * Convert a [`TraceContext`] into a gRPC `Metadata` object for
- * outbound calls. P3.d helper; no-op when fields are empty.
+ * Convert trace + auth context into gRPC metadata for outbound calls.
+ * P3.d helper; no-op when fields are empty.
  */
-function buildTraceMetadata(trace: import("../output/trace.js").TraceContext): grpc.Metadata {
+function buildRpcMetadata(
+  trace: import("../output/trace.js").TraceContext | undefined,
+  authToken: string | undefined,
+): grpc.Metadata | undefined {
   const md = new grpc.Metadata();
-  for (const [k, v] of Object.entries(traceMetadata(trace))) {
-    md.add(k, v);
+  if (trace) {
+    for (const [k, v] of Object.entries(traceMetadata(trace))) {
+      md.add(k, v);
+    }
   }
-  return md;
+  if (authToken) {
+    md.add("authorization", `Bearer ${authToken}`);
+  }
+  return md.getMap && Object.keys(md.getMap()).length > 0 ? md : undefined;
 }
 
 // ── Client Class ───────────────────────────────────────────────────
@@ -381,6 +401,8 @@ export class GuestAgentClient {
       "grpc.keepalive_time_ms": 30_000,
       "grpc.keepalive_timeout_ms": 10_000,
       "grpc.max_connection_idle_ms": 60_000,
+      "grpc.max_receive_message_length": 128 * 1024 * 1024,
+      "grpc.max_send_message_length": 128 * 1024 * 1024,
     };
 
     this._connectionState = "connecting";
@@ -412,7 +434,7 @@ export class GuestAgentClient {
   async isConnected(timeoutMs: number = 5_000): Promise<boolean> {
     if (this._connectionState === "disconnected") return false;
     try {
-      await unaryCall(this.client, "health", {}, timeoutMs);
+      await unaryCall(this.client, "health", {}, timeoutMs, this.options.authToken);
       this._connectionState = "connected";
       return true;
     } catch {
@@ -451,7 +473,7 @@ export class GuestAgentClient {
   async health(timeoutMs?: number): Promise<HealthResult> {
     const deadline = timeoutMs ?? this.options.defaultTimeoutMs;
     return withRetry(
-      () => unaryCall(this.client, "health", {}, deadline),
+      () => unaryCall(this.client, "health", {}, deadline, this.options.authToken),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
       this.options.maxRetryDelayMs,
@@ -489,7 +511,7 @@ export class GuestAgentClient {
           waitForExit: options?.waitForExit ?? false,
           timeoutMs: options?.timeoutMs ?? 0,
           run_as: options?.runAs ?? "",
-        }, deadline),
+        }, deadline, this.options.authToken),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
       this.options.maxRetryDelayMs,
@@ -515,7 +537,7 @@ export class GuestAgentClient {
           pid,
           processName: "",
           force,
-        }, deadline),
+        }, deadline, this.options.authToken),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
       this.options.maxRetryDelayMs,
@@ -533,7 +555,7 @@ export class GuestAgentClient {
     const response = await withRetry(
       () =>
         unaryCall<{ nameFilter: string }, { processes: ProcessInfo[] }>(
-          this.client, "processList", { nameFilter: filter ?? "" }, deadline,
+          this.client, "processList", { nameFilter: filter ?? "" }, deadline, this.options.authToken,
         ),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
@@ -568,7 +590,7 @@ export class GuestAgentClient {
           timeoutMs: deadline,
           captureOutput: true,
           run_as: runAs,
-        }, deadline),
+        }, deadline, this.options.authToken),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
       this.options.maxRetryDelayMs,
@@ -588,7 +610,7 @@ export class GuestAgentClient {
         unaryCall(this.client, "verifyRestriction", {
           pid,
           processName: "",
-        }, deadline),
+        }, deadline, this.options.authToken),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
       this.options.maxRetryDelayMs,
@@ -617,7 +639,7 @@ export class GuestAgentClient {
           port,
           protocol,
           timeoutMs: 5_000,
-        }, deadline),
+        }, deadline, this.options.authToken),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
       this.options.maxRetryDelayMs,
@@ -642,7 +664,7 @@ export class GuestAgentClient {
         unaryCall(this.client, "testFileAccess", {
           path: filePath,
           operation,
-        }, deadline),
+        }, deadline, this.options.authToken),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
       this.options.maxRetryDelayMs,
@@ -671,11 +693,94 @@ export class GuestAgentClient {
           source,
           version: version ?? "",
           silent: true,
-        }, deadline),
+        }, deadline, this.options.authToken),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
       this.options.maxRetryDelayMs,
     );
+  }
+
+  /**
+   * Read a file chunk from the guest filesystem and return the server's
+   * truncation signal.
+   */
+  async readFileChunk(
+    filePath: string,
+    options: { offset?: number; limit?: number; timeoutMs?: number } = {},
+  ): Promise<{ data: Buffer; truncated: boolean }> {
+    const deadline = options.timeoutMs ?? this.options.defaultTimeoutMs;
+    const response = await withRetry(
+      () =>
+        unaryCall<
+          { path: string; offset: number; limit: number },
+          { data: Buffer | Uint8Array; truncated: boolean }
+        >(this.client, "readFile", {
+          path: filePath,
+          offset: options.offset ?? 0,
+          limit: options.limit ?? 0,
+        }, deadline, this.options.authToken),
+      this.options.maxRetries,
+      this.options.initialRetryDelayMs,
+      this.options.maxRetryDelayMs,
+    );
+    return {
+      data: Buffer.from(response.data),
+      truncated: response.truncated,
+    };
+  }
+
+  /**
+   * Read a file from the guest filesystem.
+   */
+  async readFile(
+    filePath: string,
+    options: { offset?: number; limit?: number; timeoutMs?: number } = {},
+  ): Promise<Buffer> {
+    return (await this.readFileChunk(filePath, options)).data;
+  }
+
+  /**
+   * Write a file to the guest filesystem.
+   */
+  async writeFile(
+    filePath: string,
+    data: Buffer | Uint8Array | string,
+    append: boolean = false,
+    timeoutMs?: number,
+  ): Promise<{ bytesWritten: number }> {
+    const deadline = timeoutMs ?? this.options.defaultTimeoutMs;
+    return withRetry(
+      () =>
+        unaryCall<
+          { path: string; data: Buffer; append: boolean },
+          { bytesWritten: number }
+        >(this.client, "writeFile", {
+          path: filePath,
+          data: Buffer.isBuffer(data) ? data : Buffer.from(data),
+          append,
+        }, deadline, this.options.authToken),
+      this.options.maxRetries,
+      this.options.initialRetryDelayMs,
+      this.options.maxRetryDelayMs,
+    );
+  }
+
+  /**
+   * List a directory inside the guest filesystem.
+   */
+  async listDirectory(filePath: string, timeoutMs?: number): Promise<GuestDirectoryEntry[]> {
+    const deadline = timeoutMs ?? this.options.defaultTimeoutMs;
+    const response = await withRetry(
+      () =>
+        unaryCall<
+          { path: string },
+          { entries: GuestDirectoryEntry[] }
+        >(this.client, "listDirectory", { path: filePath }, deadline, this.options.authToken),
+      this.options.maxRetries,
+      this.options.initialRetryDelayMs,
+      this.options.maxRetryDelayMs,
+    );
+    return response.entries ?? [];
   }
 
   /**
@@ -699,7 +804,7 @@ export class GuestAgentClient {
         >(this.client, "uIScreenshot", {
           windowTitle: windowTitle ?? "",
           format,
-        }, deadline),
+        }, deadline, this.options.authToken),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
       this.options.maxRetryDelayMs,

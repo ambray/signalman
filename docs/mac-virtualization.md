@@ -1,0 +1,166 @@
+# Mac Virtualization Strategy
+
+Signalman's Windows path uses a privileged control-plane service to broker
+Hyper-V operations. On macOS, the equivalent problem is different: Apple's
+Virtualization.framework requires the calling process to have the
+`com.apple.security.virtualization` entitlement, and macOS guests are supported
+on Apple Silicon. That makes a plain Rust or Node daemon awkward unless we also
+build, sign, and entitle a native macOS helper.
+
+## Requirements
+
+- Host: Apple Silicon Mac for macOS guests. Linux guests can also run through
+  Apple's Virtualization.framework on modern macOS, but this document focuses on
+  macOS guests.
+- Guest image: macOS restore image (`.ipsw`) or a prepared VM image.
+- Guest control: either Signalman's guest agent, Tart's guest agent
+  (`tart exec`), or SSH into the VM.
+- Isolation: NAT is the default. Bridged or Softnet-style isolation should be a
+  scenario-level choice once network classes become enforced.
+- Licensing: Apple's currently published macOS SLA permits up to two additional
+  virtualized macOS instances per Apple-branded Mac for listed uses. Operators
+  need to validate their own license terms, especially for hosted or
+  multi-tenant use.
+
+## Guest Agent Permissions
+
+The macOS guest should run the Signalman guest agent as the in-guest control
+plane. Tart owns VM lifecycle; Signalman owns file operations, command
+execution, and eventually UI automation.
+
+Baseline guest agent:
+
+- A LaunchDaemon can run the agent as root for unattended command/file
+  operations.
+- `scripts/macos/install-guest-agent.sh` installs this LaunchDaemon inside the
+  VM. Build or copy `signalman-guest` into the VM, then run the installer with a
+  bearer token and optional TLS material.
+- `SIGNALMAN_WORKSPACE` should point at the scenario workspace inside the VM;
+  guest `WriteFile` refuses writes outside that jail when it is set.
+- No special entitlement is required for ordinary file read/write inside the
+  agent's OS permissions. Full Disk Access is a TCC grant, not a code-signing
+  entitlement; only grant it if scenarios intentionally inspect protected user
+  data.
+- The host should connect with guest mTLS and/or
+  `SIGNALMAN_GUEST_TOKEN` / `SIGNALMAN_AUTH_TOKEN`.
+
+Example guest install:
+
+```bash
+cargo build --release -p signalman-guest
+sudo scripts/macos/install-guest-agent.sh \
+  --binary target/release/signalman-guest \
+  --workspace /var/lib/signalman/workspace \
+  --token "$SIGNALMAN_AUTH_TOKEN"
+```
+
+On the host side:
+
+```bash
+export SIGNALMAN_BACKEND=tart
+export SIGNALMAN_GUEST_TOKEN="$SIGNALMAN_AUTH_TOKEN"
+```
+
+UI automation later:
+
+- Accessibility API control (`AXUIElement`) requires the agent process to be a
+  trusted accessibility client. The app/daemon can check this with
+  `AXIsProcessTrustedWithOptions`; approval is stored in TCC and is normally
+  granted by the user or by an MDM PPPC profile.
+- Screenshots should use ScreenCaptureKit. The first run prompts for Screen
+  Recording permission and the process needs to restart after approval.
+- Persistent unattended screen capture is a restricted Apple entitlement:
+  `com.apple.developer.persistent-content-capture`. Apple describes it as for
+  VNC-style apps and requires an entitlement request.
+- Event injection through CoreGraphics/HID commonly hits Accessibility and/or
+  Input Monitoring TCC policy. Treat it as a PPPC/MDM-managed permission, not a
+  normal Xcode entitlement.
+- A root LaunchDaemon is not enough for UI automation. The UI worker should run
+  as a LaunchAgent in the logged-in user session, with the LaunchDaemon reserved
+  for privileged setup and file/command operations.
+
+Device management:
+
+- If "manage the device" means MDM/ADE enrollment workflows, Apple exposes
+  `com.apple.developer.automated-device-enrollment.add-devices`, but that is
+  for adding devices to Automated Device Enrollment and requires Apple's
+  approval.
+- For scenario setup inside a VM, prefer ordinary root commands, profiles, and
+  the guest file API before pursuing restricted device-management entitlements.
+
+## Option A: Tart Backend First
+
+This is the current implementation direction.
+
+Tart is a Swift CLI/app bundle around Virtualization.framework. It already
+solves the entitlement, VM image, OCI registry, clone, run, stop, IP lookup, and
+command-exec problems that Signalman needs for a first useful macOS runner.
+
+Signalman integration:
+
+- `host/src/hypervisors/tart.ts` implements `HypervisorBackend`.
+- `createVM` maps to `tart clone <template> <name>`.
+- `startVM` launches `tart run --no-graphics <name>` and waits for Tart to
+  report the VM running.
+- `executeCommand` maps to `tart exec <vm> <command> ...args`.
+- Checkpoints are emulated with local Tart clones named
+  `<vm>--signalman-cp--<label>`.
+
+Tradeoffs:
+
+- Fastest path to usable macOS VM execution and CI-style workflows.
+- Depends on Tart's CLI contract and license.
+- Backend-level Tart file copy is intentionally not implemented yet; scenario
+  file copy should use the Signalman guest agent. Mounted directories, SSH/SCP,
+  or a future Tart copy command remain useful fallback options.
+- Full service-style mTLS control is not present; local process permissions and
+  Tart's own entitlements are the trust boundary.
+
+## Option B: First-party Swift Helper
+
+Build a small `signalman-mac-runner` Swift executable/app bundle that uses
+Virtualization.framework directly and exposes the existing Signalman
+ControlPlane gRPC contract.
+
+Tradeoffs:
+
+- Best long-term control over VM state, logs, save/restore, and packaging.
+- Aligns with the Windows service architecture.
+- Requires macOS code signing, entitlements, packaging, update flow, and a Swift
+  implementation of VM bundle management.
+- Re-implements image management that Tart already provides.
+
+This becomes attractive if Tart's license, command surface, or roadmap becomes
+misaligned with Signalman's needs.
+
+## Option C: VMware Fusion
+
+The existing `VmwareBackend` can operate VMware VMs via `vmrun`, including on
+macOS hosts with Fusion installed.
+
+Tradeoffs:
+
+- Useful fallback for users who already have Fusion VMs.
+- Not the right primary path for Apple Silicon macOS CI: VM creation is not
+  implemented, credentials are passed to `vmrun`, and macOS image automation is
+  weaker than Tart.
+
+## Recommendation
+
+Use Tart as the v0.1.x Mac runner backend and treat a first-party Swift helper
+as the v0.2+ hardening path if we need service-level identity, signed packaging,
+or deeper VM-state control.
+
+Sources:
+
+- Apple Virtualization framework: https://developer.apple.com/documentation/virtualization
+- Apple virtualization entitlement: https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.virtualization
+- Apple macOS VM sample: https://developer.apple.com/documentation/Virtualization/running-macos-in-a-virtual-machine-on-apple-silicon
+- Apple entitlements overview: https://developer.apple.com/documentation/bundleresources/entitlements
+- Apple ScreenCaptureKit sample: https://developer.apple.com/documentation/ScreenCaptureKit/capturing-screen-content-in-macos
+- Apple Persistent Content Capture entitlement: https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.persistent-content-capture
+- Apple Accessibility trust API: https://developer.apple.com/documentation/applicationservices/1459186-axisprocesstrustedwithoptions
+- Apple Automated Device Enrollment framework: https://developer.apple.com/documentation/AutomatedDeviceEnrollment
+- Apple Software License Agreements: https://www.apple.com/legal/sla/
+- Tart quick start: https://tart.run/quick-start/
+- Tart guest agent / `tart exec`: https://tart.run/blog/2025/06/01/bridging-the-gaps-with-the-tart-guest-agent/

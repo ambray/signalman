@@ -32,11 +32,14 @@ export interface SignalmanConfig {
      *
      * - "service": the signalman-service daemon (preferred-when-available, P1)
      * - "hyperv": direct PowerShell + gsudo elevation
-     * - "vmware": VMware Workstation via vmrun
+     * - "vmware": VMware Workstation/Fusion via vmrun
+     * - "tart": Tart on Apple Silicon macOS hosts
      */
-    backend: "service" | "hyperv" | "vmware";
+    backend: "service" | "hyperv" | "vmware" | "tart";
     /** Path to vmrun executable (VMware only). */
     vmrunPath?: string;
+    /** Path to tart executable (Tart/macOS only). */
+    tartPath?: string;
     /** Default guest credentials for hypervisor-level operations. */
     guestCredentials?: {
       username: string;
@@ -47,6 +50,8 @@ export interface SignalmanConfig {
   guestAgent: {
     /** Default gRPC port for the guest agent. */
     defaultPort: number;
+    /** Optional bearer token sent as `Authorization: Bearer <token>`. */
+    authToken?: string;
     /** TLS settings for guest agent connections. */
     tls: {
       /** Whether TLS is enabled for guest agent connections. */
@@ -177,6 +182,9 @@ function mergeConfig(
     if (partial.hypervisor.vmrunPath !== undefined) {
       result.hypervisor.vmrunPath = partial.hypervisor.vmrunPath;
     }
+    if (partial.hypervisor.tartPath !== undefined) {
+      result.hypervisor.tartPath = partial.hypervisor.tartPath;
+    }
     if (partial.hypervisor.guestCredentials) {
       result.hypervisor.guestCredentials = partial.hypervisor.guestCredentials;
     }
@@ -185,6 +193,9 @@ function mergeConfig(
   if (partial.guestAgent) {
     if (partial.guestAgent.defaultPort !== undefined) {
       result.guestAgent.defaultPort = partial.guestAgent.defaultPort;
+    }
+    if (partial.guestAgent.authToken !== undefined) {
+      result.guestAgent.authToken = partial.guestAgent.authToken;
     }
     if (partial.guestAgent.tls) {
       if (partial.guestAgent.tls.enabled !== undefined) {
@@ -250,9 +261,11 @@ function mergeConfig(
  * Applies environment variable overrides to the configuration.
  *
  * Supported environment variables:
- * - SIGNALMAN_BACKEND: hypervisor backend ("hyperv" | "vmware")
+ * - SIGNALMAN_BACKEND: hypervisor backend ("service" | "hyperv" | "vmware" | "tart")
  * - SIGNALMAN_VMRUN_PATH: path to vmrun executable
+ * - SIGNALMAN_TART_PATH: path to tart executable
  * - SIGNALMAN_GUEST_PORT: guest agent default port
+ * - SIGNALMAN_GUEST_TOKEN: guest agent bearer token
  * - SIGNALMAN_GUEST_TLS: enable guest agent TLS ("true" | "false")
  * - SIGNALMAN_GUEST_CA: path to CA certificate
  * - SIGNALMAN_GUEST_CERT: path to client certificate
@@ -267,12 +280,16 @@ function applyEnvOverrides(config: SignalmanConfig): SignalmanConfig {
   const result = structuredClone(config);
 
   const backend = process.env.SIGNALMAN_BACKEND;
-  if (backend === "hyperv" || backend === "vmware" || backend === "service") {
+  if (backend === "hyperv" || backend === "vmware" || backend === "service" || backend === "tart") {
     result.hypervisor.backend = backend;
   }
 
   if (process.env.SIGNALMAN_VMRUN_PATH) {
     result.hypervisor.vmrunPath = process.env.SIGNALMAN_VMRUN_PATH;
+  }
+
+  if (process.env.SIGNALMAN_TART_PATH) {
+    result.hypervisor.tartPath = process.env.SIGNALMAN_TART_PATH;
   }
 
   const guestPort = process.env.SIGNALMAN_GUEST_PORT;
@@ -281,6 +298,10 @@ function applyEnvOverrides(config: SignalmanConfig): SignalmanConfig {
     if (!isNaN(parsed) && parsed > 0 && parsed <= 65535) {
       result.guestAgent.defaultPort = parsed;
     }
+  }
+
+  if (process.env.SIGNALMAN_GUEST_TOKEN) {
+    result.guestAgent.authToken = process.env.SIGNALMAN_GUEST_TOKEN;
   }
 
   const guestTls = process.env.SIGNALMAN_GUEST_TLS;

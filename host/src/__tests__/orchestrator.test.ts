@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { ScenarioOrchestrator } from "../scenarios/orchestrator.js";
 import { loadTemplates, resolveTemplate } from "../scenarios/templates.js";
 import type { VmDefinition, StepResult } from "../scenarios/orchestrator.js";
@@ -13,6 +16,25 @@ import type {
 } from "../hypervisors/interface.js";
 import type { GuestAgentClient } from "../guest/client.js";
 import type { SignalmanConfig } from "../config.js";
+
+const guestAgentClientMockState = vi.hoisted(() => ({
+  nextInstances: [] as Array<Record<string, unknown>>,
+  constructorArgs: [] as Array<unknown[]>,
+}));
+
+vi.mock("../guest/client.js", () => ({
+  GuestAgentClient: vi.fn().mockImplementation((...args: unknown[]) => {
+    guestAgentClientMockState.constructorArgs.push(args);
+    const next = guestAgentClientMockState.nextInstances.shift() ?? {};
+    return {
+      connectionState: "connected",
+      isConnected: vi.fn().mockResolvedValue(true),
+      dispose: vi.fn(),
+      close: vi.fn(),
+      ...next,
+    };
+  }),
+}));
 
 // ── Mock Factories ─────────────────────────────────────────────────
 
@@ -125,6 +147,13 @@ function makeMockClient(
       error: "",
       errorCode: "",
     }),
+    readFile: vi.fn().mockResolvedValue(Buffer.from("from guest")),
+    readFileChunk: vi.fn().mockResolvedValue({
+      data: Buffer.from("from guest"),
+      truncated: false,
+    }),
+    writeFile: vi.fn().mockResolvedValue({ bytesWritten: 9 }),
+    listDirectory: vi.fn().mockResolvedValue([]),
     screenshot: vi.fn().mockResolvedValue(Buffer.from([])),
     ...overrides,
   } as unknown as GuestAgentClient;
@@ -151,6 +180,8 @@ describe("ScenarioOrchestrator", () => {
   let orchestrator: ScenarioOrchestrator;
 
   beforeEach(() => {
+    guestAgentClientMockState.nextInstances = [];
+    guestAgentClientMockState.constructorArgs = [];
     backend = makeMockBackend();
     clients = new Map([
       ["vm1", makeMockClient()],
@@ -246,12 +277,15 @@ describe("ScenarioOrchestrator", () => {
 
   it("executeSetup handles vm_copy_file host_to_guest", async () => {
     const vmMap = new Map([["vm1", makeHandle("vm1")]]);
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalman-copy-"));
+    const hostPath = path.join(tmpDir, "file.txt");
+    fs.writeFileSync(hostPath, "payload");
     const steps = [
       {
         action: "vm_copy_file",
         vm: "vm1",
         direction: "host_to_guest",
-        host_path: "C:\\local\\file.txt",
+        host_path: hostPath,
         guest_path: "C:\\remote\\file.txt",
       },
     ];
@@ -259,21 +293,55 @@ describe("ScenarioOrchestrator", () => {
     const results = await orchestrator.executeSetup(steps, vmMap);
 
     expect(results[0].status).toBe("success");
-    expect(backend.copyFileToVM).toHaveBeenCalledWith(
-      expect.objectContaining({ name: "vm1" }),
-      "C:\\local\\file.txt",
+    expect(clients.get("vm1")?.writeFile).toHaveBeenCalledWith(
       "C:\\remote\\file.txt",
+      Buffer.from("payload"),
+      false,
     );
+    expect(backend.copyFileToVM).not.toHaveBeenCalled();
+  });
+
+  it("executeSetup chunks vm_copy_file host_to_guest", async () => {
+    const vmMap = new Map([["vm1", makeHandle("vm1")]]);
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalman-copy-"));
+    const hostPath = path.join(tmpDir, "large.bin");
+    const chunkBytes = 1024 * 1024;
+    fs.writeFileSync(
+      hostPath,
+      Buffer.concat([Buffer.alloc(chunkBytes, 0x61), Buffer.from("tail")]),
+    );
+    const steps = [
+      {
+        action: "vm_copy_file",
+        vm: "vm1",
+        direction: "host_to_guest",
+        host_path: hostPath,
+        guest_path: "/tmp/large.bin",
+      },
+    ];
+
+    const results = await orchestrator.executeSetup(steps, vmMap);
+
+    expect(results[0].status).toBe("success");
+    const writeFile = vi.mocked(clients.get("vm1")!.writeFile);
+    expect(writeFile).toHaveBeenCalledTimes(2);
+    expect(writeFile.mock.calls[0][0]).toBe("/tmp/large.bin");
+    expect(writeFile.mock.calls[0][1]).toHaveLength(chunkBytes);
+    expect(writeFile.mock.calls[0][2]).toBe(false);
+    expect(writeFile.mock.calls[1][1]).toEqual(Buffer.from("tail"));
+    expect(writeFile.mock.calls[1][2]).toBe(true);
   });
 
   it("executeSetup handles vm_copy_file guest_to_host", async () => {
     const vmMap = new Map([["vm1", makeHandle("vm1")]]);
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalman-copy-"));
+    const hostPath = path.join(tmpDir, "file.txt");
     const steps = [
       {
         action: "vm_copy_file",
         vm: "vm1",
         direction: "guest_to_host",
-        host_path: "C:\\local\\file.txt",
+        host_path: hostPath,
         guest_path: "C:\\remote\\file.txt",
       },
     ];
@@ -281,11 +349,59 @@ describe("ScenarioOrchestrator", () => {
     const results = await orchestrator.executeSetup(steps, vmMap);
 
     expect(results[0].status).toBe("success");
-    expect(backend.copyFileFromVM).toHaveBeenCalledWith(
-      expect.objectContaining({ name: "vm1" }),
+    expect(clients.get("vm1")?.readFileChunk).toHaveBeenCalledWith(
       "C:\\remote\\file.txt",
-      "C:\\local\\file.txt",
+      { offset: 0, limit: 1024 * 1024 },
     );
+    expect(fs.readFileSync(hostPath, "utf8")).toBe("from guest");
+    expect(backend.copyFileFromVM).not.toHaveBeenCalled();
+  });
+
+  it("executeSetup chunks vm_copy_file guest_to_host", async () => {
+    const chunkBytes = 1024 * 1024;
+    const chunk = Buffer.alloc(chunkBytes, 0x62);
+    const tail = Buffer.from("done");
+    const mockClient = makeMockClient({
+      readFileChunk: vi.fn().mockImplementation(async (_guestPath: string, options?: { offset?: number }) => {
+        return options?.offset === 0
+          ? { data: chunk, truncated: true }
+          : { data: tail, truncated: false };
+      }),
+    });
+    clients.set("vm1", mockClient);
+    orchestrator = new ScenarioOrchestrator(backend, clients, config);
+    const vmMap = new Map([["vm1", makeHandle("vm1")]]);
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalman-copy-"));
+    const hostPath = path.join(tmpDir, "large.bin");
+    const steps = [
+      {
+        action: "vm_copy_file",
+        vm: "vm1",
+        direction: "guest_to_host",
+        host_path: hostPath,
+        guest_path: "/tmp/large.bin",
+      },
+    ];
+
+    const results = await orchestrator.executeSetup(steps, vmMap);
+
+    expect(results[0].status).toBe("success");
+    expect(mockClient.readFileChunk).toHaveBeenCalledTimes(2);
+    expect(mockClient.readFileChunk).toHaveBeenNthCalledWith(
+      1,
+      "/tmp/large.bin",
+      { offset: 0, limit: chunkBytes },
+    );
+    expect(mockClient.readFileChunk).toHaveBeenNthCalledWith(
+      2,
+      "/tmp/large.bin",
+      { offset: chunkBytes, limit: chunkBytes },
+    );
+    const saved = fs.readFileSync(hostPath);
+    expect(saved).toHaveLength(chunkBytes + tail.length);
+    expect(saved[0]).toBe(0x62);
+    expect(saved[chunkBytes - 1]).toBe(0x62);
+    expect(saved.subarray(chunkBytes)).toEqual(tail);
   });
 
   it("executeSetup handles wait action", async () => {
@@ -464,6 +580,49 @@ describe("ScenarioOrchestrator", () => {
     await expect(
       orchestrator.waitForGuestAgents(vmMap, defs),
     ).rejects.toThrow("No guest client configured for VM 'vm1'");
+  });
+
+  it("waitForGuestAgents retries Tart IP discovery before creating a client", async () => {
+    const emptyClients = new Map<string, GuestAgentClient>();
+    const getVmIpAddress = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("no DHCP lease yet"))
+      .mockResolvedValue("192.168.64.8");
+    const tartBackend = makeMockBackend({
+      name: "tart",
+      getVmIpAddress,
+    });
+    const isConnected = vi.fn().mockResolvedValue(true);
+    guestAgentClientMockState.nextInstances.push({ isConnected });
+    orchestrator = new ScenarioOrchestrator(
+      tartBackend,
+      emptyClients,
+      {
+        ...config,
+        guestAgent: {
+          defaultPort: 50051,
+          authToken: "guest-secret",
+          tls: { enabled: false },
+        },
+      },
+    );
+
+    const vmMap = new Map([["vm1", makeHandle("vm1")]]);
+    const defs: VmDefinition[] = [
+      { name: "vm1", template: "t", guest_agent_port: 50052 },
+    ];
+
+    await orchestrator.waitForGuestAgents(vmMap, defs);
+
+    expect(getVmIpAddress).toHaveBeenCalledTimes(2);
+    expect(guestAgentClientMockState.constructorArgs[0]).toEqual([
+      "192.168.64.8",
+      50052,
+      undefined,
+      { authToken: "guest-secret" },
+    ]);
+    expect(emptyClients.get("vm1")).toBeDefined();
+    expect(isConnected).toHaveBeenCalled();
   });
 });
 
