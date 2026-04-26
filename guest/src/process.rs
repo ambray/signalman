@@ -459,7 +459,7 @@ pub fn inspect_process(pid: u32) -> anyhow::Result<ProcessDetail> {
         })
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
         use std::fs;
         use std::path::PathBuf;
@@ -525,6 +525,51 @@ pub fn inspect_process(pid: u32) -> anyhow::Result<ProcessDetail> {
             memory_bytes,
         })
     }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::path::Path;
+        use std::process::Command;
+
+        let output = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "ppid=", "-o", "comm="])
+            .output()?;
+        if !output.status.success() {
+            anyhow::bail!("process with PID {pid} not found");
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let line = stdout.trim();
+        if line.is_empty() {
+            anyhow::bail!("process with PID {pid} not found");
+        }
+
+        let mut parts = line.split_whitespace();
+        let parent_pid = parts
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        let path = parts.collect::<Vec<_>>().join(" ");
+        let name = Path::new(&path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| path.clone());
+
+        Ok(ProcessDetail {
+            pid,
+            name,
+            path,
+            command_line: String::new(),
+            parent_pid,
+            start_time_secs: 0,
+            memory_bytes: 0,
+        })
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "linux"), not(target_os = "macos")))]
+    {
+        anyhow::bail!("process inspection is not implemented on this platform")
+    }
 }
 
 /// List running processes, optionally filtered by name.
@@ -585,6 +630,53 @@ pub fn list_processes(name_filter: Option<&str>) -> anyhow::Result<Vec<ProcessIn
     {
         let _ = name_filter;
         // TODO: /proc filesystem parsing for Linux
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::path::Path;
+        use std::process::Command;
+
+        let output = Command::new("ps").args(["-axo", "pid=,comm="]).output()?;
+        if !output.status.success() {
+            anyhow::bail!("ps failed while listing processes");
+        }
+        let filter = name_filter.map(|f| f.to_lowercase());
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let mut parts = trimmed.split_whitespace();
+            let Some(pid) = parts.next().and_then(|s| s.parse::<u32>().ok()) else {
+                continue;
+            };
+            let path = parts.collect::<Vec<_>>().join(" ");
+            let name = Path::new(&path)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| path.clone());
+            if filter
+                .as_ref()
+                .map(|f| !name.to_lowercase().contains(f))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            processes.push(ProcessInfo {
+                pid,
+                name,
+                path,
+                command_line: String::new(),
+                memory_bytes: 0,
+                user: String::new(),
+                is_appcontainer: false,
+                appcontainer_sid: None,
+                is_low_integrity: false,
+                is_in_job: false,
+            });
+        }
     }
 
     Ok(processes)

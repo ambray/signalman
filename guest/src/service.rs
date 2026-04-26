@@ -118,6 +118,8 @@ fn os_name() -> &'static str {
         "windows"
     } else if cfg!(target_os = "linux") {
         "linux"
+    } else if cfg!(target_os = "macos") {
+        "macos"
     } else {
         "unknown"
     }
@@ -145,6 +147,9 @@ fn capabilities() -> Vec<String> {
         "verify".into(),
         "network_test".into(),
         "file_test".into(),
+        "file_read".into(),
+        "file_write".into(),
+        "directory_list".into(),
         "install".into(),
     ]
 }
@@ -692,6 +697,68 @@ impl GuestAgent for GuestAgentService {
         }))
     }
 
+    // ── File Operations ─────────────────────────────────────────
+
+    async fn read_file(
+        &self,
+        request: Request<ReadFileRequest>,
+    ) -> Result<Response<ReadFileResponse>, Status> {
+        let req = request.into_inner();
+        if req.path.is_empty() {
+            return Err(Status::invalid_argument("path must not be empty"));
+        }
+
+        let file_len = std::fs::metadata(&req.path).ok().map(|m| m.len());
+        let data = file_ops::read_file(&req.path, req.offset, req.limit)
+            .map_err(|e| Status::internal(format!("read_file failed: {e}")))?;
+        let truncated = file_len
+            .map(|len| req.offset.saturating_add(data.len() as u64) < len)
+            .unwrap_or(false);
+
+        Ok(Response::new(ReadFileResponse {
+            data,
+            truncated,
+        }))
+    }
+
+    async fn write_file(
+        &self,
+        request: Request<WriteFileRequest>,
+    ) -> Result<Response<WriteFileResponse>, Status> {
+        let req = request.into_inner();
+        if req.path.is_empty() {
+            return Err(Status::invalid_argument("path must not be empty"));
+        }
+
+        let bytes_written = file_ops::write_file(&req.path, &req.data, req.append)
+            .map_err(|e| Status::invalid_argument(format!("write_file failed: {e}")))?;
+
+        Ok(Response::new(WriteFileResponse { bytes_written }))
+    }
+
+    async fn list_directory(
+        &self,
+        request: Request<ListDirectoryRequest>,
+    ) -> Result<Response<ListDirectoryResponse>, Status> {
+        let req = request.into_inner();
+        if req.path.is_empty() {
+            return Err(Status::invalid_argument("path must not be empty"));
+        }
+
+        let entries = file_ops::list_directory(&req.path)
+            .map_err(|e| Status::internal(format!("list_directory failed: {e}")))?
+            .into_iter()
+            .map(|entry| DirectoryEntry {
+                name: entry.name,
+                size: entry.size,
+                is_dir: entry.is_dir,
+                modified_unix_secs: entry.modified_secs,
+            })
+            .collect();
+
+        Ok(Response::new(ListDirectoryResponse { entries }))
+    }
+
     // ── Software Management ─────────────────────────────────────
 
     async fn install_software(
@@ -919,6 +986,52 @@ mod tests {
 
         assert!(!result.allowed);
         assert!(!result.error.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_file_rpc_roundtrip() {
+        let svc = make_service();
+        let dir = std::env::temp_dir().join(format!(
+            "signalman-service-file-rpc-{}",
+            rand::random::<u32>()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let file_path = dir.join("payload.txt");
+        let path = file_path.to_string_lossy().into_owned();
+
+        let write = svc
+            .write_file(Request::new(WriteFileRequest {
+                path: path.clone(),
+                data: b"hello mac guest".to_vec(),
+                append: false,
+            }))
+            .await
+            .expect("write_file should succeed")
+            .into_inner();
+        assert_eq!(write.bytes_written, 15);
+
+        let read = svc
+            .read_file(Request::new(ReadFileRequest {
+                path: path.clone(),
+                offset: 6,
+                limit: 3,
+            }))
+            .await
+            .expect("read_file should succeed")
+            .into_inner();
+        assert_eq!(read.data, b"mac");
+        assert!(read.truncated);
+
+        let list = svc
+            .list_directory(Request::new(ListDirectoryRequest {
+                path: dir.to_string_lossy().into_owned(),
+            }))
+            .await
+            .expect("list_directory should succeed")
+            .into_inner();
+        assert!(list.entries.iter().any(|entry| entry.name == "payload.txt"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

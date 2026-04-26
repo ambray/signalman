@@ -57,7 +57,6 @@ vi.mock("@grpc/grpc-js", () => {
   // handlers from `fakeState`.
   function ControlPlane(this: Record<string, unknown>, address: string, _creds: unknown, options: unknown) {
     fakeState.ctorCalls.push({ address, options });
-    const self = this;
     for (const method of [
       "health",
       "getActiveBackend",
@@ -78,20 +77,20 @@ vi.mock("@grpc/grpc-js", () => {
       "checkpointList",
     ]) {
       // Unary
-      self[method] = (req: unknown, options: unknown, cb: (err: Error | null, resp: unknown) => void) => {
+      this[method] = (req: unknown, options: unknown, cb: (err: Error | null, resp: unknown) => void) => {
         const handler = fakeState.unary.get(method);
         if (!handler) throw new Error(`unmocked unary ${method}`);
         handler(req, options, cb);
       };
     }
     for (const method of ["vmCopyFile", "vmRunCommand", "vmWaitAgent", "vmInstall"]) {
-      self[method] = (_req: unknown): FakeStream => {
+      this[method] = (_req: unknown): FakeStream => {
         const handler = fakeState.streams.get(method);
         if (!handler) throw new Error(`unmocked stream ${method}`);
         return handler();
       };
     }
-    self.close = () => {};
+    this.close = () => {};
   }
   return {
     credentials: {
@@ -281,7 +280,7 @@ describe("ServiceBackend.executeCommand", () => {
 
 describe("ServiceBackend.copyFileToVM / copyFileFromVM", () => {
   it("invokes vmCopyFile with fromGuest=false for to-VM transfers", async () => {
-    let captured: unknown = null;
+    const captured: unknown = null;
     fakeState.streams.set("vmCopyFile", () => {
       // We can't capture from the stream factory directly, but we can
       // observe by intercepting the constructor's stream method in the

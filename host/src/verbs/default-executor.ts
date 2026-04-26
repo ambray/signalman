@@ -22,33 +22,17 @@ import { envelopeError } from "../output/envelope.js";
  *
  * Lazily imports the orchestrator + dependencies to keep CLI tools
  * (`signalman list`, `signalman describe`) fast — they shouldn't pay
- * the import cost of the gRPC client and Hyper-V backend.
+ * the import cost of the gRPC client and hypervisor backends.
  */
 export function createDefaultExecutor(): RunExecutor {
   return async (ctx: RunExecutorContext) => {
     // Lazy import — see file-level comment.
     const { ScenarioOrchestrator } = await import("../scenarios/orchestrator.js");
-    const { HyperVBackend } = await import("../hypervisors/hyperv.js");
-    const { VmwareBackend } = await import("../hypervisors/vmware.js");
     const { loadConfig } = await import("../config.js");
+    const { selectBackend } = await import("../hypervisors/selector.js");
 
     const config = loadConfig();
-    let backend;
-    const hyperv = new HyperVBackend();
-    const vmware = new VmwareBackend({
-      vmrunPath: config.hypervisor.vmrunPath,
-      guestUser: config.hypervisor.guestCredentials?.username,
-      guestPass: config.hypervisor.guestCredentials?.password,
-    });
-    if (config.hypervisor.backend === "vmware" && (await vmware.isAvailable())) {
-      backend = vmware;
-    } else if (await hyperv.isAvailable()) {
-      backend = hyperv;
-    } else if (await vmware.isAvailable()) {
-      backend = vmware;
-    } else {
-      throw new Error("No hypervisor backend available.");
-    }
+    const backend = await selectBackend(config);
 
     const orchestrator = new ScenarioOrchestrator(backend, new Map(), config);
     // P3.c: pass ctx.emit through to the orchestrator so step lifecycle

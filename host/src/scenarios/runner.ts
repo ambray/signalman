@@ -560,7 +560,7 @@ export async function runScenario(
   // 2. Narrative is already parsed by loadScenario
 
   // 3. Execute workflow — walk each narrative step's tool blocks
-  let setupOk = true;
+  const setupOk = true;
   let workflowOk = true;
 
   if (narrative) {

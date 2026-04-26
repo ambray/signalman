@@ -26,10 +26,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import type { HypervisorBackend } from "./hypervisors/interface.js";
-import { HyperVBackend } from "./hypervisors/hyperv.js";
-import { VmwareBackend } from "./hypervisors/vmware.js";
-import { ServiceBackend } from "./hypervisors/service.js";
 import { loadConfig } from "./config.js";
+import { buildBackendList } from "./hypervisors/selector.js";
 import { createAllTools } from "./tools/index.js";
 import { runList } from "./verbs/list.js";
 import { runDescribe } from "./verbs/describe.js";
@@ -41,44 +39,13 @@ import { createDefaultExecutor } from "./verbs/default-executor.js";
 
 // ── Backend Discovery ─────────────────────────────────────────────
 
-/**
- * Build the ordered backend list from configuration.
- *
- * Selection order (P1, 2026-04): service > hyperv (direct/gsudo) > vmware.
- *
- * The `service` backend talks to the privileged `signalman-service`
- * daemon over mTLS gRPC, eliminating per-call gsudo elevation. If the
- * daemon isn't installed (or its cert bundle isn't readable), the
- * direct Hyper-V backend takes over via its existing Direct-COM /
- * gsudo path. VMware remains a legacy fallback.
- *
- * If the config specifies a preferred backend, it goes first.
- */
-function buildBackendList(preferredBackend?: string): HypervisorBackend[] {
-  const config = loadConfig();
-  const vmware = new VmwareBackend({
-    vmrunPath: config.hypervisor.vmrunPath,
-    guestUser: config.hypervisor.guestCredentials?.username,
-    guestPass: config.hypervisor.guestCredentials?.password,
-  });
-  const hyperv = new HyperVBackend();
-  const service = new ServiceBackend();
-
-  if (preferredBackend === "vmware") return [vmware, service, hyperv];
-  if (preferredBackend === "hyperv") return [hyperv, service, vmware];
-  if (preferredBackend === "service") return [service, hyperv, vmware];
-  // Default: prefer service (P1, 2026-04). Falls through to direct
-  // Hyper-V (gsudo) when the service isn't installed.
-  return [service, hyperv, vmware];
-}
-
 let activeBackend: HypervisorBackend | null = null;
 
 async function getBackend(): Promise<HypervisorBackend> {
   if (activeBackend) return activeBackend;
 
   const config = loadConfig();
-  const backends = buildBackendList(config.hypervisor.backend);
+  const backends = buildBackendList(config);
 
   for (const backend of backends) {
     if (await backend.isAvailable()) {
@@ -88,7 +55,7 @@ async function getBackend(): Promise<HypervisorBackend> {
     }
   }
   throw new Error(
-    "No hypervisor backend available. Install Hyper-V or VMware Workstation.",
+    "No hypervisor backend available. Install Signalman service, Hyper-V, Tart, or VMware Workstation/Fusion.",
   );
 }
 
