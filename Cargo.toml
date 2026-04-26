@@ -4,6 +4,12 @@ members = [
     "guest",
     "service",
 ]
+# The Loom plugin lives outside this workspace because it depends on Loom
+# crates via path-deps. Excluding makes that explicit and keeps
+# `cargo check --workspace` green when Loom is not checked out alongside.
+exclude = [
+    "plugins/signalman-loom-plugin",
+]
 
 [workspace.package]
 version = "0.1.0"

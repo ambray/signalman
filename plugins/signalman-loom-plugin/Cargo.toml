@@ -1,0 +1,38 @@
+# Empty [workspace] declares this crate as its own workspace root so it does
+# not get pulled into the Signalman or Loom Cargo workspaces. The Signalman
+# root Cargo.toml also lists this path in `workspace.exclude` for clarity.
+[workspace]
+
+[package]
+name = "signalman-loom-plugin"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Loom trusted-plugin that registers loom.signalman.* MCP tools backed by the Signalman scenario runner."
+repository = "https://github.com/ambray/signalman"
+
+[lib]
+name = "signalman_loom_plugin"
+path = "src/lib.rs"
+
+# This crate is intentionally NOT in the Signalman Cargo workspace — it
+# depends on Loom path-deps and is only built when Loom is present alongside.
+# `cargo check --workspace` from the Signalman root must remain green without
+# this crate; build the plugin explicitly with
+# `cargo check -p signalman-loom-plugin --manifest-path plugins/signalman-loom-plugin/Cargo.toml`
+# (or `cd plugins/signalman-loom-plugin && cargo check`).
+
+[dependencies]
+# NOTE: paths assume sibling-repo layout: signalman/ and loom/ as siblings
+# under the same parent. The plugin lives at signalman/plugins/signalman-
+# loom-plugin/, so ../../../loom/ resolves to the loom sibling. When
+# building from a git worktree under .claude/worktrees/, override these
+# paths in a developer-local .cargo/config.toml [patch] section or build
+# from the main checkout.
+loom-plugin-api = { path = "../../../loom/crates/loom-plugin-api" }
+loom-core = { path = "../../../loom/crates/loom-core" }
+inventory = "0.3"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
