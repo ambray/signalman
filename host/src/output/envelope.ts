@@ -82,10 +82,185 @@ export interface EnvelopeAssertions {
 /** Top-level result outcome. */
 export type EnvelopeResult = "pass" | "fail" | "error";
 
+// ── Structured error envelope (P3.a — closes audit C6) ────────────
+
+/**
+ * Categorisation of a run-level failure. Drives the exit code via
+ * [`exitCodeFor`] and signals to consumers (Loom plugin, agents) which
+ * subsystem owned the failure.
+ *
+ * Mirrors the existing [`ExitBreakdown`] union; the two are kept aligned
+ * so an [`EnvelopeError.category`] can populate [`exitCodeFor`]'s
+ * `breakdown` field directly.
+ */
+export type EnvelopeErrorCategory =
+  | "setup"
+  | "infra"
+  | "validation"
+  | "assertion"
+  | "workflow"
+  | "internal";
+
+/**
+ * Well-known error codes. Consumers should match on these strings, but
+ * MUST treat unknown codes as opaque — Signalman is free to add new
+ * codes within an envelope_version (forward-compatible by design).
+ *
+ * Naming convention: `SCREAMING_SNAKE_CASE`. Codes are stable across
+ * minor versions; renames require an envelope_version bump.
+ */
+export type KnownEnvelopeErrorCode =
+  | "SCENARIO_NOT_FOUND"
+  | "SCENARIO_INVALID"
+  | "INVALID_PARAMETERS"
+  | "SETUP_STEP_FAILED"
+  | "BACKEND_UNAVAILABLE"
+  | "VM_OPERATION_FAILED"
+  | "GUEST_UNREACHABLE"
+  | "GUEST_TIMEOUT"
+  | "ASSERTION_EVALUATION_ERROR"
+  | "WORKFLOW_TOOL_FAILED"
+  | "RUN_TIMEOUT"
+  | "INTERNAL_ERROR";
+
+/**
+ * A single structured error attached to the result envelope. Every
+ * top-level failure of a run produces at least one of these (and may
+ * chain via `cause`).
+ *
+ * Wire shape:
+ * ```json
+ * {
+ *   "code": "BACKEND_UNAVAILABLE",
+ *   "message": "No hypervisor backend available",
+ *   "category": "infra",
+ *   "details": { "tried": ["hyperv", "vmware"] },
+ *   "cause": { ... }  // optional, recursive
+ * }
+ * ```
+ *
+ * Consumers (the Loom plugin's `loom.signalman.run` handler in particular)
+ * surface `code` to agents so they can branch on machine-readable failure
+ * types rather than parsing `message` strings.
+ */
+export interface EnvelopeError {
+  /**
+   * Machine-readable code. Use [`KnownEnvelopeErrorCode`] when possible;
+   * downstream consumers MUST tolerate unknown values (forward-compat).
+   */
+  code: KnownEnvelopeErrorCode | (string & { __opaque?: never });
+  /** Human-readable summary; suitable for surfacing in TUIs and logs. */
+  message: string;
+  /** Subsystem that produced the error. Drives exit-code mapping. */
+  category: EnvelopeErrorCategory;
+  /**
+   * Free-form structured detail bag. Stable keys for known codes are
+   * documented inline at emit sites; unknown keys must round-trip
+   * through the envelope unchanged.
+   */
+  details?: Record<string, unknown>;
+  /** Wrapped lower-level error for chained failures. */
+  cause?: EnvelopeError;
+}
+
+/**
+ * Construct an [`EnvelopeError`] with the standard fields populated.
+ * Ergonomic wrapper for the common case; equivalent to a struct literal.
+ */
+export function envelopeError(args: {
+  code: EnvelopeError["code"];
+  message: string;
+  category: EnvelopeErrorCategory;
+  details?: Record<string, unknown>;
+  cause?: EnvelopeError;
+}): EnvelopeError {
+  const out: EnvelopeError = {
+    code: args.code,
+    message: args.message,
+    category: args.category,
+  };
+  if (args.details !== undefined) out.details = args.details;
+  if (args.cause !== undefined) out.cause = args.cause;
+  return out;
+}
+
+/**
+ * Wrap an arbitrary thrown value (Error, string, anything) into an
+ * [`EnvelopeError`]. Preserves the original [`Error.name`] and
+ * [`Error.stack`] in `details` so support engineers can reconstruct
+ * the failure from the envelope alone.
+ *
+ * @param thrown   The caught value. Typically `unknown` from a `catch`.
+ * @param fallback Code + category to apply when `thrown` is not already
+ *                 an [`EnvelopeError`]. Most call sites know their
+ *                 subsystem and can supply a precise category.
+ */
+export function envelopeErrorFromThrown(
+  thrown: unknown,
+  fallback: { code: EnvelopeError["code"]; category: EnvelopeErrorCategory },
+): EnvelopeError {
+  if (isEnvelopeError(thrown)) {
+    return thrown;
+  }
+  if (thrown instanceof Error) {
+    const details: Record<string, unknown> = { name: thrown.name };
+    if (thrown.stack) details.stack = thrown.stack;
+    return {
+      code: fallback.code,
+      message: thrown.message,
+      category: fallback.category,
+      details,
+    };
+  }
+  return {
+    code: fallback.code,
+    message: String(thrown),
+    category: fallback.category,
+  };
+}
+
+/**
+ * Type-guard for values already shaped like an [`EnvelopeError`]. Used
+ * by [`envelopeErrorFromThrown`] so call sites that already produced an
+ * envelope error pass it through unchanged rather than wrapping a
+ * second time.
+ */
+export function isEnvelopeError(value: unknown): value is EnvelopeError {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.code === "string" &&
+    typeof v.message === "string" &&
+    typeof v.category === "string"
+  );
+}
+
+/**
+ * Adapt a structured error array into the legacy `string[]` shape used
+ * by the existing Markdown/JUnit reporters in [`./reporter.ts`].
+ *
+ * Consumers reading the new structured envelope should NOT use this —
+ * they should read `errors[i].message` (or the full record) directly.
+ * This is a transitional helper for the reporter pipeline only.
+ */
+export function envelopeErrorMessages(errors: EnvelopeError[]): string[] {
+  return errors.map((e) => `[${e.code}] ${e.message}`);
+}
+
+// ── Result envelope ───────────────────────────────────────────────
+
 /**
  * The shared result envelope. v0.1.0 schema; v0.2.0 adds optional
  * `vm_lineage_hash` and `recording_path` fields without breaking
  * v0.1.0 readers.
+ *
+ * **Errors:** since 2026-04-25 (P3.a), `errors` carries structured
+ * [`EnvelopeError`] records with `code`, `category`, and optional
+ * `details`/`cause`. This is a within-version evolution: the field
+ * name and array shape are unchanged; element type tightens from
+ * `string` to `EnvelopeError`. Older readers that did
+ * `errors.map(s => s)` should migrate to `errors.map(e => e.message)`
+ * or use [`envelopeErrorMessages`] for the legacy string shape.
  */
 export interface ResultEnvelope {
   envelope_version: "0.1.0";
@@ -101,7 +276,7 @@ export interface ResultEnvelope {
   exit_code: number;
   assertions: EnvelopeAssertions;
   events: EnvelopeEvent[];
-  errors: string[];
+  errors: EnvelopeError[];
 }
 
 // ── scenario_hash ─────────────────────────────────────────────────
