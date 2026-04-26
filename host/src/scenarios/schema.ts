@@ -92,17 +92,68 @@ export const vmConfigSchema = z
   })
   .passthrough();
 
+// ── retry policy (P3.b — closes audit C5) ─────────────────────────
+
+/**
+ * Retry policy for setup/teardown steps. Authors can declare a
+ * scenario-level default (top-level `retry:`) and override per-step
+ * (`retry:` on the step itself). Empty / unset → no retry.
+ *
+ * Wire shape:
+ * ```yaml
+ * retry:
+ *   count: 3            # additional attempts after the first (0 = no retry)
+ *   backoff_ms: 1000    # base delay between attempts (default 1000)
+ *   jitter: false       # add ±25% randomness to backoff (default false)
+ * ```
+ *
+ * Caps are deliberate: `count` ≤ 10 and `backoff_ms` ≤ 60000 prevent
+ * pathological scenarios from blocking a run for hours. Total worst-
+ * case wait per step is `count * backoff_ms` ≈ 10 minutes at the cap.
+ *
+ * `count: 0` is the explicit "no retry" form; allowed so authors can
+ * disable a scenario-level retry on a particular step. The default
+ * across the codebase (no `retry:` block at all) is also no retry.
+ */
+export const retryConfigSchema = z
+  .object({
+    count: z
+      .number()
+      .int()
+      .min(0)
+      .max(10, "retry.count capped at 10 to prevent pathological scenarios")
+      .describe("Additional attempts after the first (0 = no retry)"),
+    backoff_ms: z
+      .number()
+      .int()
+      .min(0)
+      .max(60_000, "retry.backoff_ms capped at 60s")
+      .default(1000)
+      .describe("Base delay between attempts in milliseconds"),
+    jitter: z
+      .boolean()
+      .default(false)
+      .describe("Add ±25% randomness to backoff to break retry-storm correlation"),
+  })
+  .passthrough();
+
+export type ValidatedRetryPolicy = z.infer<typeof retryConfigSchema>;
+
 // ── setup steps / checkpoints ─────────────────────────────────────
 
 /**
  * The existing `SetupStep` type uses a loose `action: string` + extra
  * fields. Represented here as the minimum guaranteed shape; individual
  * actions validate their own params.
+ *
+ * `retry`, when present, applies only to this step and overrides any
+ * scenario-level [`retryConfigSchema`] policy.
  */
 export const setupStepSchema = z
   .object({
     action: z.string().min(1, "setup step must have non-empty action"),
     vm: z.string().optional(),
+    retry: retryConfigSchema.optional(),
   })
   .passthrough();
 
@@ -180,6 +231,12 @@ export const scenarioConfigSchema = z
     capabilities: capabilitiesSchema.optional(),
     /** Reserved for P4 — see {@link parametersSchema}. */
     parameters: parametersSchema.optional(),
+    /**
+     * Default retry policy applied to every setup/teardown step that
+     * does not declare its own `retry:` block. P3.b deliverable.
+     * See {@link retryConfigSchema}.
+     */
+    retry: retryConfigSchema.optional(),
   })
   .passthrough();
 
