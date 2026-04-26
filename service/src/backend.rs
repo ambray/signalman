@@ -439,10 +439,15 @@ impl Backend for HyperVBackend {
 
     async fn get_status(&self, handle: &VmHandle) -> BackendResult<VmStatus> {
         let safe_name = escape_powershell_arg(sanitize_vm_name(&handle.name)?);
+        // [string] cast on $ip is essential: when the VM is in Saved/Off state
+        // and has no IPv4 address, the pipeline returns $null OR an empty
+        // PSObject (depending on PowerShell version). ConvertTo-Json serialises
+        // both as `{}` rather than `null`, breaking the Rust deserialiser. The
+        // explicit string cast collapses null/empty/object to "" reliably.
         let script = format!(
             "$vm = Get-VM -Name '{safe_name}'; \
-             $ip = ($vm | Get-VMNetworkAdapter | Select-Object -ExpandProperty IPAddresses | \
-               Where-Object {{ $_ -match '\\d+\\.\\d+\\.\\d+\\.\\d+' }} | Select-Object -First 1); \
+             $ip = [string](($vm | Get-VMNetworkAdapter | Select-Object -ExpandProperty IPAddresses | \
+               Where-Object {{ $_ -match '\\d+\\.\\d+\\.\\d+\\.\\d+' }} | Select-Object -First 1)); \
              @{{ State = $vm.State.ToString(); Uptime = [int]$vm.Uptime.TotalSeconds; \
                 MemoryAssigned = [int]($vm.MemoryAssigned / 1MB); IPAddress = $ip }} | ConvertTo-Json -Compress"
         );
@@ -455,14 +460,22 @@ impl Backend for HyperVBackend {
             uptime: u64,
             #[serde(rename = "MemoryAssigned")]
             memory_assigned: u64,
-            #[serde(rename = "IPAddress")]
-            ip_address: Option<String>,
+            // Defense in depth: deserialise IPAddress as a permissive
+            // serde_json::Value, then collapse to Option<String>. Keeps the
+            // service tolerant of any future PS-side regression that re-emits
+            // the empty-object form.
+            #[serde(rename = "IPAddress", default)]
+            ip_address: serde_json::Value,
         }
         let r: R = ps_json(&out)?;
+        let ip_address = match &r.ip_address {
+            serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        };
         Ok(VmStatus {
             handle: handle.clone(),
             state: VmState::from_hyperv_state(&r.state),
-            ip_address: r.ip_address,
+            ip_address,
             guest_agent_reachable: false,
             uptime_seconds: Some(r.uptime),
             memory_used_mb: Some(r.memory_assigned),
