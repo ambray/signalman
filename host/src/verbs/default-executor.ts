@@ -27,10 +27,15 @@ export function createDefaultExecutor(): RunExecutor {
     const { ScenarioOrchestrator } = await import("../scenarios/orchestrator.js");
     const { HyperVBackend } = await import("../hypervisors/hyperv.js");
     const { VmwareBackend } = await import("../hypervisors/vmware.js");
+    const { ServiceBackend } = await import("../hypervisors/service.js");
     const { loadConfig } = await import("../config.js");
 
     const config = loadConfig();
     let backend;
+    // Backend selection order per docs/p1-service.md: service > hyperv > vmware.
+    // The service backend's isAvailable() is a fast 2s health-RPC; failure
+    // falls through to direct elevation via gsudo.
+    const service = new ServiceBackend({});
     const hyperv = new HyperVBackend();
     const vmware = new VmwareBackend({
       vmrunPath: config.hypervisor.vmrunPath,
@@ -39,6 +44,8 @@ export function createDefaultExecutor(): RunExecutor {
     });
     if (config.hypervisor.backend === "vmware" && (await vmware.isAvailable())) {
       backend = vmware;
+    } else if (await service.isAvailable()) {
+      backend = service;
     } else if (await hyperv.isAvailable()) {
       backend = hyperv;
     } else if (await vmware.isAvailable()) {
@@ -47,7 +54,34 @@ export function createDefaultExecutor(): RunExecutor {
       throw new Error("No hypervisor backend available.");
     }
 
-    const orchestrator = new ScenarioOrchestrator(backend, new Map(), config);
+    // Build a guest-agent client per VM defined in the scenario. The
+    // orchestrator's runtime tools (vm_run_command, vm_copy_file via guest,
+    // driver_*, kernel_etw_*) all look up the client by VM name; without
+    // this map, every guest-side step throws "No guest client configured".
+    const { GuestAgentClient } = await import("../guest/client.js");
+    const { loadScenario } = await import("../scenarios/runner.js");
+    const guestClients = new Map<string, InstanceType<typeof GuestAgentClient>>();
+    try {
+      const { config: scenarioCfg } = loadScenario(ctx.scenarioDir);
+      const tlsCfg = config.guestAgent?.tls?.enabled
+        ? {
+            caPath: config.guestAgent.tls.caPath,
+            certPath: config.guestAgent.tls.certPath,
+            keyPath: config.guestAgent.tls.keyPath,
+          }
+        : undefined;
+      for (const vm of scenarioCfg.vms ?? []) {
+        const ip = vm.network?.static_ip;
+        if (!ip) continue; // skip VMs with no addressable agent (e.g. docker-only)
+        const port = vm.guest_agent_port ?? config.guestAgent?.defaultPort ?? 50051;
+        guestClients.set(vm.name, new GuestAgentClient(ip, port, tlsCfg));
+      }
+    } catch {
+      // Best-effort — orchestrator surfaces the original "no guest client"
+      // error if the scenario actually needs one.
+    }
+
+    const orchestrator = new ScenarioOrchestrator(backend, guestClients, config);
     const scenarioResult = await orchestrator.runScenario(ctx.scenarioDir);
 
     // Replay setup steps as step events (the orchestrator records them
