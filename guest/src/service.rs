@@ -177,6 +177,31 @@ impl GuestAgent for GuestAgentService {
         }))
     }
 
+    // P8: server-push readiness stream is the proto-reserved future
+    // replacement for the host's poll-based waitForGuestAgents path.
+    // v0.1.0 ships it as `unimplemented` to lock the wire shape; the
+    // host orchestrator continues to use the existing Health-based
+    // poll. When a real implementation lands, the host can detect
+    // support via the gRPC reflection or by handling unimplemented
+    // gracefully.
+    type StreamReadinessStream = std::pin::Pin<
+        Box<
+            dyn tonic::codegen::tokio_stream::Stream<
+                    Item = Result<ReadinessUpdate, Status>,
+                > + Send
+                + 'static,
+        >,
+    >;
+
+    async fn stream_readiness(
+        &self,
+        _request: Request<StreamReadinessRequest>,
+    ) -> Result<Response<Self::StreamReadinessStream>, Status> {
+        Err(Status::unimplemented(
+            "StreamReadiness reserved for the future server-push readiness path; v0.1.0 uses Health polling",
+        ))
+    }
+
     // ── Registration ────────────────────────────────────────────
 
     async fn register(
@@ -382,10 +407,17 @@ impl GuestAgent for GuestAgentService {
                 memory_bytes: p.memory_bytes,
                 cpu_percent: 0.0,
                 user: p.user,
-                is_appcontainer: p.is_appcontainer,
-                appcontainer_sid: p.appcontainer_sid.unwrap_or_default(),
-                is_low_integrity: p.is_low_integrity,
-                is_in_job: p.is_in_job,
+                // P8: Windows-specific token info now lives in the
+                // platform_details oneof. Linux/macOS guests will fill
+                // their own variants when those crates ship.
+                platform_details: Some(process_info::PlatformDetails::Windows(
+                    WindowsProcessDetails {
+                        is_appcontainer: p.is_appcontainer,
+                        appcontainer_sid: p.appcontainer_sid.unwrap_or_default(),
+                        is_low_integrity: p.is_low_integrity,
+                        is_in_job: p.is_in_job,
+                    },
+                )),
             })
             .collect();
 
@@ -414,20 +446,34 @@ impl GuestAgent for GuestAgentService {
                 memory_bytes: detail.memory_bytes,
                 cpu_percent: 0.0,
                 user: String::new(),
-                is_appcontainer: false,
-                appcontainer_sid: String::new(),
-                is_low_integrity: false,
-                is_in_job: false,
+                // Token / AppContainer / Job details not yet populated
+                // in this stub; Windows variant placeholder so the
+                // oneof carries the right discriminator.
+                platform_details: Some(process_info::PlatformDetails::Windows(
+                    WindowsProcessDetails {
+                        is_appcontainer: false,
+                        appcontainer_sid: String::new(),
+                        is_low_integrity: false,
+                        is_in_job: false,
+                    },
+                )),
             }),
-            integrity_level: String::new(),
             privileges: vec![],
             groups: vec![],
-            appcontainer_name: String::new(),
-            capabilities: vec![],
-            job_name: String::new(),
-            job_memory_limit: 0,
             blocked_domains: vec![],
             allowed_domains: vec![],
+            // P8: deep token / AppContainer / Job evidence moved into
+            // the WindowsInspectDetails oneof variant. Empty defaults
+            // for now since this RPC is a v0.1.0 stub.
+            platform_details: Some(process_inspect_response::PlatformDetails::Windows(
+                WindowsInspectDetails {
+                    integrity_level: String::new(),
+                    appcontainer_name: String::new(),
+                    appcontainer_capabilities: vec![],
+                    job_name: String::new(),
+                    job_memory_limit: 0,
+                },
+            )),
         }))
     }
 
