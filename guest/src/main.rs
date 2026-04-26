@@ -126,13 +126,44 @@ impl tonic::service::Interceptor for AuthInterceptor {
             .and_then(|v| v.to_str().ok());
 
         match auth_header {
-            Some(value) if value == format!("Bearer {expected}") => Ok(request),
-            Some(_) => Err(tonic::Status::unauthenticated("Invalid bearer token")),
+            Some(value) => {
+                let expected_header = format!("Bearer {expected}");
+                if constant_time_eq(value.as_bytes(), expected_header.as_bytes()) {
+                    Ok(request)
+                } else {
+                    Err(tonic::Status::unauthenticated("Invalid bearer token"))
+                }
+            }
             None => Err(tonic::Status::unauthenticated(
                 "Missing authorization header",
             )),
         }
     }
+}
+
+/// Constant-time byte slice equality (P4.a / Sec F7).
+///
+/// `value == expected` would short-circuit on the first differing byte,
+/// which lets a network attacker who can measure response timing infer
+/// the token byte-by-byte. This loop XORs every byte and ORs the
+/// result, so the runtime is data-independent for the loop body. The
+/// length check is also constant after the early-return on length
+/// mismatch (acceptable: the token length is not secret — its presence
+/// in the configured `expected` is what matters).
+///
+/// We keep this in-tree (not `subtle` crate) so the security posture is
+/// auditable in one place without an extra dep. For wire-protocol
+/// authentication the surface is small enough that a tiny manual
+/// implementation is preferable.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 #[tokio::main]
@@ -148,6 +179,22 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let addr: SocketAddr = cli.bind.parse()?;
+
+    // P4.a / Sec F3: enforce that --allow-insecure ONLY works on a
+    // loopback bind. The doc-comment on the flag has always claimed
+    // "refuses to bind a non-loopback interface" but the parser path
+    // never actually checked. A typo'd `--bind 0.0.0.0:50051` plus
+    // `--allow-insecure` would silently expose a no-auth SYSTEM-RCE
+    // endpoint on every interface — refused here.
+    if cli.allow_insecure && !addr.ip().is_loopback() {
+        error!(
+            address = %addr,
+            "--allow-insecure may only be used with a loopback bind \
+             (127.0.0.1, ::1, or localhost). Refusing to start a no-auth \
+             listener on a non-loopback interface."
+        );
+        std::process::exit(1);
+    }
 
     // Validate TLS flag combinations before any further work — this lets
     // the operator see the failure immediately rather than during the TLS
@@ -562,5 +609,61 @@ mod auth_tests {
 
         let err = interceptor.call(request).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    // ── P4.a / Sec F7: constant-time bearer-token comparison ─────
+
+    #[test]
+    fn constant_time_eq_returns_true_for_equal_slices() {
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_eq(b"a", b"a"));
+        assert!(constant_time_eq(b"signalman-token-1234", b"signalman-token-1234"));
+    }
+
+    #[test]
+    fn constant_time_eq_returns_false_for_length_mismatch() {
+        assert!(!constant_time_eq(b"", b"a"));
+        assert!(!constant_time_eq(b"a", b"ab"));
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+    }
+
+    #[test]
+    fn constant_time_eq_returns_false_for_same_length_but_different_bytes() {
+        // Mismatch at the first byte — short-circuit `==` would stop early;
+        // our implementation must still compare the rest. We can't easily
+        // measure timing in a test, but we can pin behaviour: any single
+        // byte difference → false, regardless of position.
+        assert!(!constant_time_eq(b"abcdef", b"Xbcdef")); // first byte
+        assert!(!constant_time_eq(b"abcdef", b"abcdeF")); // last byte
+        assert!(!constant_time_eq(b"abcdef", b"abXdef")); // middle byte
+    }
+
+    #[test]
+    fn auth_interceptor_uses_constant_time_compare() {
+        // Smoke: rejected tokens still reject, accepted tokens still
+        // accept after the constant_time_eq swap. The behavioural
+        // contract from test_auth_interceptor_valid_token /
+        // _invalid_token is preserved.
+        let mut interceptor = AuthInterceptor::new(Some("token-abcdef-12345".into()));
+
+        let mut req_ok = tonic::Request::new(());
+        req_ok
+            .metadata_mut()
+            .insert("authorization", "Bearer token-abcdef-12345".parse().unwrap());
+        assert!(interceptor.call(req_ok).is_ok());
+
+        // One byte different at the end of the token.
+        let mut req_bad_tail = tonic::Request::new(());
+        req_bad_tail
+            .metadata_mut()
+            .insert("authorization", "Bearer token-abcdef-12346".parse().unwrap());
+        assert!(interceptor.call(req_bad_tail).is_err());
+
+        // One byte different at the start of the token.
+        let mut req_bad_head = tonic::Request::new(());
+        req_bad_head
+            .metadata_mut()
+            .insert("authorization", "Bearer Xoken-abcdef-12345".parse().unwrap());
+        assert!(interceptor.call(req_bad_head).is_err());
     }
 }
