@@ -13,6 +13,15 @@ package signalman.service;
 // are opaque to the protocol. v0.1.0 ships a Hyper-V dispatcher only,
 // but libvirt / vmrun dispatchers (v0.3.0+) can be added without a
 // proto break.
+//
+// ── v1 freeze (P8, 2026-04-26) ─────────────────────────────────────
+// Field numbers are STABLE; renames require a coordinated
+// host TS + service Rust + plugin migration. Hypervisor-specific
+// extension fields ride in `VmConfig.hypervisor_specific` as a
+// `oneof` so adding libvirt / vmrun / Azure / AWS does NOT require
+// renumbering existing fields. The Hyper-V variant ships empty in
+// v0.1.0 and will gain fields as needed without breaking older
+// clients (oneof-variant adds are non-breaking).
 
 service ControlPlane {
   // Returns service health and the set of available backends.
@@ -74,6 +83,15 @@ message NetworkConfig {
   string gateway = 4;
 }
 
+// VM provisioning config — fields 1–7 are hypervisor-agnostic. Anything
+// hypervisor-specific (Generation 1 vs 2 boot for Hyper-V, libvirt
+// domain XML overrides, vmrun-specific options, AWS instance-type
+// hints) lives in the `hypervisor_specific` oneof so the agnostic
+// surface stays small and future hypervisors don't require breaking
+// changes to the agnostic fields.
+//
+// v0.1.0 ships an empty HyperVVmConfig variant — sufficient for the
+// current single-template flow. Future fields land inside the variant.
 message VmConfig {
   string name = 1;
   string template = 2;
@@ -82,6 +100,41 @@ message VmConfig {
   uint32 disk_gb = 5;
   NetworkConfig network = 6;
   uint32 guest_agent_port = 7;
+
+  // P8: hypervisor-specific extension. Field tags 100–110 are reserved
+  // for future hypervisor backends; pick the next unused tag when adding
+  // a new variant.
+  oneof hypervisor_specific {
+    HyperVVmConfig hyperv = 100;
+    LibvirtVmConfig libvirt = 101;
+    VmrunVmConfig vmrun = 102;
+  }
+}
+
+// Hyper-V provisioning hints. Empty in v0.1.0 — Hyper-V is the default
+// and the agnostic fields are sufficient for our smoke and Ospiri
+// scenarios. Future fields (generation = 1 | 2, secure_boot,
+// dynamic_memory, vlan_id, integration_services) land here without
+// a proto bump.
+message HyperVVmConfig {
+  // Reserved for future Hyper-V-specific fields.
+  // Likely additions:
+  //   uint32 generation = 1;          // 1 or 2
+  //   bool secure_boot = 2;
+  //   bool dynamic_memory = 3;
+  //   uint32 vlan_id = 4;
+}
+
+// libvirt/QEMU provisioning hints. Reserved for v0.3.0+ Linux backend.
+message LibvirtVmConfig {
+  // Likely fields: domain_xml_overrides, virt_type, machine_type.
+}
+
+// vmrun (VMware Workstation/Fusion) provisioning hints. Reserved for
+// v0.3.0+ macOS backend. The TS side already has a VMware fallback;
+// this is the service-crate-side admit-it.
+message VmrunVmConfig {
+  // Likely fields: vmx_path_override, hardware_version, headless.
 }
 
 message CheckpointInfo {
