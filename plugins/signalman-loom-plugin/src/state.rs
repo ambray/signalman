@@ -74,11 +74,26 @@ impl RunStatus {
     }
 }
 
+/// Schema version of the on-disk state file. Bumped on breaking changes.
+/// Version 1 is the initial shape; readers tolerate missing version
+/// fields (treat as v1) and unknown future versions (skip with warning).
+pub const STATE_SCHEMA_VERSION: u32 = 1;
+
+fn default_state_version() -> u32 {
+    STATE_SCHEMA_VERSION
+}
+
 /// Persisted state for a single run. Forward-compatible: new fields must
 /// have `#[serde(default)]` to allow older state files to load cleanly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunState {
+    /// Schema version. Reserved field for future breaking changes; loaders
+    /// that encounter a higher version than they understand should
+    /// surface a structured error rather than silently misinterpret. v1
+    /// is the initial shape (this struct).
+    #[serde(default = "default_state_version")]
+    pub version: u32,
     /// Run handle as returned by Signalman.
     pub run_id: String,
     /// Scenario id supplied by the agent.
@@ -159,6 +174,7 @@ impl RunStateStore {
                 runs_dir.display()
             )));
         }
+        sweep_orphan_tmp_files(&runs_dir);
         Ok(Self { runs_dir })
     }
 
@@ -195,6 +211,7 @@ impl RunStateStore {
                 existing
             }
             None => RunState {
+                version: STATE_SCHEMA_VERSION,
                 run_id: run_id.to_string(),
                 scenario_id: scenario_id.map(str::to_string),
                 started_at_ms: now,
@@ -219,6 +236,7 @@ impl RunStateStore {
         envelope_so_far: Option<&Value>,
     ) -> LoomResult<RunState> {
         let mut state = self.load(run_id)?.unwrap_or_else(|| RunState {
+            version: STATE_SCHEMA_VERSION,
             run_id: run_id.to_string(),
             scenario_id: None,
             started_at_ms: now_ms(),
@@ -249,6 +267,7 @@ impl RunStateStore {
     /// Mark the run finished and store the terminal envelope.
     pub fn record_finished(&self, run_id: &str, envelope: &Value) -> LoomResult<RunState> {
         let mut state = self.load(run_id)?.unwrap_or_else(|| RunState {
+            version: STATE_SCHEMA_VERSION,
             run_id: run_id.to_string(),
             scenario_id: None,
             started_at_ms: now_ms(),
@@ -360,6 +379,48 @@ impl RunStateStore {
         fs::rename(&tmp_path, &final_path)?;
         Ok(())
     }
+}
+
+/// Sweep orphaned `.tmp.<digits>` files from the runs directory.
+///
+/// The atomic-write pattern uses `<run_id>.json.tmp.<pid>` as the staging
+/// path before rename. If the process crashed between create-temp and
+/// rename, the temp file is left orphaned. On `RunStateStore::new` we
+/// remove any file whose name matches `*.tmp.<digits>` so they don't
+/// accumulate. The strict pattern (digits only after `.tmp.`) means we
+/// won't accidentally remove a user-named file that happens to contain
+/// `.tmp.` in its path.
+///
+/// Best-effort: errors are silently ignored so a sweep failure does not
+/// prevent the store from initialising. (One case in particular: the
+/// runs dir might be on a read-only mount during recovery.)
+fn sweep_orphan_tmp_files(runs_dir: &Path) {
+    let Ok(entries) = fs::read_dir(runs_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if is_orphan_tmp_name(name) {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+/// Returns true if `name` matches `*.tmp.<digits>` exactly. Strict to
+/// avoid touching files that contain `.tmp.` somewhere in their name but
+/// are not produced by the atomic-write pattern.
+fn is_orphan_tmp_name(name: &str) -> bool {
+    let Some(idx) = name.rfind(".tmp.") else {
+        return false;
+    };
+    let suffix = &name[idx + ".tmp.".len()..];
+    !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Validates a run id is safe to use as a filename (no path separators, no
@@ -599,5 +660,76 @@ mod tests {
         assert!(RunStatus::Finished.is_terminal());
         assert!(RunStatus::Lost.is_terminal());
         assert!(RunStatus::Stale.is_terminal());
+    }
+
+    #[test]
+    fn fresh_run_state_records_schema_version() {
+        let (store, _dir) = store();
+        let s = store.record_started("r1", None, None).unwrap();
+        assert_eq!(s.version, STATE_SCHEMA_VERSION);
+        // Round-trip via load preserves it.
+        let reloaded = store.load("r1").unwrap().unwrap();
+        assert_eq!(reloaded.version, STATE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn state_without_version_loads_as_v1() {
+        // Older state files predate the version field. They must still
+        // load and default to the current version.
+        let (store, dir) = store();
+        let raw = json!({
+            "runId": "legacy",
+            "startedAtMs": 1_700_000_000_000u64,
+            "lastObservedAtMs": 1_700_000_000_001u64,
+            "lastEventSeq": 0,
+            "status": "started"
+        });
+        std::fs::write(
+            dir.path().join("runs").join("legacy.json"),
+            serde_json::to_vec(&raw).unwrap(),
+        )
+        .unwrap();
+        let loaded = store.load("legacy").unwrap().unwrap();
+        assert_eq!(loaded.version, STATE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn orphan_tmp_files_are_swept_on_store_init() {
+        let parent = tempdir().unwrap();
+        let runs_dir = parent.path().join("runs");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        // Plant orphan tmp files matching the atomic-write pattern.
+        std::fs::write(runs_dir.join("r1.json.tmp.42"), b"orphan").unwrap();
+        std::fs::write(runs_dir.join("r2.json.tmp.99999"), b"orphan").unwrap();
+        // And one well-formed state file that must NOT be deleted.
+        std::fs::write(runs_dir.join("r3.json"), b"{}").unwrap();
+        // And a file that contains `.tmp.` but doesn't match the strict
+        // pattern (no trailing digits) — must NOT be deleted.
+        std::fs::write(runs_dir.join("backup.tmp.note"), b"keep me").unwrap();
+
+        let _store = RunStateStore::new(parent.path()).unwrap();
+
+        assert!(!runs_dir.join("r1.json.tmp.42").exists(), "orphan must be swept");
+        assert!(!runs_dir.join("r2.json.tmp.99999").exists(), "orphan must be swept");
+        assert!(runs_dir.join("r3.json").exists(), "real state file must survive");
+        assert!(
+            runs_dir.join("backup.tmp.note").exists(),
+            "non-pid-suffixed file must NOT match the strict pattern",
+        );
+    }
+
+    #[test]
+    fn is_orphan_tmp_name_matches_only_pid_suffixed_tmp_files() {
+        // Positive cases.
+        assert!(is_orphan_tmp_name("r1.json.tmp.42"));
+        assert!(is_orphan_tmp_name("complex-id.json.tmp.99999"));
+        assert!(is_orphan_tmp_name("a.b.c.tmp.1"));
+        // Negative cases.
+        assert!(!is_orphan_tmp_name("r1.json"));
+        assert!(!is_orphan_tmp_name("r1.json.tmp."));
+        assert!(!is_orphan_tmp_name("r1.json.tmp.notanumber"));
+        assert!(!is_orphan_tmp_name("r1.json.tmp.42x"));
+        assert!(!is_orphan_tmp_name("backup.tmp.note"));
+        assert!(!is_orphan_tmp_name("no-tmp-here.json"));
     }
 }
