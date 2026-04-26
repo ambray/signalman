@@ -23,6 +23,7 @@ import type {
   SetupStep,
   SandboxMode,
 } from "./runner.js";
+import type { ValidatedRetryPolicy } from "./schema.js";
 import { parseNarrative } from "./narrative.js";
 import { BreakLog } from "../kernel-debug/break-log.js";
 import { createKernelDebugToolRegistry } from "../kernel-debug/tools.js";
@@ -34,6 +35,43 @@ import {
   createRealKdSession,
   type KdSessionFactory,
 } from "../kernel-debug/factory.js";
+
+// ── P3.b retry helpers ────────────────────────────────────────────
+
+/**
+ * Resolve the effective retry policy for a setup/teardown step.
+ *
+ * Per-step `retry:` beats scenario-level `retry:` beats no retry. A
+ * `count: 0` policy is preserved (explicit "no retry" override on a
+ * step-by-step basis). Returns `undefined` when no retry applies.
+ */
+function resolveStepRetry(
+  step: { retry?: ValidatedRetryPolicy } & Record<string, unknown>,
+  scenarioRetry: ValidatedRetryPolicy | undefined,
+): ValidatedRetryPolicy | undefined {
+  if (step.retry) return step.retry;
+  return scenarioRetry;
+}
+
+/**
+ * Compute the next backoff delay in ms for a retry attempt.
+ *
+ * v0.1.0 P3.b ships a constant backoff (`policy.backoff_ms`) with
+ * optional ±25% jitter. Exponential backoff is reserved for a follow-up
+ * (audit C5 only required constant; exponential is defensible but adds
+ * surface area without an established consumer need).
+ *
+ * `attempt` is the failed attempt number (1-indexed). Currently unused
+ * for the constant policy but the parameter keeps the signature
+ * forward-compat for an exponential variant.
+ */
+function computeBackoff(policy: ValidatedRetryPolicy, _attempt: number): number {
+  const base = policy.backoff_ms;
+  if (!policy.jitter) return base;
+  // ±25% jitter; uniform across [0.75, 1.25] of base.
+  const factor = 0.75 + Math.random() * 0.5;
+  return Math.max(0, Math.floor(base * factor));
+}
 
 /**
  * Local helper so the class body can stay synchronous when wiring a
@@ -105,6 +143,19 @@ export interface StepResult {
   status: "success" | "failed" | "skipped";
   duration_ms: number;
   error?: string;
+  /**
+   * Total number of attempts the step took (1 if no retry configured or
+   * retry succeeded on first try). Populated only when retry was active
+   * to keep envelopes tidy for the common no-retry case. P3.b deliverable.
+   */
+  attempts?: number;
+  /**
+   * Error messages from prior failed attempts (excluding the final
+   * attempt — its error appears in `error` for failed runs, or is
+   * absent for retry-then-success). Populated only when at least one
+   * intermediate attempt failed. P3.b deliverable.
+   */
+  attempt_failures?: string[];
 }
 
 /** Result of a single assertion evaluation. */
@@ -479,9 +530,16 @@ export class ScenarioOrchestrator {
       // Wait for guest agents
       await this.waitForGuestAgents(vmMap, vmDefs);
 
-      // Execute setup
+      // Execute setup. The scenario-level retry policy (if declared)
+      // applies as a default to every step; per-step `retry:` overrides it.
       const setupSteps = scenarioConfig.setup ?? [];
-      const sResults = await this.executeSetup(setupSteps, vmMap);
+      const scenarioRetry = (scenarioConfig as { retry?: ValidatedRetryPolicy })
+        .retry;
+      const sResults = await this.executeSetup(
+        setupSteps,
+        vmMap,
+        scenarioRetry,
+      );
       setupResults.push(...sResults);
 
       const setupFailed = sResults.some((r) => r.status === "failed");
@@ -818,6 +876,7 @@ export class ScenarioOrchestrator {
   async executeSetup(
     steps: SetupStep[],
     vmMap: Map<string, VMHandle>,
+    scenarioRetry?: ValidatedRetryPolicy,
   ): Promise<StepResult[]> {
     const results: StepResult[] = [];
 
@@ -828,8 +887,83 @@ export class ScenarioOrchestrator {
       const vmName = (step.vm as string) ?? "";
       const startTime = Date.now();
 
-      try {
-        switch (step.action) {
+      // P3.b: resolve effective retry policy: per-step beats scenario-
+      // level beats none. `count: 0` is explicit no-retry; absent
+      // policy is also no-retry.
+      const retryPolicy = resolveStepRetry(step, scenarioRetry);
+      const maxAttempts = (retryPolicy?.count ?? 0) + 1;
+      const attemptFailures: string[] = [];
+      let succeeded = false;
+      let outcome: { status: "success" | "skipped"; error?: string } | null = null;
+      let lastError: unknown = null;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          outcome = await this.executeStepBody(step, vmName, vmMap);
+          succeeded = true;
+          break;
+        } catch (err) {
+          lastError = err;
+          const msg = err instanceof Error ? err.message : String(err);
+          if (attempt < maxAttempts) {
+            attemptFailures.push(msg);
+            const delay = computeBackoff(retryPolicy!, attempt);
+            if (delay > 0) {
+              await new Promise((resolve) => setTimeout(resolve, delay));
+            }
+          }
+        }
+      }
+
+      const duration_ms = Date.now() - startTime;
+      const totalAttempts = succeeded ? attemptFailures.length + 1 : maxAttempts;
+      const recordAttempts = totalAttempts > 1; // only emit on retry-active runs
+
+      if (succeeded && outcome) {
+        results.push({
+          action: step.action,
+          vm: vmName,
+          status: outcome.status,
+          duration_ms,
+          ...(outcome.error !== undefined ? { error: outcome.error } : {}),
+          ...(recordAttempts ? { attempts: totalAttempts } : {}),
+          ...(attemptFailures.length > 0
+            ? { attempt_failures: attemptFailures }
+            : {}),
+        });
+      } else {
+        results.push({
+          action: step.action,
+          vm: vmName,
+          status: "failed",
+          duration_ms,
+          error: lastError instanceof Error ? lastError.message : String(lastError),
+          ...(recordAttempts ? { attempts: totalAttempts } : {}),
+          // attempt_failures excludes the final attempt's error since
+          // it already appears in `error`; only intermediate failures
+          // surface here.
+          ...(attemptFailures.length > 0
+            ? { attempt_failures: attemptFailures }
+            : {}),
+        });
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Execute a single setup/teardown step body. Returns
+   * `{ status: "success" }` on completion, `{ status: "skipped", error }`
+   * for unknown actions, and **throws** on any handler failure so the
+   * caller's retry loop can catch and re-attempt. P3.b refactor.
+   */
+  private async executeStepBody(
+    step: SetupStep,
+    vmName: string,
+    vmMap: Map<string, VMHandle>,
+  ): Promise<{ status: "success" | "skipped"; error?: string }> {
+    switch (step.action) {
           case "vm_install": {
             const handle = vmMap.get(vmName);
             if (!handle) throw new Error(`VM '${vmName}' not found in resolved VMs`);
@@ -841,12 +975,6 @@ export class ScenarioOrchestrator {
               step.version as string | undefined,
               step.timeout_ms as number | undefined,
             );
-            results.push({
-              action: step.action,
-              vm: vmName,
-              status: "success",
-              duration_ms: Date.now() - startTime,
-            });
             break;
           }
 
@@ -867,12 +995,6 @@ export class ScenarioOrchestrator {
                 step.host_path as string,
               );
             }
-            results.push({
-              action: step.action,
-              vm: vmName,
-              status: "success",
-              duration_ms: Date.now() - startTime,
-            });
             break;
           }
 
@@ -889,12 +1011,6 @@ export class ScenarioOrchestrator {
               cmdArgs,
               { timeoutMs, runAs },
             );
-            results.push({
-              action: step.action,
-              vm: vmName,
-              status: "success",
-              duration_ms: Date.now() - startTime,
-            });
             break;
           }
 
@@ -907,12 +1023,6 @@ export class ScenarioOrchestrator {
               vmHandle: handle,
               label,
             });
-            results.push({
-              action: step.action,
-              vm: vmName,
-              status: "success",
-              duration_ms: Date.now() - startTime,
-            });
             break;
           }
 
@@ -921,24 +1031,12 @@ export class ScenarioOrchestrator {
             if (!handle) throw new Error(`VM '${vmName}' not found in resolved VMs`);
             const label = step.label as string;
             await this.backend.createCheckpoint(handle, label);
-            results.push({
-              action: step.action,
-              vm: vmName,
-              status: "success",
-              duration_ms: Date.now() - startTime,
-            });
             break;
           }
 
           case "wait": {
             const durationMs = (step.duration_ms as number) ?? 1_000;
             await new Promise((resolve) => setTimeout(resolve, durationMs));
-            results.push({
-              action: step.action,
-              vm: vmName,
-              status: "success",
-              duration_ms: Date.now() - startTime,
-            });
             break;
           }
 
@@ -967,12 +1065,6 @@ export class ScenarioOrchestrator {
               }
             }
 
-            results.push({
-              action: step.action,
-              vm: vmName,
-              status: "success",
-              duration_ms: Date.now() - startTime,
-            });
             break;
           }
 
@@ -984,37 +1076,22 @@ export class ScenarioOrchestrator {
               env: step.env as Record<string, string> | undefined,
             };
             await docker.composeDown(composeConfig, step.remove_volumes as boolean | undefined);
-            results.push({
-              action: step.action,
-              vm: vmName,
-              status: "success",
-              duration_ms: Date.now() - startTime,
-            });
             break;
           }
 
-          default: {
-            results.push({
-              action: step.action,
-              vm: vmName,
-              status: "skipped",
-              duration_ms: Date.now() - startTime,
-              error: `Unknown action: ${step.action}`,
-            });
-          }
-        }
-      } catch (err) {
-        results.push({
-          action: step.action,
-          vm: vmName,
-          status: "failed",
-          duration_ms: Date.now() - startTime,
-          error: err instanceof Error ? err.message : String(err),
-        });
+      default: {
+        return {
+          status: "skipped",
+          error: `Unknown action: ${step.action}`,
+        };
       }
     }
 
-    return results;
+    // Successful (non-default) case fell through via `break`. The
+    // method throws on any handler failure (errors propagate naturally
+    // since there's no try/catch wrapping the switch); the caller's
+    // retry loop in executeSetup handles the catch.
+    return { status: "success" };
   }
 
   /**
@@ -1023,9 +1100,12 @@ export class ScenarioOrchestrator {
   async executeTeardown(
     steps: SetupStep[],
     vmMap: Map<string, VMHandle>,
+    scenarioRetry?: ValidatedRetryPolicy,
   ): Promise<StepResult[]> {
-    // Teardown uses the same logic as setup but swallows errors
-    return this.executeSetup(steps, vmMap);
+    // Teardown uses the same logic as setup but swallows errors. P3.b:
+    // retry policy threads through identically — flaky teardowns can
+    // also benefit from retry.
+    return this.executeSetup(steps, vmMap, scenarioRetry);
   }
 
   /**
