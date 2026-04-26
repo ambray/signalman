@@ -13,6 +13,7 @@
 
 import type { RunExecutor, RunExecutorContext } from "./run.js";
 import type { EnvelopeAssertionResult, EnvelopeEventInput } from "../output/envelope.js";
+import { envelopeError } from "../output/envelope.js";
 
 /**
  * Build a real-orchestrator-backed executor.
@@ -89,10 +90,28 @@ export function createDefaultExecutor(): RunExecutor {
           ? "fail"
           : "error";
 
+    // Translate the legacy ScenarioOrchestrator's stringly-typed `error`
+    // into a structured EnvelopeError. The orchestrator does not yet
+    // distinguish setup/workflow/infra failures at this level, so we
+    // categorise by `result`: a "failed" status is a workflow or
+    // assertion failure (the orchestrator's failed-step detection runs
+    // before assertions); an "error" status is treated as infrastructure.
+    // Once the orchestrator gains a richer error surface (P3.c
+    // event-emission hook), this mapping can sharpen further.
+    const errors = scenarioResult.error
+      ? [
+          envelopeError({
+            code: result === "error" ? "INTERNAL_ERROR" : "WORKFLOW_TOOL_FAILED",
+            message: scenarioResult.error,
+            category: result === "error" ? "infra" : "workflow",
+          }),
+        ]
+      : [];
+
     return {
       result,
       assertions: { total, passed: passedCount, failed: failedCount, results: assertionEvents },
-      errors: scenarioResult.error ? [scenarioResult.error] : [],
+      errors,
       breakdown: result === "fail" ? "assertion" : result === "error" ? "infra" : undefined,
     };
   };
