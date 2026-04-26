@@ -30,6 +30,7 @@ pub mod handlers;
 pub mod schemas;
 pub mod state;
 pub mod subprocess;
+pub mod trace;
 
 /// Stable plugin id used by Loom's manifest registry. Do NOT rename without
 /// a coordinated Loom config migration; existing user installs key off this.

@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use crate::schemas;
 use crate::state::{RunState, RunStateStore};
 use crate::subprocess::run_signalman;
+use crate::trace::{new_trace_id, parse_trace_id};
 
 const TIER: PluginTier = PluginTier::Free;
 const STABILITY: Stability = Stability::Experimental;
@@ -150,7 +151,28 @@ fn register_run() -> McpToolRegistration {
     }
 }
 
+/// Resolve the trace-id for a `loom.signalman.run` invocation. If the
+/// caller supplied one in `args.trace_id`, validate and canonicalise
+/// it; otherwise generate a fresh 32-char hex id. P3.d.
+pub(crate) fn resolve_trace_id(args: &Value) -> LoomResult<String> {
+    if let Some(supplied) = args.get("trace_id").and_then(Value::as_str) {
+        return parse_trace_id(supplied, "trace_id");
+    }
+    Ok(new_trace_id())
+}
+
 pub(crate) fn build_run_args(args: &Value) -> LoomResult<Vec<String>> {
+    build_run_args_with_trace(args, &resolve_trace_id(args)?)
+}
+
+/// `build_run_args` split for testability: separates trace-id resolution
+/// (which uses `new_trace_id` and is therefore non-deterministic) from
+/// the deterministic CLI-arg construction. Tests pin a fixed trace_id
+/// and verify the args.
+pub(crate) fn build_run_args_with_trace(
+    args: &Value,
+    trace_id: &str,
+) -> LoomResult<Vec<String>> {
     let id = require_string(args, "id")?;
     let mut a = vec!["run".to_string(), id];
     push_param_flags(&mut a, args.get("parameters"))?;
@@ -164,6 +186,10 @@ pub(crate) fn build_run_args(args: &Value) -> LoomResult<Vec<String>> {
         a.push("--network-class".to_string());
         a.push(nc.to_string());
     }
+    // P3.d: forward the resolved trace-id to Signalman so its CLI can
+    // generate matching gRPC metadata on every outbound call.
+    a.push("--trace-id".to_string());
+    a.push(trace_id.to_string());
     a.push("--format".to_string());
     a.push("json".to_string());
     Ok(a)
@@ -191,7 +217,14 @@ pub fn finalize_run_start(
         .to_string();
 
     let scenario_id = args.get("id").and_then(Value::as_str);
-    let trace_id = args.get("trace_id").and_then(Value::as_str);
+    // P3.d: prefer the trace_id Signalman echoed back in the response
+    // (it round-tripped through the CLI's parseTraceId so we know
+    // it's canonical); fall back to the input args if Signalman didn't
+    // surface it for some reason.
+    let trace_id = response
+        .get("trace_id")
+        .and_then(Value::as_str)
+        .or_else(|| args.get("trace_id").and_then(Value::as_str));
 
     store.record_started(&run_id, scenario_id, trace_id)?;
 
@@ -511,12 +544,17 @@ mod tests {
 
     // ── run ───────────────────────────────────────────────────────
 
+    const FAKE_TRACE: &str = "abcdef0123456789abcdef0123456789";
+
     #[test]
     fn run_args_pass_network_class_when_valid() {
-        let a = build_run_args(&json!({
-            "id": "x",
-            "network_class": "nat"
-        }))
+        let a = build_run_args_with_trace(
+            &json!({
+                "id": "x",
+                "network_class": "nat"
+            }),
+            FAKE_TRACE,
+        )
         .unwrap();
         let joined = a.join(" ");
         assert!(joined.contains("--network-class nat"));
@@ -524,10 +562,51 @@ mod tests {
 
     #[test]
     fn run_args_reject_invalid_network_class() {
-        let r = build_run_args(&json!({
-            "id": "x",
-            "network_class": "wide-open"
-        }));
+        let r = build_run_args_with_trace(
+            &json!({
+                "id": "x",
+                "network_class": "wide-open"
+            }),
+            FAKE_TRACE,
+        );
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn run_args_always_include_trace_id_flag() {
+        // P3.d: the plugin forwards a resolved trace_id on every run
+        // invocation so log streams correlate even when Loom itself
+        // didn't supply one.
+        let a = build_run_args_with_trace(&json!({ "id": "x" }), FAKE_TRACE).unwrap();
+        let joined = a.join(" ");
+        assert!(joined.contains(&format!("--trace-id {}", FAKE_TRACE)));
+    }
+
+    #[test]
+    fn resolve_trace_id_uses_caller_supplied_value_when_valid() {
+        let resolved = resolve_trace_id(&json!({ "trace_id": FAKE_TRACE })).unwrap();
+        assert_eq!(resolved, FAKE_TRACE);
+    }
+
+    #[test]
+    fn resolve_trace_id_canonicalises_dashed_uuid_input() {
+        // Loom may pass a dashed UUID for ergonomics; we canonicalise
+        // before forwarding to the CLI.
+        let dashed = "550E8400-E29B-41D4-A716-446655440000";
+        let resolved = resolve_trace_id(&json!({ "trace_id": dashed })).unwrap();
+        assert_eq!(resolved, "550e8400e29b41d4a716446655440000");
+    }
+
+    #[test]
+    fn resolve_trace_id_generates_when_caller_omits() {
+        let resolved = resolve_trace_id(&json!({ "id": "x" })).unwrap();
+        assert_eq!(resolved.len(), 32);
+        assert!(resolved.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn resolve_trace_id_rejects_malformed_caller_input() {
+        let r = resolve_trace_id(&json!({ "trace_id": "not-a-trace" }));
         assert!(r.is_err());
     }
 
@@ -591,6 +670,37 @@ mod tests {
         let state = store.load("abc-123").unwrap().unwrap();
         assert_eq!(state.scenario_id.as_deref(), Some("example/v2/network-egress"));
         assert_eq!(state.status, RunStatus::Started);
+    }
+
+    #[test]
+    fn finalize_run_start_records_trace_id_from_signalman_response() {
+        // Signalman echoes the canonicalised trace_id back on its
+        // run-start response. The plugin prefers that value (it's
+        // already passed through parseTraceId) over the input args.
+        let (store, _dir) = store();
+        let args = json!({ "id": "scn", "trace_id": "550E8400-E29B-41D4-A716-446655440000" });
+        let canonical = "550e8400e29b41d4a716446655440000";
+        let response = json!({
+            "run_id": "rid",
+            "trace_id": canonical
+        });
+        finalize_run_start(&args, response, &store).unwrap();
+        let state = store.load("rid").unwrap().unwrap();
+        assert_eq!(state.trace_id.as_deref(), Some(canonical));
+    }
+
+    #[test]
+    fn finalize_run_start_falls_back_to_input_trace_id_when_response_missing() {
+        // If Signalman didn't surface trace_id (older binary, smoke
+        // test, etc.), fall back to the input. The state file should
+        // still capture some trace_id so log correlation works.
+        let (store, _dir) = store();
+        let trace = "a".repeat(32);
+        let args = json!({ "id": "scn", "trace_id": trace });
+        let response = json!({ "run_id": "rid" });
+        finalize_run_start(&args, response, &store).unwrap();
+        let state = store.load("rid").unwrap().unwrap();
+        assert_eq!(state.trace_id.as_deref(), Some(&"a".repeat(32)[..]));
     }
 
     #[test]
