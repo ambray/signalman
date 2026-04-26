@@ -1,83 +1,153 @@
 # Signalman
 
-**VM Test Orchestration Framework for AI-Driven Workflow Testing**
+**VM scenario runner for agent-driven security, compliance, and CI workflows on Windows.**
 
-Signalman enables LLM agents (Claude, etc.) and CI pipelines to launch, configure, checkpoint, and drive real-world workflow tests on virtual machines with full process and UI control.
+Signalman is the runner half of an agent-first DevOps stack. LLM agents (Claude
+Code, Codex) talk MCP to **Loom** — the operator surface that holds task state,
+events, and orchestration — and Loom drives **Signalman** to execute scenario
+runs against real Hyper-V VMs. Scenarios produce a hermetic result envelope
+(scenario hash, agent version, events, duration) that Loom records as task
+evidence. CI pipelines and direct CLI consumers can also drive Signalman
+without Loom in the loop.
 
 Website: [signalman.dev](https://signalman.dev)
 
 ## Architecture
 
 ```
-Claude Code / CI Runner
-    |
-    v
-+------------------------------------------+
-|  Signalman Host MCP Server               |
-|  - VM lifecycle (create/start/stop/snap) |
-|  - Artifact deployment                   |
-|  - Software management (winget/choco)    |
-|  - Multi-VM orchestration                |
-|  - Hypervisor plugins                    |
-+------------------+-----------------------+
++---------------------+      +----------------------+
+| Claude Code / Codex |      | Direct CLI / CI      |
+|   (via MCP)         |      |  (exit codes + JSON  |
+|                     |      |   envelope contract) |
++----------+----------+      +-----------+----------+
+           |                              |
+           v                              |
++----------+----------+                   |
+|   Loom MCP Server   |                   |
+|   - tasks / state   |                   |
+|   - EventBus        |                   |
+|   - operator TUI    |                   |
++----------+----------+                   |
+           | loom plugin                  |
+           |  (shells to CLI / MCP)       |
+           +-------------+----------------+
+                         v
++---------------------------------------+
+|  Signalman Runner                     |
+|  - Six verbs (list/describe/plan/run/ |
+|    record/status) and CLI parity      |
+|  - Hyper-V control-plane (Rust svc,   |
+|    mTLS, MSI-installable)             |
+|  - Hypervisor plugins (Hyper-V        |
+|    primary; VMware fallback)          |
+|  - Scenario engine + result envelope  |
++------------------+--------------------+
                    | gRPC (mTLS)
           +--------+--------+
           |                 |
-  +-------v------+  +------v-------+
-  | Guest Agent  |  | Guest Agent  |
-  | (Windows 11) |  | (Ubuntu)     |
-  | - Process    |  | - Process    |
-  | - UI Auto    |  | - UI Auto    |
-  | - Browser    |  | - Browser    |
-  | - Verify     |  | - Verify     |
-  +--------------+  +--------------+
-          |                 |
-          +--------+--------+
-                   | (optional)
-          +--------v--------+
-          | Signalman Hub   |
-          | - Registry      |
-          | - Web Dashboard |
-          | - Fleet Mgmt    |
-          +-----------------+
+  +-------v-------+ +-------v-------+
+  | Guest Agent   | | Guest Agent   |
+  | (Windows 11)  | | (Windows 11)  |
+  | - Process     | | - Process     |
+  | - Cmd exec    | | - Cmd exec    |
+  | - File ops    | | - File ops    |
+  | - Verify net/ | | - Verify net/ |
+  |   filesystem  | |   filesystem  |
+  +---------------+ +---------------+
 ```
+
+The Loom-fronted topology is the default agent surface in v0.1.0; the standalone
+`signalman.*` MCP server in `host/` keeps shipping for direct CLI/CI consumers
+and as the substrate the Loom plugin shells to.
 
 ## Components
 
+### Loom Plugin (`plugins/signalman-loom-plugin/`) — v0.1.0 (in progress)
+Rust crate registering `loom.signalman.list/describe/plan/run/record/status`
+MCP tools through Loom's `RegisterMcpTools` capability. Stores run handles via
+Loom's `TaskOwnership` shape (no Signalman-side persistence layer); emits
+envelope events into Loom's `EventBus`; exposes scenarios as descriptor-backed
+forms in `loom tui`. Shells out to the Signalman CLI/MCP — Signalman is not
+embedded as a Rust dependency of Loom.
+
 ### Host MCP Server (`host/`)
-TypeScript MCP server that provides VM management tools to Claude Code and other MCP-compatible clients. Includes pluggable hypervisor backends.
+TypeScript MCP server providing the `signalman.*` verb surface plus the
+`signalman.advanced.*` namespace for fine-grained VM/Docker tools. Used directly
+by CI pipelines, custom MCP clients, and the Loom plugin's subprocess path.
+Includes pluggable hypervisor backends.
 
 **Supported Hypervisors:**
 - **Hyper-V** (Windows) — primary backend since 2026-04; required for Example
   correlator silo validation (agent runs as SYSTEM with `SeTcbPrivilege`,
   which Hyper-V integration services expose cleanly)
-- VMware Workstation (Windows/Linux) — legacy fallback, still supported
-- Azure VMs (planned)
-- AWS EC2 (planned)
+- **VMware Workstation** (Windows/Linux) — fallback, deprioritized; receives
+  no new feature work
+- Cross-platform daemons (libvirt on Linux, vmrun on macOS) — v0.3.0+
+
+### Hyper-V Control-Plane Service (`service/`)
+Rust crate that brokers privileged Hyper-V cmdlets via mTLS gRPC, eliminating
+per-call gsudo prompts in agent-driven workflows. MSI-installable; runs under
+a dedicated service account with minimum Hyper-V Admin privileges. Named-pipe
++ localhost TCP transports.
 
 ### Guest Agent (`guest/`)
-Rust agent that runs inside each VM, providing process control, UI automation, browser automation, and restriction verification capabilities via gRPC.
+Rust agent that runs inside each VM and exposes process control, command
+execution, file operations, and network/filesystem verification primitives over
+gRPC with bearer-token authentication and optional mTLS.
 
-### Hub (`hub/`) — Optional
-Commercial registry and dashboard for fleet-wide test orchestration. Guest agents register with the hub for discovery in complex environments.
+UI automation, browser automation, and `VerifyRestriction` RPCs ship as proto
+placeholders returning `unimplemented` in v0.1.0. They will graduate when a
+real consumer needs them; until then, scenarios should rely on
+command-output assertions, ETW captures, and network/file-access tests.
 
-### Scenarios (`scenarios/`)
+### Scenarios (`.signalman/scenarios/`, `examples/`)
 Test definitions using a two-layer approach:
-- **YAML DSL** — Machine configuration, setup steps, and assertions
-- **Markdown narratives** — Natural language workflow descriptions for LLM drivers
+- **YAML DSL** — VM configuration, setup steps, assertions
+- **Markdown narratives** — natural-language workflow for LLM drivers
+
+The Example V2 scenarios in `examples/example-v2-*` are the reference set that
+exercise the full stack end-to-end (ETW + WFP + kernel-debug tooling).
 
 ## Quick Start
+
+### Loom-fronted (default agent path; v0.1.0 target)
+
+> **Status: in progress** — the plugin lives at `plugins/signalman-loom-plugin/`
+> and is the P5 deliverable on the v0.1.0 critical path. Until that lands, use
+> the standalone path below.
+
+The plugin is a Rust crate that registers with Loom through the trusted-plugin
+inventory at build time (Loom links it in via `inventory::submit!`). Once P5.1
+lands, the workflow is:
+
+```bash
+# 1. Build Signalman + the Loom plugin in this repo
+cd host && npm install && npm run build && cd ..
+cargo build --release -p signalman-loom-plugin
+
+# 2. Build Loom with the Signalman plugin enabled (in the loom repo)
+cargo build --release -p loom --features signalman
+
+# 3. Run Loom MCP; agents see loom.signalman.* tools
+loom mcp serve
+```
+
+In Claude Code or Codex, the agent invokes `loom.signalman.list`, then
+`loom.signalman.run <scenario>`. Loom holds the run handle (via its
+`TaskOwnership` state) and streams envelope events through its `EventBus`.
+
+### Standalone (CI / direct MCP / debugging)
 
 ```bash
 # Install the host MCP server
 cd host && npm install && npm run build
 
-# Add to Claude Code
+# Add to Claude Code as a direct MCP server (no Loom in the loop)
 claude mcp add signalman node host/dist/server.js
 
-# Use in Claude Code
-# "Start the test VM and install Cursor"
-# "Run the cursor-restrict test scenario"
+# Or invoke via CLI for CI:
+node host/dist/cli.js run cursor-restrict
+echo $?   # standard exit codes; envelope JSON on stdout
 ```
 
 ## Scenario Format
