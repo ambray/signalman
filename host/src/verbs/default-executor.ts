@@ -1,18 +1,20 @@
 /**
  * Default `signalman.run` executor — bridges to the existing
- * `ScenarioOrchestrator` so that v0.1.0 ships running scenarios
- * unchanged from the legacy path while emitting envelope events.
+ * `ScenarioOrchestrator`. Since 2026-04-26 (P3.c) the orchestrator
+ * pushes setup-step lifecycle and assertion events live via the
+ * `emit` callback, so the executor no longer translates a
+ * post-run `ScenarioResult` into a synthetic event stream — events
+ * arrive in the run's `EventQueue` as they happen. The original
+ * "events all dated to the same instant" anti-pattern (audit C2)
+ * is resolved.
  *
- * The orchestrator's surface is wide and synchronous-blocking; the
- * executor invokes it once, then translates its `ScenarioResult` into
- * envelope events emitted retrospectively. Live event streaming during
- * scenario execution is a v0.2.0 deliverable (the orchestrator needs an
- * event hook surface that doesn't exist today; adding one is out of
- * scope for the P0 PR per "no semantic changes" constraint).
+ * The executor still synthesises the final `assertions` summary
+ * and `result` outcome from `ScenarioResult` for the envelope
+ * return value; only the per-event timing/replay was retrospective.
  */
 
 import type { RunExecutor, RunExecutorContext } from "./run.js";
-import type { EnvelopeAssertionResult, EnvelopeEventInput } from "../output/envelope.js";
+import type { EnvelopeAssertionResult } from "../output/envelope.js";
 import { envelopeError } from "../output/envelope.js";
 
 /**
@@ -49,36 +51,28 @@ export function createDefaultExecutor(): RunExecutor {
     }
 
     const orchestrator = new ScenarioOrchestrator(backend, new Map(), config);
-    const scenarioResult = await orchestrator.runScenario(ctx.scenarioDir);
+    // P3.c: pass ctx.emit through to the orchestrator so step lifecycle
+    // and assertion events arrive in the run's EventQueue as they
+    // happen, not retrospectively after runScenario returns. The
+    // synchronous translation block this used to do is gone.
+    const scenarioResult = await orchestrator.runScenario(
+      ctx.scenarioDir,
+      ctx.emit,
+    );
 
-    // Replay setup steps as step events (the orchestrator records them
-    // synchronously into setup_results; we surface them after-the-fact
-    // so consumers see them in the envelope).
-    let stepIndex = 0;
-    for (const step of scenarioResult.setup_results) {
-      ctx.emit({ type: "step.started", step_index: stepIndex, kind: step.action, vm: step.vm });
-      if (step.status === "failed") {
-        ctx.emit({ type: "step.failed", step_index: stepIndex, error: step.error ?? "" });
-      } else {
-        ctx.emit({ type: "step.completed", step_index: stepIndex, duration_ms: step.duration_ms });
-      }
-      stepIndex++;
-    }
-
-    const assertionEvents: EnvelopeAssertionResult[] = [];
-    for (const a of scenarioResult.assertion_results) {
-      const evt: EnvelopeEventInput = a.passed
-        ? { type: "assertion.passed", id: a.id }
-        : { type: "assertion.failed", id: a.id, expected: undefined, actual: a.actual };
-      ctx.emit(evt);
-      assertionEvents.push({
+    // Build the per-assertion summary from the orchestrator's normalised
+    // result. The events were already emitted live by the orchestrator;
+    // this loop only collects the data the run.ts envelope needs in
+    // its `assertions` field. No emit calls.
+    const assertionEvents: EnvelopeAssertionResult[] = scenarioResult.assertion_results.map(
+      (a) => ({
         id: a.id,
         passed: a.passed,
         severity: "high",
         actual: a.actual,
         error: a.error,
-      });
-    }
+      }),
+    );
 
     const total = assertionEvents.length;
     const passedCount = assertionEvents.filter((a) => a.passed).length;
