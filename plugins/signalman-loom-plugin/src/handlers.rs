@@ -13,9 +13,10 @@ use loom_core::{LoomError, LoomResult};
 use loom_plugin_api::{
     McpToolMeta, McpToolRegistration, PluginContext, PluginTier, Stability,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::schemas;
+use crate::state::{RunState, RunStateStore};
 use crate::subprocess::run_signalman;
 
 const TIER: PluginTier = PluginTier::Free;
@@ -168,8 +169,50 @@ pub(crate) fn build_run_args(args: &Value) -> LoomResult<Vec<String>> {
     Ok(a)
 }
 
-fn handle_run(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
-    run_signalman(&build_run_args(&args)?)
+/// Records a started run into the state store and returns the original
+/// Signalman response unchanged. Pure side-effect-on-store layer; unit-
+/// testable via [`finalize_run_start`] without spawning a subprocess.
+///
+/// Public so integration tests in `tests/` can drive the lifecycle without
+/// spawning a real Signalman; not part of the agent-facing surface.
+pub fn finalize_run_start(
+    args: &Value,
+    response: Value,
+    store: &RunStateStore,
+) -> LoomResult<Value> {
+    let run_id = response
+        .get("run_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            LoomError::PluginRuntime(
+                "signalman run response missing run_id; cannot persist state".to_string(),
+            )
+        })?
+        .to_string();
+
+    let scenario_id = args.get("id").and_then(Value::as_str);
+    let trace_id = args.get("trace_id").and_then(Value::as_str);
+
+    store.record_started(&run_id, scenario_id, trace_id)?;
+
+    // If Signalman returned an envelope already (e.g. immediate-fail run)
+    // promote it through Streaming/Finished so the state reflects reality.
+    if let Some(envelope) = response.get("envelope") {
+        if envelope_is_terminal(envelope) {
+            store.record_finished(&run_id, envelope)?;
+        } else {
+            store.record_streaming(&run_id, response_event_seq(&response), Some(envelope))?;
+        }
+    }
+
+    Ok(response)
+}
+
+fn handle_run(cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    let store = RunStateStore::for_plugin(&cx.data_dir)?;
+    let cli_args = build_run_args(&args)?;
+    let response = run_signalman(&cli_args)?;
+    finalize_run_start(&args, response, &store)
 }
 
 // ── status ────────────────────────────────────────────────────────
@@ -217,8 +260,88 @@ pub(crate) fn build_status_args(args: &Value) -> LoomResult<Vec<String>> {
     Ok(a)
 }
 
-fn handle_status(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
-    run_signalman(&build_status_args(&args)?)
+/// Updates the state store from a status response and falls back to the
+/// last persisted state if the underlying subprocess failed but we have a
+/// record of the run id. Pure logic layer for unit testing. See doc on
+/// [`finalize_run_start`] for the rationale on the `pub` exposure.
+pub fn finalize_status(
+    args: &Value,
+    response: Result<Value, LoomError>,
+    store: &RunStateStore,
+) -> LoomResult<Value> {
+    let run_id = args.get("run_id").and_then(Value::as_str);
+
+    match response {
+        Ok(value) => {
+            if let Some(rid) = run_id {
+                let envelope = value.get("envelope");
+                let event_seq = response_event_seq(&value);
+                if envelope.is_some() && envelope_is_terminal(envelope.unwrap()) {
+                    store.record_finished(rid, envelope.unwrap())?;
+                } else {
+                    store.record_streaming(rid, event_seq, envelope)?;
+                }
+            }
+            Ok(value)
+        }
+        Err(err) => {
+            // No run_id => the agent asked for environment health; no
+            // record to recover, propagate the error.
+            let Some(rid) = run_id else {
+                return Err(err);
+            };
+            // Try to recover the last-known state. If we have one, mark
+            // it Lost and return the persisted view; if not, propagate
+            // the original error.
+            let lost = store.record_lost(rid, &err.to_string())?;
+            match lost {
+                Some(state) => Ok(lost_response_payload(&state)),
+                None => Err(err),
+            }
+        }
+    }
+}
+
+fn handle_status(cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    let store = RunStateStore::for_plugin(&cx.data_dir)?;
+    let cli_args = build_status_args(&args)?;
+    let response = run_signalman(&cli_args);
+    finalize_status(&args, response, &store)
+}
+
+fn lost_response_payload(state: &RunState) -> Value {
+    let mut v = state.to_status_value();
+    v["recovered_from_state_file"] = json!(true);
+    v
+}
+
+fn envelope_is_terminal(envelope: &Value) -> bool {
+    // Signalman's envelope sets either a `result` field (pass/fail/error)
+    // or an explicit `terminal: true`. Either qualifies.
+    if envelope
+        .get("terminal")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    matches!(
+        envelope.get("result").and_then(Value::as_str),
+        Some("pass" | "fail" | "error" | "skipped")
+    )
+}
+
+fn response_event_seq(response: &Value) -> Option<i64> {
+    response
+        .get("envelope")
+        .and_then(|e| e.get("events"))
+        .and_then(Value::as_array)
+        .and_then(|events| {
+            events
+                .iter()
+                .filter_map(|ev| ev.get("seq").and_then(Value::as_i64))
+                .max()
+        })
 }
 
 // ── record (v0.2.0 stub passthrough) ──────────────────────────────
@@ -308,7 +431,15 @@ fn push_param_flags(into: &mut Vec<String>, params: Option<&Value>) -> LoomResul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::RunStatus;
     use serde_json::json;
+    use tempfile::tempdir;
+
+    fn store() -> (RunStateStore, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let store = RunStateStore::new(dir.path()).unwrap();
+        (store, dir)
+    }
 
     // ── list ──────────────────────────────────────────────────────
 
@@ -445,5 +576,160 @@ mod tests {
     #[test]
     fn record_rejects_zero_duration() {
         assert!(build_record_args(&json!({ "name": "x", "duration_seconds": 0 })).is_err());
+    }
+
+    // ── finalize_run_start (P5.2) ─────────────────────────────────
+
+    #[test]
+    fn finalize_run_start_persists_initial_state() {
+        let (store, _dir) = store();
+        let args = json!({ "id": "example/v2/network-egress" });
+        let response = json!({ "run_id": "abc-123", "started_at": "now" });
+        let returned = finalize_run_start(&args, response.clone(), &store).unwrap();
+        assert_eq!(returned, response, "response must pass through unchanged");
+
+        let state = store.load("abc-123").unwrap().unwrap();
+        assert_eq!(state.scenario_id.as_deref(), Some("example/v2/network-egress"));
+        assert_eq!(state.status, RunStatus::Started);
+    }
+
+    #[test]
+    fn finalize_run_start_promotes_to_finished_for_terminal_envelope() {
+        let (store, _dir) = store();
+        let args = json!({ "id": "scn" });
+        let response = json!({
+            "run_id": "rid",
+            "envelope": { "result": "pass", "events": [] }
+        });
+        finalize_run_start(&args, response, &store).unwrap();
+        let state = store.load("rid").unwrap().unwrap();
+        assert_eq!(state.status, RunStatus::Finished);
+        assert!(state.envelope.is_some());
+    }
+
+    #[test]
+    fn finalize_run_start_marks_streaming_for_partial_envelope() {
+        let (store, _dir) = store();
+        let args = json!({ "id": "scn" });
+        let response = json!({
+            "run_id": "rid",
+            "envelope": { "events": [{ "seq": 1 }, { "seq": 2 }] }
+        });
+        finalize_run_start(&args, response, &store).unwrap();
+        let state = store.load("rid").unwrap().unwrap();
+        assert_eq!(state.status, RunStatus::Streaming);
+        assert_eq!(state.last_event_seq, 2);
+    }
+
+    #[test]
+    fn finalize_run_start_rejects_response_without_run_id() {
+        let (store, _dir) = store();
+        let r = finalize_run_start(&json!({ "id": "x" }), json!({ "started_at": "now" }), &store);
+        assert!(r.is_err(), "response without run_id must fail loudly");
+    }
+
+    // ── finalize_status (P5.2) ────────────────────────────────────
+
+    #[test]
+    fn finalize_status_with_ok_response_advances_streaming() {
+        let (store, _dir) = store();
+        store.record_started("rid", Some("scn"), None).unwrap();
+        let args = json!({ "run_id": "rid" });
+        let resp = Ok(json!({
+            "envelope": { "events": [{ "seq": 5 }] }
+        }));
+        let v = finalize_status(&args, resp, &store).unwrap();
+        assert!(v.get("envelope").is_some());
+        let s = store.load("rid").unwrap().unwrap();
+        assert_eq!(s.status, RunStatus::Streaming);
+        assert_eq!(s.last_event_seq, 5);
+    }
+
+    #[test]
+    fn finalize_status_with_terminal_envelope_marks_finished() {
+        let (store, _dir) = store();
+        store.record_started("rid", None, None).unwrap();
+        let args = json!({ "run_id": "rid" });
+        let resp = Ok(json!({
+            "envelope": { "result": "fail", "events": [{ "seq": 1 }] }
+        }));
+        finalize_status(&args, resp, &store).unwrap();
+        let s = store.load("rid").unwrap().unwrap();
+        assert_eq!(s.status, RunStatus::Finished);
+    }
+
+    #[test]
+    fn finalize_status_falls_back_to_state_file_when_subprocess_fails() {
+        let (store, _dir) = store();
+        store.record_started("rid", Some("scn"), None).unwrap();
+        store
+            .record_streaming("rid", Some(3), Some(&json!({ "events": [{ "seq": 3 }] })))
+            .unwrap();
+
+        let args = json!({ "run_id": "rid" });
+        let err: LoomResult<Value> = Err(LoomError::PluginRuntime(
+            "signalman exited with code 1: ECONNREFUSED".to_string(),
+        ));
+        let v = finalize_status(&args, err, &store).unwrap();
+        assert_eq!(v["status"], "lost");
+        assert_eq!(v["recovered_from_state_file"], true);
+        assert!(v.get("envelope").is_some());
+        assert!(v["last_error"].as_str().unwrap().contains("ECONNREFUSED"));
+
+        let s = store.load("rid").unwrap().unwrap();
+        assert_eq!(s.status, RunStatus::Lost);
+    }
+
+    #[test]
+    fn finalize_status_propagates_subprocess_error_when_no_state_to_recover() {
+        let (store, _dir) = store();
+        let args = json!({ "run_id": "never-existed" });
+        let err: LoomResult<Value> = Err(LoomError::PluginRuntime("boom".to_string()));
+        let r = finalize_status(&args, err, &store);
+        assert!(r.is_err(), "no record to recover => propagate error");
+    }
+
+    #[test]
+    fn finalize_status_propagates_error_for_environment_health_calls() {
+        let (store, _dir) = store();
+        let args = json!({}); // no run_id => environment health
+        let err: LoomResult<Value> = Err(LoomError::PluginRuntime("offline".to_string()));
+        let r = finalize_status(&args, err, &store);
+        assert!(r.is_err(), "environment health failure must surface");
+    }
+
+    #[test]
+    fn finalize_status_does_not_downgrade_finished_runs_on_subprocess_error() {
+        let (store, _dir) = store();
+        store.record_started("rid", None, None).unwrap();
+        store.record_finished("rid", &json!({ "result": "pass" })).unwrap();
+
+        let args = json!({ "run_id": "rid" });
+        let err: LoomResult<Value> = Err(LoomError::PluginRuntime("transient".to_string()));
+        let v = finalize_status(&args, err, &store).unwrap();
+        assert_eq!(v["status"], "finished", "Finished must not downgrade to Lost");
+    }
+
+    // ── envelope helpers ──────────────────────────────────────────
+
+    #[test]
+    fn envelope_is_terminal_recognises_result_and_explicit_flag() {
+        assert!(envelope_is_terminal(&json!({ "result": "pass" })));
+        assert!(envelope_is_terminal(&json!({ "result": "fail" })));
+        assert!(envelope_is_terminal(&json!({ "result": "error" })));
+        assert!(envelope_is_terminal(&json!({ "result": "skipped" })));
+        assert!(envelope_is_terminal(&json!({ "terminal": true })));
+        assert!(!envelope_is_terminal(&json!({ "events": [] })));
+        assert!(!envelope_is_terminal(&json!({ "result": "running" })));
+    }
+
+    #[test]
+    fn response_event_seq_takes_max_across_events() {
+        let resp = json!({
+            "envelope": { "events": [{ "seq": 3 }, { "seq": 1 }, { "seq": 7 }, { "seq": 2 }] }
+        });
+        assert_eq!(response_event_seq(&resp), Some(7));
+        assert_eq!(response_event_seq(&json!({})), None);
+        assert_eq!(response_event_seq(&json!({ "envelope": {} })), None);
     }
 }

@@ -32,6 +32,7 @@ path = "src/lib.rs"
 loom-plugin-api = { path = "../../../loom/crates/loom-plugin-api" }
 loom-core = { path = "../../../loom/crates/loom-core" }
 inventory = "0.3"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]

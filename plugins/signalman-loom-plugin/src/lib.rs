@@ -28,6 +28,7 @@ use loom_plugin_api::{
 
 pub mod handlers;
 pub mod schemas;
+pub mod state;
 pub mod subprocess;
 
 /// Stable plugin id used by Loom's manifest registry. Do NOT rename without
