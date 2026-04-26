@@ -28,6 +28,7 @@ pub mod guest_proto {
 pub mod process;
 mod service;
 pub mod tls;
+pub mod trace;
 pub mod verification;
 
 /// Default gRPC listen address (loopback only for security).
@@ -94,7 +95,26 @@ impl AuthInterceptor {
 }
 
 impl tonic::service::Interceptor for AuthInterceptor {
-    fn call(&mut self, request: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+    fn call(
+        &mut self,
+        mut request: tonic::Request<()>,
+    ) -> Result<tonic::Request<()>, tonic::Status> {
+        // P3.d: extract trace correlation headers BEFORE running auth so
+        // even rejected (unauth'd) calls log their trace context. The
+        // extension is attached unconditionally so handlers can read it
+        // via `request.extensions().get::<TraceContextExt>()`.
+        let trace_ext = trace::extract_from_metadata(&request);
+        if trace_ext.is_traced() {
+            tracing::info!(
+                target: "signalman::trace",
+                trace_id = trace_ext.trace_id.as_deref().unwrap_or(""),
+                run_id = trace_ext.run_id.as_deref().unwrap_or(""),
+                vm_name = trace_ext.vm_name.as_deref().unwrap_or(""),
+                "guest agent request received",
+            );
+        }
+        request.extensions_mut().insert(trace_ext);
+
         let Some(ref expected) = self.expected_token else {
             // No token configured — pass through (insecure mode).
             return Ok(request);

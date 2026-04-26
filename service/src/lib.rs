@@ -23,6 +23,7 @@ pub mod proto;
 pub mod sanitize;
 pub mod service;
 pub mod tls;
+pub mod trace;
 pub mod transport;
 
 #[cfg(target_os = "windows")]

@@ -43,14 +43,22 @@ impl ControlPlaneService {
     /// service registered. Call sites usually want this rather than
     /// the raw service.
     pub fn into_router(self) -> tonic::transport::server::Router {
-        use proto::signalman_service::control_plane_server::ControlPlaneServer;
-        tonic::transport::Server::builder().add_service(ControlPlaneServer::new(self))
+        tonic::transport::Server::builder().add_service(self.into_server())
     }
 
+    /// Build the server-side service with the trace-correlation
+    /// interceptor wired in (P3.d). Trace headers off inbound requests
+    /// land in `request.extensions()` as a [`crate::trace::TraceContextExt`]
+    /// and emit a `signalman::trace` log line per request. Un-traced
+    /// callers pass through unchanged.
     pub fn into_server(
         self,
-    ) -> proto::signalman_service::control_plane_server::ControlPlaneServer<Self> {
-        proto::signalman_service::control_plane_server::ControlPlaneServer::new(self)
+    ) -> tonic::service::interceptor::InterceptedService<
+        proto::signalman_service::control_plane_server::ControlPlaneServer<Self>,
+        crate::trace::TraceInterceptor,
+    > {
+        use proto::signalman_service::control_plane_server::ControlPlaneServer;
+        ControlPlaneServer::with_interceptor(self, crate::trace::TraceInterceptor)
     }
 }
 
