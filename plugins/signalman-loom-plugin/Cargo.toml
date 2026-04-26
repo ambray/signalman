@@ -34,6 +34,10 @@ loom-core = { path = "../../../loom/crates/loom-core" }
 inventory = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# UUID v4 for trace-id generation when an upstream Loom workflow doesn't
+# supply one. 32-char hex (without dashes) matches the W3C trace-id width
+# the Signalman CLI expects via parseTraceId.
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"

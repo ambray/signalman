@@ -124,6 +124,11 @@ pub fn run_input() -> Value {
                 "type": "string",
                 "enum": ["isolated", "nat", "internet"],
                 "description": "Reserved for P4 — declared, not enforced in v0.1.0."
+            },
+            "trace_id": {
+                "type": "string",
+                "description":
+                    "P3.d: optional 32-char hex (or dashed UUID) correlation root. Loom can supply this so an agent's view, the Loom task state, and Signalman gRPC log streams correlate by `grep $TRACE_ID`. When omitted, the plugin generates a fresh trace-id and surfaces it via RunState.trace_id."
             }
         },
         "required": ["id"],
