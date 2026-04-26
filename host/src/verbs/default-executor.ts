@@ -32,9 +32,47 @@ export function createDefaultExecutor(): RunExecutor {
     const { selectBackend } = await import("../hypervisors/selector.js");
 
     const config = loadConfig();
+    // selectBackend() (host/src/hypervisors/selector.ts) handles the
+    // service > hyperv > vmware > tart cascade and honours
+    // `config.hypervisor.backend` as the explicit operator preference.
+    // ServiceBackend's isAvailable() is a fast 2s health-RPC; failure
+    // falls through to direct-elevation backends.
     const backend = await selectBackend(config);
 
-    const orchestrator = new ScenarioOrchestrator(backend, new Map(), config);
+    // Build a guest-agent client per VM defined in the scenario. The
+    // orchestrator's runtime tools (vm_run_command, vm_copy_file via
+    // guest, driver_*, kernel_etw_*) all look up the client by VM name;
+    // without this map, every guest-side step throws "No guest client
+    // configured for VM '<name>'".
+    //
+    // Originally landed as `67ee631` on `fix/p1-service-integration`
+    // (2026-04-25). Cherry-picked onto main 2026-04-29 as part of the
+    // service-binary refresh — the running daemon depended on this
+    // wiring being present in the host process.
+    const { GuestAgentClient } = await import("../guest/client.js");
+    const { loadScenario } = await import("../scenarios/runner.js");
+    const guestClients = new Map<string, InstanceType<typeof GuestAgentClient>>();
+    try {
+      const { config: scenarioCfg } = loadScenario(ctx.scenarioDir);
+      const tlsCfg = config.guestAgent?.tls?.enabled
+        ? {
+            caPath: config.guestAgent.tls.caPath,
+            certPath: config.guestAgent.tls.certPath,
+            keyPath: config.guestAgent.tls.keyPath,
+          }
+        : undefined;
+      for (const vm of scenarioCfg.vms ?? []) {
+        const ip = vm.network?.static_ip;
+        if (!ip) continue; // skip VMs with no addressable agent (e.g. docker-only)
+        const port = vm.guest_agent_port ?? config.guestAgent?.defaultPort ?? 50051;
+        guestClients.set(vm.name, new GuestAgentClient(ip, port, tlsCfg));
+      }
+    } catch {
+      // Best-effort — orchestrator surfaces the original "no guest
+      // client" error if the scenario actually needs one.
+    }
+
+    const orchestrator = new ScenarioOrchestrator(backend, guestClients, config);
     // P3.c: pass ctx.emit through to the orchestrator so step lifecycle
     // and assertion events arrive in the run's EventQueue as they
     // happen, not retrospectively after runScenario returns. The
