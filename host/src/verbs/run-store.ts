@@ -23,6 +23,14 @@ export interface RunHandle {
   queue: EventQueue;
   /** Populated once the run is terminal. */
   envelope: ResultEnvelope | null;
+  /**
+   * 32-char lowercase hex correlation key (P3.d). Generated at run
+   * issue time (or supplied by an upstream orchestrator like the Loom
+   * plugin or CI via `--trace-id`). Propagated to every gRPC call
+   * the run makes via the `signalman-trace-id` metadata header so
+   * host / service / guest log streams correlate by `grep $TRACE_ID`.
+   */
+  trace_id: string;
 }
 
 const handles = new Map<string, RunHandle>();

@@ -25,6 +25,7 @@ import {
   type ResultEnvelope,
   type ExitBreakdown,
 } from "../output/envelope.js";
+import { newTraceId, parseTraceId } from "../output/trace.js";
 import { resolveLayout } from "../scenarios/project-layout.js";
 import { resolveScenarioById } from "../scenarios/scenario-loader.js";
 import { newRunId, registerHandle, type RunHandle } from "./run-store.js";
@@ -56,6 +57,15 @@ export interface RunExecutorContext {
   scenarioHash: string;
   parameters: Record<string, unknown>;
   network_class: "isolated" | "nat" | "internet";
+  /**
+   * Cross-process correlation root (P3.d). Same value flows into
+   * gRPC `signalman-trace-id` metadata on every outbound call the
+   * executor's orchestrator makes. Same value is recorded on the
+   * RunHandle and visible to consumers of `signalman.status`.
+   */
+  traceId: string;
+  /** The run handle id — passed alongside traceId to gRPC peers. */
+  runId: string;
   /** Push an event into the run's queue. Auto-numbered/timestamped. */
   emit(event: EnvelopeEventInput): void;
 }
@@ -64,6 +74,13 @@ export interface RunParams {
   id: string;
   parameters?: Record<string, unknown>;
   network_class?: "isolated" | "nat" | "internet";
+  /**
+   * Optional 32-char lowercase hex (or dashed-UUID) trace id from an
+   * upstream orchestrator (Loom plugin, CI). When omitted, the verb
+   * generates a fresh one. Validated at parse time so a malformed
+   * value fails loudly before any gRPC call.
+   */
+  trace_id?: string;
 }
 
 export interface RunIssueResult {
@@ -72,6 +89,8 @@ export interface RunIssueResult {
   scenario_hash: string;
   started_at: string;
   status: "running";
+  /** P3.d: surfaced so external orchestrators can correlate immediately. */
+  trace_id: string;
 }
 
 /**
@@ -95,6 +114,13 @@ export async function runRun(
   const run_id = newRunId();
   const started_at = new Date().toISOString();
 
+  // P3.d: trace-id is either the caller's (validated) or a fresh one.
+  // parseTraceId accepts dashed-UUID for ergonomic CI flag passing
+  // (`--trace-id $GITHUB_RUN_ID-…`) and canonicalises to plain hex.
+  const trace_id = params.trace_id
+    ? parseTraceId(params.trace_id)
+    : newTraceId();
+
   const queue = new EventQueue();
   const handle: RunHandle = {
     run_id,
@@ -104,6 +130,7 @@ export async function runRun(
     status: "running",
     queue,
     envelope: null,
+    trace_id,
   };
   registerHandle(handle);
 
@@ -111,6 +138,7 @@ export async function runRun(
     type: "run.started",
     scenario_id: params.id,
     scenario_hash: scenarioHash,
+    trace_id,
   });
 
   // Fire-and-forget: drive the executor, build the envelope on completion.
@@ -131,6 +159,8 @@ export async function runRun(
         scenarioHash,
         parameters: params.parameters ?? {},
         network_class,
+        traceId: trace_id,
+        runId: run_id,
         emit: (e) => queue.push(e),
       });
     } catch (err) {
@@ -206,5 +236,6 @@ export async function runRun(
     scenario_hash: scenarioHash,
     started_at,
     status: "running",
+    trace_id,
   };
 }

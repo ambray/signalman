@@ -25,6 +25,7 @@ import type {
 } from "./runner.js";
 import type { ValidatedRetryPolicy } from "./schema.js";
 import type { EnvelopeEventEmitter } from "../output/envelope.js";
+import { runWithTrace, type TraceContext } from "../output/trace.js";
 import { parseNarrative } from "./narrative.js";
 import { BreakLog } from "../kernel-debug/break-log.js";
 import { createKernelDebugToolRegistry } from "../kernel-debug/tools.js";
@@ -501,6 +502,12 @@ export class ScenarioOrchestrator {
   async runScenario(
     scenarioPath: string,
     emit?: EnvelopeEventEmitter,
+    /**
+     * P3.d: trace context propagated to every gRPC call this run makes.
+     * `vmName` is filled in per-call inside executeSetup; the {traceId,
+     * runId} pair is the run-level constant.
+     */
+    trace?: { traceId: string; runId: string },
   ): Promise<ScenarioResult> {
     const startTime = Date.now();
     const setupResults: StepResult[] = [];
@@ -554,6 +561,7 @@ export class ScenarioOrchestrator {
         vmMap,
         scenarioRetry,
         emit,
+        trace,
       );
       setupResults.push(...sResults);
 
@@ -698,6 +706,7 @@ export class ScenarioOrchestrator {
         vmMap,
         scenarioRetry,
         emit,
+        trace,
       );
       teardownResults.push(...tResults);
     } catch (err) {
@@ -915,6 +924,12 @@ export class ScenarioOrchestrator {
     vmMap: Map<string, VMHandle>,
     scenarioRetry?: ValidatedRetryPolicy,
     emit?: EnvelopeEventEmitter,
+    /**
+     * P3.d: run-level trace context. The per-step trace context is
+     * built here by composing { traceId, runId } with `vmName`
+     * derived from the step's vm field.
+     */
+    trace?: { traceId: string; runId: string },
   ): Promise<StepResult[]> {
     const results: StepResult[] = [];
 
@@ -946,9 +961,19 @@ export class ScenarioOrchestrator {
       let outcome: { status: "success" | "skipped"; error?: string } | null = null;
       let lastError: unknown = null;
 
+      // P3.d: per-step trace context. vmName is filled in here so log
+      // demuxing works at fleet scale (many VMs, many concurrent runs).
+      // runWithTrace is a no-op when `trace` is undefined, so the
+      // un-traced path is identical to pre-P3.d behaviour.
+      const stepTrace: TraceContext | undefined = trace
+        ? { traceId: trace.traceId, runId: trace.runId, vmName }
+        : undefined;
+
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-          outcome = await this.executeStepBody(step, vmName, vmMap);
+          outcome = await runWithTrace(stepTrace, () =>
+            this.executeStepBody(step, vmName, vmMap),
+          );
           succeeded = true;
           break;
         } catch (err) {
@@ -1196,11 +1221,14 @@ export class ScenarioOrchestrator {
     vmMap: Map<string, VMHandle>,
     scenarioRetry?: ValidatedRetryPolicy,
     emit?: EnvelopeEventEmitter,
+    trace?: { traceId: string; runId: string },
   ): Promise<StepResult[]> {
     // Teardown uses the same logic as setup but swallows errors. P3.b:
     // retry policy threads through identically — flaky teardowns can
     // also benefit from retry. P3.c: live events emit identically too.
-    return this.executeSetup(steps, vmMap, scenarioRetry, emit);
+    // P3.d: trace context threads through too so teardown gRPC calls
+    // are correlated with their run.
+    return this.executeSetup(steps, vmMap, scenarioRetry, emit, trace);
   }
 
   /**
