@@ -48,9 +48,19 @@ describe('defaultConfig', () => {
     expect(config.hypervisor.vmrunPath).toBeUndefined();
   });
 
+  it('has no tartPath by default', () => {
+    const config = defaultConfig();
+    expect(config.hypervisor.tartPath).toBeUndefined();
+  });
+
   it('has no guest credentials by default', () => {
     const config = defaultConfig();
     expect(config.hypervisor.guestCredentials).toBeUndefined();
+  });
+
+  it('has no guest auth token by default', () => {
+    const config = defaultConfig();
+    expect(config.guestAgent.authToken).toBeUndefined();
   });
 });
 
@@ -61,6 +71,7 @@ describe('loadConfig — guestAgent.tls', () => {
   const savedEnv: Record<string, string | undefined> = {};
   const TLS_ENV_KEYS = [
     'SIGNALMAN_GUEST_TLS',
+    'SIGNALMAN_GUEST_TOKEN',
     'SIGNALMAN_GUEST_CA',
     'SIGNALMAN_GUEST_CERT',
     'SIGNALMAN_GUEST_KEY',
@@ -137,12 +148,14 @@ describe('loadConfig — guestAgent.tls', () => {
       ].join('\n'),
     );
     process.env.SIGNALMAN_GUEST_TLS = 'true';
+    process.env.SIGNALMAN_GUEST_TOKEN = 'guest-secret';
     process.env.SIGNALMAN_GUEST_CA = '/env/ca.pem';
     process.env.SIGNALMAN_GUEST_CERT = '/env/host.pem';
     process.env.SIGNALMAN_GUEST_KEY = '/env/host.key';
 
     const cfg = loadConfig(cfgPath);
     expect(cfg.guestAgent.tls.enabled).toBe(true);
+    expect(cfg.guestAgent.authToken).toBe('guest-secret');
     expect(cfg.guestAgent.tls.caPath).toBe('/env/ca.pem');
     expect(cfg.guestAgent.tls.certPath).toBe('/env/host.pem');
     expect(cfg.guestAgent.tls.keyPath).toBe('/env/host.key');

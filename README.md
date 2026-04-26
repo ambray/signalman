@@ -80,9 +80,15 @@ Includes pluggable hypervisor backends.
 - **Hyper-V** (Windows) — primary backend since 2026-04; required for Ospiri
   correlator silo validation (agent runs as SYSTEM with `SeTcbPrivilege`,
   which Hyper-V integration services expose cleanly)
+- **Tart** (macOS on Apple Silicon) — first Mac runner backend for macOS VM
+  lifecycle and command execution through Apple's Virtualization.framework;
+  see [docs/mac-virtualization.md](docs/mac-virtualization.md). macOS guests run
+  the normal Signalman guest agent; `scripts/macos/install-guest-agent.sh`
+  installs it as a LaunchDaemon for unattended file and command operations.
 - **VMware Workstation** (Windows/Linux) — fallback, deprioritized; receives
   no new feature work
-- Cross-platform daemons (libvirt on Linux, vmrun on macOS) — v0.3.0+
+- Cross-platform daemons (libvirt on Linux, first-party Swift helper on macOS)
+  — v0.3.0+
 
 ### Hyper-V Control-Plane Service (`service/`)
 Rust crate that brokers privileged Hyper-V cmdlets via mTLS gRPC, eliminating
@@ -94,6 +100,8 @@ a dedicated service account with minimum Hyper-V Admin privileges. Named-pipe
 Rust agent that runs inside each VM and exposes process control, command
 execution, file operations, and network/filesystem verification primitives over
 gRPC with bearer-token authentication and optional mTLS.
+Scenario file transfer uses this agent in chunks, so Mac/Tart runs do not depend
+on hypervisor-specific shared folders.
 
 UI automation, browser automation, and `VerifyRestriction` RPCs ship as proto
 placeholders returning `unimplemented` in v0.1.0. They will graduate when a

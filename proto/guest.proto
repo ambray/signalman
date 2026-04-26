@@ -38,6 +38,11 @@ service GuestAgent {
   rpc TestNetwork(TestNetworkRequest) returns (TestNetworkResponse);
   rpc TestFileAccess(TestFileAccessRequest) returns (TestFileAccessResponse);
 
+  // ── File Operations ────────────────────────────────────────────
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
+  rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
+  rpc ListDirectory(ListDirectoryRequest) returns (ListDirectoryResponse);
+
   // ── Software Management ─────────────────────────────────────
   rpc InstallSoftware(InstallSoftwareRequest) returns (InstallSoftwareResponse);
 }
@@ -305,6 +310,45 @@ message TestFileAccessResponse {
   bool allowed = 1;
   string error = 2;
   string error_code = 3;  // Win32 error code
+}
+
+// ── File Operations ───────────────────────────────────────────────
+
+message ReadFileRequest {
+  string path = 1;
+  uint64 offset = 2;
+  // 0 means read to EOF, capped by the guest agent.
+  uint64 limit = 3;
+}
+
+message ReadFileResponse {
+  bytes data = 1;
+  bool truncated = 2;
+}
+
+message WriteFileRequest {
+  string path = 1;
+  bytes data = 2;
+  bool append = 3;
+}
+
+message WriteFileResponse {
+  uint64 bytes_written = 1;
+}
+
+message ListDirectoryRequest {
+  string path = 1;
+}
+
+message DirectoryEntry {
+  string name = 1;
+  uint64 size = 2;
+  bool is_dir = 3;
+  uint64 modified_unix_secs = 4;
+}
+
+message ListDirectoryResponse {
+  repeated DirectoryEntry entries = 1;
 }
 
 // ── Software Management ───────────────────────────────────────────

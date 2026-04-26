@@ -157,6 +157,19 @@ describe("GuestAgentClient", () => {
           capabilities: [],
         });
       });
+      this.readFile = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+        cb(null, { data: Buffer.from("hello"), truncated: false });
+      });
+      this.writeFile = vi.fn((req: { data?: Buffer }, _opts: unknown, cb: (err: null, res: object) => void) => {
+        cb(null, { bytesWritten: req.data?.length ?? 0 });
+      });
+      this.listDirectory = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+        cb(null, {
+          entries: [
+            { name: "hello.txt", size: 5, isDir: false, modifiedUnixSecs: 1 },
+          ],
+        });
+      });
       this.close = vi.fn();
     });
 
@@ -258,6 +271,21 @@ describe("GuestAgentClient", () => {
     });
     // Client created successfully with custom options
     expect(client.connectionState).toBe("connected");
+  });
+
+  it("reads, writes, and lists files through guest file RPCs", async () => {
+    const client = new GuestAgentClient("127.0.0.1");
+    await expect(client.readFile("/tmp/hello.txt")).resolves.toEqual(Buffer.from("hello"));
+    await expect(client.readFileChunk("/tmp/hello.txt")).resolves.toEqual({
+      data: Buffer.from("hello"),
+      truncated: false,
+    });
+    await expect(client.writeFile("/tmp/hello.txt", "hello")).resolves.toEqual({
+      bytesWritten: 5,
+    });
+    await expect(client.listDirectory("/tmp")).resolves.toEqual([
+      { name: "hello.txt", size: 5, isDir: false, modifiedUnixSecs: 1 },
+    ]);
   });
 });
 

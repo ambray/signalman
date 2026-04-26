@@ -9,7 +9,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { HypervisorBackend, VMHandle } from "../hypervisors/interface.js";
-import type { GuestAgentClient } from "../guest/client.js";
+import { GuestAgentClient, type CommandResult } from "../guest/client.js";
 import type { SignalmanConfig } from "../config.js";
 import type { DockerClient, ComposeConfig } from "../docker/client.js";
 import {
@@ -18,7 +18,6 @@ import {
   evaluateAssertionsV2,
   extractToolBlocks,
 } from "./runner.js";
-import type { CommandResult } from "../guest/client.js";
 import type {
   SetupStep,
   SandboxMode,
@@ -102,6 +101,8 @@ function createInitialToolRegistry(): ToolRegistry {
 // KdSession constructor.
 import { writeJunitReport } from "../output/reporter.js";
 import type { TestResult, AssertionResultEntry } from "../output/reporter.js";
+
+const GUEST_FILE_CHUNK_BYTES = 1024 * 1024;
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -296,7 +297,7 @@ export class ScenarioOrchestrator {
     // Lazy-import-compatible initializer — the import below is static
     // so there's no circular-dep risk (kernel-debug doesn't import
     // orchestrator).
-     
+
     this.toolRegistry = createInitialToolRegistry();
   }
 
@@ -395,7 +396,7 @@ export class ScenarioOrchestrator {
     if (errors.length > 0 && process.env.SIGNALMAN_DEBUG === "1") {
       // Debug-only surface — most detach failures mean the process
       // was already dead, which is fine.
-       
+
       console.error(
         `[orchestrator] ${errors.length} kernel-debug teardown error(s):`,
         errors.map((e) => (e instanceof Error ? e.message : String(e))),
@@ -481,6 +482,107 @@ export class ScenarioOrchestrator {
       );
     }
     return this.docker;
+  }
+
+  private async ensureGuestClient(
+    vmName: string,
+    handle: VMHandle,
+    def?: VmDefinition,
+  ): Promise<GuestAgentClient> {
+    const existing = this.guestClients.get(vmName);
+    if (existing) return existing;
+
+    const ipAddress =
+      def?.network?.static_ip ??
+      (this.backend.getVmIpAddress
+        ? await this.backend.getVmIpAddress(handle)
+        : undefined);
+    if (!ipAddress) {
+      throw new Error(`Cannot create guest client for VM '${vmName}': no IP address available`);
+    }
+
+    const tlsConfig = this.config.guestAgent.tls;
+    const tlsOptions = tlsConfig.enabled
+      ? {
+          caPath: tlsConfig.caPath,
+          certPath: tlsConfig.certPath,
+          keyPath: tlsConfig.keyPath,
+        }
+      : undefined;
+
+    const client = new GuestAgentClient(
+      ipAddress,
+      def?.guest_agent_port ?? this.config.guestAgent.defaultPort,
+      tlsOptions,
+      { authToken: this.config.guestAgent.authToken },
+    );
+    this.guestClients.set(vmName, client);
+    return client;
+  }
+
+  private async copyFileToGuest(
+    vmName: string,
+    handle: VMHandle,
+    hostPath: string,
+    guestPath: string,
+  ): Promise<void> {
+    const client = this.guestClients.get(vmName);
+    if (!client) {
+      await this.backend.copyFileToVM(handle, hostPath, guestPath);
+      return;
+    }
+
+    const fd = fs.openSync(hostPath, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(GUEST_FILE_CHUNK_BYTES);
+      let offset = 0;
+      let firstChunk = true;
+      while (true) {
+        const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, offset);
+        if (bytesRead === 0) {
+          if (firstChunk) {
+            await client.writeFile(guestPath, Buffer.alloc(0), false);
+          }
+          break;
+        }
+        await client.writeFile(guestPath, buffer.subarray(0, bytesRead), !firstChunk);
+        firstChunk = false;
+        offset += bytesRead;
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+
+  private async copyFileFromGuest(
+    vmName: string,
+    handle: VMHandle,
+    guestPath: string,
+    hostPath: string,
+  ): Promise<void> {
+    const client = this.guestClients.get(vmName);
+    if (!client) {
+      await this.backend.copyFileFromVM(handle, guestPath, hostPath);
+      return;
+    }
+    fs.mkdirSync(path.dirname(hostPath), { recursive: true });
+    const fd = fs.openSync(hostPath, "w");
+    try {
+      let offset = 0;
+      while (true) {
+        const chunk = await client.readFileChunk(guestPath, {
+          offset,
+          limit: GUEST_FILE_CHUNK_BYTES,
+        });
+        const data = chunk.data;
+        if (data.length === 0) break;
+        fs.writeSync(fd, data, 0, data.length);
+        offset += data.length;
+        if (!chunk.truncated) break;
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
   }
 
   /**
@@ -1102,13 +1204,15 @@ export class ScenarioOrchestrator {
             if (!handle) throw new Error(`VM '${vmName}' not found in resolved VMs`);
             const direction = (step.direction as string) ?? "host_to_guest";
             if (direction === "host_to_guest") {
-              await this.backend.copyFileToVM(
+              await this.copyFileToGuest(
+                vmName,
                 handle,
                 step.host_path as string,
                 step.guest_path as string,
               );
             } else {
-              await this.backend.copyFileFromVM(
+              await this.copyFileFromGuest(
+                vmName,
                 handle,
                 step.guest_path as string,
                 step.host_path as string,
@@ -1121,15 +1225,28 @@ export class ScenarioOrchestrator {
             const handle = vmMap.get(vmName);
             if (!handle) throw new Error(`VM '${vmName}' not found in resolved VMs`);
             const client = this.guestClients.get(vmName);
-            if (!client) throw new Error(`No guest client for VM '${vmName}'`);
             const timeoutMs = (step.timeout_ms as number) ?? 60_000;
             const cmdArgs = (step.args as string[]) ?? [];
             const runAs = (step.run_as as string) ?? undefined;
-            await client.runCommand(
-              step.command as string,
-              cmdArgs,
-              { timeoutMs, runAs },
-            );
+            if (client) {
+              await client.runCommand(
+                step.command as string,
+                cmdArgs,
+                { timeoutMs, runAs },
+              );
+            } else {
+              const result = await this.backend.executeCommand(
+                handle,
+                step.command as string,
+                cmdArgs,
+                timeoutMs,
+              );
+              if (result.exitCode !== 0) {
+                throw new Error(
+                  `vm_run_command exited ${result.exitCode}: ${result.stderr || result.stdout}`,
+                );
+              }
+            }
             break;
           }
 
@@ -1249,13 +1366,23 @@ export class ScenarioOrchestrator {
 
     switch (tool) {
       case "vm_run_command": {
+        const handle = vmMap.get(vmName);
         const client = this.guestClients.get(vmName);
-        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
         const command = params.command as string;
         const args = (params.args as string[]) ?? [];
         const timeoutMs = (params.timeout_ms as number) ?? 60_000;
         const runAs = (params.run_as as string) ?? undefined;
-        const result = await client.runCommand(command, args, { timeoutMs, runAs });
+        const result = client
+          ? await client.runCommand(command, args, { timeoutMs, runAs })
+          : handle
+            ? await this.backend.executeCommand(handle, command, args, timeoutMs)
+            : undefined;
+        if (!result) throw new Error(`VM '${vmName}' not found`);
+        if (result.exitCode !== 0) {
+          throw new Error(
+            `vm_run_command exited ${result.exitCode}: ${result.stderr || result.stdout}`,
+          );
+        }
         return result.stdout ?? "";
       }
 
@@ -1264,13 +1391,15 @@ export class ScenarioOrchestrator {
         if (!handle) throw new Error(`VM '${vmName}' not found`);
         const direction = (params.direction as string) ?? "host_to_guest";
         if (direction === "host_to_guest") {
-          await this.backend.copyFileToVM(
+          await this.copyFileToGuest(
+            vmName,
             handle,
             params.host_path as string,
             params.guest_path as string,
           );
         } else {
-          await this.backend.copyFileFromVM(
+          await this.copyFileFromGuest(
+            vmName,
             handle,
             params.guest_path as string,
             params.host_path as string,
@@ -1507,9 +1636,12 @@ export class ScenarioOrchestrator {
     const pollIntervalMs = 2_000;
 
     for (const def of vmDefs) {
-      const client = this.guestClients.get(def.name);
+      const handle = vmMap.get(def.name);
+      let client = this.guestClients.get(def.name);
       if (!client) {
-        throw new Error(`No guest client configured for VM '${def.name}'`);
+        if (!handle || this.backend.name !== "tart") {
+          throw new Error(`No guest client configured for VM '${def.name}'`);
+        }
       }
 
       const deadline = Date.now() + timeoutMs;
@@ -1517,10 +1649,14 @@ export class ScenarioOrchestrator {
 
       while (Date.now() < deadline) {
         try {
+          if (!client) {
+            client = await this.ensureGuestClient(def.name, handle!, def);
+          }
           connected = await client.isConnected(5_000);
           if (connected) break;
         } catch {
-          // Retry on connection failure
+          // Retry while Tart is still assigning an IP or while the agent is
+          // still booting.
         }
         const remaining = deadline - Date.now();
         if (remaining <= 0) break;

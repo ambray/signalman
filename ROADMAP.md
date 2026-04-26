@@ -1,10 +1,19 @@
 # Signalman Development Roadmap
 
-**Last Updated**: 2026-04-25
+**Last Updated**: 2026-04-26
 **Current Version**: Pre-release (v0.0.x)
 **Target**: v0.1.0 (first public release as agent-first DevOps runner)
-**Test Count**: 59 Rust (guest) + 257 TypeScript (host, 8 files) = 316 tests
+**Test Count**: 151 Rust (guest/service) + 769 TypeScript (host) = 920 tests
 **Repo**: https://github.com/ambray/signalman.git
+
+**2026-04-26 Mac virtualization decision**: macOS VM support starts with a
+Tart-backed host backend (`host/src/hypervisors/tart.ts`) rather than a
+first-party Swift daemon. Rationale: Apple's Virtualization.framework requires a
+signed/entitled caller, Tart already packages that surface and provides clone,
+run, stop, IP lookup, image registry, and `tart exec` command execution. This
+unblocks v0.1.x Mac runner experiments while preserving a v0.2+ path to a
+service-like Swift helper if Signalman needs its own mTLS identity, code-signing
+story, or deeper VM-state control. See `docs/mac-virtualization.md`.
 
 **2026-04-25 audit pass**: Four-lens audit (QA / Architecture / PM / Security)
 distributed into existing phases. P0 and P1 confirmed merged. P3, P4, P7 re-scoped
@@ -111,6 +120,7 @@ in from day one (v0.1.0).
 - **MCP Protocol Server** (`host/src/server.ts`) — Full MCP server with tool registration, Zod schema validation, JSON schema-to-Zod bridge
 - **Hypervisor Backends**:
   - Hyper-V (`hypervisors/hyperv.ts`) — Full VM lifecycle, checkpoints, file transfer, command execution, IP address resolution, heartbeat wait, memory/CPU configuration. All PowerShell commands use sanitized parameter passing.
+  - Tart (`hypervisors/tart.ts`) — macOS-on-Apple-Silicon runner backend: clone-based creation, headless start/stop, IP lookup, `tart exec` command execution, suspend/resume, and clone-emulated checkpoints. Scenario file copy uses the Signalman guest agent when available; backend-level Tart copy remains a future shared-directory/SSH/SCP/Tart-copy concern.
   - VMware (`hypervisors/vmware.ts`) — Full vmrun backend with checkpoint, file transfer, command execution. Credential redaction in error messages.
   - Backend interface (`hypervisors/interface.ts`) — Shared types for VM handle, checkpoint, command result, progress callback
 - **Tool System** (`tools/`) — Modular MCP tool architecture:
@@ -146,13 +156,14 @@ in from day one (v0.1.0).
   - Package ID validation for install_software
 - **Process Management** (`process.rs`) — Process registry, SafeHandle RAII for Win32, `os_kill` with honest force=false behavior, handle-leak-free `CreateToolhelp32Snapshot`
 - **File Operations** (`file_ops.rs`) — Read (100MB cap, chunked), write (path jail via `SIGNALMAN_WORKSPACE`), list directory. System directory write blocking.
+- **macOS guest bootstrap** (`scripts/macos/install-guest-agent.sh`) — LaunchDaemon installer for root command/file control inside Tart macOS guests.
 - **Verification** (`verification.rs`) — Restriction verification logic
 - **CLI** (`main.rs`) — `--bind`, `--token`, `--allow-insecure` flags via clap. Refuses to start without auth unless explicitly insecure.
 
 ### Test Infrastructure
-- 8 host test files (257 tests): sanitize, assertions, config, docker, orchestrator, reporter, scenarios, client
-- 59 guest Rust tests
-- TypeScript compilation clean, Clippy clean
+- 29 host test files (769 tests)
+- 151 Rust tests across guest and service crates
+- TypeScript compilation clean; ESLint clean with existing unused-disable warnings
 
 ---
 
