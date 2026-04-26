@@ -198,6 +198,61 @@ service binary, transport layer, or sanitization code.
    .\target\release\signalman-service.exe uninstall
    ```
 
+## Post-merge fixes (2026-04-25)
+
+The initial P1 merge passed unit tests but the first end-to-end run
+against a real Hyper-V VM surfaced three integration issues. All three
+are fixed and validated by an `example-driver-v3-fs-10l-etw` scenario
+run that takes ~9.5 min from `signalman run` to `result: pass`.
+
+### 1. ServiceBackend not wired into the run executor
+
+The MCP `signalman.run` verb's default executor
+(`host/src/verbs/default-executor.ts`) only constructed
+`HyperVBackend` and `VmwareBackend` and never tried `ServiceBackend`.
+Every scenario fell through to the gsudo path even when the daemon
+was installed and healthy — defeating the entire P1 contract.
+
+Fix: import `ServiceBackend` in the executor and put it ahead of the
+direct-Hyper-V branch (`service > hyperv > vmware`, matching this
+doc's documented order).
+
+### 2. `get_status` PowerShell pipeline returns `{}` for empty IP
+
+When the VM is in `Saved` state OR Integration Services hasn't
+reported an IP yet, the PowerShell pipeline
+
+```powershell
+$ip = ($vm | Get-VMNetworkAdapter | Select-Object -ExpandProperty IPAddresses |
+       Where-Object { $_ -match '\d+\.\d+\.\d+\.\d+' } | Select-Object -First 1)
+```
+
+returns `$null` or an empty `PSObject`. `ConvertTo-Json` then emits
+`"IPAddress":{}` rather than `"IPAddress":null`, which the Rust
+`Option<String>` deserializer rejects with
+`invalid type: map, expected a string`.
+
+Fix (`service/src/backend.rs::get_status`):
+- Wrap the `$ip` capture in `[string](...)` so PS coerces null/empty
+  to an empty string.
+- Deserialize `IPAddress` into `serde_json::Value` and project to
+  `Option<String>` only when the value is a non-empty string.
+  Belt-and-braces — protects against any future PS-side regression.
+
+### 3. Default executor never populated `guestClients`
+
+The orchestrator looks up a `GuestAgentClient` by VM name for every
+guest-side step (`vm_run_command`, `vm_copy_file` via guest, all the
+`driver_*` and `kernel_etw_*` tools). The default executor passed
+`new Map()` — empty. Every scenario that targeted a VM agent died
+with `No guest client configured for VM '...'`.
+
+Fix: parse the scenario's `setup.yaml` in the executor, walk
+`config.vms`, and build one `GuestAgentClient` per VM keyed on the
+logical name (the orchestrator does its own alias resolution against
+the physical VM record). TLS material from `guestAgent.tls.*` in the
+host config is forwarded so mTLS scenarios get the right channel.
+
 ## Open questions / compromises
 
 * **Pipe ACLs.** The pipe is created with default ACLs (LocalSystem
