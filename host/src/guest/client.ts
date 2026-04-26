@@ -61,7 +61,35 @@ export interface ClientOptions {
 /** Connection state of the gRPC client. */
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "error";
 
-/** Process information returned by the guest agent. */
+/** Windows-specific process token / container details (P8). */
+export interface WindowsProcessDetails {
+  isAppcontainer: boolean;
+  appcontainerSid: string;
+  isLowIntegrity: boolean;
+  isInJob: boolean;
+}
+
+/** Linux-specific process details — reserved; empty in v0.1.0. */
+export interface LinuxProcessDetails {
+  // Future: cgroupPath, namespaces, capabilities.
+}
+
+/** macOS-specific process details — reserved; empty in v0.1.0. */
+export interface MacOsProcessDetails {
+  // Future: sandboxProfile, codeSigningTeamId.
+}
+
+/**
+ * Process information returned by the guest agent.
+ *
+ * Cross-platform fields are flat; OS-specific token / container info
+ * lives in `platformDetails` (P8 oneof). For Windows guests, only
+ * `platformDetails.windows` is populated; the other variants are
+ * absent.
+ *
+ * Convenience helper: [`getWindowsProcessDetails`] unwraps the oneof
+ * for the common Windows-only path.
+ */
 export interface ProcessInfo {
   pid: number;
   name: string;
@@ -70,10 +98,31 @@ export interface ProcessInfo {
   memoryBytes: number;
   cpuPercent: number;
   user: string;
-  isAppcontainer: boolean;
-  appcontainerSid: string;
-  isLowIntegrity: boolean;
-  isInJob: boolean;
+  /**
+   * P8 oneof platform_details. Exactly one variant key is present
+   * (`windows` | `linux` | `macos`); the others are absent (not
+   * `undefined`-valued — actually missing from the object).
+   * `@grpc/proto-loader` decodes proto3 oneofs as plain object
+   * properties matching the variant name in camelCase.
+   */
+  platformDetails?: {
+    windows?: WindowsProcessDetails;
+    linux?: LinuxProcessDetails;
+    macos?: MacOsProcessDetails;
+  };
+}
+
+/**
+ * Convenience accessor for the Windows variant of `ProcessInfo.
+ * platformDetails`. Returns the WindowsProcessDetails record or
+ * `undefined` when the process is from a non-Windows guest. Use this
+ * in scenario code that's Windows-only — clearer than spelunking the
+ * oneof shape inline.
+ */
+export function getWindowsProcessDetails(
+  info: ProcessInfo,
+): WindowsProcessDetails | undefined {
+  return info.platformDetails?.windows;
 }
 
 /** Result of running a command inside the VM. */
@@ -84,21 +133,49 @@ export interface CommandResult {
   durationMs: number;
 }
 
-/** Restriction verification verdict for a process. */
-export interface RestrictionVerdict {
-  isRestricted: boolean;
+/** Windows-specific restriction evidence (P8). */
+export interface WindowsRestrictionDetails {
+  /** "AppContainer" | "Legacy" | "None" */
   restrictionMode: string;
   hasAppcontainerToken: boolean;
   appcontainerSid: string;
   isLowIntegrity: boolean;
   isInJob: boolean;
   jobName: string;
-  hasFirewallRules: boolean;
-  blockedDomains: string[];
   hasRestrictDll: boolean;
   restrictDllPath: string;
+}
+
+/**
+ * Restriction verification verdict for a process. Cross-platform
+ * top-level outcome + per-platform evidence under `platformDetails`.
+ *
+ * The Windows-specific fields previously hoisted onto this interface
+ * (restrictionMode, hasAppcontainerToken, appcontainerSid, etc.) now
+ * live under `platformDetails.windows` after the P8 freeze. Use
+ * [`getWindowsRestrictionDetails`] to unwrap on the Windows-only path.
+ */
+export interface RestrictionVerdict {
+  isRestricted: boolean;
+  hasFirewallRules: boolean;
+  blockedDomains: string[];
   verdict: string;
   issues: string[];
+  /** P8 oneof platform_details; exactly one variant present. */
+  platformDetails?: {
+    windows?: WindowsRestrictionDetails;
+  };
+}
+
+/**
+ * Convenience accessor for the Windows variant of `RestrictionVerdict.
+ * platformDetails`. Returns `undefined` when the verdict came from a
+ * non-Windows guest.
+ */
+export function getWindowsRestrictionDetails(
+  v: RestrictionVerdict,
+): WindowsRestrictionDetails | undefined {
+  return v.platformDetails?.windows;
 }
 
 /** Result of a network connectivity test. */

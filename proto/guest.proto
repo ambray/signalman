@@ -5,10 +5,28 @@ package signalman.guest;
 // Guest Agent gRPC service — runs inside each VM.
 // The host MCP server calls these RPCs to control processes,
 // automate UI, and verify restrictions.
+//
+// ── v1 freeze (P8, 2026-04-26) ─────────────────────────────────────
+// This file is the v1 contract. Field numbers are STABLE; renames
+// require a coordinated host TS + guest Rust + service Rust + plugin
+// migration. Windows-only details are split into per-platform `oneof`
+// variants so adding Linux/macOS guest agents does NOT require a
+// breaking field renumbering — the variant is a free addition.
+//
+// Width compatibility: trace IDs that ride alongside this proto on
+// gRPC metadata (`signalman-trace-id`) are 32 hex chars to match
+// W3C `trace-id` width, keeping the OTel-upgrade path cheap.
 
 service GuestAgent {
   // ── Health ──────────────────────────────────────────────────
   rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Server-streaming readiness signal. Reserved for the cold-boot
+  // wait path (orchestrator.waitForGuestAgents). v0.1.0 keeps the
+  // poll-based path; this RPC is the future-readiness slot so we
+  // do not need another proto bump to add it. Implementations are
+  // free to return UNIMPLEMENTED until a real consumer arrives.
+  rpc StreamReadiness(StreamReadinessRequest) returns (stream ReadinessUpdate);
 
   // ── Registration ────────────────────────────────────────────
   rpc Register(RegisterRequest) returns (RegisterResponse);
@@ -58,6 +76,23 @@ message HealthResponse {
   string agent_version = 4;
   uint64 uptime_seconds = 5;
   repeated string capabilities = 6;  // e.g., ["process", "ui", "browser", "verify"]
+}
+
+// ── Readiness Stream (P8 future-readiness slot) ───────────────────
+
+message StreamReadinessRequest {
+  // Optional client-side identifier for log correlation. Empty is OK.
+  string client_id = 1;
+}
+
+message ReadinessUpdate {
+  // Lifecycle state of the guest agent.
+  // "starting" | "ready" | "degraded" | "stopping"
+  string state = 1;
+  // Human-readable detail line; safe to log verbatim.
+  string detail = 2;
+  // Monotonic counter so a slow consumer can detect dropped updates.
+  uint64 sequence = 3;
 }
 
 // ── Registration ──────────────────────────────────────────────────
@@ -113,6 +148,10 @@ message ProcessListRequest {
   string name_filter = 1;  // Optional: filter by process name
 }
 
+// Process info — cross-platform in fields 1–7; OS-specific token /
+// container details live in `platform_details` (P8). Linux and macOS
+// guests fill in the matching variant when they ship; until then their
+// variants are empty placeholders that lock the field tags.
 message ProcessInfo {
   uint32 pid = 1;
   string name = 2;
@@ -121,11 +160,42 @@ message ProcessInfo {
   uint64 memory_bytes = 5;
   double cpu_percent = 6;
   string user = 7;
-  // Restriction info (Windows-specific)
-  bool is_appcontainer = 8;
-  string appcontainer_sid = 9;
-  bool is_low_integrity = 10;
-  bool is_in_job = 11;
+
+  // P8: tags 8–11 previously held flat Windows-specific token info
+  // (is_appcontainer, appcontainer_sid, is_low_integrity, is_in_job).
+  // They moved into `WindowsProcessDetails` under the platform_details
+  // oneof. Reserved here so a future field cannot accidentally reuse
+  // a tag and confuse old binaries on the wire.
+  reserved 8 to 11;
+  reserved "is_appcontainer", "appcontainer_sid", "is_low_integrity", "is_in_job";
+
+  oneof platform_details {
+    WindowsProcessDetails windows = 100;
+    LinuxProcessDetails linux = 101;
+    MacOsProcessDetails macos = 102;
+  }
+}
+
+message WindowsProcessDetails {
+  bool is_appcontainer = 1;
+  string appcontainer_sid = 2;
+  bool is_low_integrity = 3;
+  bool is_in_job = 4;
+}
+
+message LinuxProcessDetails {
+  // Reserved for future Linux guest agents. Likely fields:
+  //   string cgroup_path = 1;
+  //   repeated string namespaces = 2;
+  //   repeated string capabilities_effective = 3;
+  // Empty for now to lock the variant tag.
+}
+
+message MacOsProcessDetails {
+  // Reserved for future macOS guest agents. Likely fields:
+  //   string sandbox_profile = 1;
+  //   string code_signing_team_id = 2;
+  // Empty for now to lock the variant tag.
 }
 
 message ProcessListResponse {
@@ -136,21 +206,55 @@ message ProcessInspectRequest {
   uint32 pid = 1;
 }
 
+// Detailed process inspection. Cross-platform fields are common
+// privileges/groups; deep token / job / container info is per-platform.
 message ProcessInspectResponse {
   ProcessInfo process = 1;
-  // Token details
-  string integrity_level = 2;
+
+  // Cross-platform fields kept flat:
+  //   privileges: Win32 privilege names OR Linux capability names; the
+  //               value is opaque to the protocol — implementations
+  //               choose their convention.
+  //   groups:     OS group names; format is platform-defined.
   repeated string privileges = 3;
   repeated string groups = 4;
-  // AppContainer details
-  string appcontainer_name = 5;
-  repeated string capabilities = 6;
-  // Job object details
-  string job_name = 7;
-  uint64 job_memory_limit = 8;
-  // Network restrictions
+  // Network-restriction observations (cross-platform); empty when
+  // not applicable.
   repeated string blocked_domains = 9;
   repeated string allowed_domains = 10;
+
+  // P8: tags 2 and 5–8 previously held flat Windows token / AppContainer
+  // / Job details (integrity_level, appcontainer_name, capabilities,
+  // job_name, job_memory_limit). They moved into the platform_details
+  // oneof.
+  reserved 2, 5, 6, 7, 8;
+  reserved "integrity_level", "appcontainer_name", "capabilities",
+           "job_name", "job_memory_limit";
+
+  oneof platform_details {
+    WindowsInspectDetails windows = 100;
+    LinuxInspectDetails linux = 101;
+    MacOsInspectDetails macos = 102;
+  }
+}
+
+message WindowsInspectDetails {
+  // Token integrity ("Low" | "Medium" | "High" | "System").
+  string integrity_level = 1;
+  // AppContainer details.
+  string appcontainer_name = 2;
+  repeated string appcontainer_capabilities = 3;
+  // Job-object details.
+  string job_name = 4;
+  uint64 job_memory_limit = 5;
+}
+
+message LinuxInspectDetails {
+  // Reserved for future use; empty for now.
+}
+
+message MacOsInspectDetails {
+  // Reserved for future use; empty for now.
 }
 
 // ── Command Execution ─────────────────────────────────────────────
@@ -266,25 +370,57 @@ message VerifyRestrictionRequest {
   string process_name = 2;  // Alternative: find by name
 }
 
+// Restriction verdict — cross-platform top-level result + per-platform
+// evidence in the platform_details oneof.
 message VerifyRestrictionResponse {
+  // Cross-platform top-level fields:
   bool is_restricted = 1;
-  string restriction_mode = 2;  // "AppContainer", "Legacy", "None"
-  // Token checks
-  bool has_appcontainer_token = 3;
-  string appcontainer_sid = 4;
-  bool is_low_integrity = 5;
-  // Job object checks
-  bool is_in_job = 6;
-  string job_name = 7;
-  // Firewall checks
+  // Free-form verdict label. Recognised values today:
+  //   "fully_restricted" | "partially_restricted" | "not_restricted"
+  string verdict = 12;
+  repeated string issues = 13;
+  // Network-egress observations (cross-platform).
   bool has_firewall_rules = 8;
   repeated string blocked_domains = 9;
-  // DLL injection check
-  bool has_restrict_dll = 10;
-  string restrict_dll_path = 11;
-  // Overall verdict
-  string verdict = 12;  // "fully_restricted", "partially_restricted", "not_restricted"
-  repeated string issues = 13;
+
+  // P8: tags 2–7, 10–11 previously held flat Windows-specific evidence
+  // (restriction_mode, has_appcontainer_token, appcontainer_sid,
+  // is_low_integrity, is_in_job, job_name, has_restrict_dll,
+  // restrict_dll_path). They moved into WindowsRestrictionDetails.
+  reserved 2, 3, 4, 5, 6, 7, 10, 11;
+  reserved "restriction_mode", "has_appcontainer_token",
+           "appcontainer_sid", "is_low_integrity", "is_in_job",
+           "job_name", "has_restrict_dll", "restrict_dll_path";
+
+  oneof platform_details {
+    WindowsRestrictionDetails windows = 100;
+    LinuxRestrictionDetails linux = 101;
+    MacOsRestrictionDetails macos = 102;
+  }
+}
+
+message WindowsRestrictionDetails {
+  // Restriction mode the agent observed.
+  // Values: "AppContainer" | "Legacy" | "None"
+  string restriction_mode = 1;
+  // AppContainer-token observations.
+  bool has_appcontainer_token = 2;
+  string appcontainer_sid = 3;
+  bool is_low_integrity = 4;
+  // Job-object observations.
+  bool is_in_job = 5;
+  string job_name = 6;
+  // DLL-injection-based restriction observations (e.g. RestrictDll).
+  bool has_restrict_dll = 7;
+  string restrict_dll_path = 8;
+}
+
+message LinuxRestrictionDetails {
+  // Reserved for future use; empty for now.
+}
+
+message MacOsRestrictionDetails {
+  // Reserved for future use; empty for now.
 }
 
 message TestNetworkRequest {
@@ -309,7 +445,10 @@ message TestFileAccessRequest {
 message TestFileAccessResponse {
   bool allowed = 1;
   string error = 2;
-  string error_code = 3;  // Win32 error code
+  // Platform-defined error code. On Windows this is the Win32 error
+  // (e.g. "5" = access denied); on Linux it would be the errno
+  // ("EACCES") or syscall name. The protocol does not interpret it.
+  string error_code = 3;
 }
 
 // ── File Operations ───────────────────────────────────────────────
