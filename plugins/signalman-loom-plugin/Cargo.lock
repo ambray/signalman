@@ -536,6 +536,7 @@ dependencies = [
  "inventory",
  "loom-core",
  "loom-plugin-api",
+ "serde",
  "serde_json",
  "tempfile",
 ]
