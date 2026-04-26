@@ -17,6 +17,8 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
+import { currentTrace, traceMetadata } from "../output/trace.js";
+
 // ── Types ──────────────────────────────────────────────────────────
 
 /**
@@ -254,17 +256,42 @@ function unaryCall<TReq, TRes>(
     if (deadlineMs !== undefined && deadlineMs > 0) {
       options.deadline = new Date(Date.now() + deadlineMs);
     }
+    // P3.d: read trace context from AsyncLocalStorage and inject as
+    // gRPC metadata. The orchestrator (or any caller wrapping work in
+    // runWithTrace) sets the context; we don't otherwise touch the
+    // call signature so existing call sites are unchanged.
+    const trace = currentTrace();
+    const metadata = trace ? buildTraceMetadata(trace) : undefined;
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (client as any)[method](
-      request,
-      options,
+    const cb = (err: grpc.ServiceError | null, response: any) => {
+      if (err) reject(err);
+      else resolve(response as TRes);
+    };
+
+    // gRPC's generated method accepts (request, metadata?, options?, cb).
+    // Pass metadata only when present so un-traced calls go through
+    // the original 3-arg path unchanged.
+    if (metadata) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (err: grpc.ServiceError | null, response: any) => {
-        if (err) reject(err);
-        else resolve(response as TRes);
-      },
-    );
+      (client as any)[method](request, metadata, options, cb);
+    } else {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (client as any)[method](request, options, cb);
+    }
   });
+}
+
+/**
+ * Convert a [`TraceContext`] into a gRPC `Metadata` object for
+ * outbound calls. P3.d helper; no-op when fields are empty.
+ */
+function buildTraceMetadata(trace: import("../output/trace.js").TraceContext): grpc.Metadata {
+  const md = new grpc.Metadata();
+  for (const [k, v] of Object.entries(traceMetadata(trace))) {
+    md.add(k, v);
+  }
+  return md;
 }
 
 // ── Client Class ───────────────────────────────────────────────────

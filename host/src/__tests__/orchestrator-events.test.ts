@@ -18,6 +18,7 @@ import { describe, it, expect, vi } from "vitest";
 
 import { ScenarioOrchestrator } from "../scenarios/orchestrator.js";
 import type { EnvelopeEventInput } from "../output/envelope.js";
+import { currentTrace } from "../output/trace.js";
 import type {
   HypervisorBackend,
   VMHandle,
@@ -286,5 +287,114 @@ describe("executeSetup live event emission", () => {
     );
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe("success");
+  });
+});
+
+describe("executeSetup trace-context propagation (P3.d)", () => {
+  it("threads trace context into the step body via AsyncLocalStorage", async () => {
+    const { orchestrator, client, vmMap } = makeOrchestrator();
+    const observed: ReturnType<typeof currentTrace>[] = [];
+
+    (client.runCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        observed.push(currentTrace());
+        return { exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
+      },
+    );
+
+    await orchestrator.executeSetup(
+      [
+        { action: "vm_run_command", vm: "endpoint-1", command: "a" },
+        { action: "vm_run_command", vm: "endpoint-1", command: "b" },
+      ],
+      vmMap,
+      undefined,
+      undefined,
+      { traceId: "f".repeat(32), runId: "run_xyz" },
+    );
+
+    expect(observed).toHaveLength(2);
+    for (const o of observed) {
+      expect(o).toBeDefined();
+      expect(o!.traceId).toBe("f".repeat(32));
+      expect(o!.runId).toBe("run_xyz");
+      // vmName is filled in per-step from the step's `vm` field — at
+      // fleet scale this is the demuxing key for "which VM produced
+      // this gRPC call".
+      expect(o!.vmName).toBe("endpoint-1");
+    }
+  });
+
+  it("leaves trace unset when caller passes no trace context", async () => {
+    const { orchestrator, client, vmMap } = makeOrchestrator();
+    let observed: ReturnType<typeof currentTrace>;
+
+    (client.runCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        observed = currentTrace();
+        return { exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
+      },
+    );
+
+    await orchestrator.executeSetup(
+      [{ action: "vm_run_command", vm: "endpoint-1", command: "a" }],
+      vmMap,
+    );
+
+    expect(observed!).toBeUndefined();
+  });
+
+  it("isolates trace contexts across concurrent executeSetup calls", async () => {
+    // Two parallel runs against the same orchestrator-class object must
+    // not see each other's trace IDs. AsyncLocalStorage gives us this
+    // guarantee even without per-run client instances; this test pins
+    // the contract for future fleet-scale work.
+    const o1 = makeOrchestrator();
+    const o2 = makeOrchestrator();
+    const observed: Array<{ run: string; sawTrace: string | undefined }> = [];
+
+    (o1.client.runCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        await new Promise((r) => setTimeout(r, 3));
+        observed.push({
+          run: "1",
+          sawTrace: currentTrace()?.traceId,
+        });
+        return { exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
+      },
+    );
+    (o2.client.runCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        await new Promise((r) => setTimeout(r, 1));
+        observed.push({
+          run: "2",
+          sawTrace: currentTrace()?.traceId,
+        });
+        return { exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
+      },
+    );
+
+    await Promise.all([
+      o1.orchestrator.executeSetup(
+        [{ action: "vm_run_command", vm: "endpoint-1", command: "a" }],
+        o1.vmMap,
+        undefined,
+        undefined,
+        { traceId: "1".repeat(32), runId: "r1" },
+      ),
+      o2.orchestrator.executeSetup(
+        [{ action: "vm_run_command", vm: "endpoint-1", command: "b" }],
+        o2.vmMap,
+        undefined,
+        undefined,
+        { traceId: "2".repeat(32), runId: "r2" },
+      ),
+    ]);
+
+    expect(observed).toHaveLength(2);
+    const r1 = observed.find((o) => o.run === "1")!;
+    const r2 = observed.find((o) => o.run === "2")!;
+    expect(r1.sawTrace).toBe("1".repeat(32));
+    expect(r2.sawTrace).toBe("2".repeat(32));
   });
 });
