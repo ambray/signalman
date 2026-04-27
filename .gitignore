@@ -10,6 +10,9 @@ guest/target/
 # Cargo workspace target (P1 service crate)
 target/
 
+# Coverage reports (vitest v8 provider)
+host/coverage/
+
 # OS files
 .DS_Store
 Thumbs.db
