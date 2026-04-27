@@ -46,6 +46,8 @@ version = "0.58"
 features = [
     "Win32_Foundation",
     "Win32_Security",
+    # P4.c B6: SDDL parsing for named-pipe SECURITY_DESCRIPTOR.
+    "Win32_Security_Authorization",
     "Win32_System_Threading",
     "Win32_System_Pipes",
     "Win32_Storage_FileSystem",

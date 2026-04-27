@@ -19,6 +19,8 @@
 #![allow(clippy::result_large_err)]
 
 pub mod backend;
+#[cfg(target_os = "windows")]
+pub mod pipe_security;
 pub mod proto;
 pub mod sanitize;
 pub mod service;
