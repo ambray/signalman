@@ -79,6 +79,97 @@ fn is_denied_command(command: &str, args: &[String]) -> bool {
     false
 }
 
+/// Argument flags whose VALUES are likely credentials. The value
+/// (which appears as the next argv element OR as the right-hand side
+/// of `flag=value`) is replaced with `***REDACTED***` in audit logs.
+/// Match is case-insensitive against the flag name and tolerates
+/// either a leading `-` or `--`.
+///
+/// P4.c-B11 / Sec F11. Conservative list — when in doubt, redact.
+const CREDENTIAL_FLAGS: &[&str] = &[
+    "password",
+    "passwd",
+    "pass",
+    "pwd",
+    "secret",
+    "token",
+    "api-key",
+    "api_key",
+    "apikey",
+    "auth",
+    "auth-token",
+    "auth_token",
+    "credentials",
+    "client-secret",
+    "client_secret",
+    "p", // gpg, openssl, vmrun -gp
+    "u", // some tools pair -u <user> -p <pass>; we don't redact -u itself
+];
+
+/// Strip the leading `-`/`--` and lowercase a flag name for matching.
+fn normalise_flag(arg: &str) -> Option<&str> {
+    let s = arg.strip_prefix("--").or_else(|| arg.strip_prefix("-"))?;
+    Some(s)
+}
+
+/// Returns true when `flag` (already with `-`/`--` prefix removed)
+/// is a known credential-bearing flag name. Case-insensitive.
+fn is_credential_flag(flag: &str) -> bool {
+    // Strip a `=value` suffix before comparing (`--password=foo`
+    // pattern). The value-side redaction happens separately in
+    // redact_credential_args.
+    let name = flag.split_once('=').map(|(n, _)| n).unwrap_or(flag);
+    let name_lc = name.to_ascii_lowercase();
+    CREDENTIAL_FLAGS.iter().any(|f| *f == name_lc)
+}
+
+/// Walk an argv vector and produce a copy in which the value
+/// component of any credential-bearing flag is replaced with
+/// `***REDACTED***`. Two patterns recognised:
+///
+///   - Whitespace-separated: `["--password", "secret"]` →
+///     `["--password", "***REDACTED***"]`. The value is the NEXT
+///     element after the flag.
+///   - Equals-separated: `["--password=secret"]` →
+///     `["--password=***REDACTED***"]`.
+///
+/// Bare flags with no value (e.g. `["--password"]` at end of argv)
+/// pass through unchanged — there's no value to redact.
+fn redact_credential_args(args: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        // Equals form: `--password=secret`
+        if let Some(stripped) = normalise_flag(arg) {
+            if let Some((name, _value)) = stripped.split_once('=') {
+                if is_credential_flag(name) {
+                    let prefix_len = arg.len() - stripped.len();
+                    let prefix = &arg[..prefix_len];
+                    out.push(format!("{prefix}{name}=***REDACTED***"));
+                    i += 1;
+                    continue;
+                }
+            } else if is_credential_flag(stripped) {
+                // Whitespace form: this is the flag, redact next
+                // element if present.
+                out.push(arg.clone());
+                if i + 1 < args.len() {
+                    out.push("***REDACTED***".to_string());
+                    i += 2;
+                    continue;
+                } else {
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+        out.push(arg.clone());
+        i += 1;
+    }
+    out
+}
+
 /// Check if any argument contains shell metacharacters that could chain commands.
 fn contains_shell_metacharacters(command: &str, args: &[String]) -> bool {
     for ch in SHELL_METACHARACTERS {
@@ -530,10 +621,19 @@ impl GuestAgent for GuestAgentService {
             return Err(Status::invalid_argument("command must not be empty"));
         }
 
-        // S-06: Audit logging for every command execution.
+        // P4.c-B11 / Sec F11: redact arg patterns that commonly carry
+        // credentials BEFORE writing the audit log. Operators leave
+        // `signalman::audit` log streams open in shared TUIs and
+        // ship them to centralised log stores; a verbatim
+        // `--password supersecret` in argv would leak straight to
+        // disk and to anyone with read access to the log destination.
+        // Audit logging stays comprehensive (command name + arg
+        // count + shape) for forensics; only the specific
+        // sensitive-flag values are redacted.
         warn!(
             command = %req.command,
-            args = ?req.args,
+            args = ?redact_credential_args(&req.args),
+            arg_count = req.args.len(),
             "AUDIT: run_command invoked"
         );
 
@@ -1116,6 +1216,82 @@ mod tests {
                 "shell-metachar gate must surface as InvalidArgument"
             );
         }
+    }
+
+    // ── P4.c-B11 / Sec F11: credential redaction in audit logs ───
+
+    #[test]
+    fn redact_credential_args_handles_whitespace_form() {
+        let args = vec![
+            "--user".into(),
+            "alice".into(),
+            "--password".into(),
+            "supersecret".into(),
+            "--verbose".into(),
+        ];
+        let redacted = redact_credential_args(&args);
+        assert_eq!(
+            redacted,
+            vec!["--user", "alice", "--password", "***REDACTED***", "--verbose"]
+        );
+        // Original is untouched.
+        assert_eq!(args[3], "supersecret");
+    }
+
+    #[test]
+    fn redact_credential_args_handles_equals_form() {
+        let args = vec![
+            "--password=hunter2".into(),
+            "--token=abc123".into(),
+            "--api-key=xyz".into(),
+        ];
+        let redacted = redact_credential_args(&args);
+        assert_eq!(
+            redacted,
+            vec!["--password=***REDACTED***", "--token=***REDACTED***", "--api-key=***REDACTED***"]
+        );
+    }
+
+    #[test]
+    fn redact_credential_args_is_case_insensitive() {
+        let args = vec!["--PASSWORD".into(), "x".into(), "--Token=y".into()];
+        let redacted = redact_credential_args(&args);
+        assert_eq!(redacted[1], "***REDACTED***");
+        assert!(redacted[2].ends_with("***REDACTED***"));
+    }
+
+    #[test]
+    fn redact_credential_args_handles_short_flags() {
+        // vmrun -gp <password> pattern.
+        let args = vec!["-gu".into(), "alice".into(), "-gp".into(), "secret".into()];
+        let redacted = redact_credential_args(&args);
+        // `-gp` (g + p) — only `-p` is in the credential list, but
+        // we don't redact `-gp` because it doesn't match `password`
+        // or any other flag in the list. Document this gap: the
+        // caller must use `-p` short form OR `--password` long form
+        // to get redaction. The vmware backend (host-side) does
+        // its own redactCredentials() at the call site for vmrun.
+        assert_eq!(redacted[3], "secret"); // NOT redacted — known gap
+    }
+
+    #[test]
+    fn redact_credential_args_leaves_non_credential_args_untouched() {
+        let args = vec![
+            "--config".into(),
+            "/etc/foo".into(),
+            "--verbose".into(),
+            "positional".into(),
+        ];
+        let redacted = redact_credential_args(&args);
+        assert_eq!(redacted, args);
+    }
+
+    #[test]
+    fn redact_credential_args_handles_bare_flag_at_end() {
+        // Trailing bare flag — no value to redact, pass through.
+        let args = vec!["--password".into()];
+        let redacted = redact_credential_args(&args);
+        assert_eq!(redacted, vec!["--password"]);
     }
 
     #[tokio::test]
