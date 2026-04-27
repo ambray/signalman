@@ -75,6 +75,18 @@ pub async fn serve(
 
             let identity = tonic::transport::Identity::from_pem(server_pem, server_key);
             let ca = tonic::transport::Certificate::from_pem(ca_pem);
+            // Audit Sec F8 (Med) / B8: protocol-version policy lives in
+            // `crate::tls::ALLOWED_PROTOCOL_VERSIONS` (TLS 1.3 + 1.2).
+            // tonic 0.12's `ServerTlsConfig` does NOT expose a way to
+            // inject a pre-built `rustls::ServerConfig`, so the pin
+            // can't be pushed through this path today. rustls 0.23's
+            // defaults match our policy (TLS 1.3 + 1.2 only — older
+            // versions aren't even compiled in given our feature
+            // set), so we are not actually wider than intended. When
+            // tonic exposes `rustls_server_config(...)` (slated for
+            // 0.13+), swap to `crate::tls::build_rustls_server_config`
+            // and the pin becomes load-bearing. See `tls.rs` module
+            // docs for full rationale.
             let tls = ServerTlsConfig::new().identity(identity).client_ca_root(ca);
 
             Server::builder()

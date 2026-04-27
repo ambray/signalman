@@ -25,6 +25,15 @@
 # start alone measured at 101 s in the worst case). See
 # `feedback_vm_smoke_after_every_phase.md` for the harvest procedure
 # on a fresh machine.
+#
+# Host-side build artifacts live in a SIBLING repository (the Ospiri
+# `correlator` checkout). Set `CORRELATOR_BUILD_ROOT` to that repo's
+# root before running this scenario. The default below assumes
+# `correlator` and `signalman` share a parent directory; override via
+# the env var when your layout differs:
+#
+#   $env:CORRELATOR_BUILD_ROOT = "E:\\source\\repos\\correlator"   # PowerShell
+#   export CORRELATOR_BUILD_ROOT=/mnt/c/source/repos/correlator    # bash
 
 name: "Ospiri v2 Registry Rule Deny (scope-based)"
 version: "1.0"
@@ -62,19 +71,19 @@ setup:
   - action: vm_copy_file
     vm: endpoint-1
     direction: host_to_guest
-    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.sys"
+    host_path: "${CORRELATOR_BUILD_ROOT}\\docs\\drv\\x64\\Debug\\drv\\drv.sys"
     guest_path: "C:\\Ospiri\\drv\\ospiri.sys"
 
   - action: vm_copy_file
     vm: endpoint-1
     direction: host_to_guest
-    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.cat"
+    host_path: "${CORRELATOR_BUILD_ROOT}\\docs\\drv\\x64\\Debug\\drv\\drv.cat"
     guest_path: "C:\\Ospiri\\drv\\ospiri.cat"
 
   - action: vm_copy_file
     vm: endpoint-1
     direction: host_to_guest
-    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.inf"
+    host_path: "${CORRELATOR_BUILD_ROOT}\\docs\\drv\\x64\\Debug\\drv\\drv.inf"
     guest_path: "C:\\Ospiri\\drv\\ospiri.inf"
 
   # silo-spawn-helper.exe - Phase 6 scope-based orchestrator + worker.
@@ -86,7 +95,7 @@ setup:
   - action: vm_copy_file
     vm: endpoint-1
     direction: host_to_guest
-    host_path: "E:\\source\\repos\\correlator\\docs\\target\\x86_64-pc-windows-msvc\\release\\silo-spawn-helper.exe"
+    host_path: "${CORRELATOR_BUILD_ROOT}\\docs\\target\\x86_64-pc-windows-msvc\\release\\silo-spawn-helper.exe"
     guest_path: "C:\\Ospiri\\tools\\silo-spawn-helper.exe"
 
   # Register the driver service (kernel, demand-start).

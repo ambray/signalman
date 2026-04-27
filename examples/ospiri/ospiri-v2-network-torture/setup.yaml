@@ -26,6 +26,15 @@
 # Uses the `test-signing-warm` checkpoint (running-state child of
 # `test-signing-enabled`) for fast restore. See
 # ospiri-v2-network-egress/setup.yaml for rationale.
+#
+# Host-side build artifacts live in a SIBLING repository (the Ospiri
+# `correlator` checkout). Set `CORRELATOR_BUILD_ROOT` to that repo's
+# root before running this scenario. The default below assumes
+# `correlator` and `signalman` share a parent directory; override via
+# the env var when your layout differs:
+#
+#   $env:CORRELATOR_BUILD_ROOT = "E:\\source\\repos\\correlator"   # PowerShell
+#   export CORRELATOR_BUILD_ROOT=/mnt/c/source/repos/correlator    # bash
 
 name: "Ospiri v2 Network Egress Multi-Threaded Torture (16 threads x 100 iter)"
 version: "1.0"
@@ -58,19 +67,19 @@ setup:
   - action: vm_copy_file
     vm: endpoint-1
     direction: host_to_guest
-    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.sys"
+    host_path: "${CORRELATOR_BUILD_ROOT}\\docs\\drv\\x64\\Debug\\drv\\drv.sys"
     guest_path: "C:\\Ospiri\\drv\\ospiri.sys"
 
   - action: vm_copy_file
     vm: endpoint-1
     direction: host_to_guest
-    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.cat"
+    host_path: "${CORRELATOR_BUILD_ROOT}\\docs\\drv\\x64\\Debug\\drv\\drv.cat"
     guest_path: "C:\\Ospiri\\drv\\ospiri.cat"
 
   - action: vm_copy_file
     vm: endpoint-1
     direction: host_to_guest
-    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.inf"
+    host_path: "${CORRELATOR_BUILD_ROOT}\\docs\\drv\\x64\\Debug\\drv\\drv.inf"
     guest_path: "C:\\Ospiri\\drv\\ospiri.inf"
 
   # net-spawn-helper-torture.exe - Sprint 60.8b Phase 2 commit 5
@@ -81,7 +90,7 @@ setup:
   - action: vm_copy_file
     vm: endpoint-1
     direction: host_to_guest
-    host_path: "E:\\source\\repos\\correlator\\docs\\target\\x86_64-pc-windows-msvc\\release\\net-spawn-helper-torture.exe"
+    host_path: "${CORRELATOR_BUILD_ROOT}\\docs\\target\\x86_64-pc-windows-msvc\\release\\net-spawn-helper-torture.exe"
     guest_path: "C:\\Ospiri\\tools\\net-spawn-helper-torture.exe"
 
   # Register the driver service (kernel, demand-start).

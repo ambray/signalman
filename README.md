@@ -153,8 +153,8 @@ cd host && npm install && npm run build
 # Add to Claude Code as a direct MCP server (no Loom in the loop)
 claude mcp add signalman node host/dist/server.js
 
-# Or invoke via CLI for CI:
-node host/dist/cli.js run cursor-restrict
+# Or invoke via CLI for CI (any scenario in .signalman/scenarios/):
+node host/dist/cli.js run sandbox-enforcement
 echo $?   # standard exit codes; envelope JSON on stdout
 ```
 
@@ -163,58 +163,69 @@ echo $?   # standard exit codes; envelope JSON on stdout
 Each scenario is a directory with three files:
 
 ```
-scenarios/cursor-restrict/
+scenarios/<name>/
 ├── setup.yaml       # VM config, software installation, policy setup
-├── workflow.md       # Natural language narrative for LLM drivers
-└── assertions.yaml   # Expected outcomes and verification steps
+├── workflow.md      # Natural language narrative for LLM drivers
+└── assertions.yaml  # Expected outcomes and verification steps
 ```
 
 ### Setup DSL (`setup.yaml`)
+
+Minimal, illustrative example — runs a process listing in a Hyper-V VM
+that already has the guest agent installed. Real scenarios live in
+`examples/ospiri/` (full driver + WFP stack) and `.signalman/scenarios/`
+(short-form smoke tests):
+
 ```yaml
-name: "Cursor under Restrict policy"
+name: "smoke: hyperv basic"
+version: "1.0"
+
 vms:
   - name: endpoint-1
-    template: windows-11-clean
-    checkpoint: agent-installed
+    template: win11-base
+    checkpoint_restore: agent-installed
+    guest_agent_port: 50051
 
 setup:
-  - vm_install: { name: endpoint-1, package: Cursor.Cursor }
-  - vm_copy_file: { src: ./policies/restrict-ai.rego, dest: C:\Ospiri\policies\ }
-  - vm_run_command: { cmd: "Restart-Service OspiriAgent" }
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell.exe
+    args: ["-Command", "Get-Process | Select-Object -First 5"]
 ```
 
 ### Workflow Narrative (`workflow.md`)
 Natural language instructions that an LLM driver reads and translates into tool calls:
 
 ```markdown
-# Cursor Under Restrict Policy
+# Hyper-V Basic Smoke
 
 ## Context
-You are testing the agent's Restrict enforcement on Cursor IDE.
+You are verifying the host can reach the guest agent and run a command
+inside the VM.
 
 ## Workflow
-1. **Launch Cursor** — Open Cursor from the desktop shortcut.
-2. **Create a project** — Create a new folder and open it.
-3. **Write code** — Create hello.py with a print statement.
-4. **Test AI features** — Attempt Ctrl+Space completion. It should fail.
-5. **Verify** — Cursor still runs, AI blocked, agent logged the event.
+1. **Restore the checkpoint** — bring `endpoint-1` to a known good state.
+2. **Run a process listing** — execute `Get-Process` over the guest agent.
+3. **Verify** — assertions check the agent responded and the command's
+   exit code was zero.
 ```
 
 ### Assertions (`assertions.yaml`)
 ```yaml
 assertions:
-  - type: process_running
-    process: cursor.exe
-  - type: restriction_active
-    process: cursor.exe
-    mode: AppContainer
-  - type: network_blocked
-    host: api.openai.com
-    port: 443
-  - type: agent_event
-    event_type: enforcement
-    action: restrict
+  - type: command_succeeded
+    vm: endpoint-1
+    step: 0
+  - type: stdout_matches
+    vm: endpoint-1
+    step: 0
+    pattern: "ProcessName"
 ```
+
+> Older cursor-restrict / `restrict-ai.rego` examples in earlier docs
+> referenced an Ospiri policy bundle and a `vm_screenshot` RPC that
+> ships as a proto stub in v0.1.0. Use the smoke example above as the
+> starting template instead.
 
 ## License
 
