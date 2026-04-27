@@ -559,10 +559,34 @@ impl GuestAgent for GuestAgentService {
             ));
         }
 
-        // SYSTEM elevation: wrap command via start_process_as_system
+        // SYSTEM elevation: pass argv directly via CreateProcessAsUserW.
+        //
+        // P4.c-B5 / Sec F5 (High) — was: shell through cmd.exe /C with
+        // the user's command interpolated as the script. cmd.exe re-
+        // interprets metacharacters that our metachar gate above does
+        // NOT cover — `>`, `<`, `(`, `)`, `^`, `%VAR%`, encoded
+        // PowerShell, embedded backticks. A request with a benign-
+        // looking `command="echo evil>C:\\Windows\\Temp\\evil.bat"`
+        // (no banned chars) would write a SYSTEM-context batch file.
+        //
+        // Now: req.command is the program path; req.args is the argv.
+        // CreateProcessAsUserW sees only what we pass — no shell
+        // expansion, no metachar reinterpretation. Callers that
+        // previously relied on cmd.exe builtins (echo, dir) must now
+        // pass `command="cmd.exe"` and put the rest in args
+        // explicitly (`["/C","echo","..."]`). The denylist + metachar
+        // gate above run BEFORE this branch is even reached, so those
+        // explicit cmd.exe invocations are subject to the same
+        // checks as everything else.
+        //
+        // This is a behaviour change for SYSTEM callers; documented
+        // in CHANGELOG (when written) and in the function header.
         if req.run_as.eq_ignore_ascii_case("system") {
-            let mut all_args = vec!["/C".to_string(), req.command.clone()];
-            all_args.extend(req.args.iter().cloned());
+            if req.command.is_empty() {
+                return Err(Status::invalid_argument(
+                    "run_as=system requires command to be a program path; cmd.exe builtins must be invoked explicitly via command=\"cmd.exe\" args=[\"/C\",...]",
+                ));
+            }
             let env_map = std::collections::HashMap::new();
             let working_dir = if req.working_directory.is_empty() {
                 None
@@ -570,11 +594,14 @@ impl GuestAgent for GuestAgentService {
                 Some(Path::new(&req.working_directory))
             };
 
-            // For SYSTEM run_command, we use start_process_as_system with cmd.exe
-            // and capture output via a temp file since CreateProcessAsUserW doesn't
-            // give us piped stdout easily.
-            let cmd_path = Path::new("cmd.exe");
-            match process::start_process_as_system(cmd_path, &all_args, working_dir, &env_map) {
+            let cmd_path = Path::new(&req.command);
+            tracing::warn!(
+                target: "signalman::audit",
+                command = %req.command,
+                arg_count = req.args.len(),
+                "run_command(run_as=system) invoking CreateProcessAsUserW directly (no cmd.exe shell)"
+            );
+            match process::start_process_as_system(cmd_path, &req.args, working_dir, &env_map) {
                 Ok(pid) => {
                     return Ok(Response::new(RunCommandResponse {
                         exit_code: 0,
