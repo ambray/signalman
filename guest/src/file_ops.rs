@@ -121,10 +121,22 @@ fn validate_write_path_inner(path: &str, jail: Option<&Path>) -> anyhow::Result<
     }
 
     // Block known system directories.
-    let canonical_path_str = path.replace('\\', "/");
+    //
+    // P4.c-B10 / Sec F10: case-insensitive comparison. Before this
+    // fix the prefix match was case-sensitive — `C:\WINDOWS\...`
+    // and `c:\windows\...` both target the same Windows file but
+    // only the canonical-cased form matched the denylist. NTFS
+    // (and HFS+ default, and APFS case-insensitive) treat these
+    // paths as identical at the filesystem layer, so the denylist
+    // MUST too. On case-sensitive filesystems (Linux ext4 default)
+    // this only widens the deny — `/Etc/passwd` would also be
+    // refused, even though it's a different file from `/etc/passwd`.
+    // That widening is the correct posture: the denylist is a
+    // defensive guard, not a precise filesystem predicate.
+    let canonical_path_lc = path.replace('\\', "/").to_ascii_lowercase();
     for blocked in BLOCKED_DIRECTORIES {
-        let blocked_normalized = blocked.replace('\\', "/");
-        if canonical_path_str.starts_with(&blocked_normalized) {
+        let blocked_lc = blocked.replace('\\', "/").to_ascii_lowercase();
+        if canonical_path_lc.starts_with(&blocked_lc) {
             anyhow::bail!("write_file: path is inside blocked system directory {blocked}: {path}");
         }
     }
@@ -421,5 +433,37 @@ mod tests {
 
         let result2 = write_file("/etc/shadow", b"bad", false);
         assert!(result2.is_err());
+    }
+
+    // ── P4.c-B10 / Sec F10: case-insensitive system-dir denylist ──
+
+    #[test]
+    fn test_write_rejected_system_dir_case_variants() {
+        // Before P4.c-B10 the prefix match was case-sensitive — these
+        // attacker-friendly casings would slip past on Windows. Each
+        // case must be rejected by the denylist gate (NOT just by
+        // the OS filesystem; we want the deny path to be hit at the
+        // Rust layer for forensic logging and consistent error
+        // shapes).
+        for path in [
+            "C:\\windows\\evil.txt",   // lowercase windows
+            "C:\\WINDOWS\\evil.txt",   // uppercase
+            "C:\\WiNdOwS\\evil.txt",   // mixed
+            "c:\\Windows\\evil.txt",   // lowercase drive letter
+            "/USR/bin/evil",           // uppercase /usr
+            "/Etc/passwd",             // mixed /etc
+            "/Sbin/evil",              // mixed /sbin
+        ] {
+            let result = write_file(path, b"bad", false);
+            assert!(
+                result.is_err(),
+                "denylist must catch case variant: {path}"
+            );
+            let err_msg = result.unwrap_err().to_string();
+            assert!(
+                err_msg.contains("blocked system directory"),
+                "error must come from the denylist for {path}: {err_msg}"
+            );
+        }
     }
 }
