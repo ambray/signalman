@@ -160,6 +160,29 @@ mod pipe {
         // Hyper-V control-plane workload is sequential anyway; if we
         // ever need parallel connections we can spin up multiple
         // accept tasks.
+        //
+        // P4.c / Sec F6: build a SECURITY_DESCRIPTOR ONCE and reuse
+        // it for every pipe instance. Without this, the pipe inherits
+        // the creating process's default ACL (LocalSystem +
+        // BUILTIN\Administrators + creating user) — fine on a single-
+        // admin dev box but on a server with many local Administrators
+        // it broadens far past the intended operator surface. The
+        // explicit SD pins access to {SYSTEM, BUILTIN\Administrators,
+        // Hyper-V Administrators, current process user} only.
+        //
+        // Failure to build the SD is a fatal startup error rather
+        // than falling back to default ACLs — we want the operator
+        // to see the failure (likely a Win32 misconfig) loudly
+        // rather than silently downgrade to the insecure default.
+        let mut pipe_sd = match crate::pipe_security::PipeSecurityDescriptor::new() {
+            Ok(sd) => sd,
+            Err(e) => {
+                return Err(e.context(
+                    "building named-pipe SECURITY_DESCRIPTOR for signalman-service",
+                ));
+            }
+        };
+
         let accept_task = tokio::spawn(async move {
             // The first instance MUST use `first_pipe_instance(true)`
             // so we claim ownership of the pipe namespace.
@@ -170,7 +193,18 @@ mod pipe {
                     opts.first_pipe_instance(true);
                     first = false;
                 }
-                let server = match opts.create(&pipe_name_for_loop) {
+                // SAFETY: `pipe_sd.as_raw()` returns a pointer that
+                // remains valid for the lifetime of `pipe_sd`, which
+                // is moved into this task and lives until the task
+                // exits. tokio's API requires we hand it an unsafe
+                // raw pointer because SECURITY_ATTRIBUTES is a Win32
+                // C struct.
+                let server = match unsafe {
+                    opts.create_with_security_attributes_raw(
+                        &pipe_name_for_loop,
+                        pipe_sd.as_raw(),
+                    )
+                } {
                     Ok(s) => s,
                     Err(e) => {
                         let _ = tx.send(Err(e)).await;
