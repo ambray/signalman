@@ -25,6 +25,7 @@ pub mod guest_proto {
     tonic::include_proto!("signalman.guest");
 }
 
+pub mod cert_pin;
 pub mod process;
 mod service;
 pub mod tls;
@@ -71,6 +72,22 @@ struct Cli {
     /// does not verify client identity at the TLS layer.
     #[arg(long, env = "SIGNALMAN_TLS_CA")]
     tls_ca: Option<PathBuf>,
+
+    /// Pin the client certificate by SHA-256 hash (B2 / Sec F1).
+    ///
+    /// Format: lowercase hex, 64 chars, optional `sha256:` prefix.
+    /// Multiple pins comma-separated to support cert rotation.
+    /// Requires mTLS (`--tls-cert` + `--tls-key` + `--tls-ca`).
+    ///
+    /// Example: `--client-cert-sha256 abcd...123 ,sha256:def0...456`
+    ///
+    /// When set, the auth interceptor rejects any inbound request whose
+    /// presented client cert hashes to something OTHER than one of the
+    /// pinned values — even if the cert is otherwise valid against the
+    /// CA. Closes the "any cert from this CA grants SYSTEM-RCE" gap
+    /// flagged by Sec F1 (Critical).
+    #[arg(long, env = "SIGNALMAN_CLIENT_CERT_SHA256")]
+    client_cert_sha256: Option<String>,
 }
 
 /// Bearer-token authentication interceptor for gRPC requests.
@@ -78,18 +95,29 @@ struct Cli {
 /// If a token is configured, every inbound request must include an
 /// `authorization` metadata header with value `Bearer <token>`.
 /// Requests without a valid token are rejected with `UNAUTHENTICATED`.
+///
+/// **B2 / Sec F1 — client-cert pinning.** When a non-empty
+/// [`cert_pin::PinSet`] is configured, the interceptor ALSO verifies
+/// that the leaf cert presented during the mTLS handshake hashes to
+/// one of the pinned SHA-256 values. Pinning runs AFTER the bearer
+/// check (so log entries don't leak info about which gate rejected
+/// the request) and FIRST gate to fail short-circuits.
 #[derive(Clone)]
 struct AuthInterceptor {
     /// The expected bearer token, if authentication is enabled.
     expected_token: Option<String>,
+    /// Configured client-cert SHA-256 pins. Empty disables pin checking.
+    cert_pins: cert_pin::PinSet,
 }
 
 impl AuthInterceptor {
-    /// Create a new interceptor. Pass `None` to disable authentication
-    /// (only valid when `--allow-insecure` is set).
-    fn new(token: Option<String>) -> Self {
+    /// Create a new interceptor. Pass `None` for `token` to disable
+    /// bearer-token authentication (only valid when `--allow-insecure`
+    /// is set). Pass an empty [`cert_pin::PinSet`] to disable pinning.
+    fn new(token: Option<String>, cert_pins: cert_pin::PinSet) -> Self {
         Self {
             expected_token: token,
+            cert_pins,
         }
     }
 }
@@ -115,29 +143,84 @@ impl tonic::service::Interceptor for AuthInterceptor {
         }
         request.extensions_mut().insert(trace_ext);
 
-        let Some(ref expected) = self.expected_token else {
-            // No token configured — pass through (insecure mode).
-            return Ok(request);
-        };
+        // ── Bearer token check (existing) ─────────────────────────
+        if let Some(ref expected) = self.expected_token {
+            let auth_header = request
+                .metadata()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok());
 
-        let auth_header = request
-            .metadata()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok());
-
-        match auth_header {
-            Some(value) => {
-                let expected_header = format!("Bearer {expected}");
-                if constant_time_eq(value.as_bytes(), expected_header.as_bytes()) {
-                    Ok(request)
-                } else {
-                    Err(tonic::Status::unauthenticated("Invalid bearer token"))
+            match auth_header {
+                Some(value) => {
+                    let expected_header = format!("Bearer {expected}");
+                    if !constant_time_eq(value.as_bytes(), expected_header.as_bytes()) {
+                        return Err(tonic::Status::unauthenticated("Invalid bearer token"));
+                    }
+                }
+                None => {
+                    return Err(tonic::Status::unauthenticated(
+                        "Missing authorization header",
+                    ));
                 }
             }
-            None => Err(tonic::Status::unauthenticated(
-                "Missing authorization header",
-            )),
         }
+
+        // ── B2 / Sec F1: client-cert SHA-256 pin check ───────────
+        //
+        // Run only when pins are configured. The interceptor sees the
+        // request AFTER tonic has accepted the TLS connection, so the
+        // peer-cert chain is available via the `TlsConnectInfo`
+        // extension that tonic injects on every mTLS-accepted
+        // connection. If pinning is enabled but no peer cert is
+        // available (e.g. plaintext or server-auth-only TLS — should
+        // be impossible because we refuse to start in that case, but
+        // defensive), reject with Unauthenticated.
+        if !self.cert_pins.is_empty() {
+            // peer_certs() in tonic 0.12 returns
+            // `Option<Arc<Vec<rustls_pki_types::CertificateDer<'_>>>>`.
+            // We don't import the rustls type directly to avoid binding
+            // to it (it's re-exported by rustls' MSRV-version-of-the-day);
+            // type inference on `info.peer_certs()` keeps the binding
+            // anonymous. The `.as_ref()` call below works because
+            // `CertificateDer` derefs / AsRef to `[u8]`.
+            let peer_certs =
+                request
+                    .extensions()
+                    .get::<tonic::transport::server::TlsConnectInfo<
+                        tonic::transport::server::TcpConnectInfo,
+                    >>()
+                    .and_then(|info| info.peer_certs());
+            let Some(certs) = peer_certs else {
+                tracing::warn!(
+                    "client-cert pin configured but no peer certs on this request — \
+                     was the listener started without --tls-ca?"
+                );
+                return Err(tonic::Status::unauthenticated(
+                    "client certificate required",
+                ));
+            };
+            // Tonic exposes the peer chain in handshake order; the
+            // leaf is the FIRST entry (the cert the client owns; the
+            // rest are intermediates up to but excluding the trust
+            // anchor). Pin the leaf — that's the identity certificate
+            // we mean to bind to.
+            let Some(leaf) = certs.first() else {
+                return Err(tonic::Status::unauthenticated(
+                    "empty client certificate chain",
+                ));
+            };
+            if !self.cert_pins.verify(leaf.as_ref()) {
+                tracing::warn!(
+                    pin_count = self.cert_pins.len(),
+                    "client cert SHA-256 did not match any configured pin"
+                );
+                return Err(tonic::Status::unauthenticated(
+                    "client certificate hash does not match a configured pin",
+                ));
+            }
+        }
+
+        Ok(request)
     }
 }
 
@@ -211,6 +294,38 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // B2 / Sec F1: parse + validate the cert-pin configuration.
+    // Empty pin set = pinning disabled. A non-empty pin set without
+    // mTLS is a configuration error (the pin can't be checked) and we
+    // exit rather than silently downgrade.
+    let cert_pins = match cli
+        .client_cert_sha256
+        .as_deref()
+        .map(cert_pin::PinSet::parse)
+        .transpose()
+    {
+        Ok(Some(set)) => set,
+        Ok(None) => cert_pin::PinSet::default(),
+        Err(err) => {
+            error!(
+                "Invalid --client-cert-sha256 value: {err:#}. Expected one or more \
+                 64-char lowercase hex strings, comma-separated. The optional `sha256:` \
+                 prefix is accepted."
+            );
+            std::process::exit(1);
+        }
+    };
+    if !cert_pins.is_empty() && tls_mode != tls::TlsMode::MutualTls {
+        error!(
+            tls_mode = ?tls_mode,
+            pin_count = cert_pins.len(),
+            "--client-cert-sha256 requires full mTLS (provide --tls-cert, --tls-key, \
+             AND --tls-ca). Pinning a cert that the server never receives is a \
+             configuration error."
+        );
+        std::process::exit(1);
+    }
+
     // S-05: Enforce authentication configuration.
     // If no token is configured AND --allow-insecure is not set, refuse to start.
     if cli.token.is_none() && !cli.allow_insecure {
@@ -253,7 +368,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let svc = service::GuestAgentService::new();
-    let interceptor = AuthInterceptor::new(cli.token);
+    let interceptor = AuthInterceptor::new(cli.token, cert_pins.clone());
+
+    if !cert_pins.is_empty() {
+        info!(
+            pin_count = cert_pins.len(),
+            "Client-cert pinning enabled (B2 / Sec F1). Inbound requests must \
+             present a leaf cert whose SHA-256 matches a configured pin."
+        );
+    }
 
     info!(
         address = %addr,
@@ -361,6 +484,15 @@ mod mtls_integration_tests {
     }
 
     fn build_pki() -> TestPki {
+        build_pki_with_extra_clients(0).0
+    }
+
+    /// Build a `TestPki` AND `extra` additional client certs all signed
+    /// by the same CA. Used by the cert-pin integration tests where we
+    /// need TWO certs from the SAME issuer (so handshake succeeds for
+    /// either) to demonstrate that pinning rejects on cert-IDENTITY
+    /// mismatch, not just CA mismatch.
+    fn build_pki_with_extra_clients(extra: usize) -> (TestPki, Vec<PemPair>) {
         let (ca_cert, ca_key) = build_ca("Signalman Test CA");
         let server = issue(
             &ca_cert,
@@ -374,11 +506,21 @@ mod mtls_integration_tests {
             vec!["client.test".into()],
             "signalman-host",
         );
+        let extras: Vec<PemPair> = (0..extra)
+            .map(|i| {
+                issue(
+                    &ca_cert,
+                    &ca_key,
+                    vec![format!("extra-{i}.test")],
+                    &format!("signalman-host-extra-{i}"),
+                )
+            })
+            .collect();
         let ca = PemPair {
             cert: ca_cert.pem(),
             key: ca_key.serialize_pem(),
         };
-        TestPki { ca, server, client }
+        (TestPki { ca, server, client }, extras)
     }
 
     /// Spawn the GuestAgent service on a loopback port with the given TLS
@@ -386,10 +528,19 @@ mod mtls_integration_tests {
     async fn spawn_server(
         tls_cfg: tonic::transport::ServerTlsConfig,
     ) -> (String, tokio::sync::oneshot::Sender<()>) {
+        spawn_server_with(tls_cfg, cert_pin::PinSet::default()).await
+    }
+
+    /// Like [`spawn_server`] but with a configured client-cert pin set
+    /// (B2 / Sec F1). Used by the pin-enforcement integration tests.
+    async fn spawn_server_with(
+        tls_cfg: tonic::transport::ServerTlsConfig,
+        pins: cert_pin::PinSet,
+    ) -> (String, tokio::sync::oneshot::Sender<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local_addr");
         let svc = service::GuestAgentService::new();
-        let interceptor = AuthInterceptor::new(None);
+        let interceptor = AuthInterceptor::new(None, pins);
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
         tokio::spawn(async move {
@@ -546,6 +697,168 @@ mod mtls_integration_tests {
 
         let _ = shutdown.send(());
     }
+
+    // ── B2 / Sec F1: client-cert SHA-256 pin enforcement ────────
+
+    /// Compute the SHA-256 hex of a PEM-encoded cert by stripping
+    /// header/footer + decoding the base64 body, the same way tonic
+    /// surfaces it to the interceptor (DER bytes).
+    fn pem_cert_sha256_hex(pem: &str) -> String {
+        // The PEM body is the lines between BEGIN CERTIFICATE / END
+        // CERTIFICATE. Concatenate, base64-decode, SHA-256, hex.
+        let mut body = String::new();
+        let mut in_cert = false;
+        for line in pem.lines() {
+            if line.starts_with("-----BEGIN CERTIFICATE") {
+                in_cert = true;
+                continue;
+            }
+            if line.starts_with("-----END CERTIFICATE") {
+                break;
+            }
+            if in_cert {
+                body.push_str(line.trim());
+            }
+        }
+        // base64 decode using rcgen's transitive dep — but we don't
+        // have it directly. Use `pem` parsing via the `pem` crate?
+        // Simplest: use rustls-pemfile's path through rcgen, but that's
+        // also indirect. Easiest is to decode via the `base64` crate
+        // which `tonic` transitively pulls in. Use std-lib approach
+        // instead: manual base64 decode.
+        let der = decode_b64(&body).expect("decode pem body");
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(&der);
+        hex::encode(hash)
+    }
+
+    /// Tiny base64 decoder for the PEM body. Standard alphabet, with
+    /// `=` padding ignored. We avoid pulling another dep just for this
+    /// test helper.
+    fn decode_b64(input: &str) -> Result<Vec<u8>, String> {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut buf: u32 = 0;
+        let mut bits: u32 = 0;
+        let mut out: Vec<u8> = Vec::new();
+        for ch in input.bytes() {
+            if ch == b'=' || ch.is_ascii_whitespace() {
+                continue;
+            }
+            let idx = ALPHABET
+                .iter()
+                .position(|&c| c == ch)
+                .ok_or_else(|| format!("non-b64 char {ch}"))?;
+            buf = (buf << 6) | idx as u32;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((buf >> bits) as u8);
+                buf &= (1 << bits) - 1;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Build a server TLS config wired with cert-pin enforcement at
+    /// the interceptor layer (NOT at the rustls layer — pinning is an
+    /// app-level concern).
+    fn server_tls_config_with_pin(pki: &TestPki) -> tonic::transport::ServerTlsConfig {
+        server_tls_config(pki)
+    }
+
+    #[tokio::test]
+    async fn cert_pin_matching_client_cert_succeeds() {
+        // Pin the EXACT client cert the test will present. Handshake
+        // succeeds, interceptor verifies the hash matches, RPC reaches
+        // the handler.
+        let pki = build_pki();
+        let pin_hex = pem_cert_sha256_hex(&pki.client.cert);
+        let pins = cert_pin::PinSet::parse(&pin_hex).expect("parse pin");
+        assert_eq!(pins.len(), 1);
+
+        let (addr, shutdown) = spawn_server_with(server_tls_config_with_pin(&pki), pins).await;
+
+        let identity = tonic::transport::Identity::from_pem(
+            pki.client.cert.as_bytes(),
+            pki.client.key.as_bytes(),
+        );
+        let tls = ClientTlsConfig::new()
+            .domain_name("localhost")
+            .ca_certificate(Certificate::from_pem(pki.ca.cert.as_bytes()))
+            .identity(identity);
+
+        let endpoint = Endpoint::from_shared(format!("https://{addr}"))
+            .unwrap()
+            .tls_config(tls)
+            .unwrap()
+            .connect_timeout(Duration::from_secs(5));
+
+        let channel = endpoint.connect().await.expect("client connect");
+        let mut client = GuestAgentClient::new(channel);
+        let resp = client
+            .health(HealthRequest {})
+            .await
+            .expect("health rpc should succeed when client cert hash matches pin");
+        assert!(!resp.into_inner().agent_version.is_empty());
+
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn cert_pin_mismatched_client_cert_rejected() {
+        // Configure a pin for a SECOND client cert (issued by the SAME
+        // CA so the TLS handshake itself succeeds), then present the
+        // ORIGINAL client cert. The handshake is happy (cert chains to
+        // trusted CA) but the interceptor rejects on pin mismatch —
+        // exactly the threat model B2 / Sec F1 closes: "any cert from
+        // this CA grants SYSTEM" → "this exact cert grants SYSTEM".
+        let (pki, mut extras) = build_pki_with_extra_clients(1);
+        let other_client = extras.pop().expect("one extra cert");
+        // The pin is for `other_client`, but the request will present
+        // `pki.client`. Both signed by the same CA — chain validation
+        // passes, but pin fails.
+        let pin_hex = pem_cert_sha256_hex(&other_client.cert);
+        let pins = cert_pin::PinSet::parse(&pin_hex).expect("parse pin");
+
+        let (addr, shutdown) = spawn_server_with(server_tls_config_with_pin(&pki), pins).await;
+
+        let identity = tonic::transport::Identity::from_pem(
+            pki.client.cert.as_bytes(),
+            pki.client.key.as_bytes(),
+        );
+        let tls = ClientTlsConfig::new()
+            .domain_name("localhost")
+            .ca_certificate(Certificate::from_pem(pki.ca.cert.as_bytes()))
+            .identity(identity);
+
+        let endpoint = Endpoint::from_shared(format!("https://{addr}"))
+            .unwrap()
+            .tls_config(tls)
+            .unwrap()
+            .connect_timeout(Duration::from_secs(5));
+
+        let channel = endpoint.connect().await.expect("client connect");
+        let mut client = GuestAgentClient::new(channel);
+        let result = client.health(HealthRequest {}).await;
+        // The mTLS handshake succeeded (same CA), so we get a tonic
+        // Status back, NOT a transport error. The status code is
+        // Unauthenticated.
+        let err = result.expect_err("pin mismatch must reject the RPC");
+        assert_eq!(
+            err.code(),
+            tonic::Code::Unauthenticated,
+            "pin-mismatch surface should be Unauthenticated, got {:?}",
+            err.code()
+        );
+        assert!(
+            err.message().to_lowercase().contains("pin")
+                || err.message().to_lowercase().contains("hash"),
+            "error message should mention pin/hash; got: {}",
+            err.message()
+        );
+
+        let _ = shutdown.send(());
+    }
 }
 
 #[cfg(test)]
@@ -555,7 +868,8 @@ mod auth_tests {
 
     #[test]
     fn test_auth_interceptor_valid_token() {
-        let mut interceptor = AuthInterceptor::new(Some("secret123".into()));
+        let mut interceptor =
+            AuthInterceptor::new(Some("secret123".into()), cert_pin::PinSet::default());
 
         let mut request = tonic::Request::new(());
         request
@@ -567,7 +881,8 @@ mod auth_tests {
 
     #[test]
     fn test_auth_interceptor_invalid_token() {
-        let mut interceptor = AuthInterceptor::new(Some("secret123".into()));
+        let mut interceptor =
+            AuthInterceptor::new(Some("secret123".into()), cert_pin::PinSet::default());
 
         let mut request = tonic::Request::new(());
         request
@@ -581,7 +896,8 @@ mod auth_tests {
 
     #[test]
     fn test_auth_interceptor_missing_token() {
-        let mut interceptor = AuthInterceptor::new(Some("secret123".into()));
+        let mut interceptor =
+            AuthInterceptor::new(Some("secret123".into()), cert_pin::PinSet::default());
 
         let request = tonic::Request::new(());
 
@@ -592,7 +908,7 @@ mod auth_tests {
 
     #[test]
     fn test_auth_interceptor_no_auth_configured() {
-        let mut interceptor = AuthInterceptor::new(None);
+        let mut interceptor = AuthInterceptor::new(None, cert_pin::PinSet::default());
 
         let request = tonic::Request::new(());
         assert!(interceptor.call(request).is_ok());
@@ -600,7 +916,8 @@ mod auth_tests {
 
     #[test]
     fn test_auth_interceptor_wrong_scheme() {
-        let mut interceptor = AuthInterceptor::new(Some("secret123".into()));
+        let mut interceptor =
+            AuthInterceptor::new(Some("secret123".into()), cert_pin::PinSet::default());
 
         let mut request = tonic::Request::new(());
         request
@@ -647,7 +964,10 @@ mod auth_tests {
         // accept after the constant_time_eq swap. The behavioural
         // contract from test_auth_interceptor_valid_token /
         // _invalid_token is preserved.
-        let mut interceptor = AuthInterceptor::new(Some("token-abcdef-12345".into()));
+        let mut interceptor = AuthInterceptor::new(
+            Some("token-abcdef-12345".into()),
+            cert_pin::PinSet::default(),
+        );
 
         let mut req_ok = tonic::Request::new(());
         req_ok.metadata_mut().insert(
