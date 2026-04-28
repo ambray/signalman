@@ -21,8 +21,8 @@
 //! [`host/src/output/trace.ts`] module. Renaming requires a coordinated
 //! host + service + guest + plugin migration.
 
-use tonic::Status;
 use tonic::service::Interceptor;
+use tonic::Status;
 
 pub const HEADER_TRACE_ID: &str = "signalman-trace-id";
 pub const HEADER_RUN_ID: &str = "signalman-run-id";

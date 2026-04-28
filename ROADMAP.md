@@ -344,9 +344,17 @@ parse but don't enforce; two Critical findings open from audit.
 - **B7 / Sec F7** — Constant-time bearer-token compare
   ([guest/src/main.rs:108-114](guest/src/main.rs:108)).
 - **B8 / Sec F8** — Pin TLS min-version (TLS 1.3) explicitly in tonic config.
-- **B9 / Sec F9** — Replace substring denylist with positive allowlist (or
-  remove). Naive case-sensitive `contains` is bypassed by `format C:`,
-  `cipher /w`, encoded PowerShell, etc. False confidence > no list.
+- ✅ **B9 / Sec F9 (CLOSED 2026-04-28)** — `is_denied_command` now
+  case-insensitive (`format C:` and `RM -RF /` both match), patterns
+  expanded (`cipher /w`, `rd /s /q`, target-bound `format c:`/`format /q`
+  rather than bare `format` to avoid colliding with cargo/rustfmt), and
+  the `DENIED_COMMANDS` doc-comment makes the **tripwire-not-boundary**
+  scope explicit: this list catches blatant agent hallucinations cheaply
+  but the actual security boundary is mTLS + named-pipe ACL + (B2-pending)
+  cert pin. A positive allowlist was rejected with rationale: generic VM
+  scenario execution legitimately needs arbitrary `winget`/`choco`/`pwsh`
+  invocations; per-scenario allowlists deferred to v0.2.0 manifest work.
+  See `guest/src/service.rs:35-90` for the full doc-comment.
 - **B10 / Sec F10** — `file_ops.rs` path checks: case-insensitive,
   prefix-canonical (today: case-sensitive prefix string match,
   [guest/src/file_ops.rs:21-160](guest/src/file_ops.rs:21)).
@@ -515,11 +523,26 @@ existing-tests CI, audit found the test pyramid is inverted-T —
   client (no mocks). Pass each across Health, VmList,
   VmRunCommand-streaming, VmCopyFile-streaming. Catches proto-drift bugs
   current tests cannot detect.
-- **D2 — Host↔service mTLS handshake test.** Mirror the guest-agent
-  mTLS pattern at [guest/src/main.rs:363](guest/src/main.rs:363) but on
-  the service side with a TS client. Three cases: valid mTLS, wrong CA,
-  cert missing. Use `rcgen` server-side, `tls.createSecureContext`
-  client-side. Closes the only post-P4 mTLS gap.
+- ✅ **Workflow API surface tests (LANDED 2026-04-28).**
+  `host/src/__tests__/workflow-api.test.ts` (20 tests) pins the
+  scenario-action → backend/guest-client routing for the four
+  user-facing verbs: `vm_checkpoint`, `vm_restore`, `vm_copy_file`
+  (host_to_guest + guest_to_host), `vm_install`. Per-action tests cover
+  argv shape, error propagation as failed StepResults, and missing-VM
+  edge cases; an end-to-end chain test (`restore → copy → install →
+  checkpoint`) verifies dispatch order. Each test carries a "What this
+  catches" comment naming the regression it guards against.
+- ✅ **D2 — Host↔service mTLS handshake test (CLOSED 2026-04-28).**
+  `service/tests/mtls_smoke.rs` ships three windows-only `#[tokio::test]`
+  cases: `mtls_valid_client_succeeds`, `mtls_wrong_ca_rejected`,
+  `mtls_no_client_cert_rejected`. Each spins up the actual
+  `signalman_service::transport::serve` with a fresh tempdir cert bundle
+  generated via `tls::generate_certs` (skipping `ensure_certs`'s
+  `icacls` step to stay CI-runnable), dials the TCP listener with a
+  tonic client built from the same bundle, calls `Health`, asserts.
+  Negative cases use a foreign-CA-signed client identity / no client
+  cert at all and verify the handshake or first RPC fails. Companion
+  to `named_pipe_smoke.rs` — together they exercise both transports.
 - **D3 — Scenario-validation smoke.** One test that walks
   `.signalman/scenarios/`, calls `parseSetup` + `parseAssertions`, and
   fails on schema errors. Cheap fence against rotted example scenarios.
@@ -534,11 +557,17 @@ existing-tests CI, audit found the test pyramid is inverted-T —
   once D2 lands (it exists only because no real TLS test exists).
 
 **P7.3 — Gated E2E lane (the missing top of the pyramid):**
-- **D4 — Single E2E gated by `SIGNALMAN_E2E=1`.** Restore a known
-  checkpoint, run `signalman.run` against `silo-validation` (or a
-  purpose-built `smoke` scenario), assert pass. Run nightly on a
-  self-hosted Windows runner, not on PR. Solves the "no test ever boots
-  a VM" gap without making PR CI flaky.
+- ✅ **D4 — Gated E2E lane (LANDED 2026-04-28).** New
+  `.github/workflows/e2e.yaml` runs only on `workflow_dispatch` or PRs
+  labeled `e2e`. Job builds host (npm) + guest (cargo) + service (cargo)
+  in release mode, then invokes `scripts/e2e-smoke.ps1`. The smoke
+  script is a placeholder (no Hyper-V on standard runners) that verifies
+  the toolchain — host CLI `--help`, guest `--version`, service binary
+  present — and exits non-zero on any failure. When a self-hosted
+  Hyper-V runner is wired up, the smoke script gets replaced by a real
+  scenario run (restore checkpoint → install agent → `signalman run
+  smoke` → assert pass). The lane scaffolding stays exercised in the
+  meantime so the wiring doesn't bit-rot.
 
 - **Effort**: M–L
 
