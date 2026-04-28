@@ -195,10 +195,7 @@ pub fn write_file(path: &str, content: &[u8], append: bool) -> anyhow::Result<u6
     validate_write_path(path)?;
 
     let mut file = if append {
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?
+        OpenOptions::new().create(true).append(true).open(path)?
     } else {
         OpenOptions::new()
             .create(true)
@@ -253,7 +250,8 @@ mod tests {
 
     impl TempDir {
         fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("signalman-test-{name}-{}", rand::random::<u32>()));
+            let path = std::env::temp_dir()
+                .join(format!("signalman-test-{name}-{}", rand::random::<u32>()));
             fs::create_dir_all(&path).expect("create temp dir");
             Self(path)
         }
@@ -396,7 +394,10 @@ mod tests {
         let file_path = dir.path().join("ok.txt");
         // Validate using the inner function directly to avoid env var races.
         let result = validate_write_path_inner(file_path.to_str().unwrap(), Some(dir.path()));
-        assert!(result.is_ok(), "write inside jail should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "write inside jail should succeed: {result:?}"
+        );
     }
 
     #[test]
@@ -418,7 +419,10 @@ mod tests {
         let result = write_file("/tmp/../etc/passwd", b"bad", false);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains(".."), "error should mention traversal: {err_msg}");
+        assert!(
+            err_msg.contains(".."),
+            "error should mention traversal: {err_msg}"
+        );
     }
 
     #[test]
@@ -446,19 +450,16 @@ mod tests {
         // Rust layer for forensic logging and consistent error
         // shapes).
         for path in [
-            "C:\\windows\\evil.txt",   // lowercase windows
-            "C:\\WINDOWS\\evil.txt",   // uppercase
-            "C:\\WiNdOwS\\evil.txt",   // mixed
-            "c:\\Windows\\evil.txt",   // lowercase drive letter
-            "/USR/bin/evil",           // uppercase /usr
-            "/Etc/passwd",             // mixed /etc
-            "/Sbin/evil",              // mixed /sbin
+            "C:\\windows\\evil.txt", // lowercase windows
+            "C:\\WINDOWS\\evil.txt", // uppercase
+            "C:\\WiNdOwS\\evil.txt", // mixed
+            "c:\\Windows\\evil.txt", // lowercase drive letter
+            "/USR/bin/evil",         // uppercase /usr
+            "/Etc/passwd",           // mixed /etc
+            "/Sbin/evil",            // mixed /sbin
         ] {
             let result = write_file(path, b"bad", false);
-            assert!(
-                result.is_err(),
-                "denylist must catch case variant: {path}"
-            );
+            assert!(result.is_err(), "denylist must catch case variant: {path}");
             let err_msg = result.unwrap_err().to_string();
             assert!(
                 err_msg.contains("blocked system directory"),

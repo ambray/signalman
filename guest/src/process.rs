@@ -123,8 +123,8 @@ pub fn start_process_as_system(
         TOKEN_QUERY,
     };
     use windows::Win32::System::Threading::{
-        CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, PROCESS_INFORMATION,
-        STARTUPINFOW, CREATE_NEW_CONSOLE, CREATE_UNICODE_ENVIRONMENT,
+        CreateProcessAsUserW, GetCurrentProcess, OpenProcessToken, CREATE_NEW_CONSOLE,
+        CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, STARTUPINFOW,
     };
 
     // Step 1: Open current process token
@@ -170,10 +170,7 @@ pub fn start_process_as_system(
             cmd_line.push_str(arg);
         }
     }
-    let mut cmd_wide: Vec<u16> = OsStr::new(&cmd_line)
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
+    let mut cmd_wide: Vec<u16> = OsStr::new(&cmd_line).encode_wide().chain(Some(0)).collect();
 
     // Step 4: Build environment block if needed
     let env_block = if env.is_empty() {
@@ -223,9 +220,7 @@ pub fn start_process_as_system(
             None,  // thread security
             false, // inherit handles
             creation_flags,
-            env_block
-                .as_ref()
-                .map(|b| b.as_ptr() as *const _),
+            env_block.as_ref().map(|b| b.as_ptr() as *const _),
             work_dir_pcwstr,
             &si,
             &mut pi,
@@ -298,9 +293,7 @@ pub fn stop_process(pid: u32, force: bool) -> anyhow::Result<bool> {
 fn os_kill(pid: u32, force: bool) -> anyhow::Result<bool> {
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::System::Threading::{
-            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
-        };
+        use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 
         if !force {
             // S-12 FIX: Do not silently claim success when we cannot
@@ -353,11 +346,7 @@ pub fn is_in_registry(pid: u32) -> bool {
 
 /// Return the number of processes currently in the registry.
 pub fn registry_len() -> usize {
-    PROCESS_REGISTRY
-        .lock()
-        .ok()
-        .map(|r| r.len())
-        .unwrap_or(0)
+    PROCESS_REGISTRY.lock().ok().map(|r| r.len()).unwrap_or(0)
 }
 
 /// Detailed information about a single process, returned by [`inspect_process`].
@@ -566,7 +555,11 @@ pub fn inspect_process(pid: u32) -> anyhow::Result<ProcessDetail> {
         })
     }
 
-    #[cfg(all(not(target_os = "windows"), not(target_os = "linux"), not(target_os = "macos")))]
+    #[cfg(all(
+        not(target_os = "windows"),
+        not(target_os = "linux"),
+        not(target_os = "macos")
+    ))]
     {
         anyhow::bail!("process inspection is not implemented on this platform")
     }
@@ -579,8 +572,8 @@ pub fn list_processes(name_filter: Option<&str>) -> anyhow::Result<Vec<ProcessIn
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::System::Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW,
-            PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
         };
 
         // S-11 FIX: Wrap snapshot handle in SafeHandle to prevent leak.
@@ -595,7 +588,11 @@ pub fn list_processes(name_filter: Option<&str>) -> anyhow::Result<Vec<ProcessIn
             if Process32FirstW(snapshot.get(), &mut entry).is_ok() {
                 loop {
                     let name = String::from_utf16_lossy(
-                        &entry.szExeFile[..entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len())],
+                        &entry.szExeFile[..entry
+                            .szExeFile
+                            .iter()
+                            .position(|&c| c == 0)
+                            .unwrap_or(entry.szExeFile.len())],
                     );
 
                     let matches = name_filter
@@ -700,7 +697,13 @@ mod tests {
     fn test_args() -> Vec<String> {
         if cfg!(target_os = "windows") {
             // Use `ping -n 60 127.0.0.1` which works in all Windows shells.
-            vec!["/C".into(), "ping".into(), "-n".into(), "60".into(), "127.0.0.1".into()]
+            vec![
+                "/C".into(),
+                "ping".into(),
+                "-n".into(),
+                "60".into(),
+                "127.0.0.1".into(),
+            ]
         } else {
             vec!["60".into()]
         }
@@ -708,8 +711,7 @@ mod tests {
 
     #[test]
     fn test_start_registers_child() {
-        let pid = start_process(&test_command(), &test_args(), None)
-            .expect("should spawn");
+        let pid = start_process(&test_command(), &test_args(), None).expect("should spawn");
         assert!(pid > 0);
         assert!(is_in_registry(pid), "spawned PID should be in registry");
 
@@ -719,8 +721,7 @@ mod tests {
 
     #[test]
     fn test_stop_removes_from_registry() {
-        let pid = start_process(&test_command(), &test_args(), None)
-            .expect("should spawn");
+        let pid = start_process(&test_command(), &test_args(), None).expect("should spawn");
         assert!(is_in_registry(pid));
 
         let stopped = stop_process(pid, true).expect("should stop");
@@ -732,8 +733,7 @@ mod tests {
     fn test_stop_unregistered_pid_falls_back_to_os_kill() {
         // Spawn a process but remove it from registry manually,
         // then verify stop_process still works via OS kill.
-        let pid = start_process(&test_command(), &test_args(), None)
-            .expect("should spawn");
+        let pid = start_process(&test_command(), &test_args(), None).expect("should spawn");
         let _child = remove_from_registry(pid);
         assert!(!is_in_registry(pid));
 
@@ -744,8 +744,7 @@ mod tests {
 
     #[test]
     fn test_remove_from_registry_returns_child() {
-        let pid = start_process(&test_command(), &test_args(), None)
-            .expect("should spawn");
+        let pid = start_process(&test_command(), &test_args(), None).expect("should spawn");
         let child = remove_from_registry(pid);
         assert!(child.is_some(), "should return the Child handle");
         assert!(!is_in_registry(pid));
@@ -759,10 +758,8 @@ mod tests {
     #[test]
     fn test_registry_tracks_multiple_processes() {
         // Spawn two processes, verify both are tracked, then clean up.
-        let pid1 = start_process(&test_command(), &test_args(), None)
-            .expect("spawn 1");
-        let pid2 = start_process(&test_command(), &test_args(), None)
-            .expect("spawn 2");
+        let pid1 = start_process(&test_command(), &test_args(), None).expect("spawn 1");
+        let pid2 = start_process(&test_command(), &test_args(), None).expect("spawn 2");
 
         assert!(is_in_registry(pid1));
         assert!(is_in_registry(pid2));
@@ -796,8 +793,7 @@ mod tests {
     #[test]
     fn test_os_kill_graceful_returns_false_on_windows() {
         // Spawn a process, remove from registry so stop_process uses os_kill.
-        let pid = start_process(&test_command(), &test_args(), None)
-            .expect("should spawn");
+        let pid = start_process(&test_command(), &test_args(), None).expect("should spawn");
         let _child = remove_from_registry(pid);
 
         let result = stop_process(pid, false);
@@ -805,7 +801,10 @@ mod tests {
         if cfg!(target_os = "windows") {
             // On Windows, graceful (force=false) should return Ok(false).
             let stopped = result.expect("os_kill should not error");
-            assert!(!stopped, "graceful os_kill on Windows must return false, not silently succeed");
+            assert!(
+                !stopped,
+                "graceful os_kill on Windows must return false, not silently succeed"
+            );
         }
         // Clean up — force-kill the process.
         let _ = stop_process(pid, true);

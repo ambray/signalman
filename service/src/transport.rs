@@ -189,9 +189,9 @@ mod pipe {
         let mut pipe_sd = match crate::pipe_security::PipeSecurityDescriptor::new() {
             Ok(sd) => sd,
             Err(e) => {
-                return Err(e.context(
-                    "building named-pipe SECURITY_DESCRIPTOR for signalman-service",
-                ));
+                return Err(
+                    e.context("building named-pipe SECURITY_DESCRIPTOR for signalman-service")
+                );
             }
         };
 
@@ -212,10 +212,7 @@ mod pipe {
                 // raw pointer because SECURITY_ATTRIBUTES is a Win32
                 // C struct.
                 let server = match unsafe {
-                    opts.create_with_security_attributes_raw(
-                        &pipe_name_for_loop,
-                        pipe_sd.as_raw(),
-                    )
+                    opts.create_with_security_attributes_raw(&pipe_name_for_loop, pipe_sd.as_raw())
                 } {
                     Ok(s) => s,
                     Err(e) => {

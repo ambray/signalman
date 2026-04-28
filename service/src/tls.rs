@@ -74,10 +74,8 @@ pub const CLIENT_KEY: &str = "client.key";
 /// This is the SINGLE source of truth for protocol-version policy.
 /// Production code that builds a `rustls::ServerConfig` MUST go
 /// through [`build_rustls_server_config`] so the policy can't drift.
-pub const ALLOWED_PROTOCOL_VERSIONS: &[&rustls::SupportedProtocolVersion] = &[
-    &rustls::version::TLS13,
-    &rustls::version::TLS12,
-];
+pub const ALLOWED_PROTOCOL_VERSIONS: &[&rustls::SupportedProtocolVersion] =
+    &[&rustls::version::TLS13, &rustls::version::TLS12];
 
 /// Build a `rustls::ServerConfig` with Signalman's protocol-version
 /// policy applied.
@@ -141,9 +139,7 @@ pub fn build_rustls_server_config(bundle: &CertBundle) -> Result<rustls::ServerC
             .context("parsing CA cert PEM")?;
     let mut roots = RootCertStore::empty();
     for ca in ca_certs {
-        roots
-            .add(ca)
-            .context("adding CA cert to root store")?;
+        roots.add(ca).context("adding CA cert to root store")?;
     }
 
     let client_verifier = WebPkiClientVerifier::builder(Arc::new(roots))
@@ -333,8 +329,7 @@ fn harden_cert_dir_acls(dir: &Path) -> Result<()> {
     // the dir functional for the service path).
     if let Ok(user) = std::env::var("USERNAME") {
         if !user.is_empty() {
-            cmd.arg("/grant:r")
-                .arg(format!("{user}:(OI)(CI)R"));
+            cmd.arg("/grant:r").arg(format!("{user}:(OI)(CI)R"));
         }
     }
 
