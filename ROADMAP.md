@@ -313,12 +313,19 @@ parse but don't enforce; two Critical findings open from audit.
   bundle and drive the elevated daemon. Add `SetSecurityInfo` (or
   `icacls /inheritance:r /grant SYSTEM:F /grant Administrators:F /grant
   <ServiceAcct>:R`) at install time. Single highest-value security fix.
-- **B2 / Sec F1 (Critical mitigation) — Pin client-cert SHA-256 (or DN
-  allowlist) on the guest.** Today mTLS authenticates the *channel*, not
-  the *caller*; any cert chained to the configured CA grants full SYSTEM
-  RCE. Pinning turns "any cert from this CA" into "this exact cert";
-  rotation becomes "update the pinned hash." Per-user identity certs ship
-  in v0.2.0+.
+- ✅ **B2 / Sec F1 (CLOSED 2026-04-28) — Client-cert SHA-256 pin.**
+  New `--client-cert-sha256 <hex>` (env `SIGNALMAN_CLIENT_CERT_SHA256`,
+  comma-separated for rotation). On startup the guest agent parses the
+  flag into a `cert_pin::PinSet`; refuses to start if pins are
+  configured without full mTLS (`--tls-cert + --tls-key + --tls-ca`).
+  At request time, the `AuthInterceptor` extracts the leaf client cert
+  from `tonic::transport::server::TlsConnectInfo::peer_certs`, SHA-256s
+  the DER, and compares constant-time against every configured pin.
+  Closes the "any cert from this CA grants SYSTEM" gap. Tests: 13
+  unit (`cert_pin::tests`) + 2 integration (`cert_pin_matching_*`,
+  `cert_pin_mismatched_*`) — the integration tests issue two leaves
+  from the same CA and prove pin enforcement rejects a chain-valid but
+  identity-wrong cert with `Status::unauthenticated`.
 - **B3 / Sec F3 (High) — `--allow-insecure` loopback enforcement.** Doc
   comment ([guest/src/main.rs:46-49](guest/src/main.rs:46)) claims
   loopback-only; parser accepts `0.0.0.0`. Add

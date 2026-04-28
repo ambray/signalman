@@ -32,6 +32,13 @@ thiserror = "1"
 # Process registry
 rand = "0.8"
 
+# SHA-256 for client-cert pinning (B2 / Sec F1 Critical mitigation).
+# We use sha2 + hex rather than ring directly because ring is a heavy
+# crypto framework dep — pulling it for a single hash would be a dep
+# bloat regression. sha2 is a small, well-audited primitive.
+sha2 = "0.10"
+hex = "0.4"
+
 # Networking (for restriction verification)
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 
