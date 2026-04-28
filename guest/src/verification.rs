@@ -9,7 +9,7 @@
 //! - DLL injection (restrict hook loaded)
 
 use std::fs::OpenOptions;
-use std::net::{TcpStream, SocketAddr};
+use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
 /// Restriction verification result.
@@ -65,11 +65,7 @@ pub struct RestrictionCheck {
 ///
 /// Returns `true` if the connection succeeds (host is reachable),
 /// `false` if blocked or timed out.
-pub fn test_network_connectivity(
-    host: &str,
-    port: u16,
-    timeout: Duration,
-) -> NetworkTestResult {
+pub fn test_network_connectivity(host: &str, port: u16, timeout: Duration) -> NetworkTestResult {
     let addr = format!("{host}:{port}");
 
     match addr.parse::<SocketAddr>() {
@@ -132,35 +128,53 @@ pub struct NetworkTestResult {
 /// Test file access (read, write, delete).
 pub fn test_file_access(path: &str, operation: &str) -> FileAccessResult {
     match operation {
-        "read" => {
-            match std::fs::read(path) {
-                Ok(_) => FileAccessResult { allowed: true, error: None },
-                Err(e) => FileAccessResult { allowed: false, error: Some(e.to_string()) },
-            }
-        }
+        "read" => match std::fs::read(path) {
+            Ok(_) => FileAccessResult {
+                allowed: true,
+                error: None,
+            },
+            Err(e) => FileAccessResult {
+                allowed: false,
+                error: Some(e.to_string()),
+            },
+        },
         "write" => {
             // Use a unique temp file with create_new to avoid overwriting existing data.
             let random_suffix: u64 = rand::random();
             let test_path = format!("{path}.signalman-test-{random_suffix:016x}");
-            match OpenOptions::new().write(true).create_new(true).open(&test_path) {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&test_path)
+            {
                 Ok(_file) => {
                     // Clean up test file
                     let _ = std::fs::remove_file(&test_path);
-                    FileAccessResult { allowed: true, error: None }
+                    FileAccessResult {
+                        allowed: true,
+                        error: None,
+                    }
                 }
                 Err(e) => {
                     // Clean up on failure too, in case partial create occurred.
                     let _ = std::fs::remove_file(&test_path);
-                    FileAccessResult { allowed: false, error: Some(e.to_string()) }
+                    FileAccessResult {
+                        allowed: false,
+                        error: Some(e.to_string()),
+                    }
                 }
             }
         }
-        "list" => {
-            match std::fs::read_dir(path) {
-                Ok(_) => FileAccessResult { allowed: true, error: None },
-                Err(e) => FileAccessResult { allowed: false, error: Some(e.to_string()) },
-            }
-        }
+        "list" => match std::fs::read_dir(path) {
+            Ok(_) => FileAccessResult {
+                allowed: true,
+                error: None,
+            },
+            Err(e) => FileAccessResult {
+                allowed: false,
+                error: Some(e.to_string()),
+            },
+        },
         _ => FileAccessResult {
             allowed: false,
             error: Some(format!("Unknown operation: {operation}")),
@@ -276,7 +290,11 @@ fn verify_software_installed_unix(name: &str) -> SoftwareCheckResult {
 /// Shared fallback: search PATH for an executable matching `name`.
 fn verify_software_installed_path(name: &str) -> SoftwareCheckResult {
     if let Ok(path_var) = std::env::var("PATH") {
-        let separator = if cfg!(target_os = "windows") { ';' } else { ':' };
+        let separator = if cfg!(target_os = "windows") {
+            ';'
+        } else {
+            ':'
+        };
         for dir in path_var.split(separator) {
             let candidate = std::path::Path::new(dir).join(name);
             if candidate.exists() {

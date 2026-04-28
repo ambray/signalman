@@ -39,12 +39,12 @@ mod windows_impl {
     use anyhow::{Context, Result};
     use std::ffi::c_void;
     use std::ptr;
-    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     };
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-    use windows::core::PCWSTR;
 
     /// Owns a SECURITY_DESCRIPTOR allocated via
     /// `ConvertStringSecurityDescriptorToSecurityDescriptorW` and a
@@ -74,11 +74,10 @@ mod windows_impl {
         /// - `SY` / `BA`       — well-known short forms
         /// - `S-1-5-32-578`    — Hyper-V Administrators (no SDDL alias)
         /// - `<USER>`          — current process user (added at runtime;
-        ///                        skipped if `USERNAME` env var is unset)
+        ///   skipped if `USERNAME` env var is unset)
         pub fn new() -> Result<Self> {
             let sddl = build_sddl();
-            let sddl_wide: Vec<u16> =
-                sddl.encode_utf16().chain(std::iter::once(0)).collect();
+            let sddl_wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
 
             let mut sd = PSECURITY_DESCRIPTOR::default();
             unsafe {
@@ -193,7 +192,10 @@ mod windows_impl {
             // SYSTEM
             assert!(sddl.contains(";SY)"), "SDDL must grant SYSTEM: {sddl}");
             // Administrators
-            assert!(sddl.contains(";BA)"), "SDDL must grant Administrators: {sddl}");
+            assert!(
+                sddl.contains(";BA)"),
+                "SDDL must grant Administrators: {sddl}"
+            );
             // Hyper-V Administrators (SID, no alias)
             assert!(
                 sddl.contains(";S-1-5-32-578)"),
