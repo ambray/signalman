@@ -1,0 +1,305 @@
+# Release workflow (P6).
+#
+# Tag-triggered: pushing a `v*.*.*` git tag (e.g. `v0.1.0`) builds and
+# publishes:
+#   1. signalman-service.msi (Windows MSI installer for the host service)
+#   2. @signalman/host (npm package)
+#   3. signalman-guest (crates.io)
+#   4. GitHub Release with all of the above attached
+#
+# The workflow is split into independent jobs so a single-target failure
+# (e.g. cargo publish rate limit) doesn't block the others. Each job
+# checks that the version in its manifest matches the tag — this
+# catches the most common release-day mistake (forgetting to bump
+# host/package.json or guest/Cargo.toml before tagging).
+#
+# ## Required GitHub secrets (configure once in repo settings)
+#
+# | Secret                  | Purpose                                     |
+# |-------------------------|---------------------------------------------|
+# | `WINDOWS_CERT_BASE64`   | Code-signing PFX (base64-encoded)           |
+# | `WINDOWS_CERT_PASSWORD` | Password for the PFX                        |
+# | `NPM_TOKEN`             | npm publish token (Automation type)         |
+# | `CARGO_REGISTRY_TOKEN`  | crates.io API token (publish-crates scope)  |
+#
+# When a secret is missing, the corresponding job logs a warning and
+# skips the publish step but still produces (and uploads) the build
+# artifact so dry-runs and pre-cert builds remain useful.
+#
+# ## Manual dispatch
+#
+# `workflow_dispatch` is also enabled so maintainers can run the full
+# pipeline against an arbitrary ref without tagging first. The version-
+# match check is relaxed in dispatch mode (warning instead of failure).
+#
+# ## Dry run
+#
+# Local pre-flight: `scripts/release-dry-run.ps1` (Windows) reproduces
+# the build + packaging steps without invoking signtool or publishing.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref (branch / tag / SHA) to build"
+        required: true
+        default: "main"
+
+permissions:
+  contents: write # to create the GitHub Release
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────
+  # Service MSI — Windows-only. Builds + (when secrets are present)
+  # signs `signalman-service.msi`. Output: `signalman-service-<ver>.msi`
+  # in the release-msi artifact.
+  service-msi:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          workspaces: . -> target
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "25.x"
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked --version 0.3.9
+
+      - name: Verify version matches tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $manifestVersion = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $expected = "v$manifestVersion"
+          if ("${{ github.event_name }}" -eq "push" -and $tag -ne $expected) {
+            Write-Error "Tag $tag does not match Cargo.toml version $manifestVersion (expected $expected). Bump versions before tagging."
+            exit 1
+          }
+          Write-Host "Manifest version: $manifestVersion ; tag: $tag"
+
+      - name: Build service (release)
+        run: cargo build -p signalman-service --release
+
+      - name: Build MSI via cargo-wix
+        run: cargo wix --package signalman-service --no-build --nocapture
+        # `--no-build` reuses the release artefact from the previous step.
+
+      - name: Locate MSI
+        id: msi
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem target\wix\*.msi | Select-Object -First 1
+          if (-not $msi) { Write-Error "No MSI produced by cargo-wix"; exit 1 }
+          "path=$($msi.FullName)" | Out-File -Append $env:GITHUB_OUTPUT
+          "name=$($msi.Name)" | Out-File -Append $env:GITHUB_OUTPUT
+
+      - name: Sign MSI
+        if: env.WINDOWS_CERT_BASE64 != ''
+        env:
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        shell: pwsh
+        run: |
+          # Decode the cert into a tempfile, sign, then shred. Never
+          # write the cert to a path under the workspace — uploads
+          # would expose it.
+          $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
+          try {
+            & signtool sign `
+              /f $pfxPath `
+              /p $env:WINDOWS_CERT_PASSWORD `
+              /tr http://timestamp.digicert.com `
+              /td sha256 `
+              /fd sha256 `
+              "${{ steps.msi.outputs.path }}"
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+            & signtool verify /pa /v "${{ steps.msi.outputs.path }}"
+          } finally {
+            Remove-Item -Force $pfxPath -ErrorAction SilentlyContinue
+          }
+
+      - name: Skip-sign warning (no cert configured)
+        if: env.WINDOWS_CERT_BASE64 == ''
+        run: |
+          echo "::warning::WINDOWS_CERT_BASE64 secret is not set — MSI is unsigned."
+          echo "::warning::Configure WINDOWS_CERT_BASE64 + WINDOWS_CERT_PASSWORD in repo secrets to sign release builds."
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-msi
+          path: ${{ steps.msi.outputs.path }}
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────
+  # Host npm package. Builds the TS host, runs the test suite as a
+  # final gate, and (when NPM_TOKEN is present) publishes to npm.
+  host-npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: host/package-lock.json
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install
+        working-directory: host
+        run: npm ci || npm install
+
+      - name: Verify version matches tag
+        if: github.event_name == 'push'
+        working-directory: host
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          pkg_version=$(node -p "require('./package.json').version")
+          expected="v${pkg_version}"
+          if [ "$tag" != "$expected" ]; then
+            echo "::error::Tag $tag does not match host/package.json version $pkg_version (expected $expected)."
+            exit 1
+          fi
+          echo "host/package.json version: $pkg_version ; tag: $tag"
+
+      - name: Build
+        working-directory: host
+        run: npm run build
+
+      - name: Test (release gate)
+        working-directory: host
+        run: npx vitest run
+
+      - name: Pack
+        working-directory: host
+        run: npm pack
+        # `npm pack` emits a .tgz alongside package.json — we attach
+        # this to the GitHub Release as the canonical npm tarball.
+
+      - name: Publish to npm
+        if: env.NPM_TOKEN != ''
+        working-directory: host
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+      - name: Skip-publish warning (no NPM_TOKEN)
+        if: env.NPM_TOKEN == ''
+        run: |
+          echo "::warning::NPM_TOKEN secret is not set — skipping npm publish."
+          echo "::warning::The .tgz artifact is still uploaded for manual publishing."
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-npm-tgz
+          path: host/*.tgz
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────
+  # Guest crate publish to crates.io. Builds, tests, dry-runs `cargo
+  # publish`, then publishes when CARGO_REGISTRY_TOKEN is present.
+  guest-crate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          workspaces: guest -> target
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "25.x"
+
+      - name: Verify version matches tag
+        if: github.event_name == 'push'
+        working-directory: guest
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          crate_version=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.+)".*/\1/')
+          expected="v${crate_version}"
+          if [ "$tag" != "$expected" ]; then
+            echo "::error::Tag $tag does not match guest/Cargo.toml version $crate_version (expected $expected)."
+            exit 1
+          fi
+          echo "guest version: $crate_version ; tag: $tag"
+
+      - name: Build
+        working-directory: guest
+        run: cargo build --release
+
+      - name: Test (release gate)
+        working-directory: guest
+        run: cargo test
+
+      - name: Cargo publish dry-run
+        working-directory: guest
+        run: cargo publish --dry-run --allow-dirty
+        # `--allow-dirty` because the build step above wrote target/.
+        # Dry-run validates the manifest, README, and license fields
+        # without actually pushing to crates.io.
+
+      - name: Publish to crates.io
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        working-directory: guest
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --allow-dirty
+
+      - name: Skip-publish warning (no CARGO_REGISTRY_TOKEN)
+        if: env.CARGO_REGISTRY_TOKEN == ''
+        run: |
+          echo "::warning::CARGO_REGISTRY_TOKEN secret is not set — skipping cargo publish."
+          echo "::warning::Run \`cargo publish\` locally to push to crates.io once the token is configured."
+
+  # ─────────────────────────────────────────────────────────────────
+  # GitHub Release — runs after all build jobs, attaches every artifact
+  # uploaded above. Only fires on tag pushes (manual dispatches don't
+  # produce a stable release page).
+  github-release:
+    needs: [service-msi, host-npm, guest-crate]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+
+      - name: Stage artifacts for release
+        run: |
+          mkdir -p release-staging
+          cp artifacts/release-msi/*.msi release-staging/ 2>/dev/null || true
+          cp artifacts/release-npm-tgz/*.tgz release-staging/ 2>/dev/null || true
+          ls -la release-staging/
+
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: release-staging/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-rc.') || contains(github.ref, '-beta.') || contains(github.ref, '-alpha.') }}
