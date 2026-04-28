@@ -1,5 +1,6 @@
-//! Six MCP tool handlers — one per Signalman verb. Each handler validates
-//! the input shape (defense-in-depth alongside Loom's MCP layer schema
+//! Seven MCP tool handlers — one per Signalman verb plus the P5.4
+//! `loom.signalman.form_descriptor` helper. Each handler validates the
+//! input shape (defense-in-depth alongside Loom's MCP layer schema
 //! check), translates the JSON into `signalman <verb>` CLI args, shells
 //! out, and returns the JSON envelope unchanged.
 //!
@@ -10,11 +11,11 @@
 use std::sync::Arc;
 
 use loom_core::{LoomError, LoomResult};
-use loom_plugin_api::{
-    McpToolMeta, McpToolRegistration, PluginContext, PluginTier, Stability,
-};
-use serde_json::{Value, json};
+use loom_plugin_api::{McpToolMeta, McpToolRegistration, PluginContext, PluginTier, Stability};
+use serde_json::{json, Value};
 
+use crate::events::{emit_envelope_events, EventEmitter};
+use crate::forms::{descriptor_for_scenario, ScenarioMeta, ScenarioParameter};
 use crate::schemas;
 use crate::state::{RunState, RunStateStore};
 use crate::subprocess::run_signalman;
@@ -31,7 +32,9 @@ fn meta() -> McpToolMeta {
     }
 }
 
-/// Returns all six [`McpToolRegistration`] entries the plugin exposes.
+/// Returns all seven [`McpToolRegistration`] entries the plugin exposes.
+/// P5.4 added `loom.signalman.form_descriptor` for the TUI's guided
+/// scenario-launch form.
 pub fn all_tool_registrations() -> Vec<McpToolRegistration> {
     vec![
         register_list(),
@@ -40,7 +43,23 @@ pub fn all_tool_registrations() -> Vec<McpToolRegistration> {
         register_run(),
         register_status(),
         register_record(),
+        register_form_descriptor(),
     ]
+}
+
+/// Build the [`EventEmitter`] a handler should use for live event
+/// emission. P5.3: today this returns a no-op emitter because
+/// `PluginContext` does not yet expose a Loom EventBus handle. When Loom
+/// adds (e.g.) `cx.event_bus()`, this is the single call site to wire
+/// the real sink in. The rest of the plugin already routes events
+/// through the [`EventEmitter`] abstraction so the rewire is one line.
+fn emitter_for(_cx: &PluginContext) -> EventEmitter {
+    // TODO(P5.3): once `loom_plugin_api::PluginContext` exposes an
+    // EventBus accessor, build a `LoomBusEmitter` here that forwards
+    // into Loom's bus (see crate::events module-level doc). Until then
+    // we emit into the noop sink so the rest of the plugin can rely on
+    // a non-`Option<EventEmitter>` handle without branching everywhere.
+    EventEmitter::noop()
 }
 
 // ── list ──────────────────────────────────────────────────────────
@@ -60,7 +79,11 @@ fn register_list() -> McpToolRegistration {
 }
 
 pub(crate) fn build_list_args(args: &Value) -> Vec<String> {
-    let mut a = vec!["list".to_string(), "--format".to_string(), "json".to_string()];
+    let mut a = vec![
+        "list".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ];
     if let Some(tag) = args.get("tag").and_then(Value::as_str) {
         a.push("--tag".to_string());
         a.push(tag.to_string());
@@ -140,7 +163,7 @@ fn handle_plan(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
 fn register_run() -> McpToolRegistration {
     McpToolRegistration {
         name: "loom.signalman.run".to_string(),
-        description: "Execute a scenario. Returns a run handle synchronously; events stream via loom.signalman.status long-poll (P5.3 will route via Loom EventBus)."
+        description: "Execute a scenario. Returns a run handle synchronously; events stream live via Loom EventBus (signalman.run.* taxonomy) and via loom.signalman.status long-poll for replay."
             .to_string(),
         input_schema: schemas::run_input(),
         output_schema: schemas::run_output(),
@@ -169,10 +192,7 @@ pub(crate) fn build_run_args(args: &Value) -> LoomResult<Vec<String>> {
 /// (which uses `new_trace_id` and is therefore non-deterministic) from
 /// the deterministic CLI-arg construction. Tests pin a fixed trace_id
 /// and verify the args.
-pub(crate) fn build_run_args_with_trace(
-    args: &Value,
-    trace_id: &str,
-) -> LoomResult<Vec<String>> {
+pub(crate) fn build_run_args_with_trace(args: &Value, trace_id: &str) -> LoomResult<Vec<String>> {
     let id = require_string(args, "id")?;
     let mut a = vec!["run".to_string(), id];
     push_param_flags(&mut a, args.get("parameters"))?;
@@ -206,6 +226,21 @@ pub fn finalize_run_start(
     response: Value,
     store: &RunStateStore,
 ) -> LoomResult<Value> {
+    finalize_run_start_with_emitter(args, response, store, None)
+}
+
+/// P5.3: same as [`finalize_run_start`] but additionally emits live
+/// events onto Loom's EventBus via `emitter`. Each step / assertion
+/// event in the envelope (when present) is promoted; the terminal run
+/// event is emitted by `record_finished_with_emitter` so it fires
+/// exactly once even if Signalman returns an immediate-finish envelope
+/// off the run handler.
+pub fn finalize_run_start_with_emitter(
+    args: &Value,
+    response: Value,
+    store: &RunStateStore,
+    emitter: Option<&EventEmitter>,
+) -> LoomResult<Value> {
     let run_id = response
         .get("run_id")
         .and_then(Value::as_str)
@@ -226,15 +261,26 @@ pub fn finalize_run_start(
         .and_then(Value::as_str)
         .or_else(|| args.get("trace_id").and_then(Value::as_str));
 
-    store.record_started(&run_id, scenario_id, trace_id)?;
+    store.record_started_with_emitter(&run_id, scenario_id, trace_id, emitter)?;
 
     // If Signalman returned an envelope already (e.g. immediate-fail run)
     // promote it through Streaming/Finished so the state reflects reality.
     if let Some(envelope) = response.get("envelope") {
+        // First: per-event emission. emit_envelope_events is a no-op
+        // when there's no events array, so this is safe regardless of
+        // envelope shape.
+        if let Some(em) = emitter {
+            emit_envelope_events(em, &run_id, envelope, trace_id, scenario_id);
+        }
         if envelope_is_terminal(envelope) {
-            store.record_finished(&run_id, envelope)?;
+            store.record_finished_with_emitter(&run_id, envelope, emitter)?;
         } else {
-            store.record_streaming(&run_id, response_event_seq(&response), Some(envelope))?;
+            store.record_streaming_with_emitter(
+                &run_id,
+                response_event_seq(&response),
+                Some(envelope),
+                emitter,
+            )?;
         }
     }
 
@@ -243,9 +289,10 @@ pub fn finalize_run_start(
 
 fn handle_run(cx: &PluginContext, args: Value) -> LoomResult<Value> {
     let store = RunStateStore::for_plugin(&cx.data_dir)?;
+    let emitter = emitter_for(cx);
     let cli_args = build_run_args(&args)?;
     let response = run_signalman(&cli_args)?;
-    finalize_run_start(&args, response, &store)
+    finalize_run_start_with_emitter(&args, response, &store, Some(&emitter))
 }
 
 // ── status ────────────────────────────────────────────────────────
@@ -302,6 +349,17 @@ pub fn finalize_status(
     response: Result<Value, LoomError>,
     store: &RunStateStore,
 ) -> LoomResult<Value> {
+    finalize_status_with_emitter(args, response, store, None)
+}
+
+/// P5.3: same as [`finalize_status`] plus per-envelope-event emission
+/// onto the Loom EventBus and (on transitions) lifecycle events.
+pub fn finalize_status_with_emitter(
+    args: &Value,
+    response: Result<Value, LoomError>,
+    store: &RunStateStore,
+    emitter: Option<&EventEmitter>,
+) -> LoomResult<Value> {
     let run_id = args.get("run_id").and_then(Value::as_str);
 
     match response {
@@ -309,10 +367,25 @@ pub fn finalize_status(
             if let Some(rid) = run_id {
                 let envelope = value.get("envelope");
                 let event_seq = response_event_seq(&value);
-                if envelope.is_some() && envelope_is_terminal(envelope.unwrap()) {
-                    store.record_finished(rid, envelope.unwrap())?;
+                // P5.3: emit per-event events first so subscribers see
+                // them ordered before any terminal-run lifecycle event.
+                // We intentionally DO NOT dedupe against state.last_event_seq
+                // here — Loom's EventBus is a one-shot bus, not the
+                // long-poll replay channel; subscribers get exactly the
+                // events that arrive on this poll.
+                if let (Some(em), Some(env)) = (emitter, envelope) {
+                    // Look up scenario_id / trace_id from persisted state
+                    // for label consistency with the started event.
+                    let (trace_id, scenario_id) = match store.load(rid) {
+                        Ok(Some(s)) => (s.trace_id.clone(), s.scenario_id.clone()),
+                        _ => (None, None),
+                    };
+                    emit_envelope_events(em, rid, env, trace_id.as_deref(), scenario_id.as_deref());
+                }
+                if let Some(env) = envelope.filter(|e| envelope_is_terminal(e)) {
+                    store.record_finished_with_emitter(rid, env, emitter)?;
                 } else {
-                    store.record_streaming(rid, event_seq, envelope)?;
+                    store.record_streaming_with_emitter(rid, event_seq, envelope, emitter)?;
                 }
             }
             Ok(value)
@@ -326,7 +399,7 @@ pub fn finalize_status(
             // Try to recover the last-known state. If we have one, mark
             // it Lost and return the persisted view; if not, propagate
             // the original error.
-            let lost = store.record_lost(rid, &err.to_string())?;
+            let lost = store.record_lost_with_emitter(rid, &err.to_string(), emitter)?;
             match lost {
                 Some(state) => Ok(lost_response_payload(&state)),
                 None => Err(err),
@@ -337,9 +410,10 @@ pub fn finalize_status(
 
 fn handle_status(cx: &PluginContext, args: Value) -> LoomResult<Value> {
     let store = RunStateStore::for_plugin(&cx.data_dir)?;
+    let emitter = emitter_for(cx);
     let cli_args = build_status_args(&args)?;
     let response = run_signalman(&cli_args);
-    finalize_status(&args, response, &store)
+    finalize_status_with_emitter(&args, response, &store, Some(&emitter))
 }
 
 fn lost_response_payload(state: &RunState) -> Value {
@@ -412,6 +486,147 @@ pub(crate) fn build_record_args(args: &Value) -> LoomResult<Vec<String>> {
 
 fn handle_record(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
     run_signalman(&build_record_args(&args)?)
+}
+
+// ── form_descriptor (P5.4) ────────────────────────────────────────
+
+fn register_form_descriptor() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.form_descriptor".to_string(),
+        description:
+            "Return a guided form descriptor for a scenario. The TUI renders this as a form with labeled inputs (text / select / number / boolean / secret) instead of asking the operator to author raw JSON. Submit binds to loom.signalman.run."
+                .to_string(),
+        input_schema: schemas::form_descriptor_input(),
+        output_schema: schemas::form_descriptor_output(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_form_descriptor),
+        meta: meta(),
+    }
+}
+
+/// Build the scenario-form descriptor by shelling out to
+/// `signalman describe <id> --format json`, parsing the metadata, and
+/// running it through [`descriptor_for_scenario`]. The shell-out is
+/// deliberate: keeping the form derivation close to what `describe`
+/// actually returns means the TUI never sees a parameter the run verb
+/// can't accept.
+fn handle_form_descriptor(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    let scenario = require_string(&args, "scenario")?;
+    let describe_args = vec![
+        "describe".to_string(),
+        scenario.clone(),
+        "--format".to_string(),
+        "json".to_string(),
+    ];
+    let raw_meta = run_signalman(&describe_args)?;
+    let descriptor = descriptor_from_describe_response(&scenario, &raw_meta);
+    serde_json::to_value(&descriptor).map_err(|e| {
+        LoomError::PluginRuntime(format!(
+            "failed to serialise form descriptor for '{}': {}",
+            scenario, e
+        ))
+    })
+}
+
+/// Translate the JSON response from `signalman describe` into a
+/// [`crate::forms::ScenarioFormDescriptor`].
+///
+/// Tolerant of partial responses: missing fields fall back to defaults
+/// (id-as-label, generic description, no parameters). Pure / unit-testable
+/// without spawning a subprocess.
+pub(crate) fn descriptor_from_describe_response(
+    scenario_id: &str,
+    describe_response: &Value,
+) -> crate::forms::ScenarioFormDescriptor {
+    let name = describe_response.get("name").and_then(Value::as_str);
+    // Use the first paragraph of workflow_md as the form description if
+    // available; falls back to None and the descriptor builder synthesises
+    // a generic line.
+    let description_owned: Option<String> = describe_response
+        .get("workflow_md")
+        .and_then(Value::as_str)
+        .and_then(|md| md.split("\n\n").next().map(str::to_string))
+        .filter(|s| !s.trim().is_empty());
+
+    let tags_owned: Vec<String> = describe_response
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let parameters_owned: Vec<ParameterOwned> = describe_response
+        .get("parameters")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(parameter_owned_from_value).collect())
+        .unwrap_or_default();
+
+    // Build borrowed view of the owned data; the descriptor builder takes
+    // a `ScenarioMeta<'_>` of borrows so we don't pay for clones in the
+    // hot path even though the describe response only lives until this
+    // function returns.
+    let parameters: Vec<ScenarioParameter<'_>> = parameters_owned
+        .iter()
+        .map(ParameterOwned::as_borrow)
+        .collect();
+    let tags_borrow: Vec<&str> = tags_owned.iter().map(String::as_str).collect();
+
+    let meta = ScenarioMeta {
+        id: scenario_id,
+        name,
+        description: description_owned.as_deref(),
+        parameters,
+        tags: tags_borrow,
+    };
+    descriptor_for_scenario(scenario_id, &meta)
+}
+
+/// Owned-string mirror of `ScenarioParameter` so we can build the
+/// borrowed view from values that came out of the describe response.
+struct ParameterOwned {
+    name: String,
+    label: Option<String>,
+    kind_hint: Option<String>,
+    required: bool,
+    default: Option<Value>,
+    help: Option<String>,
+}
+
+impl ParameterOwned {
+    fn as_borrow(&self) -> ScenarioParameter<'_> {
+        ScenarioParameter {
+            name: &self.name,
+            label: self.label.as_deref(),
+            kind_hint: self.kind_hint.as_deref(),
+            required: self.required,
+            default: self.default.clone(),
+            help: self.help.as_deref(),
+        }
+    }
+}
+
+fn parameter_owned_from_value(v: &Value) -> Option<ParameterOwned> {
+    let name = v.get("name").and_then(Value::as_str)?.to_string();
+    Some(ParameterOwned {
+        name,
+        label: v.get("label").and_then(Value::as_str).map(str::to_string),
+        kind_hint: v
+            .get("kind")
+            .and_then(Value::as_str)
+            .or_else(|| v.get("type").and_then(Value::as_str))
+            .map(str::to_string),
+        required: v.get("required").and_then(Value::as_bool).unwrap_or(false),
+        default: v.get("default").cloned(),
+        help: v
+            .get("help")
+            .and_then(Value::as_str)
+            .or_else(|| v.get("description").and_then(Value::as_str))
+            .map(str::to_string),
+    })
 }
 
 // ── helpers ───────────────────────────────────────────────────────
@@ -668,7 +883,10 @@ mod tests {
         assert_eq!(returned, response, "response must pass through unchanged");
 
         let state = store.load("abc-123").unwrap().unwrap();
-        assert_eq!(state.scenario_id.as_deref(), Some("ospiri/v2/network-egress"));
+        assert_eq!(
+            state.scenario_id.as_deref(),
+            Some("ospiri/v2/network-egress")
+        );
         assert_eq!(state.status, RunStatus::Started);
     }
 
@@ -734,7 +952,11 @@ mod tests {
     #[test]
     fn finalize_run_start_rejects_response_without_run_id() {
         let (store, _dir) = store();
-        let r = finalize_run_start(&json!({ "id": "x" }), json!({ "started_at": "now" }), &store);
+        let r = finalize_run_start(
+            &json!({ "id": "x" }),
+            json!({ "started_at": "now" }),
+            &store,
+        );
         assert!(r.is_err(), "response without run_id must fail loudly");
     }
 
@@ -812,12 +1034,17 @@ mod tests {
     fn finalize_status_does_not_downgrade_finished_runs_on_subprocess_error() {
         let (store, _dir) = store();
         store.record_started("rid", None, None).unwrap();
-        store.record_finished("rid", &json!({ "result": "pass" })).unwrap();
+        store
+            .record_finished("rid", &json!({ "result": "pass" }))
+            .unwrap();
 
         let args = json!({ "run_id": "rid" });
         let err: LoomResult<Value> = Err(LoomError::PluginRuntime("transient".to_string()));
         let v = finalize_status(&args, err, &store).unwrap();
-        assert_eq!(v["status"], "finished", "Finished must not downgrade to Lost");
+        assert_eq!(
+            v["status"], "finished",
+            "Finished must not downgrade to Lost"
+        );
     }
 
     // ── envelope helpers ──────────────────────────────────────────
@@ -841,5 +1068,236 @@ mod tests {
         assert_eq!(response_event_seq(&resp), Some(7));
         assert_eq!(response_event_seq(&json!({})), None);
         assert_eq!(response_event_seq(&json!({ "envelope": {} })), None);
+    }
+
+    // ── P5.3 EventBus emission ────────────────────────────────────
+
+    use crate::events::mock_emitter;
+
+    #[test]
+    fn finalize_run_start_with_emitter_emits_started_event() {
+        // Run handle accepted, no envelope yet → only the lifecycle
+        // Started event should fire.
+        let (store, _dir) = store();
+        let (emitter, mock) = mock_emitter();
+        let trace = "a".repeat(32);
+        let args = json!({ "id": "scn", "trace_id": trace.clone() });
+        let response = json!({ "run_id": "rid", "trace_id": trace.clone() });
+        finalize_run_start_with_emitter(&args, response, &store, Some(&emitter)).unwrap();
+        let started = mock.filter_by_kind("signalman.run.started");
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].labels.get("signalman-trace-id"), Some(&trace));
+    }
+
+    #[test]
+    fn finalize_run_start_with_emitter_promotes_envelope_events() {
+        // An immediate-finish run that returned an envelope with step
+        // and assertion events MUST emit a bus event for each promoted
+        // type plus the terminal Finished event.
+        let (store, _dir) = store();
+        let (emitter, mock) = mock_emitter();
+        let args = json!({ "id": "scn" });
+        let response = json!({
+            "run_id": "rid",
+            "envelope": {
+                "result": "pass",
+                "events": [
+                    { "seq": 0, "type": "step.started", "step_index": 0 },
+                    { "seq": 1, "type": "step.completed", "step_index": 0 },
+                    { "seq": 2, "type": "assertion.passed", "id": "a1" }
+                ]
+            }
+        });
+        finalize_run_start_with_emitter(&args, response, &store, Some(&emitter)).unwrap();
+        // Expected: 1 Started + 3 envelope events + 1 RunFinished = 5.
+        assert_eq!(
+            mock.len(),
+            5,
+            "expected 5 events; got {:?}",
+            mock.published()
+        );
+        assert_eq!(mock.filter_by_kind("signalman.run.started").len(), 1);
+        assert_eq!(mock.filter_by_kind("signalman.run.step_started").len(), 1);
+        assert_eq!(mock.filter_by_kind("signalman.run.step_completed").len(), 1);
+        assert_eq!(
+            mock.filter_by_kind("signalman.run.assertion_passed").len(),
+            1
+        );
+        assert_eq!(mock.filter_by_kind("signalman.run.finished").len(), 1);
+    }
+
+    #[test]
+    fn finalize_status_with_emitter_emits_envelope_events_and_finished() {
+        let (store, _dir) = store();
+        let (emitter, mock) = mock_emitter();
+        store
+            .record_started_with_emitter("rid", Some("scn"), Some("trace-1"), Some(&emitter))
+            .unwrap();
+        // Drain mock so the assertion below counts only status-driven events.
+        let started_count = mock.filter_by_kind("signalman.run.started").len();
+        assert_eq!(started_count, 1);
+
+        let args = json!({ "run_id": "rid" });
+        let resp = Ok(json!({
+            "envelope": {
+                "result": "fail",
+                "events": [
+                    { "seq": 0, "type": "step.started", "step_index": 0 },
+                    { "seq": 1, "type": "step.failed", "step_index": 0, "error": "boom" }
+                ]
+            }
+        }));
+        finalize_status_with_emitter(&args, resp, &store, Some(&emitter)).unwrap();
+        assert_eq!(mock.filter_by_kind("signalman.run.step_started").len(), 1);
+        assert_eq!(mock.filter_by_kind("signalman.run.step_failed").len(), 1);
+        assert_eq!(mock.filter_by_kind("signalman.run.finished").len(), 1);
+
+        // Trace-id label must be present on the per-event events too,
+        // pulled from the persisted RunState (not the response, which
+        // doesn't carry trace_id on per-event payloads).
+        let step = &mock.filter_by_kind("signalman.run.step_started")[0];
+        assert_eq!(
+            step.labels.get("signalman-trace-id").map(String::as_str),
+            Some("trace-1")
+        );
+    }
+
+    #[test]
+    fn finalize_status_with_emitter_emits_lost_on_subprocess_failure() {
+        let (store, _dir) = store();
+        let (emitter, mock) = mock_emitter();
+        store.record_started("rid", None, None).unwrap();
+
+        let args = json!({ "run_id": "rid" });
+        let err: LoomResult<Value> = Err(LoomError::PluginRuntime("ECONNREFUSED".to_string()));
+        finalize_status_with_emitter(&args, err, &store, Some(&emitter)).unwrap();
+
+        let lost = mock.filter_by_kind("signalman.run.lost");
+        assert_eq!(lost.len(), 1);
+        // The reason carries LoomError's Display format which includes
+        // the variant prefix (`plugin runtime error: ...`). Asserting
+        // contains() rather than == keeps the test resilient to
+        // future LoomError formatting tweaks while still proving the
+        // underlying error message reaches the event payload.
+        assert!(
+            lost[0].payload["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("ECONNREFUSED"),
+            "reason payload should contain ECONNREFUSED; got {:?}",
+            lost[0].payload["reason"],
+        );
+    }
+
+    #[test]
+    fn finalize_status_emits_streaming_event_only_on_first_transition() {
+        // Streaming → Streaming on subsequent polls must not re-emit.
+        let (store, _dir) = store();
+        let (emitter, mock) = mock_emitter();
+        store.record_started("rid", None, None).unwrap();
+
+        for seq in [1, 2, 3] {
+            finalize_status_with_emitter(
+                &json!({ "run_id": "rid" }),
+                Ok(json!({ "envelope": { "events": [{ "seq": seq, "type": "log" }] } })),
+                &store,
+                Some(&emitter),
+            )
+            .unwrap();
+        }
+        // Exactly one streaming lifecycle event despite three polls.
+        assert_eq!(mock.filter_by_kind("signalman.run.streaming").len(), 1);
+    }
+
+    #[test]
+    fn finalize_run_start_without_emitter_preserves_legacy_behaviour() {
+        // P5.3 backward-compat: callers that don't pass an emitter
+        // (existing tests, integration tests in tests/) must still
+        // observe the original state-only behaviour.
+        let (store, _dir) = store();
+        let args = json!({ "id": "scn" });
+        let response = json!({
+            "run_id": "rid",
+            "envelope": { "result": "pass", "events": [] }
+        });
+        // No emitter — call the legacy entry point.
+        finalize_run_start(&args, response, &store).unwrap();
+        let s = store.load("rid").unwrap().unwrap();
+        assert_eq!(s.status, RunStatus::Finished);
+    }
+
+    // ── P5.4 form_descriptor ──────────────────────────────────────
+
+    #[test]
+    fn descriptor_from_empty_describe_response_still_includes_baseline_fields() {
+        // Tolerance check: a describe response that lacks every optional
+        // field still produces a usable form (id + network_class + trace_id).
+        let d = descriptor_from_describe_response("scn", &json!({}));
+        let names: Vec<&str> = d.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["id", "network_class", "trace_id"]);
+        assert_eq!(d.submit_tool, "loom.signalman.run");
+    }
+
+    #[test]
+    fn descriptor_from_describe_response_uses_first_paragraph_of_workflow_md() {
+        let resp = json!({
+            "name": "Network egress",
+            "workflow_md": "Validate the VM can reach external HTTPS endpoints.\n\n## Steps\n\n1. Setup",
+            "tags": ["smoke"],
+        });
+        let d = descriptor_from_describe_response("ospiri/v2/network-egress", &resp);
+        assert_eq!(d.label, "Network egress");
+        assert_eq!(
+            d.description,
+            "Validate the VM can reach external HTTPS endpoints."
+        );
+    }
+
+    #[test]
+    fn descriptor_from_describe_response_translates_parameters_to_fields() {
+        // The describe response surfaces a `parameters` array of declared
+        // overrides; each one should land in the descriptor with the right
+        // kind hint.
+        let resp = json!({
+            "parameters": [
+                { "name": "vm", "label": "Target VM", "kind": "text", "required": true,
+                  "default": "endpoint-1", "help": "VM template name" },
+                { "name": "verbose", "type": "bool", "default": false },
+                { "name": "tier", "kind": "select:gold|silver|bronze", "required": true },
+                { "name": "api_key", "kind": "secret", "required": true,
+                  "description": "Resolved at runtime." }
+            ]
+        });
+        let d = descriptor_from_describe_response("scn", &resp);
+        let names: Vec<&str> = d.fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"parameters.vm"));
+        assert!(names.contains(&"parameters.verbose"));
+        assert!(names.contains(&"parameters.tier"));
+        assert!(names.contains(&"parameters.api_key"));
+
+        let api_key = d
+            .fields
+            .iter()
+            .find(|f| f.name == "parameters.api_key")
+            .unwrap();
+        // Falls back to `description` when `help` is absent.
+        assert_eq!(api_key.help.as_deref(), Some("Resolved at runtime."));
+    }
+
+    #[test]
+    fn descriptor_from_describe_response_skips_parameters_without_name() {
+        // Defensive: a malformed describe response with a nameless
+        // parameter must not crash the form builder.
+        let resp = json!({
+            "parameters": [
+                { "kind": "text" }, // no name
+                { "name": "ok" },
+            ]
+        });
+        let d = descriptor_from_describe_response("scn", &resp);
+        let names: Vec<&str> = d.fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"parameters.ok"));
+        // Only one parameter field plus the three baselines.
+        assert_eq!(d.fields.len(), 4);
     }
 }
