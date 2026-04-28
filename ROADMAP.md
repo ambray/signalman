@@ -424,7 +424,7 @@ agent → Loom MCP → Loom plugin → Signalman CLI/MCP → VM.
   surfaces in-flight runs after host restart; Signalman just needs to
   redrive the run from its persisted state file.
 
-**P5.3 — Live event streaming via Loom EventBus:**
+**P5.3 — Live event streaming via Loom EventBus: ✅ closed**
 - Signalman emits envelope events (step start/finish, assertion
   pass/fail, error, run finished) into Loom's `EventBus` with a
   `signalman.run.<phase>` event kind taxonomy. **This is how P3-C2
@@ -433,8 +433,24 @@ agent → Loom MCP → Loom plugin → Signalman CLI/MCP → VM.
 - Trace-id flows as a `TelemetryEvent.labels["signalman-trace-id"]`
   entry; one event-bus `repo_id` correlates all phases of a run.
   **This is how P3-C10 closes.**
+- **Delivered**: `plugins/signalman-loom-plugin/src/events.rs` defines
+  the `EventEmitter` / `EventSink` abstraction, the `RunEventKind`
+  taxonomy (`signalman.run.{started,streaming,step_started,
+  step_completed,step_failed,assertion_passed,assertion_failed,
+  finished,lost}`), and the per-envelope-event promotion helper that
+  the `loom.signalman.run` and `loom.signalman.status` handlers call
+  on every poll. State-machine transitions in `state.rs`
+  (`record_*_with_emitter` variants) emit lifecycle events exactly
+  once per transition. The trait-based abstraction is the cheap
+  insurance: until `loom_plugin_api::PluginContext` exposes an
+  `EventBus` accessor, `handlers::emitter_for` returns a no-op sink;
+  when Loom's API stabilises, that single function is the only call
+  site that needs updating. Test coverage uses an in-memory
+  `MockEventSink` so assertions on emission order, label propagation,
+  and once-per-transition semantics all run without depending on a
+  Loom build.
 
-**P5.4 — Descriptor-backed scenario forms in `loom tui`:**
+**P5.4 — Descriptor-backed scenario forms in `loom tui`: ✅ closed**
 - Each Signalman scenario exposes a Loom form descriptor (analogous to
   `form.task.start`) so the operator console renders scenarios as guided
   forms. Required parameters (scenario id), optional parameters
@@ -442,6 +458,23 @@ agent → Loom MCP → Loom plugin → Signalman CLI/MCP → VM.
   with no TUI changes.
 - Status indicators (running / passed / failed / lost) feed the active-
   work dashboard via Loom task attention state.
+- **Delivered**: `plugins/signalman-loom-plugin/src/forms.rs` defines
+  `ScenarioFormDescriptor` / `FormField` / `FieldKind` / `FieldValidator`
+  with text / select / number / boolean / secret variants and
+  min-length / pattern / range / trace-id validators. The new
+  `loom.signalman.form_descriptor` MCP tool (`handlers.rs`) shells out
+  to `signalman describe`, parses the response via
+  `descriptor_from_describe_response`, and emits the descriptor JSON
+  for the TUI. Secret fields default to `${secret:NAME}` so saved form
+  state never carries plaintext credentials. `status_indicator_for_status`
+  yields a `StatusBadge` (label + display + colour key + glyph + terminal
+  flag) for every `RunStatus` variant; `failed_finished_badge()` covers
+  the envelope-failed case so the dashboard distinguishes pass-vs-fail
+  without re-walking the state machine. The wire format is
+  forward-compatible (tagged `kind` discriminator on `FieldKind`,
+  `additionalProperties: true` on the output schema), so a future
+  `PluginHandles.forms` field on `loom-plugin-api` can absorb the same
+  descriptor without re-shaping JSON.
 
 **P5.5 — Directives + agent guidance:**
 - A Loom directive (e.g. `validate-on-vm`) surfaces "use Signalman for

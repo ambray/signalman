@@ -39,6 +39,8 @@ use loom_core::{LoomError, LoomResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::events::{EventEmitter, RunEventKind, emit_run_event};
+
 /// Lifecycle state for a tracked run. JSON-serialised in the state file
 /// under `status`. Forward-compatible: unknown variants on load become
 /// `Lost` (with a warning surfaced via the plugin's error envelope).
@@ -198,8 +200,22 @@ impl RunStateStore {
         scenario_id: Option<&str>,
         trace_id: Option<&str>,
     ) -> LoomResult<RunState> {
+        self.record_started_with_emitter(run_id, scenario_id, trace_id, None)
+    }
+
+    /// P5.3: same as [`record_started`] plus optional emission of a
+    /// `signalman.run.started` event onto Loom's EventBus when this is
+    /// a *new* record (re-entries don't re-emit, since Loom subscribers
+    /// would see a duplicate).
+    pub fn record_started_with_emitter(
+        &self,
+        run_id: &str,
+        scenario_id: Option<&str>,
+        trace_id: Option<&str>,
+        emitter: Option<&EventEmitter>,
+    ) -> LoomResult<RunState> {
         let now = now_ms();
-        let state = match self.load(run_id)? {
+        let (state, was_new) = match self.load(run_id)? {
             Some(mut existing) => {
                 existing.last_observed_at_ms = now;
                 if existing.scenario_id.is_none() {
@@ -208,22 +224,40 @@ impl RunStateStore {
                 if existing.trace_id.is_none() {
                     existing.trace_id = trace_id.map(str::to_string);
                 }
-                existing
+                (existing, false)
             }
-            None => RunState {
-                version: STATE_SCHEMA_VERSION,
-                run_id: run_id.to_string(),
-                scenario_id: scenario_id.map(str::to_string),
-                started_at_ms: now,
-                last_observed_at_ms: now,
-                last_event_seq: 0,
-                status: RunStatus::Started,
-                envelope: None,
-                trace_id: trace_id.map(str::to_string),
-                last_error: None,
-            },
+            None => (
+                RunState {
+                    version: STATE_SCHEMA_VERSION,
+                    run_id: run_id.to_string(),
+                    scenario_id: scenario_id.map(str::to_string),
+                    started_at_ms: now,
+                    last_observed_at_ms: now,
+                    last_event_seq: 0,
+                    status: RunStatus::Started,
+                    envelope: None,
+                    trace_id: trace_id.map(str::to_string),
+                    last_error: None,
+                },
+                true,
+            ),
         };
         self.write(&state)?;
+        if was_new {
+            if let Some(em) = emitter {
+                emit_run_event(
+                    em,
+                    run_id,
+                    RunEventKind::Started,
+                    json!({
+                        "started_at_ms": state.started_at_ms,
+                        "scenario_id": state.scenario_id,
+                    }),
+                    state.trace_id.as_deref(),
+                    state.scenario_id.as_deref(),
+                );
+            }
+        }
         Ok(state)
     }
 
@@ -234,6 +268,21 @@ impl RunStateStore {
         run_id: &str,
         events_drained: Option<i64>,
         envelope_so_far: Option<&Value>,
+    ) -> LoomResult<RunState> {
+        self.record_streaming_with_emitter(run_id, events_drained, envelope_so_far, None)
+    }
+
+    /// P5.3: same as [`record_streaming`] but also emits a
+    /// `signalman.run.streaming` event the *first* time we transition
+    /// from `Started → Streaming`. Subsequent streaming polls do not
+    /// re-emit (the per-event emissions ride on
+    /// [`crate::events::emit_envelope_events`] from the handler layer).
+    pub fn record_streaming_with_emitter(
+        &self,
+        run_id: &str,
+        events_drained: Option<i64>,
+        envelope_so_far: Option<&Value>,
+        emitter: Option<&EventEmitter>,
     ) -> LoomResult<RunState> {
         let mut state = self.load(run_id)?.unwrap_or_else(|| RunState {
             version: STATE_SCHEMA_VERSION,
@@ -247,6 +296,7 @@ impl RunStateStore {
             trace_id: None,
             last_error: None,
         });
+        let was_started = matches!(state.status, RunStatus::Started);
         state.last_observed_at_ms = now_ms();
         if let Some(seq) = events_drained {
             if seq > state.last_event_seq {
@@ -261,11 +311,37 @@ impl RunStateStore {
             state.last_error = None;
         }
         self.write(&state)?;
+        if was_started && matches!(state.status, RunStatus::Streaming) {
+            if let Some(em) = emitter {
+                emit_run_event(
+                    em,
+                    run_id,
+                    RunEventKind::Streaming,
+                    json!({
+                        "last_event_seq": state.last_event_seq,
+                    }),
+                    state.trace_id.as_deref(),
+                    state.scenario_id.as_deref(),
+                );
+            }
+        }
         Ok(state)
     }
 
     /// Mark the run finished and store the terminal envelope.
     pub fn record_finished(&self, run_id: &str, envelope: &Value) -> LoomResult<RunState> {
+        self.record_finished_with_emitter(run_id, envelope, None)
+    }
+
+    /// P5.3: same as [`record_finished`] plus a `signalman.run.finished`
+    /// event (only emitted on the *first* transition into Finished, not
+    /// on idempotent re-records).
+    pub fn record_finished_with_emitter(
+        &self,
+        run_id: &str,
+        envelope: &Value,
+        emitter: Option<&EventEmitter>,
+    ) -> LoomResult<RunState> {
         let mut state = self.load(run_id)?.unwrap_or_else(|| RunState {
             version: STATE_SCHEMA_VERSION,
             run_id: run_id.to_string(),
@@ -278,11 +354,27 @@ impl RunStateStore {
             trace_id: None,
             last_error: None,
         });
+        let was_already_finished = matches!(state.status, RunStatus::Finished);
         state.last_observed_at_ms = now_ms();
         state.envelope = Some(envelope.clone());
         state.status = RunStatus::Finished;
         state.last_error = None;
         self.write(&state)?;
+        if !was_already_finished {
+            if let Some(em) = emitter {
+                emit_run_event(
+                    em,
+                    run_id,
+                    RunEventKind::RunFinished,
+                    json!({
+                        "result": envelope.get("result").cloned().unwrap_or(Value::Null),
+                        "last_event_seq": state.last_event_seq,
+                    }),
+                    state.trace_id.as_deref(),
+                    state.scenario_id.as_deref(),
+                );
+            }
+        }
         Ok(state)
     }
 
@@ -290,6 +382,17 @@ impl RunStateStore {
     /// AND we still have a record for it. Returns `None` if no record exists
     /// (in which case the caller should propagate the original error).
     pub fn record_lost(&self, run_id: &str, reason: &str) -> LoomResult<Option<RunState>> {
+        self.record_lost_with_emitter(run_id, reason, None)
+    }
+
+    /// P5.3: same as [`record_lost`] plus a `signalman.run.lost` event
+    /// emitted on the *first* transition into Lost.
+    pub fn record_lost_with_emitter(
+        &self,
+        run_id: &str,
+        reason: &str,
+        emitter: Option<&EventEmitter>,
+    ) -> LoomResult<Option<RunState>> {
         let Some(mut state) = self.load(run_id)? else {
             return Ok(None);
         };
@@ -297,10 +400,23 @@ impl RunStateStore {
             // Already terminal (e.g., Finished). Don't downgrade.
             return Ok(Some(state));
         }
+        let was_already_lost = matches!(state.status, RunStatus::Lost);
         state.last_observed_at_ms = now_ms();
         state.status = RunStatus::Lost;
         state.last_error = Some(reason.to_string());
         self.write(&state)?;
+        if !was_already_lost {
+            if let Some(em) = emitter {
+                emit_run_event(
+                    em,
+                    run_id,
+                    RunEventKind::Lost,
+                    json!({ "reason": reason }),
+                    state.trace_id.as_deref(),
+                    state.scenario_id.as_deref(),
+                );
+            }
+        }
         Ok(Some(state))
     }
 
@@ -716,6 +832,140 @@ mod tests {
             runs_dir.join("backup.tmp.note").exists(),
             "non-pid-suffixed file must NOT match the strict pattern",
         );
+    }
+
+    // ── P5.3 emitter integration ──────────────────────────────────
+
+    use crate::events::mock_emitter;
+
+    #[test]
+    fn record_started_with_emitter_emits_started_event_for_new_records() {
+        let (store, _dir) = store();
+        let (emitter, mock) = mock_emitter();
+        store
+            .record_started_with_emitter(
+                "r1",
+                Some("scn"),
+                Some("trace-abc"),
+                Some(&emitter),
+            )
+            .unwrap();
+        let events = mock.published();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "signalman.run.started");
+        assert_eq!(events[0].run_id, "r1");
+        assert_eq!(
+            events[0].labels.get("signalman-trace-id").map(String::as_str),
+            Some("trace-abc")
+        );
+    }
+
+    #[test]
+    fn record_started_with_emitter_does_not_re_emit_for_existing_records() {
+        // Re-entry on the same run id must not emit a duplicate Started
+        // — Loom subscribers would see the same event twice.
+        let (store, _dir) = store();
+        let (emitter, mock) = mock_emitter();
+        store
+            .record_started_with_emitter("r1", Some("scn"), None, Some(&emitter))
+            .unwrap();
+        store
+            .record_started_with_emitter("r1", Some("scn"), None, Some(&emitter))
+            .unwrap();
+        assert_eq!(mock.len(), 1, "second record_started must not re-emit");
+    }
+
+    #[test]
+    fn record_streaming_with_emitter_emits_streaming_only_on_first_transition() {
+        let (store, _dir) = store();
+        let (emitter, mock) = mock_emitter();
+        store
+            .record_started_with_emitter("r1", None, None, Some(&emitter))
+            .unwrap();
+        // First streaming call: Started → Streaming, must emit.
+        store
+            .record_streaming_with_emitter("r1", Some(1), None, Some(&emitter))
+            .unwrap();
+        // Second streaming call: Streaming → Streaming, must NOT emit.
+        store
+            .record_streaming_with_emitter("r1", Some(2), None, Some(&emitter))
+            .unwrap();
+        assert_eq!(mock.filter_by_kind("signalman.run.streaming").len(), 1);
+    }
+
+    #[test]
+    fn record_finished_with_emitter_emits_finished_with_result_payload() {
+        let (store, _dir) = store();
+        let (emitter, mock) = mock_emitter();
+        store
+            .record_started_with_emitter("r1", Some("scn"), None, Some(&emitter))
+            .unwrap();
+        store
+            .record_finished_with_emitter(
+                "r1",
+                &json!({ "result": "fail" }),
+                Some(&emitter),
+            )
+            .unwrap();
+        let finished = mock.filter_by_kind("signalman.run.finished");
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].payload["result"], "fail");
+    }
+
+    #[test]
+    fn record_finished_with_emitter_does_not_re_emit_on_idempotent_finish() {
+        let (store, _dir) = store();
+        let (emitter, mock) = mock_emitter();
+        store.record_started("r1", None, None).unwrap();
+        store
+            .record_finished_with_emitter("r1", &json!({ "result": "pass" }), Some(&emitter))
+            .unwrap();
+        store
+            .record_finished_with_emitter("r1", &json!({ "result": "pass" }), Some(&emitter))
+            .unwrap();
+        assert_eq!(mock.filter_by_kind("signalman.run.finished").len(), 1);
+    }
+
+    #[test]
+    fn record_lost_with_emitter_emits_lost_with_reason() {
+        let (store, _dir) = store();
+        let (emitter, mock) = mock_emitter();
+        store.record_started("r1", None, None).unwrap();
+        store
+            .record_lost_with_emitter("r1", "ECONNREFUSED", Some(&emitter))
+            .unwrap()
+            .unwrap();
+        let lost = mock.filter_by_kind("signalman.run.lost");
+        assert_eq!(lost.len(), 1);
+        assert_eq!(lost[0].payload["reason"], "ECONNREFUSED");
+    }
+
+    #[test]
+    fn record_lost_with_emitter_does_not_emit_when_already_finished() {
+        // Lost-after-Finished is a no-op (we don't downgrade Finished).
+        // Therefore no Lost event should fire.
+        let (store, _dir) = store();
+        let (emitter, mock) = mock_emitter();
+        store.record_started("r1", None, None).unwrap();
+        store.record_finished("r1", &json!({ "result": "pass" })).unwrap();
+        store
+            .record_lost_with_emitter("r1", "post-hoc", Some(&emitter))
+            .unwrap();
+        assert!(mock.filter_by_kind("signalman.run.lost").is_empty());
+    }
+
+    #[test]
+    fn record_with_no_emitter_is_a_no_op_for_event_emission() {
+        // Backward-compat: the existing record_* methods (which delegate
+        // with emitter=None) must continue to work without surprises.
+        let (store, _dir) = store();
+        store.record_started("r1", None, None).unwrap();
+        store.record_streaming("r1", Some(1), None).unwrap();
+        store
+            .record_finished("r1", &json!({ "result": "pass" }))
+            .unwrap();
+        // No assertions on a sink — the test asserts these calls succeed
+        // with no emitter at all.
     }
 
     #[test]
