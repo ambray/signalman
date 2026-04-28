@@ -186,6 +186,70 @@ pub fn status_output() -> Value {
     })
 }
 
+// ── form_descriptor (P5.4) ────────────────────────────────────────
+
+/// Input schema for `loom.signalman.form_descriptor`. The TUI passes the
+/// scenario id; the plugin returns a [`crate::forms::ScenarioFormDescriptor`].
+pub fn form_descriptor_input() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "scenario": {
+                "type": "string",
+                "description": "Scenario id whose form to describe (e.g. 'example/v2/network-egress')."
+            }
+        },
+        "required": ["scenario"],
+        "additionalProperties": false
+    })
+}
+
+/// Output schema for `loom.signalman.form_descriptor`. Mirrors the
+/// `ScenarioFormDescriptor` Rust type's [`serde::Serialize`] shape.
+/// `additionalProperties: true` so future field/validator kinds can land
+/// without coordinating a Loom-side schema bump.
+pub fn form_descriptor_output() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "id": { "type": "string", "description": "Stable form id, e.g. loom.signalman.run.<scenario>." },
+            "label": { "type": "string" },
+            "description": { "type": "string" },
+            "submit_tool": {
+                "type": "string",
+                "description": "MCP tool the form invokes on submit; always loom.signalman.run."
+            },
+            "fields": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "label": { "type": "string" },
+                        "help": { "type": "string" },
+                        "kind": {
+                            "type": "object",
+                            "description":
+                                "Tagged union: { kind: 'text' } | { kind: 'select', options: [...] } | { kind: 'number', min?, max? } | { kind: 'boolean' } | { kind: 'secret' }.",
+                            "additionalProperties": true
+                        },
+                        "required": { "type": "boolean" },
+                        "default": {},
+                        "validators": {
+                            "type": "array",
+                            "items": { "type": "object", "additionalProperties": true }
+                        }
+                    },
+                    "required": ["name", "label", "kind", "required"],
+                    "additionalProperties": true
+                }
+            }
+        },
+        "required": ["id", "label", "description", "submit_tool", "fields"],
+        "additionalProperties": true
+    })
+}
+
 // ── record ────────────────────────────────────────────────────────
 
 pub fn record_input() -> Value {
@@ -232,6 +296,7 @@ mod tests {
             run_input(),
             status_input(),
             record_input(),
+            form_descriptor_input(),
         ] {
             schema_is_object(&schema);
             assert_eq!(
@@ -252,9 +317,32 @@ mod tests {
             run_output(),
             status_output(),
             record_output(),
+            form_descriptor_output(),
         ] {
             schema_is_object(&schema);
         }
+    }
+
+    #[test]
+    fn form_descriptor_input_requires_scenario_field() {
+        let s = form_descriptor_input();
+        let req: Vec<&str> = s
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        assert_eq!(req, vec!["scenario"]);
+    }
+
+    #[test]
+    fn form_descriptor_output_is_permissive_for_forward_compat() {
+        // Future field kinds (e.g. multi-select, file picker) must not
+        // require a coordinated Loom schema bump.
+        let s = form_descriptor_output();
+        assert_eq!(
+            s.get("additionalProperties").and_then(Value::as_bool),
+            Some(true),
+        );
     }
 
     #[test]
