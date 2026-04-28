@@ -497,9 +497,37 @@ agent → Loom MCP → Loom plugin → Signalman CLI/MCP → VM.
 
 - **Effort**: M (4-7 days)
 
-### P6: Packaging + Docs — RE-SCOPED 2026-04-25
+### P6: Packaging + Docs — SCAFFOLDING LANDED 2026-04-28
 **Estimated Duration**: 5-7 days (was 3-4d; +2d for README scrub and
 test-strategy doc)
+
+**P6 SCAFFOLDING (LANDED 2026-04-28):** The release pipeline is wired
+end-to-end and tested via local dry-run. Tag-triggered build + sign
++ publish:
+- ✅ `.github/workflows/release.yaml` — tag (`v*.*.*`) or
+  `workflow_dispatch` trigger. Three independent jobs (service-msi,
+  host-npm, guest-crate) feed a `github-release` aggregator that
+  attaches every artifact to a GitHub Release. Each job verifies the
+  manifest version matches the tag before building.
+- ✅ MSI signing via `signtool` gated on `WINDOWS_CERT_BASE64` +
+  `WINDOWS_CERT_PASSWORD` secrets (cert decoded into RUNNER_TEMP,
+  shredded after sign, never written under workspace).
+- ✅ npm publish via `NPM_TOKEN` (Automation type), with
+  `npm pack` artifact uploaded for manual fallback when secret unset.
+- ✅ `cargo publish --dry-run` always runs as a release gate; real
+  publish gated on `CARGO_REGISTRY_TOKEN`.
+- ✅ `scripts/release-dry-run.ps1` — local pre-flight that
+  reproduces every build + packaging step except the publish ones.
+  Run before tagging to catch version skew / WiX template / packaging
+  errors without a CI round-trip.
+- ✅ README quickstart updated: removes "in progress" P5 caveat,
+  adds MSI install path, adds Release process section pointing at the
+  workflow + dry-run script.
+
+**Operator setup remaining (release day):** configure the four repo
+secrets (`WINDOWS_CERT_BASE64` + password, `NPM_TOKEN`,
+`CARGO_REGISTRY_TOKEN`), then `git tag v0.1.0 && git push origin
+v0.1.0`. The workflow handles the rest.
 
 **Originally listed:**
 - Signed MSI for the service (P1 dep).
