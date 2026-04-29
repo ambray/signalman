@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Signalman guest agent MSI definition (P9.1).
+
+  Builds an installer that:
+    1. Drops `signalman-guest.exe` into `%ProgramFiles%\Signalman\guest\`.
+    2. Registers a Windows service named "SignalmanGuest" — auto-start,
+       LocalSystem, ImagePath wired to read TLS material + bearer token
+       from `%ProgramData%\Signalman\guest\config.json` (the host
+       provisioner lands this file BEFORE invoking the MSI; see
+       host/src/provisioning/provision.ts).
+    3. Opens INBOUND firewall rule for TCP 50051 (loopback by default;
+       MSI property BIND_ADDR overrides the bind address).
+    4. On uninstall: removes the service + firewall rule + program
+       files, but LEAVES `%ProgramData%\Signalman\certs\` in place
+       in case other tooling depends on it.
+
+  Cert/key/CA paths (from the host provisioner's config landing):
+    %ProgramData%\Signalman\certs\ca.pem
+    %ProgramData%\Signalman\certs\server.pem
+    %ProgramData%\Signalman\certs\server.key
+
+  Auth token + bind address come from environment variables baked
+  into the service registration via SC's `binPath` argument string.
+
+  To build (from guest crate root):
+
+    cargo wix init   # one-time
+    cargo wix --package signalman-guest
+
+  -or- raw WiX:
+
+    candle -arch x64 product.wxs
+    light -ext WixUtilExtension -ext WixFirewallExtension product.wixobj \
+          -o signalman-guest.msi
+
+  v0.1.1 ships dev-signed only. Code signing is a separate pickup.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension"
+     xmlns:fire="http://schemas.microsoft.com/wix/FirewallExtension">
+  <Product Id="*"
+           Name="Signalman Guest Agent"
+           Language="1033"
+           Version="0.1.1.0"
+           Manufacturer="Signalman"
+           UpgradeCode="9b1d2c8e-3e4a-4f7c-9b1a-7d2e6c4a8b9f">
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Description="Signalman Guest Agent — gRPC service for VM control plane"
+             Manufacturer="Signalman" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Signalman Guest Agent is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Properties exposed for the host provisioner to override at
+         install time via `msiexec /i signalman-guest.msi BIND_ADDR=...
+         AUTH_TOKEN=...`. The host provisioner injects these. -->
+    <Property Id="BIND_ADDR" Value="127.0.0.1:50051" />
+    <Property Id="AUTH_TOKEN" Secure="yes" />
+    <Property Id="CONFIG_DIR" Value="[CommonAppDataFolder]Signalman\guest\" />
+    <Property Id="CERTS_DIR" Value="[CommonAppDataFolder]Signalman\certs\" />
+
+    <Feature Id="ProductFeature" Title="Signalman Guest Agent" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+      <ComponentGroupRef Id="ConfigComponents" />
+    </Feature>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Signalman">
+          <Directory Id="GuestFolder" Name="guest" />
+        </Directory>
+      </Directory>
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="SignalmanDataDir" Name="Signalman">
+          <Directory Id="GuestDataDir" Name="guest" />
+          <!-- Certs dir is intentionally NOT created by the MSI — the
+               host provisioner lands certs there before the MSI runs.
+               The MSI only references the path. -->
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <ComponentGroup Id="ProductComponents" Directory="GuestFolder">
+      <Component Id="GuestBinary" Guid="2c8d4e6f-1a3b-5d7e-9f2c-4b6a8d0e3c5f">
+        <File Id="SignalmanGuestExe"
+              Source="$(var.BinDir)\signalman-guest.exe"
+              KeyPath="yes" />
+
+        <!-- Service registration. Service argv reads TLS paths from
+             %ProgramData%\Signalman\certs\ — the host provisioner's
+             responsibility to land them before the MSI runs.
+             AUTH_TOKEN comes through as an env var so it doesn't
+             show up in the SCM ImagePath (still in the registry but
+             one less surface).
+
+             Bind address defaults to loopback; an override via
+             BIND_ADDR (set on the msiexec command line) lets the
+             host provisioner widen it for VM-to-host gRPC. -->
+        <ServiceInstall Id="SignalmanGuestService"
+                        Name="SignalmanGuest"
+                        DisplayName="Signalman Guest Agent"
+                        Description="gRPC control plane for Signalman scenario runs"
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Account="LocalSystem"
+                        Vital="yes"
+                        Arguments="--bind &quot;[BIND_ADDR]&quot; --tls-cert &quot;[CERTS_DIR]server.pem&quot; --tls-key &quot;[CERTS_DIR]server.key&quot; --tls-ca &quot;[CERTS_DIR]ca.pem&quot;">
+          <util:ServiceConfig FirstFailureActionType="restart"
+                              SecondFailureActionType="restart"
+                              ThirdFailureActionType="none"
+                              RestartServiceDelayInSeconds="10" />
+        </ServiceInstall>
+
+        <ServiceControl Id="StartSignalmanGuest"
+                        Name="SignalmanGuest"
+                        Start="install"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+
+        <!-- Bearer token lives in registry as an environment variable
+             on the service so it doesn't end up in the SCM ImagePath.
+             SignalmanGuest reads SIGNALMAN_AUTH_TOKEN at startup
+             (see guest/src/main.rs Cli::token #[arg(env = ...)]). -->
+        <RegistryKey Root="HKLM"
+                     Key="SYSTEM\CurrentControlSet\Services\SignalmanGuest"
+                     ForceCreateOnInstall="no">
+          <RegistryValue Type="multiString"
+                         Name="Environment"
+                         Value="SIGNALMAN_AUTH_TOKEN=[AUTH_TOKEN]" />
+        </RegistryKey>
+
+        <!-- Inbound firewall rule for the gRPC port. The bind address
+             property may have a non-loopback IP/port; the rule opens
+             the TCP port. Removed on uninstall. -->
+        <fire:FirewallException Id="SignalmanGuestPort"
+                                Name="Signalman Guest Agent (gRPC)"
+                                Port="50051"
+                                Protocol="tcp"
+                                Profile="all"
+                                Scope="any"
+                                IgnoreFailure="no" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="ConfigComponents" Directory="GuestDataDir">
+      <!-- Empty config dir; certs land at CERTS_DIR via the host
+           provisioner before this MSI runs. We create the guest config
+           dir so future config-file features have a known path. -->
+      <Component Id="GuestDataDirComponent" Guid="f1a2b3c4-d5e6-7f80-9a1b-2c3d4e5f6071">
+        <CreateFolder />
+        <RemoveFolder Id="RemoveGuestDataDir" On="uninstall" />
+        <RegistryValue Root="HKLM"
+                       Key="Software\Signalman\Guest"
+                       Name="DataDirCreated"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Product>
+</Wix>

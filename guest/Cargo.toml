@@ -71,3 +71,27 @@ tokio-stream = { version = "0.1", features = ["net"] }
 [features]
 default = ["screenshot"]
 screenshot = ["image"]
+
+# ── cargo-wix configuration (P9.1) ─────────────────────────────────
+#
+# Tells `cargo wix` where to find the hand-rolled product.wxs file
+# rather than generating one. Run from the workspace root:
+#
+#   cargo wix --package signalman-guest
+#
+# Output lands at `target/wix/signalman-guest-<version>-<arch>.msi`.
+# The host provisioner discovers it via the chain documented in
+# `host/src/provisioning/guest-msi-discovery.ts`.
+[package.metadata.wix]
+# Path is relative to this Cargo.toml.
+path = "wix/product.wxs"
+# Compression: high gives a smaller MSI at the cost of build time.
+# Acceptable here — guest agent builds aren't on the hot path.
+compression-level = "high"
+# Include the WiX UtilExtension (used by ServiceConfig) and the
+# FirewallExtension (inbound port-50051 rule). cargo-wix maps these
+# to candle/light's `-ext` flags.
+include = [
+    "WixUtilExtension",
+    "WixFirewallExtension",
+]
