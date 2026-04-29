@@ -682,6 +682,194 @@ One-shot opportunity. Parallelizes with P3/P4/P6/P7.
 
 ---
 
+## v0.1.1 Roadmap (Provisioning + Bootstrap) — NEW 2026-04-28
+
+**Why a separate minor**: v0.1.0 ships the secure scenario runner +
+Loom-fronted MCP surface; that's a coherent "you can use this if you
+already have a guest-installed VM checkpoint" product. v0.1.1 closes
+the onboarding gap — fresh Windows host → first scenario run without
+hand-rolled cert generation, manual VM creation, or copy-pasted guest
+install steps. Treating this as v0.1.1 (a) keeps v0.1.0 shippable
+NOW and (b) lets P9 land iteratively against real operator feedback.
+
+### Audit cadence (locked 2026-04-28)
+Every P9.x deliverable runs a **6-lens audit** at delivery milestone
+(not per-commit) before the merge commit lands:
+- **PM** — roadmap fit, scope creep check, "is this minimum shippable"
+- **QA** — test coverage, edge cases, regression risk
+- **Arch** — design consistency, contract stability, future flexibility
+- **Sec** — threat model, attack surface, secret handling
+- **DX** — contributor onboarding, code clarity, doc-as-code
+- **Ops** — CLI ergonomics for HUMANS *and* MCP-schema clarity for
+  LLM agents (deterministic outputs, recoverable errors,
+  no-foot-gun defaults)
+
+### P9: Provisioning + Bootstrap
+
+**Symmetry rule** (locked): every new provisioning capability lands as
+**both** a CLI verb and an MCP tool with identical input shape. Agents
+and CI invoke the same surface.
+
+**Versioning rule** (locked): provisioning verbs are *destructive* but
+ship in the *default* MCP namespace (not `signalman.advanced.*`). Tool
+descriptions explicitly say "creates / destroys VM state" so LLM
+clients can apply their own confirmation gates.
+
+**P9.1 — Windows guest-agent MSI + `signalman vm provision`**
+- New `guest/wix/product.wxs` builds `signalman-guest.msi`. The MSI:
+  - Drops `signalman-guest.exe` into `%ProgramFiles%\Signalman\guest\`.
+  - Registers a Windows service (auto-start, runs as LocalSystem).
+  - Opens an inbound firewall rule for port 50051 (loopback by default;
+    operator-overridable via MSI property).
+  - Reads CA + server cert from `%ProgramData%\Signalman\certs\` (host
+    is responsible for landing them inside the VM before the MSI runs).
+- New CLI verb: `signalman vm provision <name> [--template T]
+  [--guest-msi PATH] [--checkpoint LABEL] [--force]`. Pipeline:
+  1. Resolve template (P9.5 may have downloaded the VHDX).
+  2. Create VM (idempotent: skip if exists with matching template).
+  3. Boot, wait for IP.
+  4. Generate dev certs into a tempdir, copy into VM via Hyper-V
+     `Copy-VMFile`.
+  5. Discover guest MSI: `--guest-msi` arg → `dist/guest/*.msi` in the
+     installed host package → fetch from GitHub Releases matching
+     `signalman --version`. Hard-fail on miss with explicit
+     remediation.
+  6. Copy MSI into VM, run silent install, wait for service health.
+  7. Take a checkpoint (default label `agent-installed`).
+- New MCP tool `vm_provision` — same input shape as the CLI.
+- **Cert model (locked, Q2(c))**: one-CA-many-VMs for v0.1.x. All
+  provisioned guests get the same server cert. v0.2.0 promotes to
+  per-VM identity certs (consumes the B2 pin registry).
+- **Failure recovery**: leave the VM around on failure (operator
+  inspects), explicit `signalman vm cleanup <name>` to remove. No
+  silent rollback. `--cleanup-on-failure` opt-in flag.
+- **Idempotency**: re-running with no changes is a 2-second no-op.
+  `--force` rebuilds from scratch (cleanup + provision).
+
+**P9.2 — Software bundle manifest + `signalman vm install-bundle`**
+- New schema: `bundle.yaml` with declarative `packages:` list.
+- New CLI verb: `signalman vm install-bundle <vm> <bundle.yaml>`.
+- New MCP tool `vm_install_bundle`.
+- New scenario YAML key: `software:` references a bundle filename so
+  scenarios can compose package sets.
+
+**Tier 1 sources (v0.1.1, must-have):**
+| source | shape | notes |
+|---|---|---|
+| `winget` | `{ id, source: winget, version?, verify? }` | already exists |
+| `choco` | `{ id, source: choco, version?, verify? }` | already exists |
+| `msstore` | `{ id, source: msstore, version?, verify? }` | one-line addition (winget --source msstore) |
+| `direct` | `{ id, source: direct, url, sha256, args, verify }` | **most security-sensitive** |
+| `docker` | `{ id, source: docker, image, image_sha256, ports, env, restart_policy, verify }` | requires Docker on the VM (operator orders the prereq) |
+
+**Tier 2 sources (v0.1.2):** `scoop`, `github_release`, `git_repo`
+(with `ref:` for branch/tag/SHA, optional `submodules:`/`sparse:`),
+`powershell` (Install-Module), `npm`, `pip`, `cargo`, `custom_script`.
+
+**Tier 3 (later, multi-platform):** `brew`, `mas`, `apt`, `dnf`,
+`flatpak`, `snap`.
+
+**`direct` security gates (locked)**:
+- SHA-256 REQUIRED — refuse to download without it.
+- HTTPS-only.
+- Allowlist installer extensions: `.msi`, `.exe`, `.msix`, `.appx`.
+  Operators wanting `.bat`/`.ps1` use Tier-2 `custom_script` with its
+  own threat model.
+
+**`docker` security gates (locked)**:
+- `image_sha256` REQUIRED (image digest pin, not the tag).
+- Image pulls go through the VM's docker daemon (not the host's).
+- Container `restart_policy` defaults to `unless-stopped`.
+
+**Ordering (locked, Q10(a))**: bundle author orders manually,
+`source: docker` entries must come AFTER the Docker install entry
+(typically `Docker.DockerDesktop` from winget). Future `requires:`
+DAG resolver: see P9.7.
+
+**Optional `parallel:` group flag** for known-independent installs:
+```yaml
+packages:
+  - { id: Git.Git, source: winget }      # serial — others may depend
+  - parallel:
+    - { id: Microsoft.VisualStudioCode, source: winget }
+    - { id: 7zip.7zip, source: winget }
+    - { id: Mailhog, source: docker, image: "mailhog/mailhog@sha256:..." }
+```
+
+**Idempotency**: rely on the underlying package manager. `winget
+install` returns "already installed" cleanly; `docker run` errors
+"container already exists" which the orchestrator catches and treats
+as success. No host-side install ledger (avoids drift).
+
+**P9.3 — `signalman init` + `signalman vm create`**
+- `signalman init` (locked, Q5(c)): minimal scaffold. Creates
+  `.signalman/{config.yaml,scenarios/,templates/}` plus an empty
+  sample scenario. Runs in <1 second.
+- `signalman init --bootstrap` (opt-in): full interactive flow —
+  generate dev certs, prompt for template, download base image
+  (P9.5), provision a VM. May take 30+ minutes; deliberately
+  separated so re-running `init` is always safe.
+- `signalman vm create <name> [--template T]`: explicit VM creation
+  outside the provisioning pipeline (no agent install, no checkpoint).
+  For users who want the create step but their own bootstrap.
+
+**P9.4 — Idempotent "ensure provisioned" semantics**
+- Cross-cutting: every provisioning verb gets `--force` + idempotent
+  re-run. Already specified in P9.1; this P9.4 entry is the
+  cross-cutting test pass: write integration tests that re-run each
+  verb 3x and verify the second + third runs no-op.
+- New scenario field: `provision_if_missing: true` on the `vms:`
+  block. When set, `signalman run` provisions the VM transparently
+  before the scenario starts.
+
+**P9.5 — Template registry + base-image fetch**
+- New template fields:
+  ```yaml
+  base_image_path: "D:/images/win11.vhdx"  # BYO
+  # OR
+  base_image_url: "https://aka.ms/.../win11-eval.vhdx"
+  base_image_sha256: "REQUIRED for URL form"
+  ```
+- New CLI verb: `signalman vm fetch-template <name>` — downloads to
+  `%LOCALAPPDATA%\Signalman\templates\<name>\<sha>.vhdx`, verifies
+  SHA-256, atomic rename on success.
+- HTTPS-only for `base_image_url`.
+- v0.1.1 ships **with** a curated default-templates section pointing
+  at Microsoft Eval VHDX URLs (90-day eval license, legally
+  distributable). Custom templates use the BYO path.
+- **Out of scope for v0.1.1**: ISO-to-VHDX conversion. Operators
+  provide pre-built VHDX (downloaded or `Convert-WindowsImage.ps1`).
+  v0.2.0 may add an ISO build step.
+
+**P9.6 — Bootstrap docs**
+- `docs/bootstrap.md` — end-to-end "fresh Windows host → first
+  scenario run" walkthrough. Covers: install host npm package, run
+  `signalman init --bootstrap`, fetch a template, provision a VM,
+  run the sample scenario, verify pass.
+- Updates to `docs/testing.md` so the gated E2E lane (P7 D4) can use
+  the bootstrap flow when self-hosted Hyper-V runners come online.
+- README "Quick Start" gets a one-line addition pointing at the
+  bootstrap doc.
+
+**P9.7 — DAG-resolved bundle dependencies (deferred to v0.1.2)**
+- Q10(a) gives v0.1.1 manual ordering. Once real bundles surface
+  ergonomic complaints, add a declarative `requires:` field with
+  topological sort:
+  ```yaml
+  - id: Mailhog
+    source: docker
+    image: mailhog/mailhog@sha256:...
+    requires: ["Docker.DockerDesktop"]
+  ```
+- Roughly 1-2 days of work; gated on actual bundle complexity.
+
+**Effort estimate**: 5-8 days for P9.1–P9.6.
+**Parallelizable**: P9.1, P9.2, P9.5 are disjoint after P9.5's
+`templates.ts` API contract is locked. P9.3 + P9.6 are main-session
+material.
+
+---
+
 ## v0.2.0 Roadmap
 
 These are the primitives that make "agent-first DevOps" actually new.
