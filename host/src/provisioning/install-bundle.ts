@@ -13,8 +13,8 @@
  * Tier 1 dispatch summary:
  *   - winget / choco / msstore  → `client.installSoftware(id, source, version, timeoutMs)`
  *                                 (existing RPC; source string passes through)
- *   - direct                   → `client.installDirect(...)` — TODO proto
- *   - docker                   → `client.installDocker(...)` — TODO proto
+ *   - direct                   → `client.installDirect(...)` (P9.2 RPC)
+ *   - docker                   → `client.installDocker(...)` (P9.2 RPC)
  *
  * Per the locked design decisions, this file does NOT touch
  * `proto/guest.proto`. Where a new RPC is needed, the call site has a
@@ -57,64 +57,14 @@ export interface InstallBundleResult {
 }
 
 /**
- * Extension of {@link GuestAgentClient} carrying the two new install
- * methods this file dispatches to. We declare the optional methods here
- * rather than on the client class itself to keep the new code self-
- * contained until the proto extension lands. The dispatcher feature-
- * detects each method and surfaces a clear error if the client doesn't
- * support it yet.
+ * Bundle-capable client. As of P9.2 (proto extension landed,
+ * commit following e1be740), the methods this dispatcher needs all
+ * live on `GuestAgentClient` directly — no feature-detection
+ * needed. The alias is preserved so downstream callers that already
+ * type their guest-client variable as `BundleCapableClient` keep
+ * compiling.
  */
-export interface BundleCapableClient extends GuestAgentClient {
-  /**
-   * TODO(P9.2): proto extension needed.
-   *
-   * Expected RPC shape (host side):
-   *   installDirect({
-   *     url: string;        // https-only, validated host-side
-   *     sha256: string;     // 64 hex chars
-   *     args?: string[];    // silent-install args
-   *     install_dir?: string;
-   *   }) → InstallResult
-   *
-   * The guest agent does the download, sha256 check, and spawn.
-   */
-  installDirect?(args: {
-    url: string;
-    sha256: string;
-    args?: string[];
-    install_dir?: string;
-    timeoutMs?: number;
-  }): Promise<InstallResult>;
-
-  /**
-   * TODO(P9.2): proto extension needed.
-   *
-   * Expected RPC shape (host side):
-   *   installDocker({
-   *     image: string;
-   *     image_sha256: string;        // digest pin
-   *     container_name?: string;
-   *     ports?: string[];
-   *     env?: Record<string, string>;
-   *     restart_policy?: "no" | "always" | "unless-stopped" | "on-failure";
-   *     command?: string[];
-   *   }) → InstallResult
-   *
-   * The guest agent runs `docker pull <image>@<digest>` then
-   * `docker run --restart=...` and treats "container already exists"
-   * as success (idempotency).
-   */
-  installDocker?(args: {
-    image: string;
-    image_sha256: string;
-    container_name?: string;
-    ports?: string[];
-    env?: Record<string, string>;
-    restart_policy?: "no" | "always" | "unless-stopped" | "on-failure";
-    command?: string[];
-    timeoutMs?: number;
-  }): Promise<InstallResult>;
-}
+export type BundleCapableClient = GuestAgentClient;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -252,27 +202,28 @@ async function dispatchInstall(
     }
 
     case "direct": {
-      // TODO(P9.2): proto extension needed. Method is feature-detected
-      // until the Rust handler lands; surface a clear error otherwise.
-      if (typeof client.installDirect !== "function") {
-        throw new Error(
-          `client does not support 'direct' source (installDirect RPC pending — see TODO in install-bundle.ts)`,
-        );
-      }
+      // P9.2 proto bump landed: installDirect is now first-class on
+      // GuestAgentClient. Guest agent does the HTTPS download +
+      // SHA-256 verify + spawn; we just translate field naming
+      // conventions (Zod schema uses snake_case for YAML readability,
+      // client method takes camelCase to match the rest of the TS API).
       let result: InstallResult;
       try {
         result = await client.installDirect({
+          id: pkg.id,
           url: pkg.url,
           sha256: pkg.sha256,
           args: pkg.args,
-          install_dir: pkg.install_dir,
+          installDir: pkg.install_dir,
           timeoutMs: DEFAULT_INSTALL_TIMEOUT_MS,
         });
       } catch (err) {
         if (errorIndicatesAlreadyExists(err)) return { status: "skipped" };
         throw err;
       }
-      if (isAlreadyInstalled(result)) return { status: "skipped", result };
+      if (result.alreadyInstalled || isAlreadyInstalled(result)) {
+        return { status: "skipped", result };
+      }
       if (!result.success && result.exitCode !== 0) {
         throw new Error(
           `direct install failed (exit ${result.exitCode}): ${
@@ -284,22 +235,17 @@ async function dispatchInstall(
     }
 
     case "docker": {
-      // TODO(P9.2): proto extension needed. Same feature-detect pattern.
-      if (typeof client.installDocker !== "function") {
-        throw new Error(
-          `client does not support 'docker' source (installDocker RPC pending — see TODO in install-bundle.ts)`,
-        );
-      }
       const restartPolicy = pkg.restart_policy ?? "unless-stopped";
       let result: InstallResult;
       try {
         result = await client.installDocker({
+          id: pkg.id,
           image: pkg.image,
-          image_sha256: pkg.image_sha256,
-          container_name: pkg.container_name,
+          imageSha256: pkg.image_sha256,
+          containerName: pkg.container_name,
           ports: pkg.ports,
           env: pkg.env,
-          restart_policy: restartPolicy,
+          restartPolicy,
           command: pkg.command,
           timeoutMs: DEFAULT_INSTALL_TIMEOUT_MS,
         });
@@ -307,7 +253,9 @@ async function dispatchInstall(
         if (errorIndicatesAlreadyExists(err)) return { status: "skipped" };
         throw err;
       }
-      if (isAlreadyInstalled(result)) return { status: "skipped", result };
+      if (result.alreadyInstalled || isAlreadyInstalled(result)) {
+        return { status: "skipped", result };
+      }
       if (!result.success && result.exitCode !== 0) {
         throw new Error(
           `docker install failed (exit ${result.exitCode}): ${
