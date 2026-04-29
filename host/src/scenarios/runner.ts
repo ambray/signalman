@@ -48,11 +48,26 @@ import {
  */
 export type SandboxMode = "none" | "legacy" | "appcontainer" | "silo";
 
+/**
+ * Bundle reference inside a scenario's `software:` list. Either a bare
+ * path string or an object identifying the path + target VM. Resolved by
+ * the orchestrator before `setup:` runs (P9.2).
+ */
+export type BundleRef =
+  | string
+  | { path: string; vm?: string };
+
 export interface ScenarioConfig {
   name: string;
   version: string;
   tags: string[];
   vms: VmConfig[];
+  /**
+   * P9.2 — list of bundle paths applied before `setup:` runs. Each
+   * bundle is parsed via {@link parseBundle} and dispatched against
+   * its target VM (explicit `vm:` field, or the lone scenario VM).
+   */
+  software?: BundleRef[];
   setup: SetupStep[];
   teardown: SetupStep[];
   checkpoints: CheckpointConfig;

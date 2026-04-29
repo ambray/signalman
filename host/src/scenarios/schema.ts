@@ -223,6 +223,31 @@ export const scenarioConfigSchema = z
     version: z.string().min(1, "scenario version is required"),
     tags: z.array(z.string()).default([]),
     vms: z.array(vmConfigSchema).min(1, "scenario must define at least one VM"),
+    /**
+     * P9.2 — list of bundle paths to apply BEFORE `setup:` runs. Each
+     * entry is a path to a `bundle.yaml` (relative to the scenario dir
+     * or absolute). The orchestrator reads + parses each bundle and
+     * dispatches `installBundle` against the bundle's target VM
+     * (taken from the `vm` field of the entry, or the lone scenario
+     * VM when there's exactly one).
+     *
+     * Bundles are applied in array order; multi-VM scenarios disambiguate
+     * via `{ path: "...", vm: "endpoint-1" }` entries. A bare string is
+     * sugar for `{ path: <string> }`.
+     */
+    software: z
+      .array(
+        z.union([
+          z.string(),
+          z
+            .object({
+              path: z.string(),
+              vm: z.string().optional(),
+            })
+            .passthrough(),
+        ]),
+      )
+      .optional(),
     setup: z.array(setupStepSchema).default([]),
     teardown: z.array(setupStepSchema).default([]),
     checkpoints: checkpointConfigSchema.default({}),

@@ -1,0 +1,40 @@
+# Curated downloadable template — Windows 11 Enterprise 90-day evaluation.
+#
+# This is the canonical example of the URL form added in v0.1.1 (P9.5).
+# Operators can run `signalman vm fetch-template windows-11-eval` to
+# pre-warm the cache, or let the orchestrator pull it lazily on first
+# scenario run via resolveTemplateAsync().
+#
+# Locked design (see host/src/scenarios/templates.ts):
+#   - HTTPS-only — http:// URLs are rejected at validation time.
+#   - SHA-256 is REQUIRED — fetches without it hard-fail.
+#   - Atomic rename — partial downloads never expose the final filename.
+#   - ISO-to-VHDX conversion is OUT of scope. The URL must point at a
+#     pre-built VHDX; operators wanting an ISO-driven flow can build
+#     their VHDX once and reference it via base_image_path on a custom
+#     template.
+#
+# License note: Microsoft's Windows Enterprise evaluation grants a
+# 90-day eval license for redistribution; making this the default
+# downloadable template is legally clean for the project.
+
+name: windows-11-eval
+generation: 2
+memoryMB: 4096
+processorCount: 2
+networkSwitch: "Default Switch"
+checkpoints:
+  clean: "Windows 11 Enterprise 90-day evaluation, freshly installed"
+
+# TODO: real Microsoft eval URL — Microsoft currently distributes
+# Windows 11 Enterprise eval as an ISO via the eval portal; the
+# canonical pre-built VHDX needs to be hosted (project mirror or
+# Microsoft-blessed source) before this template is usable. Leaving
+# the placeholder so the registry surface and validation are testable
+# end-to-end in v0.1.1 — main session swaps in the real URL + SHA
+# during release prep.
+base_image_url: "https://example.com/eval/win11-eval.vhdx"
+
+# TODO: real SHA-256 — recompute from the verified eval VHDX once
+# the URL above is finalised. Must be 64 lowercase hex chars.
+base_image_sha256: "0000000000000000000000000000000000000000000000000000000000000000"

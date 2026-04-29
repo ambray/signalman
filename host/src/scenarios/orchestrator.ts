@@ -653,6 +653,24 @@ export class ScenarioOrchestrator {
       // Wait for guest agents
       await this.waitForGuestAgents(vmMap, vmDefs);
 
+      // P9.2 — apply `software:` bundles BEFORE `setup:` runs so
+      // setup steps can rely on the installed packages. Each bundle
+      // is applied to its declared `vm:` (or the lone scenario VM
+      // when there's exactly one). Failures are surfaced as
+      // setupResults entries with status="failed" so scenarios that
+      // depend on the bundle are observable in the envelope.
+      if (scenarioConfig.software && scenarioConfig.software.length > 0) {
+        const softwareResults = await this.applyScenarioSoftware(
+          scenarioConfig.software,
+          vmMap,
+          path.dirname(scenarioPath),
+        );
+        setupResults.push(...softwareResults);
+        if (softwareResults.some((r) => r.status === "failed")) {
+          status = "failed";
+        }
+      }
+
       // Execute setup. The scenario-level retry policy (if declared)
       // applies as a default to every step; per-step `retry:` overrides it.
       const setupSteps = scenarioConfig.setup ?? [];
@@ -1009,10 +1027,134 @@ export class ScenarioOrchestrator {
   }
 
   /**
+   * P9.2 — Read + parse a bundle.yaml from disk and apply it to a VM.
+   *
+   * Used by both the `install_bundle` setup-action and the top-level
+   * `software:` key. The path is resolved relative to the caller's
+   * `cwd` if not absolute (CLI path) and relative to the scenario
+   * directory by `applyScenarioSoftware`.
+   */
+  private async applyBundleByPath(
+    client: GuestAgentClient,
+    vmName: string,
+    bundlePath: string,
+  ): Promise<import("../provisioning/install-bundle.js").InstallBundleResult> {
+    const fs = await import("node:fs");
+    const yamlMod = await import("yaml");
+    const { parseBundle } = await import("../provisioning/bundle-types.js");
+    const { installBundle } = await import(
+      "../provisioning/install-bundle.js"
+    );
+    if (!fs.existsSync(bundlePath)) {
+      throw new Error(`bundle file not found: ${bundlePath}`);
+    }
+    const text = fs.readFileSync(bundlePath, "utf-8");
+    const bundle = parseBundle(yamlMod.parse(text));
+    return installBundle(this.backend, client, vmName, bundle);
+  }
+
+  /**
+   * P9.2 — Apply every entry in a scenario's `software:` list. Returns
+   * a `StepResult[]` shaped like a setup pass so the caller can fold
+   * the entries into `setupResults` directly. Each entry produces ONE
+   * step result whose action is "install_bundle" — the per-package
+   * detail lives in the orchestrator's structured logs (the bundle
+   * machinery returns a richer `InstallBundleResult` but the scenario-
+   * level surface is binary success/fail).
+   */
+  private async applyScenarioSoftware(
+    refs: import("./runner.js").BundleRef[],
+    vmMap: Map<string, VMHandle>,
+    scenarioDir: string,
+  ): Promise<StepResult[]> {
+    const results: StepResult[] = [];
+    for (const refRaw of refs) {
+      const ref =
+        typeof refRaw === "string" ? { path: refRaw } : refRaw;
+      const startedAt = Date.now();
+
+      // Resolve target VM. With one scenario VM the `vm:` field is
+      // optional; with multiple, omitting it is an error.
+      let vmName = ref.vm ?? "";
+      if (!vmName) {
+        if (vmMap.size === 1) {
+          vmName = vmMap.keys().next().value as string;
+        } else {
+          results.push({
+            action: "install_bundle",
+            vm: "",
+            status: "failed",
+            duration_ms: Date.now() - startedAt,
+            error: `software entry '${ref.path}' must specify 'vm:' when scenario has multiple VMs`,
+          });
+          continue;
+        }
+      }
+      const handle = vmMap.get(vmName);
+      if (!handle) {
+        results.push({
+          action: "install_bundle",
+          vm: vmName,
+          status: "failed",
+          duration_ms: Date.now() - startedAt,
+          error: `VM '${vmName}' not found in resolved VMs`,
+        });
+        continue;
+      }
+      const client = this.guestClients.get(vmName);
+      if (!client) {
+        results.push({
+          action: "install_bundle",
+          vm: vmName,
+          status: "failed",
+          duration_ms: Date.now() - startedAt,
+          error: `No guest client for VM '${vmName}'`,
+        });
+        continue;
+      }
+
+      // Resolve bundle path relative to the scenario dir if relative.
+      const resolvedPath = path.isAbsolute(ref.path)
+        ? ref.path
+        : path.join(scenarioDir, ref.path);
+
+      try {
+        const bundleResult = await this.applyBundleByPath(
+          client,
+          vmName,
+          resolvedPath,
+        );
+        const failed = bundleResult.failed;
+        results.push({
+          action: "install_bundle",
+          vm: vmName,
+          status: failed > 0 ? "failed" : "success",
+          duration_ms: Date.now() - startedAt,
+          ...(failed > 0
+            ? {
+                error: `${failed}/${bundleResult.totalPackages} packages failed`,
+              }
+            : {}),
+        });
+      } catch (err) {
+        results.push({
+          action: "install_bundle",
+          vm: vmName,
+          status: "failed",
+          duration_ms: Date.now() - startedAt,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return results;
+  }
+
+  /**
    * Execute setup steps sequentially.
    *
    * Supported actions:
    * - vm_install: Install software via guest agent
+   * - install_bundle: Apply a software bundle (P9.2)
    * - vm_copy_file: Copy a file host->guest or guest->host
    * - vm_run_command: Run a command inside the VM
    * - vm_restore: Restore a VM checkpoint
@@ -1196,6 +1338,37 @@ export class ScenarioOrchestrator {
               step.version as string | undefined,
               step.timeout_ms as number | undefined,
             );
+            break;
+          }
+
+          // P9.2 — `install_bundle` action. Lets a scenario's `setup:`
+          // pull in a software bundle in one declarative step. The
+          // top-level `software:` key (applied before `setup:` runs)
+          // and this action dispatch share the same `applyBundleByPath`
+          // helper so the semantics match.
+          case "install_bundle": {
+            const handle = vmMap.get(vmName);
+            if (!handle) throw new Error(`VM '${vmName}' not found in resolved VMs`);
+            const client = this.guestClients.get(vmName);
+            if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+            const bundlePath = step.bundle as string;
+            if (!bundlePath) {
+              throw new Error(`install_bundle missing 'bundle' path`);
+            }
+            const result = await this.applyBundleByPath(
+              client,
+              vmName,
+              bundlePath,
+            );
+            if (result.failed > 0) {
+              const firstFail = result.perPackageResults.find(
+                (r) => r.status === "failed",
+              );
+              throw new Error(
+                `install_bundle: ${result.failed}/${result.totalPackages} packages failed` +
+                  (firstFail ? ` — first: ${firstFail.package}: ${firstFail.error}` : ""),
+              );
+            }
             break;
           }
 

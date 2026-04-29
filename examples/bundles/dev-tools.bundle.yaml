@@ -1,0 +1,81 @@
+# Reference bundle exercising every Tier 1 source (P9.2).
+#
+# Apply with:
+#   signalman vm install-bundle <vm> examples/bundles/dev-tools.bundle.yaml
+#
+# Or compose into a scenario:
+#   software:
+#     - examples/bundles/dev-tools.bundle.yaml
+#
+# Real package IDs are used, so this bundle would actually install on a
+# Windows guest with the named package managers configured.
+apiVersion: signalman.dev/v1alpha1
+kind: Bundle
+metadata:
+  name: dev-tools
+  description: >
+    Developer-machine baseline: editor, source control, browser, mail
+    catcher (Docker), and a direct-download installer. Demonstrates
+    every v0.1.1 Tier-1 source plus a parallel group.
+
+packages:
+  # ── 1. winget — the canonical Windows package manager ────────────────
+  - id: Microsoft.VisualStudioCode
+    source: winget
+    version: "1.96.0"
+    verify: code --version
+    verify_expect: "1.96"
+
+  # ── 2. parallel — install three independent tools concurrently ───────
+  - parallel:
+      - id: Git.Git
+        source: winget
+        verify: git --version
+        verify_expect: "git version"
+      - id: Microsoft.PowerToys
+        source: winget
+      - id: Mozilla.Firefox
+        source: winget
+
+  # ── 3. choco — Chocolatey for tools winget doesn't ship cleanly ─────
+  - id: nodejs-lts
+    source: choco
+    verify: node --version
+    verify_expect: "v"
+
+  # ── 4. msstore — Microsoft Store apps via the unified winget surface ─
+  - id: 9NBLGGH4MSV6  # Windows Terminal
+    source: msstore
+
+  # ── 5. direct — sha256-pinned MSI download with silent-install args ─
+  #
+  # The URL/sha256 below are illustrative; replace with a real release
+  # when you actually want to install it. The schema enforces:
+  #   - https-only URL,
+  #   - 64-hex sha256,
+  #   - allowlisted .msi/.exe/.msix/.appx extension.
+  - id: NDI-tools
+    source: direct
+    url: https://downloads.ndi.tv/Tools/NDI%206%20Tools.exe
+    sha256: 0000000000000000000000000000000000000000000000000000000000000000
+    args:
+      - /S
+    install_dir: C:\Program Files\NDI
+
+  # ── 6. docker — image-digest-pinned container as a "package" ─────────
+  #
+  # The orchestrator's restart_policy default is "unless-stopped"; this
+  # entry pins a sample digest for MailHog. In real bundles, fetch the
+  # current digest with `docker buildx imagetools inspect <image>` and
+  # paste it here verbatim.
+  - id: mailhog
+    source: docker
+    image: mailhog/mailhog
+    image_sha256: sha256:8d128e87db96f3ac3d6f80dea5d7cb0b4cd5e1a9b7e69ff84fa28c8a6e1aaa11
+    container_name: mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    env:
+      MH_STORAGE: memory
+    restart_policy: unless-stopped
