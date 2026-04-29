@@ -508,3 +508,788 @@ describe("installBundle: failure propagation", () => {
     expect(result.failed).toBe(0);
   });
 });
+
+// ── Tier 2: schema accept ──────────────────────────────────────────
+
+describe("parseBundle: Tier 2 sources accept valid bundles", () => {
+  it("accepts a scoop entry", () => {
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "scoop" },
+      packages: [
+        { id: "scoop-nodejs", source: "scoop", package_id: "nodejs" },
+      ],
+    });
+    expect(bundle.packages).toHaveLength(1);
+  });
+
+  it("accepts a github_release entry without sha256", () => {
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "gh" },
+      packages: [
+        {
+          id: "fzf",
+          source: "github_release",
+          repo: "junegunn/fzf",
+          asset_name_pattern: "fzf-*-windows_amd64.zip",
+        },
+      ],
+    });
+    expect(bundle.packages).toHaveLength(1);
+  });
+
+  it("accepts a git_repo entry with sparse + submodules", () => {
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "git" },
+      packages: [
+        {
+          id: "checkout",
+          source: "git_repo",
+          url: "https://github.com/example/repo.git",
+          ref: "v1.2.3",
+          dest: "C:\\src\\repo",
+          submodules: true,
+          sparse: ["docs", "test"],
+        },
+      ],
+    });
+    expect(bundle.packages).toHaveLength(1);
+  });
+
+  it("accepts a powershell entry", () => {
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "ps" },
+      packages: [
+        {
+          id: "psreadline",
+          source: "powershell",
+          module_id: "PSReadLine",
+          scope: "AllUsers",
+          version: "2.3.4",
+        },
+      ],
+    });
+    expect(bundle.packages).toHaveLength(1);
+  });
+
+  it("accepts npm/pip/cargo entries", () => {
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "lang" },
+      packages: [
+        { id: "tsc", source: "npm", package_id: "typescript", version: "5.4.5" },
+        { id: "req", source: "pip", package_id: "requests" },
+        { id: "just", source: "cargo", crate_id: "just" },
+      ],
+    });
+    expect(bundle.packages).toHaveLength(3);
+  });
+
+  it("accepts a custom_script entry", () => {
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "cs" },
+      packages: [
+        {
+          id: "boot",
+          source: "custom_script",
+          url: "https://example.com/bootstrap.ps1",
+          sha256: "a".repeat(64),
+          interpreter: "pwsh",
+          args: ["-Force"],
+        },
+      ],
+    });
+    expect(bundle.packages).toHaveLength(1);
+  });
+});
+
+// ── Tier 2: schema reject — missing required fields ────────────────
+
+describe("parseBundle: Tier 2 missing-required-field rejection", () => {
+  it("rejects scoop without package_id", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [{ id: "s", source: "scoop" }],
+      }),
+    ).toThrow(BundleValidationError);
+  });
+
+  it("rejects github_release without repo", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [
+          {
+            id: "g",
+            source: "github_release",
+            asset_name_pattern: "*.zip",
+          },
+        ],
+      }),
+    ).toThrow(BundleValidationError);
+  });
+
+  it("rejects git_repo without dest", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [
+          {
+            id: "g",
+            source: "git_repo",
+            url: "https://github.com/x/y.git",
+          },
+        ],
+      }),
+    ).toThrow(BundleValidationError);
+  });
+
+  it("rejects powershell without module_id", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [{ id: "p", source: "powershell" }],
+      }),
+    ).toThrow(BundleValidationError);
+  });
+
+  it("rejects npm without package_id", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [{ id: "n", source: "npm" }],
+      }),
+    ).toThrow(BundleValidationError);
+  });
+
+  it("rejects pip without package_id", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [{ id: "n", source: "pip" }],
+      }),
+    ).toThrow(BundleValidationError);
+  });
+
+  it("rejects cargo without crate_id", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [{ id: "c", source: "cargo" }],
+      }),
+    ).toThrow(BundleValidationError);
+  });
+
+  it("rejects custom_script without sha256", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [
+          {
+            id: "cs",
+            source: "custom_script",
+            url: "https://example.com/x.ps1",
+            interpreter: "pwsh",
+          },
+        ],
+      }),
+    ).toThrow(BundleValidationError);
+  });
+});
+
+// ── Tier 2: security gates ────────────────────────────────────────
+
+describe("parseBundle: Tier 2 security gates", () => {
+  it("rejects github_release with malformed repo (path traversal)", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [
+          {
+            id: "x",
+            source: "github_release",
+            repo: "../etc/passwd",
+            asset_name_pattern: "*.zip",
+          },
+        ],
+      }),
+    ).toThrow(/owner\/repo/);
+  });
+
+  it("rejects github_release asset_name_pattern containing '/'", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [
+          {
+            id: "x",
+            source: "github_release",
+            repo: "junegunn/fzf",
+            asset_name_pattern: "../*.zip",
+          },
+        ],
+      }),
+    ).toThrow(/'\/'|'\.\.'/);
+  });
+
+  it("rejects git_repo with http:// URL (HTTPS-only)", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [
+          {
+            id: "x",
+            source: "git_repo",
+            url: "http://github.com/example/r.git",
+            dest: "C:\\src\\r",
+          },
+        ],
+      }),
+    ).toThrow(/https:\/\//);
+  });
+
+  it("rejects git_repo with ssh:// URL", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [
+          {
+            id: "x",
+            source: "git_repo",
+            url: "ssh://git@github.com/example/r.git",
+            dest: "C:\\src\\r",
+          },
+        ],
+      }),
+    ).toThrow(/https:\/\//);
+  });
+
+  it("rejects git_repo with bad ref (shell metachars)", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [
+          {
+            id: "x",
+            source: "git_repo",
+            url: "https://github.com/example/r.git",
+            ref: "main; rm -rf /",
+            dest: "C:\\src\\r",
+          },
+        ],
+      }),
+    ).toThrow(/ref/);
+  });
+
+  it("rejects git_repo with relative dest", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [
+          {
+            id: "x",
+            source: "git_repo",
+            url: "https://github.com/example/r.git",
+            dest: "src/r",
+          },
+        ],
+      }),
+    ).toThrow(/absolute/);
+  });
+
+  it("rejects git_repo dest containing '..'", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [
+          {
+            id: "x",
+            source: "git_repo",
+            url: "https://github.com/example/r.git",
+            dest: "C:\\src\\..\\evil",
+          },
+        ],
+      }),
+    ).toThrow(/'\.\.'/);
+  });
+
+  it("rejects custom_script with http:// URL", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [
+          {
+            id: "x",
+            source: "custom_script",
+            url: "http://example.com/x.ps1",
+            sha256: "a".repeat(64),
+            interpreter: "pwsh",
+          },
+        ],
+      }),
+    ).toThrow(/https:\/\//);
+  });
+
+  it("rejects custom_script with bogus interpreter", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [
+          {
+            id: "x",
+            source: "custom_script",
+            url: "https://example.com/x.ps1",
+            sha256: "a".repeat(64),
+            interpreter: "cmd",
+          },
+        ],
+      }),
+    ).toThrow(BundleValidationError);
+  });
+
+  it("rejects npm package_id with shell metachars", () => {
+    expect(() =>
+      parseBundle({
+        apiVersion: "signalman.dev/v1alpha1",
+        kind: "Bundle",
+        metadata: { name: "x" },
+        packages: [
+          { id: "x", source: "npm", package_id: "typescript; rm -rf /" },
+        ],
+      }),
+    ).toThrow(/alphanumerics/);
+  });
+});
+
+// ── Tier 2: dispatch routing ───────────────────────────────────────
+
+describe("installBundle: Tier 2 dispatch routing", () => {
+  it("scoop routes through client.installSoftware with source=scoop", async () => {
+    const backend = makeMockBackend();
+    const client = makeMockClient();
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "scoop" },
+      packages: [
+        { id: "node", source: "scoop", package_id: "nodejs", version: "20.11.0" },
+      ],
+    });
+    const result = await installBundle(
+      backend,
+      client as unknown as GuestAgentClient,
+      "vm",
+      bundle,
+    );
+    expect(result.installed).toBe(1);
+    expect(client.installSoftware).toHaveBeenCalledTimes(1);
+    const call = (client.installSoftware as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[0]).toBe("nodejs");
+    expect(call[1]).toBe("scoop");
+    expect(call[2]).toBe("20.11.0");
+  });
+
+  it("github_release fetches GitHub API and routes through installDirect", async () => {
+    const backend = makeMockBackend();
+    const client = makeMockClient();
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        assets: [
+          {
+            name: "fzf-0.50.0-linux_amd64.tar.gz",
+            browser_download_url: "https://example.com/fzf-linux.tar.gz",
+          },
+          {
+            name: "fzf-0.50.0-windows_amd64.zip",
+            browser_download_url:
+              "https://example.com/fzf-windows.zip",
+          },
+        ],
+      }),
+    } as unknown as Response);
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "gh" },
+      packages: [
+        {
+          id: "fzf",
+          source: "github_release",
+          repo: "junegunn/fzf",
+          asset_name_pattern: "fzf-*-windows_amd64.zip",
+          sha256: "a".repeat(64),
+        },
+      ],
+    });
+    const result = await installBundle(
+      backend,
+      client as unknown as GuestAgentClient,
+      "vm",
+      bundle,
+      { githubFetch: fakeFetch as unknown as typeof fetch },
+    );
+    expect(result.installed).toBe(1);
+    expect(fakeFetch).toHaveBeenCalledTimes(1);
+    const apiUrl = (fakeFetch.mock.calls[0] as unknown as [string])[0];
+    expect(apiUrl).toBe(
+      "https://api.github.com/repos/junegunn/fzf/releases/latest",
+    );
+    expect(client.installDirect).toHaveBeenCalledTimes(1);
+    const arg = (client.installDirect as ReturnType<typeof vi.fn>).mock
+      .calls[0][0];
+    expect(arg.url).toBe("https://example.com/fzf-windows.zip");
+    expect(arg.sha256).toBe("a".repeat(64));
+  });
+
+  it("github_release surfaces GitHub API failure as a failed result", async () => {
+    const backend = makeMockBackend();
+    const client = makeMockClient();
+    const fakeFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      statusText: "Forbidden",
+      json: async () => ({}),
+    } as unknown as Response);
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "gh-rate" },
+      packages: [
+        {
+          id: "fzf",
+          source: "github_release",
+          repo: "junegunn/fzf",
+          asset_name_pattern: "*.zip",
+          sha256: "a".repeat(64),
+        },
+      ],
+    });
+    const result = await installBundle(
+      backend,
+      client as unknown as GuestAgentClient,
+      "vm",
+      bundle,
+      { githubFetch: fakeFetch as unknown as typeof fetch },
+    );
+    expect(result.failed).toBe(1);
+    expect(result.perPackageResults[0].error).toMatch(/rate limit|403/);
+    expect(client.installDirect).not.toHaveBeenCalled();
+  });
+
+  it("git_repo with sparse-checkout issues three runCommand calls", async () => {
+    const backend = makeMockBackend();
+    const client = makeMockClient({
+      runCommand: vi.fn().mockResolvedValue({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        durationMs: 5,
+      }),
+    });
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "git-sparse" },
+      packages: [
+        {
+          id: "checkout",
+          source: "git_repo",
+          url: "https://github.com/example/repo.git",
+          dest: "C:\\src\\repo",
+          sparse: ["docs", "test"],
+        },
+      ],
+    });
+    const result = await installBundle(
+      backend,
+      client as unknown as GuestAgentClient,
+      "vm",
+      bundle,
+    );
+    expect(result.installed).toBe(1);
+    // Exactly three git invocations: clone + sparse-checkout init +
+    // sparse-checkout set.
+    expect(client.runCommand).toHaveBeenCalledTimes(3);
+    const calls = (client.runCommand as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls[0][0]).toBe("git");
+    expect(calls[0][1]).toContain("clone");
+    expect(calls[0][1]).toContain("--filter=blob:none");
+    expect(calls[1][1]).toContain("init");
+    expect(calls[2][1]).toContain("set");
+    expect(calls[2][1]).toContain("docs");
+    expect(calls[2][1]).toContain("test");
+  });
+
+  it("git_repo without sparse-checkout issues a single runCommand call", async () => {
+    const backend = makeMockBackend();
+    const client = makeMockClient({
+      runCommand: vi.fn().mockResolvedValue({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        durationMs: 5,
+      }),
+    });
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "git-simple" },
+      packages: [
+        {
+          id: "checkout",
+          source: "git_repo",
+          url: "https://github.com/example/repo.git",
+          ref: "v1.0.0",
+          dest: "C:\\src\\repo",
+        },
+      ],
+    });
+    const result = await installBundle(
+      backend,
+      client as unknown as GuestAgentClient,
+      "vm",
+      bundle,
+    );
+    expect(result.installed).toBe(1);
+    expect(client.runCommand).toHaveBeenCalledTimes(1);
+    const args = (client.runCommand as ReturnType<typeof vi.fn>).mock
+      .calls[0][1];
+    expect(args).toContain("clone");
+    expect(args).toContain("--branch");
+    expect(args).toContain("v1.0.0");
+  });
+
+  it("powershell routes through runCommand pwsh Install-Module", async () => {
+    const backend = makeMockBackend();
+    const client = makeMockClient({
+      runCommand: vi.fn().mockResolvedValue({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        durationMs: 5,
+      }),
+    });
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "ps" },
+      packages: [
+        {
+          id: "psr",
+          source: "powershell",
+          module_id: "PSReadLine",
+          scope: "AllUsers",
+        },
+      ],
+    });
+    const result = await installBundle(
+      backend,
+      client as unknown as GuestAgentClient,
+      "vm",
+      bundle,
+    );
+    expect(result.installed).toBe(1);
+    expect(client.runCommand).toHaveBeenCalledTimes(1);
+    const call = (client.runCommand as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[0]).toBe("pwsh");
+    expect(call[1]).toContain("Install-Module");
+    expect(call[1]).toContain("PSReadLine");
+    expect(call[1]).toContain("AllUsers");
+  });
+
+  it("npm routes through runCommand with version pin", async () => {
+    const backend = makeMockBackend();
+    const client = makeMockClient({
+      runCommand: vi.fn().mockResolvedValue({
+        exitCode: 0,
+        stdout: "added 1 package",
+        stderr: "",
+        durationMs: 5,
+      }),
+    });
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "npm" },
+      packages: [
+        {
+          id: "tsc",
+          source: "npm",
+          package_id: "typescript",
+          version: "5.4.5",
+        },
+      ],
+    });
+    const result = await installBundle(
+      backend,
+      client as unknown as GuestAgentClient,
+      "vm",
+      bundle,
+    );
+    expect(result.installed).toBe(1);
+    const call = (client.runCommand as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[0]).toBe("npm");
+    expect(call[1]).toEqual(["install", "-g", "typescript@5.4.5"]);
+  });
+
+  it("pip routes through runCommand with version-pin syntax", async () => {
+    const backend = makeMockBackend();
+    const client = makeMockClient({
+      runCommand: vi.fn().mockResolvedValue({
+        exitCode: 0,
+        stdout: "Successfully installed requests",
+        stderr: "",
+        durationMs: 5,
+      }),
+    });
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "pip" },
+      packages: [
+        {
+          id: "req",
+          source: "pip",
+          package_id: "requests",
+          version: "2.32.3",
+        },
+      ],
+    });
+    const result = await installBundle(
+      backend,
+      client as unknown as GuestAgentClient,
+      "vm",
+      bundle,
+    );
+    expect(result.installed).toBe(1);
+    const call = (client.runCommand as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[0]).toBe("pip");
+    expect(call[1]).toEqual(["install", "requests==2.32.3"]);
+  });
+
+  it("cargo routes through runCommand with --version", async () => {
+    const backend = makeMockBackend();
+    const client = makeMockClient({
+      runCommand: vi.fn().mockResolvedValue({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        durationMs: 5,
+      }),
+    });
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "cargo" },
+      packages: [
+        {
+          id: "j",
+          source: "cargo",
+          crate_id: "just",
+          version: "1.30.0",
+        },
+      ],
+    });
+    const result = await installBundle(
+      backend,
+      client as unknown as GuestAgentClient,
+      "vm",
+      bundle,
+    );
+    expect(result.installed).toBe(1);
+    const call = (client.runCommand as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[0]).toBe("cargo");
+    expect(call[1]).toEqual(["install", "just", "--version", "1.30.0"]);
+  });
+
+  it("custom_script routes through runCommand powershell with hash check", async () => {
+    const backend = makeMockBackend();
+    const client = makeMockClient({
+      runCommand: vi.fn().mockResolvedValue({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        durationMs: 5,
+      }),
+    });
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "cs" },
+      packages: [
+        {
+          id: "boot",
+          source: "custom_script",
+          url: "https://example.com/bootstrap.ps1",
+          sha256: "b".repeat(64),
+          interpreter: "pwsh",
+          args: ["-Force"],
+        },
+      ],
+    });
+    const result = await installBundle(
+      backend,
+      client as unknown as GuestAgentClient,
+      "vm",
+      bundle,
+    );
+    expect(result.installed).toBe(1);
+    const call = (client.runCommand as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[0]).toBe("powershell");
+    // The PowerShell script-block must reference Get-FileHash, the
+    // operator-supplied URL, and the operator-supplied hash.
+    const script = (call[1] as string[])[3];
+    expect(script).toContain("Get-FileHash");
+    expect(script).toContain("Invoke-WebRequest");
+    expect(script).toContain("https://example.com/bootstrap.ps1");
+    expect(script).toContain("b".repeat(64));
+  });
+});

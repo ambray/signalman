@@ -62,7 +62,31 @@ export interface FetchTemplateOptions {
    * (Node 18+). Tests pass a vi.fn that returns controlled streams.
    */
   fetchImpl?: typeof fetch;
+  /**
+   * Hard cap on bytes to download. Defaults to {@link DEFAULT_MAX_BYTES}
+   * (50 GiB). When the stream exceeds this, the partial file is shredded
+   * and the call throws. Defends against:
+   *   - operator paste-error pointing at a multi-TB URL,
+   *   - upstream serving a malicious oversize file under a hash that
+   *     happens to match (vanishingly unlikely but cheap to defend),
+   *   - Content-Length spoofing followed by an unbounded body.
+   *
+   * Most VHDX templates are 8–25 GiB. 50 GiB is generous enough to
+   * cover Windows Server with full updates while still catching
+   * obvious abuse.
+   *
+   * Also rejected pre-flight: a Content-Length header that ALREADY
+   * exceeds the cap, before we open a write stream.
+   */
+  maxBytes?: number;
 }
+
+/**
+ * Default disk-fill cap for VHDX downloads. Tunable per-call via
+ * {@link FetchTemplateOptions.maxBytes}. Sized to fit Windows Server
+ * with full eval + service-pack content (~25 GiB) plus 2x headroom.
+ */
+export const DEFAULT_MAX_BYTES = 50 * 1024 * 1024 * 1024; // 50 GiB
 
 /** Outputs of {@link fetchTemplateImage}. */
 export interface FetchTemplateResult {
@@ -320,6 +344,17 @@ export async function fetchTemplateImage(
 
   const contentLengthHeader = response.headers.get("content-length");
   const totalBytes = contentLengthHeader ? Number(contentLengthHeader) : undefined;
+  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
+  // Pre-flight: refuse before opening a write stream when Content-Length
+  // is already over the cap. Saves us from creating an empty .tmp that
+  // we'll have to clean up on the very next chunk.
+  if (totalBytes !== undefined && totalBytes > maxBytes) {
+    throw new Error(
+      `Refusing to download ${opts.url}: Content-Length ${totalBytes} bytes ` +
+        `exceeds maxBytes cap ${maxBytes}. If this template legitimately ` +
+        `needs more, pass maxBytes explicitly to fetchTemplateImage().`,
+    );
+  }
   const reportProgress =
     opts.onProgress ?? defaultOnProgress(opts.templateName, totalBytes);
 
@@ -346,6 +381,16 @@ export async function fetchTemplateImage(
           const buf = chunk as Buffer;
           hash.update(buf);
           bytesWritten += buf.length;
+          // Disk-fill defense: if a hostile or misconfigured server
+          // serves more bytes than the cap, abort hard. The pipeline()
+          // catch path below shreds the partial file. Throwing inside
+          // the generator surfaces as a rejected pipeline.
+          if (bytesWritten > maxBytes) {
+            throw new Error(
+              `Download exceeded maxBytes cap ${maxBytes} after ` +
+                `${bytesWritten} bytes — aborted to avoid disk-fill.`,
+            );
+          }
           if (totalBytes && totalBytes > 0) {
             reportProgress(Math.min(bytesWritten / totalBytes, 1), bytesWritten);
           } else {
