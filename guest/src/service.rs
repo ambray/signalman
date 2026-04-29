@@ -1095,11 +1095,31 @@ impl GuestAgent for GuestAgentService {
                 }
                 ("choco".to_string(), a)
             }
+            // P9.2 Tier-2 v0.1.1: scoop. The bundle author is responsible
+            // for ordering — scoop must already be bootstrapped on the
+            // guest before the first scoop-source entry runs (Q10(a)).
+            // Other Tier-2 sources (npm / pip / cargo / powershell) route
+            // through RunCommand from the host side, not through this RPC.
+            "scoop" => {
+                let target = if req.version.is_empty() {
+                    req.package_id.clone()
+                } else {
+                    // Scoop pins via `<package>@<version>`.
+                    format!("{}@{}", req.package_id, req.version)
+                };
+                let mut a = vec!["install".to_string(), target];
+                if req.silent {
+                    // Defang interactive scoop-self-update prompts.
+                    a.push("--no-update-scoop".into());
+                }
+                ("scoop".to_string(), a)
+            }
             other => {
                 return Err(Status::invalid_argument(format!(
                     "Unsupported install source: '{other}'. Use 'winget', 'choco', \
-                     'msstore', or call InstallDirect / InstallDocker for direct \
-                     installer / docker-image sources."
+                     'scoop', 'msstore', or call InstallDirect / InstallDocker for \
+                     direct installer / docker-image sources. Tier-2 npm/pip/cargo/ \
+                     powershell route through RunCommand on the host side."
                 )));
             }
         };
@@ -1388,6 +1408,8 @@ fn is_already_installed_output(source: &str, exit_code: i32, stdout: &str, stder
         }
         // choco exits 0 with "<pkg> v<ver> already installed."
         "choco" => stdout.contains("already installed"),
+        // scoop exits 0 with "WARN  '<pkg>' (<ver>) is already installed."
+        "scoop" => stdout.contains("is already installed") || stdout.contains("already installed"),
         _ => false,
     };
     // Also check stderr — some package managers route their

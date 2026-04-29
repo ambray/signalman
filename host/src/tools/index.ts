@@ -29,6 +29,8 @@ import { createVmOperationTools } from "./vm-operations.js";
 import { createDockerTools } from "./docker-tools.js";
 import { createVmTemplateTools } from "./vm-template.js";
 import { createVmProvisioningTools } from "./vm-provisioning.js";
+import { createVmInstallBundleTool } from "./vm-install-bundle.js";
+import { makeGuestClientResolver } from "../provisioning/guest-client-factory.js";
 import { DockerClient } from "../docker/client.js";
 
 /**
@@ -47,6 +49,13 @@ export function createAllTools(
 ): ToolDefinition[] {
   const dockerClient = new DockerClient(dockerOptions);
 
+  // P9.2 — vm_install_bundle needs a per-VM GuestAgentClient resolver.
+  // The factory builds one on demand from (backend, vmName) — no
+  // long-lived client cache (bundle installs are infrequent; stale
+  // clients across reboots would be a worse footgun than the per-call
+  // IP-resolution cost).
+  const getGuestClient = makeGuestClientResolver(getBackend);
+
   return [
     ...createVmLifecycleTools(getBackend),
     ...createVmCheckpointTools(getBackend),
@@ -58,5 +67,8 @@ export function createAllTools(
     // descriptions carry the "Destructive" marker so LLM clients
     // gate on it.
     ...createVmProvisioningTools(getBackend),
+    // P9.2: vm_install_bundle. Same default-namespace + "Modifies VM
+    // state" description rule.
+    createVmInstallBundleTool(getBackend, getGuestClient),
   ];
 }

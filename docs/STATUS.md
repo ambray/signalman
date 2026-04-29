@@ -1,0 +1,550 @@
+# Signalman — Status & Resume Context
+
+> Last updated: 2026-04-28. Living document — update on every commit
+> that changes scope, ships a feature, closes an audit finding, or
+> introduces a new TODO bucket. See [Document maintenance](#document-maintenance)
+> for the trigger rules.
+
+## TL;DR (one-paragraph)
+
+`main` carries the v0.1.1 surface: the secure scenario runner from
+v0.1.0 (six MCP verbs, Loom-fronted plugin, mTLS guest agent, signed-MSI
+release pipeline) plus the P9 provisioning + bootstrap stack that closes
+the onboarding gap (`signalman vm provision` / `vm fetch-template` /
+`vm install-bundle` / `vm cleanup`, `signalman init`, software-bundle
+schema, idempotency contract, `docs/bootstrap.md`). Versions in every
+manifest read `0.1.0` and need to bump to `0.1.1` together with a tag
+push to ship — the release workflow validates the manifest version
+matches the tag before publishing. The four GitHub repo secrets
+(`WINDOWS_CERT_BASE64`, `WINDOWS_CERT_PASSWORD`, `NPM_TOKEN`,
+`CARGO_REGISTRY_TOKEN`) are the only operator setup remaining; without
+them the workflow still produces but does not publish artifacts.
+Monday-morning operator action: run `pwsh scripts/release-dry-run.ps1`,
+bump the four version pins, `git tag v0.1.1 && git push origin v0.1.1`.
+
+## Versions
+
+| Component | Path | Current version |
+|---|---|---|
+| Host (npm) | `host/package.json` | `0.1.0` |
+| Guest (cargo) | `guest/Cargo.toml` | `0.1.0` |
+| Workspace (cargo) | `Cargo.toml` (`workspace.package.version`) | `0.1.0` |
+| Service (cargo) | `service/Cargo.toml` (`version.workspace = true`) | `0.1.0` (inherits workspace) |
+| Loom plugin | `plugins/signalman-loom-plugin/Cargo.toml` | `0.1.0` |
+| Proto contract — guest | `proto/guest.proto` | `signalman.guest` package, **v1 frozen** (P8 / commit `c9e8e30`) with `oneof platform_details` |
+| Proto contract — service | `service/proto/signalman_service.proto` | `signalman.service.v1.ControlPlane` |
+
+> The version skew between manifests-on-`main` (`0.1.0`) and the *intended*
+> v0.1.1 release tag is the deliberate state — every P9 commit landed
+> against the unbumped manifest. Bump all four pins (`host/package.json`,
+> `guest/Cargo.toml`, root `Cargo.toml`, `plugins/signalman-loom-plugin/Cargo.toml`)
+> in the same commit that creates the `v0.1.1` tag.
+
+## Latest commits (top 10)
+
+```
+50807f6 P9.2-followup + P9.4 + P9.6: proto bump, idempotency tests, bootstrap docs
+e1be740 P9.1 + P9.2 + P9.3 + P9.5: provisioning + bootstrap (v0.1.1)
+271559d ROADMAP: P9 provisioning + bootstrap (v0.1.1, NEW 2026-04-28)
+e23d838 P6: release pipeline scaffolding (MSI sign + npm + crate publish)
+dfb524b P5.3 + P5.4 + P5.5: EventBus streaming, form descriptors, integration provider
+6608c06 P4.c-B2 / Sec F1: client-cert SHA-256 pinning on guest agent
+7a07a87 P4.c-B9 + P7 D2 + P7 D4: denylist clarification, mTLS smoke, gated E2E
+89b0d1f P7 D2-prep + workflow API tests: validate snapshot/copy/install routing
+b426756 P4.c-B8 + P6-A3-A6 + B12 + coverage wiring (parallel-agent batch + SHA pin)
+119d117 P4.c-B10 + B11: case-insensitive system-dir denylist + audit log credential redaction
+```
+
+## Audit closure (security findings)
+
+The audit numbering uses two parallel namespaces: `Bn` is the ROADMAP
+sub-bullet identifier; `Sec Fn` is the security-finding identifier from
+the 2026-04-25 four-lens audit. Both refer to the same underlying gap.
+
+| ID | Severity | What | Status | Closing commit |
+|---|---|---|---|---|
+| B1 / Sec F2 | Critical | Cert dir ACL hardening at install time (`%ProgramData%\Signalman\certs\`) | Closed | `ea6852c` (P4.b) |
+| B2 / Sec F1 | Critical | Client-cert SHA-256 pinning on guest agent (closes "any cert from this CA grants SYSTEM") | Closed | `6608c06` (P4.c B2) |
+| B3 / Sec F3 | High | `--allow-insecure` loopback enforcement (refuse non-loopback bind) | Closed | `ca804ae` (P4.a) |
+| B4 / Sec F4 | High | `process_start` denylist + metachar parity with `run_command` | Closed | `ca804ae` (P4.a) |
+| B5 / Sec F5 | High | Drop `cmd.exe /C` from `run_command` SYSTEM path; pass argv via `CreateProcessAsUserW` | Closed | `92a9030` (P4.c B5) |
+| B6 / Sec F6 | High | Named-pipe `SECURITY_DESCRIPTOR` (SDDL) — pipe ACL hardening | Closed | `53fe483` (P4.c B6) |
+| B7 / Sec F7 | Medium | Constant-time bearer-token compare | Closed | `ca804ae` (P4.a) |
+| B8 / Sec F8 | Medium | Pin TLS min-version (TLS 1.3) explicitly | Closed | `b426756` (P4.c B8) |
+| B9 / Sec F9 | Medium | `is_denied_command` case-insensitive + tripwire-not-boundary doc | Closed | `7a07a87` (P4.c B9) |
+| B10 / Sec F10 | Medium | `file_ops.rs` path checks: case-insensitive, prefix-canonical | Closed | `119d117` (P4.c B10) |
+| B11 / Sec F11 | Medium | Strip credentials from `AUDIT: run_command` logs | Closed | `119d117` (P4.c B11) |
+| B12 / Sec F15 | Medium | Pin GitHub Actions by SHA, not tag | Closed | `b426756` (P6-A3-A6 + B12) |
+| B13 / Sec F14 | Medium | Document `protoc-bin-vendored` supply-chain stance or replace | Open | — |
+| C3 | High | Capability declaration enforcement (scenario `capabilities:` block actually gates execution) | Open | — |
+| C4 | High | `${secret:NAME}` resolution from host-side keychain or env (parses today, doesn't resolve) | Open | — |
+| F3 (P4.4) | Medium | Cert rotation lifecycle (initial gen lands; rotation does not) | Open | — |
+
+The three open items (B13, C3, C4) plus cert rotation are the remaining
+v0.1.x security backlog. None block the v0.1.1 tag — they are the
+v0.1.2 security carry-over.
+
+## Test coverage map
+
+Counts taken from source (`#[test]` / `#[tokio::test]` attributes for
+Rust; `it(...)` and `test(...)` invocations for vitest). Vitest run-time
+counts are higher than the source count because parameterized blocks
+expand at runtime — see `docs/testing.md` for the variance discussion.
+
+| Crate / package | Test count (source) | Files | Last verified |
+|---|---|---|---|
+| Host (TypeScript / vitest) — `host/src/__tests__/` | 876 | 35 | 2026-04-28 (this doc) |
+| Host (TypeScript / vitest) — `host/src/verbs/__tests__/` | 45 | 5 | 2026-04-28 |
+| Guest (Rust / cargo) | 105 | 8 | 2026-04-28 |
+| Service (Rust / cargo) | 95 | 8 (incl. 2 integration files) | 2026-04-28 |
+| Plugin (Rust / cargo) | 135 | 11 (incl. 2 integration files) | 2026-04-28 |
+| **Total** | **1256** test attributes / `it()` calls | **67** files | |
+
+> The ROADMAP headline "151 Rust + 769 TS = 920" predates the v0.1.1
+> P9 work (which added the provisioning, bundle, idempotency, and
+> bootstrap surfaces). `docs/testing.md` quotes 807 TypeScript / 245 Rust
+> at HEAD `ea6852c` — the figure above is the post-`50807f6` count.
+
+### Canonical test files (what each one pins)
+
+- **`host/src/__tests__/sanitize.test.ts`** (59 cases) — every input
+  validator in `host/src/sanitize.ts` (VM names, labels, paths, commands,
+  PowerShell args, URLs, timeouts).
+- **`host/src/__tests__/envelope.test.ts`** — result-envelope shape
+  and scenario-hash determinism.
+- **`host/src/__tests__/orchestrator.test.ts`** + **`orchestrator-events.test.ts`** —
+  orchestrator + mocked hypervisor backend; live-emit propagation
+  hook (closes P3 C2-residual).
+- **`host/src/__tests__/proto-shape.test.ts`** — pins the v1 proto
+  `oneof platform_details` shape so a stray rebuild can't silently
+  change the wire contract.
+- **`host/src/__tests__/proto-contract.test.ts`** — proto v1 contract
+  (P7 D1) at the source level.
+- **`host/src/__tests__/scenario-validation.test.ts`** — walks every
+  scenario in `.signalman/scenarios/` and `examples/`, schema-validates.
+- **`host/src/__tests__/workflow-api.test.ts`** (20 cases, landed in
+  `89b0d1f`) — pins scenario-action → backend/guest-client routing for
+  `vm_checkpoint`, `vm_restore`, `vm_copy_file`, `vm_install`, plus an
+  E2E chain. P7 D2-prep deliverable.
+- **`host/src/__tests__/provisioning-idempotency.test.ts`** (9 cases,
+  landed in `50807f6`) — cross-cutting × 3 invocation tests for every
+  provisioning verb. Closes P9.4.
+- **`host/src/__tests__/template-fetch.test.ts`** + **`provisioning.test.ts`** +
+  **`bundle.test.ts`** — P9.5 / P9.1 / P9.2 surfaces.
+- **`host/src/__tests__/scenario-retry.test.ts`** — closes P3 C5
+  (scenario + step retry policy).
+- **`host/src/__tests__/trace.test.ts`** — `signalman-trace-id` header
+  generation + propagation (closes P3 C10-residual TS side).
+- **`host/src/verbs/__tests__/run-lifecycle.test.ts`** — six-verb
+  surface end-to-end with mocked executor.
+- **`guest/src/cert_pin.rs` `tests` mod** (13 unit cases) +
+  **`guest/src/service.rs` integration cases** (`cert_pin_matching_*`,
+  `cert_pin_mismatched_*`) — pin enforcement (B2 / Sec F1).
+- **`guest/src/main.rs auth_tests`** — bearer-token parsing, constant-time
+  compare, allow-insecure invariants (B3, B7).
+- **`service/tests/named_pipe_smoke.rs`** — Rust↔Rust gRPC over Windows
+  named pipe; the only existing integration test on the service crate
+  before mtls_smoke landed.
+- **`service/tests/mtls_smoke.rs`** (3 cases, landed in `7a07a87`) —
+  `mtls_valid_client_succeeds`, `mtls_wrong_ca_rejected`,
+  `mtls_no_client_cert_rejected`. Closes P7 D2.
+- **`plugins/signalman-loom-plugin/tests/run_lifecycle.rs`** — plugin
+  state-store lifecycle including plugin recreation.
+- **`plugins/signalman-loom-plugin/src/state.rs`** + **`events.rs`** +
+  **`forms.rs`** + **`handlers.rs`** unit tests — P5.3 / P5.4 deliverables.
+
+## Roadmap status (by milestone)
+
+### v0.1.0 — secure scenario runner (READY TO TAG once secrets configured)
+
+All v0.1.0 phases are merged on `main`. Bullet status as of 2026-04-28:
+
+- **P0 — MCP Surface Inversion** — Closed. Six verbs registered;
+  `signalman.advanced.*` namespace gated; envelope shipping.
+- **P1 — Hyper-V Control-Plane Service** — Closed (commit `3828913`
+  per ROADMAP). MSI scaffold, named-pipe + TCP, mTLS, SCM lifecycle.
+  Audit A2 closure (default-executor service routing) folded into P3.
+- **P2 — Orchestrator Polish** — Closed via `0960ea6` (orphan sweep,
+  CI re-enable, schema versioning, env-var test serialization).
+- **P3 — Agent UX Baseline** — Closed: P3.a structured errors
+  (`a52d3bb`), P3.b retry (`13f2b0a`), P3.c orchestrator event hook
+  (`ec92f80`), P3.d trace-id propagation across TS / Rust / plugin
+  (`5a65922`, `9c3bd88`, `e4b1192`).
+- **P4 — Security Baseline** — Closed for v0.1.x. Critical and High
+  findings B1–B6 closed; Medium findings B7–B12 closed; B13/C3/C4
+  carry to v0.1.2 (see Audit closure table).
+- **P5 — Loom Plugin** — Closed: P5.3 (EventBus streaming) + P5.4
+  (TUI form descriptors) + P5.5 (directive provider) shipped in
+  `dfb524b`.
+- **P6 — Packaging + Docs** — Scaffolding closed (`e23d838`).
+  Tag-triggered MSI / npm / crate publishing wired; secrets gate the
+  publish steps.
+- **P7 — CI Pipeline + Test Pyramid** — Closed: D1 (`a347301`), D2
+  (`7a07a87`), D2-prep (`89b0d1f`), D3+D6 (`2248903`), D4 gated E2E
+  (`7a07a87`).
+- **P8 — Proto v1 Freeze** — Closed (`c9e8e30`) with
+  `platform_details` + `hypervisor_specific` oneofs.
+
+### v0.1.1 — provisioning + bootstrap (CURRENT — READY TO TAG once secrets configured + versions bumped)
+
+Tracking entry: ROADMAP § "v0.1.1 Roadmap (Provisioning + Bootstrap) —
+NEW 2026-04-28". Status as of 2026-04-28:
+
+- **P9.1 — Windows guest-agent MSI + `signalman vm provision`** —
+  Closed (`e1be740`). 7-step pipeline at
+  `host/src/provisioning/provision.ts`. Cert model locked at
+  one-CA-many-VMs (Q2(c)).
+- **P9.2 — Software bundle manifest + `signalman vm install-bundle`** —
+  Closed (`e1be740`, follow-up `50807f6`). Tier 1 sources shipped
+  (`winget`, `choco`, `msstore`, `direct`, `docker`).
+- **P9.3 — `signalman init` + `signalman vm create`** — Closed
+  (`e1be740`). `signalman init --bootstrap` ships the
+  `BOOTSTRAP_DEFERRED` message naming P9.1+P9.5; full interactive
+  composed flow deferred.
+- **P9.4 — Idempotent "ensure provisioned" semantics** — Closed
+  (`50807f6`, `host/src/__tests__/provisioning-idempotency.test.ts`).
+  Per-verb × 3 invocation suite; `provision_if_missing: true` scenario
+  YAML field deferred to v0.1.2.
+- **P9.5 — Template registry + base-image fetch** — Closed
+  (`e1be740`). `signalman vm fetch-template`, content-addressed cache
+  at `%LOCALAPPDATA%\Signalman\templates\<name>\<sha-prefix>.vhdx`.
+  Microsoft Eval URL placeholder still in the shipped template
+  (release-day swap).
+- **P9.6 — Bootstrap docs** — Closed (`50807f6`). `docs/bootstrap.md`
+  is the end-to-end walkthrough; README points at it on the first line.
+- **P9.7 — DAG-resolved bundle dependencies** — Deferred to v0.1.2.
+
+### v0.1.2 — Tier-2 sources + DAG dependencies (DEFERRED)
+
+Promised work, not started:
+
+- P9.7 DAG `requires:` resolver for bundle ordering.
+- `provision_if_missing: true` scenario YAML field (P9.4 deferred fragment).
+- Tier 2 bundle sources: `scoop`, `github_release`, `git_repo` (with
+  `ref:` for branch/tag/SHA, `submodules:`/`sparse:`), `powershell`
+  (`Install-Module`), `npm`, `pip`, `cargo`, `custom_script`.
+- B13 (`protoc-bin-vendored` supply-chain documentation), C3
+  (capability enforcement), C4 (`${secret:NAME}` resolution), cert
+  rotation — the remaining audit backlog.
+- Per-scenario denylist allowlists (B9 follow-up) — locked decision
+  was to keep the tripwire-not-boundary stance for v0.1.x.
+
+### v0.2.0+ — record/replay, ephemeral provisioning, per-VM cert identity
+
+Tracked in ROADMAP § "v0.2.0 Roadmap":
+
+- **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
+  calls into `.signalman/recordings/`. The agent-first DevOps
+  differentiator.
+- **v0.2.0-2 Ephemeral VM Provisioning** — Differencing-disk pipeline,
+  per-scenario disposable guests, real `template:` wiring (C9), streamed
+  `vm_copy_file` progress (C8).
+- **v0.2.0-3 Hermetic Envelope** (full triple) — Adds `vm_lineage_hash`
+  to the envelope; depends on -2.
+- **v0.2.0-4 Explicit Orchestrator (Loom-fronted)** — Loom workflows +
+  `loom tui` are the orchestrator; Signalman exposes the contract Loom
+  invokes.
+- **Per-VM identity certs** — Replaces v0.1.x one-CA-many-VMs cert model
+  with per-VM identity certs that consume the B2 pin registry.
+- **ISO-to-VHDX conversion** — Out of scope for v0.1.1; v0.2.0 may add.
+
+v0.3.0+ speculative: cross-platform daemon (libvirt, vmrun wrapper),
+Linux/macOS guest agent (E3), mobile UI proto shape (E4), per-user
+identity certs and per-method capability tokens, hub component
+resurrection, hosted orchestration.
+
+## Outstanding TODOs in code
+
+Every TODO/FIXME/XXX/HACK marker in product source as of 2026-04-28.
+Format: `path:line — marker: description`.
+
+### Host (TypeScript)
+
+- `host/src/config.ts:156` — TODO: backwards-compat config field; v0.2.0
+  will drop.
+- `host/src/config.ts:388` — TODO(v0.2.0): top-level `signalman.yaml`
+  resolution legacy path.
+- `host/src/hypervisors/hyperv.ts:384` — TODO: gRPC health check for
+  `guestAgentReachable`.
+- `host/src/hypervisors/vmware.ts:126` — TODO: gRPC health check for
+  `guestAgentReachable`.
+- `host/src/scenarios/templates.ts:204` — TODO: real Microsoft eval URL
+  (placeholder until release-prep finalisation).
+- `host/src/scenarios/templates.ts:210` — TODO: real SHA-256 (recompute
+  from the verified eval VHDX; companion to line 204).
+- `host/src/scenarios/project-layout.ts:18` — TODO marker referenced in
+  the next entry.
+- `host/src/scenarios/project-layout.ts:75` — TODO(v0.2.0): remove the
+  legacy fallback entirely.
+- `host/src/provisioning/install-bundle.ts:21` — TODO(P9.2): proto
+  extension cast comment (proto bump landed; comment now historical;
+  candidate for cleanup).
+- `host/src/provisioning/guest-msi-discovery.ts:146` — Source 3 (GitHub
+  Releases) deferred to P9.5 follow-up; documented as the third tier
+  of the discovery chain.
+
+### Guest (Rust)
+
+- `guest/src/process.rs:606` — TODO: `QueryFullProcessImageNameW` (path
+  reporting on Linux process inspect path).
+- `guest/src/process.rs:607` — TODO: `NtQueryInformationProcess`
+  (`command_line` reporting).
+- `guest/src/process.rs:610` — TODO: `GetTokenInformation`
+  (`is_appcontainer` reporting on the Linux path).
+- `guest/src/process.rs:629` — TODO: `/proc` filesystem parsing for Linux.
+- `guest/src/verification.rs:75` — TODO: measure actual latency
+  (currently hardcoded `latency_ms: 0`).
+
+### Service (Rust)
+
+- (none)
+
+### Plugin (Rust)
+
+- `plugins/signalman-loom-plugin/src/handlers.rs:57` — TODO(P5.3): once
+  `loom_plugin_api::PluginContext` exposes an `EventBus` accessor, swap
+  the no-op sink for the real bus.
+
+Cross-bucket: every "deferred to v0.1.2" / "deferred to v0.2.0" mention
+is captured in the [Roadmap status](#roadmap-status-by-milestone)
+section above. There are no `FIXME`, `XXX`, or `HACK` markers in product
+source.
+
+## Release process
+
+### Required GitHub secrets
+
+Configure once in repository Settings → Secrets and variables →
+Actions. Source: `.github/workflows/release.yaml` § "Required GitHub
+secrets" (lines 18–23).
+
+| Secret | Purpose |
+|---|---|
+| `WINDOWS_CERT_BASE64` | Code-signing PFX (base64-encoded). Decoded into `RUNNER_TEMP` and shredded after sign — never written under workspace. |
+| `WINDOWS_CERT_PASSWORD` | Password for the PFX. |
+| `NPM_TOKEN` | npm publish token (Automation type). |
+| `CARGO_REGISTRY_TOKEN` | crates.io API token (publish-crates scope). |
+
+When a secret is missing, the corresponding job logs a warning and
+skips the publish step but still produces (and uploads) the build
+artifact, so dry-runs and pre-cert builds remain useful.
+
+### Operator workflow to ship v0.1.x
+
+```powershell
+# 1. Local dry-run (catches version skew, packaging, template errors
+#    without round-tripping through CI).
+pwsh scripts/release-dry-run.ps1
+
+# 2. Bump every version pin to the same string in one commit:
+#      host/package.json
+#      Cargo.toml (workspace.package.version — covers service)
+#      guest/Cargo.toml
+#      plugins/signalman-loom-plugin/Cargo.toml
+#    Commit as e.g. "release: v0.1.1".
+
+# 3. Tag and push.
+git tag v0.1.1
+git push origin v0.1.1
+
+# The Release workflow runs three independent jobs (service-msi,
+# host-npm, guest-crate), each verifying manifest-version-equals-tag,
+# then aggregates artifacts into a GitHub Release. cargo publish
+# always runs --dry-run as a release gate; the real publish is gated
+# on CARGO_REGISTRY_TOKEN.
+```
+
+### What CI runs on every PR
+
+`.github/workflows/ci.yaml`:
+
+- **`host`** (ubuntu): `npm install`, `tsc --noEmit`, `eslint src/`,
+  `vitest run`, `vitest run --coverage` (continue-on-error until
+  thresholds wire on).
+- **`guest-windows`** (windows): `cargo fmt --check`, `cargo build
+  --release`, `cargo test --lib`, `cargo clippy -- -D warnings`.
+- **`guest-linux`** (ubuntu): same as guest-windows but debug build.
+- **`service-windows`** (windows, re-enabled in commit referenced by
+  audit A1): `cargo fmt -p signalman-service --check`, `cargo build
+  -p signalman-service --release`, `cargo test -p signalman-service`,
+  `cargo clippy -p signalman-service --all-targets -- -D warnings`.
+
+All `uses:` references are SHA-pinned per B12 / Sec F15.
+
+### What CI runs on a tag push
+
+`.github/workflows/release.yaml`:
+
+- **`service-msi`** (windows): build service, `cargo wix`, sign MSI
+  via `signtool` (gated on `WINDOWS_CERT_BASE64`), upload artifact.
+- **`host-npm`** (ubuntu): build host, run `vitest` as release gate,
+  `npm pack`, publish to npm (gated on `NPM_TOKEN`), upload artifact.
+- **`guest-crate`** (ubuntu): build, test, `cargo publish --dry-run`
+  always, real publish gated on `CARGO_REGISTRY_TOKEN`.
+- **`github-release`** (ubuntu): aggregator. Only fires on tag pushes.
+  Downloads every uploaded artifact, attaches to a `softprops/action-gh-release`
+  release with `generate_release_notes: true`. Pre-release flag set
+  automatically for `-rc.` / `-beta.` / `-alpha.` tags.
+
+### Gated lanes
+
+`.github/workflows/e2e.yaml` (P7 D4 — placeholder):
+
+- **Trigger**: `workflow_dispatch` (manual) **or** PR labeled `e2e`.
+- **Platform**: `windows-latest` (no Hyper-V on standard runners — see
+  the workflow header for the rationale).
+- **Steps**: build host (npm) + guest (cargo) + service (cargo) in
+  release mode, then run `scripts/e2e-smoke.ps1`. The smoke script is
+  a placeholder verifying CLI `--help` / `--version` and binary
+  presence; the real lane lights up when a self-hosted Hyper-V runner
+  is wired (P7 D4 follow-up).
+
+## Architecture invariants (decisions that span features)
+
+These are the locked rules that survive any single feature. Each row
+points at a primary source of truth so the rule can be re-derived from
+the codebase.
+
+| Rule | Source |
+|---|---|
+| Cert model is one-CA-many-VMs for v0.1.x; per-VM identity certs are deferred to v0.2.0 (consumes the B2 pin registry). | ROADMAP § "P9.1" + `host/src/provisioning/provision.ts:354-365`; locked Q2(c). |
+| Symmetry rule: every provisioning capability ships as **both** a CLI verb and an MCP tool with identical input shape. | ROADMAP § "P9 Symmetry rule (locked)". |
+| Versioning rule: provisioning verbs are *destructive* but ship in the *default* MCP namespace (not `signalman.advanced.*`); tool descriptions explicitly say "creates / destroys VM state" so LLM clients apply their own confirmation gates. | ROADMAP § "P9 Versioning rule (locked)". |
+| Idempotency: re-running any provisioning verb with no changes is a 2-second no-op; `--force` rebuilds. | `host/src/__tests__/provisioning-idempotency.test.ts`; ROADMAP § "P9.4". |
+| CLI parity: every MCP verb has a matching CLI command. CI invokes the CLI; agents invoke the MCP. Same execution path, same envelope, same exit codes. | ROADMAP § "Product Direction → CLI parity". |
+| Hermetic envelope (staged): v0.1.x emits `(scenario_hash, agent_version, network_class, result, events[], duration)`; full triple including `vm_lineage_hash` lands in v0.2.0-3. | ROADMAP § "Hermetic envelope (staged)"; `host/src/output/envelope.ts`. |
+| MCP surface principle: the unit of agent action is a **scenario**, not a raw VM/Docker call. Six verbs (`list`, `describe`, `plan`, `run`, `record`, `status`); raw VM ops live behind `signalman.advanced.*`. | ROADMAP § "MCP surface principle". |
+| Failure recovery (provisioning): leave the VM around on failure for inspection; explicit `signalman vm cleanup` to remove. `--cleanup-on-failure` is opt-in. | `host/src/provisioning/provision.ts:25-28`; locked Q decision. |
+| `direct` source security gates (locked): SHA-256 REQUIRED, HTTPS-only, allowlist `.msi/.exe/.msix/.appx`. | ROADMAP § "P9.2 `direct` security gates"; `host/src/provisioning/bundle-types.ts:189`. |
+| `docker` source security gates (locked): `image_sha256` REQUIRED (digest, not tag), pulls go through the VM's daemon, `restart_policy` defaults to `unless-stopped`. | ROADMAP § "P9.2 `docker` security gates". |
+| Bundle ordering (Q10(a) locked): bundle author orders manually for v0.1.1; `requires:` DAG resolver lands in v0.1.2 (P9.7) when ergonomic complaints surface. | ROADMAP § "P9.2 Ordering". |
+| ISO-to-VHDX conversion is **out of scope** for v0.1.1; operators bring pre-built VHDX. v0.2.0 may add an ISO build step. | `host/src/provisioning/template-fetch.ts:23-24`; ROADMAP § "P9.5". |
+| Loom-fronted topology is the default agent surface for v0.1.0; the standalone `signalman.*` MCP server in `host/` keeps shipping for direct CLI/CI consumers and as the substrate the Loom plugin shells to. | ROADMAP § "2026-04-25 architecture decision (Loom-fronted agent surface)"; `README.md` Quick Start. |
+| Plugin integration is **process-isolated**: the Loom plugin shells out to the Signalman CLI; Signalman is not a Rust dependency of Loom. | ROADMAP § "P5 Topology and boundaries". |
+| Hyper-V is the primary hypervisor backend; VMware Workstation remains a working fallback but is no longer the default. macOS support starts with a Tart-backed host backend (v0.2.0+ may add a first-party Swift helper). | ROADMAP § "2026-04-17 change" + "2026-04-26 Mac virtualization decision". |
+| UI / Browser / Verify guest RPCs ship as proto placeholders returning `Status::unimplemented`; the slot is reserved to avoid a breaking proto change later. Scenarios should rely on command-output assertions, ETW captures, and network/file-access tests. | ROADMAP § "Cuts and Deferrals 2026-04-25"; `proto/guest.proto`; `guest/src/service.rs:565-641`. |
+| `template:` field on scenario `vms[]` is **decorative** for v0.1.0; orchestrator never calls `resolveTemplate`. Wired for real in v0.2.0-2 (C9). | ROADMAP § "Cuts and Deferrals" + § "v0.2.0-2"; `host/src/scenarios/templates.ts:36-74`. |
+| Denylist is a **tripwire, not a boundary**: catches blatant agent hallucinations cheaply; the actual security boundary is mTLS + named-pipe ACL + cert pin. Positive allowlist explicitly rejected for generic VM scenario execution. | `guest/src/service.rs:35-90`; ROADMAP § "P4.2 B9". |
+| Every cross-process contract needs at least one test pinning its shape. Today: host TS↔service Rust (P7 D2 closed via `service/tests/mtls_smoke.rs`); host TS↔guest agent gRPC (mock-backed today; real-wire test deferred); plugin↔CLI (state side covered, real CLI subprocess test deferred). | `docs/testing.md` § "Test-pyramid invariants"; ROADMAP § "P7.2". |
+| Trace-id format: 32-char hex, matches W3C `trace-id` width, rides on gRPC metadata as `signalman-trace-id`. Cheap upgrade path to OTel. | `proto/guest.proto` v1-freeze comment (lines 9–18); `host/src/guest/client.ts` (`parseTraceId`); plugin `src/trace.rs`. |
+| Audit cadence (locked 2026-04-28): every P9.x deliverable runs a 6-lens audit (PM / QA / Arch / Sec / DX / Ops) at the delivery milestone, not per-commit, before the merge commit lands. | ROADMAP § "Audit cadence (locked 2026-04-28)". |
+
+## How to resume on a different machine
+
+```bash
+# 1. Clone (Loom must live as a sibling of signalman/ for the plugin to
+#    build — see plugins/signalman-loom-plugin/Cargo.toml header).
+git clone https://github.com/ambray/signalman.git
+git clone https://github.com/ambray/loom.git    # sibling, only needed for plugin
+
+# 2. Initial dependencies (run from signalman/).
+cd signalman/host && npm install && cd ..
+cargo build --release                            # builds workspace (guest + service)
+
+# Loom plugin is intentionally NOT in the Cargo workspace; build it
+# explicitly when Loom is checked out alongside.
+cargo build --release \
+  -p signalman-loom-plugin \
+  --manifest-path plugins/signalman-loom-plugin/Cargo.toml
+
+# 3. Run the test suites (1256+ test attributes / it() calls across
+#    host TS, guest Rust, service Rust, plugin Rust).
+cd host && npm test && cd ..
+cargo test --workspace
+cd plugins/signalman-loom-plugin && cargo test && cd ../..
+
+# 4. Type-check + lint gates (matches CI).
+cd host && npx tsc --noEmit && npm run lint && cd ..
+cargo clippy --workspace -- -D warnings
+cargo fmt --check
+
+# 5. To start contributing on a new feature
+#    - Pick the level. See docs/testing.md § "The five test classes".
+#    - Default to a unit test. Reach for integration only when a single
+#      function isn't enough.
+#    - Run only the relevant slice while iterating:
+cd host && npx vitest run src/__tests__/<file>.test.ts
+cargo test -p signalman-guest <test_name>
+
+# 6. To ship a release: see "Operator workflow to ship v0.1.x" above.
+```
+
+## How to pick up mid-stream in a future Claude session
+
+Copy-paste prompt that bootstraps a fresh session with full context:
+
+```
+Read these files in order to bootstrap context for resuming Signalman work:
+1. docs/STATUS.md — current state, version pins, audit closure, TODOs.
+2. ROADMAP.md § "v0.1.1 Roadmap (Provisioning + Bootstrap)" and the
+   "Timeline Summary" table at the bottom.
+3. The output of `git log --oneline -10` to see what landed most recently.
+4. docs/bootstrap.md if the work involves provisioning / bootstrap UX.
+5. docs/testing.md if the work involves adding tests.
+
+Then summarize: (a) what version is on main, (b) what the next planned
+work is per ROADMAP, (c) what audit findings are still open. After that,
+ask the user what to work on. Do NOT bump version pins, tag, or push
+without explicit user instruction — those are operator actions.
+```
+
+## Glossary
+
+- **Envelope** — JSON result emitted by `signalman.run` and `signalman
+  run` (CLI). Shape: `(envelope_version, run_id, scenario_id,
+  scenario_hash, agent_version, network_class, started_at, finished_at,
+  duration_ms, result, exit_code, assertions, events[], errors[])`.
+  v0.1.x is the staged shape; v0.2.0-3 adds `vm_lineage_hash`.
+- **Scenario** — A directory under `.signalman/scenarios/<name>/` (or
+  `examples/`) containing `setup.yaml`, `assertions.yaml`, `workflow.md`.
+  The unit of agent action.
+- **Verb** — One of `list`, `describe`, `plan`, `run`, `record`,
+  `status`. The six high-level MCP entry points; each has a matching
+  CLI command.
+- **Bundle** — A `bundle.yaml` declaring `packages:` from Tier 1
+  sources (`winget`, `choco`, `msstore`, `direct`, `docker`).
+  `signalman vm install-bundle <vm> <bundle.yaml>` applies it.
+- **Loom plugin** — `plugins/signalman-loom-plugin/`. Rust crate that
+  registers `loom.signalman.list/describe/plan/run/record/status` MCP
+  tools through Loom's `RegisterMcpTools` capability and shells out
+  to the Signalman CLI.
+- **Provision pipeline** — The 7-step `signalman vm provision` flow:
+  resolve_template → create_vm → boot_vm → stage_certs →
+  discover_msi → install_msi → checkpoint. Source of truth:
+  `host/src/provisioning/provision.ts:1-29`.
+- **Tier 1 / 2 / 3 (sources)** — Bundle-source taxonomy.
+  Tier 1 ships in v0.1.1 (`winget`, `choco`, `msstore`, `direct`,
+  `docker`). Tier 2 in v0.1.2 (`scoop`, `github_release`, `git_repo`,
+  `powershell`, `npm`, `pip`, `cargo`, `custom_script`). Tier 3 later
+  (`brew`, `mas`, `apt`, `dnf`, `flatpak`, `snap`).
+- **6-lens audit** — PM, QA, Arch, Sec, DX, Ops. Locked 2026-04-28 as
+  the per-milestone audit shape; runs at delivery milestone, not
+  per-commit.
+- **Hermetic envelope** — The staged contract: same
+  `(scenario_hash, agent_version, network_class)` triple in v0.1.x;
+  full `(scenario_hash, vm_lineage_hash, agent_version)` in v0.2.0-3.
+- **Tripwire-not-boundary** — Doc convention for the `is_denied_command`
+  list. The denylist catches obvious agent hallucinations cheaply; the
+  actual security boundary is mTLS + named-pipe ACL + cert pin.
+- **Symmetry rule** — Every provisioning capability lands as both a
+  CLI verb and an MCP tool with identical input shape.
+
+## Document maintenance
+
+This doc is meant to track the codebase. Update triggers:
+
+- **After every milestone-level commit** — refresh: latest commits
+  (top 10), test count rows, roadmap status, outstanding TODOs.
+- **After every audit finding closure** — update the Audit closure
+  table with the closing commit SHA.
+- **After every breaking proto change** — bump the proto contract row
+  in Versions; add a note in the Architecture invariants section if
+  the change touches a locked rule.
+- **After every version bump** — update the Versions table to match
+  the new manifest values.
+- **After every `Last updated:` date change** — bump the date in the
+  doc header.
+
+When the doc and the source disagree, the source wins. Open a PR to
+update this file rather than working around drift. Same convention as
+`docs/bootstrap.md` and `docs/testing.md`.
