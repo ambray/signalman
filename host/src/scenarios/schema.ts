@@ -56,6 +56,34 @@ export const vmConfigSchema = z
   .object({
     name: z.string().min(1, "VM name must be non-empty"),
     template: z.string().min(1, "VM template must be non-empty"),
+    /**
+     * P9.4 v0.1.1 — auto-provision the VM if it's missing on the
+     * host before the scenario starts. When set, `signalman run` calls
+     * `provisionVM` (P9.1) to create the VM + install the guest agent
+     * + take the `checkpoint_restore` checkpoint, then proceeds with
+     * the normal restore flow.
+     *
+     * Idempotent: if the VM already exists with the matching template
+     * and checkpoint label, the provision step is a 2-second no-op.
+     *
+     * Guarded behaviour: provision_if_missing requires the operator
+     * to have run `signalman init --bootstrap` (or the equivalent
+     * one-time setup) to land the dev certs at
+     * `%ProgramData%\Signalman\certs\`. The orchestrator surfaces a
+     * descriptive error if the cert prereq isn't satisfied — it does
+     * NOT silently bootstrap them, since cert generation requires
+     * elevated privileges that the run context may not have.
+     *
+     * Default: false. When false, a missing VM surfaces as a setup
+     * error (the existing v0.1.0 behaviour).
+     */
+    provision_if_missing: z
+      .boolean()
+      .default(false)
+      .describe(
+        "If true, run signalman vm provision <name> before the scenario " +
+          "when the VM doesn't already exist. P9.4 v0.1.1.",
+      ),
     checkpoint_restore: z.string().optional(),
     /**
      * Whether the named `checkpoint_restore` is a warm-state checkpoint

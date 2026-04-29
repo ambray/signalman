@@ -366,6 +366,96 @@ describe("fetchTemplateImage — failure modes", () => {
   });
 });
 
+describe("fetchTemplateImage — disk-fill cap (Sec follow-up)", () => {
+  // What this catches: an operator paste-error pointing fetchTemplateImage
+  // at a multi-TB URL, OR a hostile/misconfigured server replying with
+  // an oversize body. The cap defends both.
+
+  it("rejects pre-flight when Content-Length exceeds maxBytes", async () => {
+    const body = Buffer.from("x".repeat(1000));
+    const sha = sha256Hex(body);
+    let openedBody = false;
+    const fetchSpy: typeof fetch = (async () => {
+      openedBody = true;
+      return makeResponse(body); // Content-Length = 1000
+    }) as unknown as typeof fetch;
+
+    await expect(
+      fetchTemplateImage({
+        templateName: "tiny",
+        url: "https://example.com/tiny.vhdx",
+        expectedSha256: sha,
+        cacheDir: tmpRoot,
+        fetchImpl: fetchSpy,
+        maxBytes: 500, // smaller than the body
+      }),
+    ).rejects.toThrow(/exceeds maxBytes cap 500/);
+
+    // The spy still ran (we always make the request), but no .tmp
+    // file should have been created because we abort BEFORE opening
+    // the write stream.
+    expect(openedBody).toBe(true);
+    const tmpFiles = fs
+      .readdirSync(tmpRoot, { recursive: true })
+      .filter((f) => String(f).endsWith(".tmp"));
+    expect(tmpFiles).toEqual([]);
+  });
+
+  it("aborts mid-stream + shreds .tmp when running total exceeds maxBytes", async () => {
+    // Build a fetch that reports a small Content-Length but actually
+    // streams more bytes — Content-Length spoofing scenario.
+    const realBody = Buffer.from("x".repeat(2000));
+    const sha = sha256Hex(realBody);
+
+    const fetchSpy: typeof fetch = (async () => {
+      const stream = Readable.from(realBody);
+      const webStream = Readable.toWeb(
+        stream,
+      ) as unknown as ReadableStream<Uint8Array>;
+      return new Response(webStream, {
+        status: 200,
+        // Lie about the size so pre-flight passes.
+        headers: { "content-length": "100" },
+      });
+    }) as unknown as typeof fetch;
+
+    await expect(
+      fetchTemplateImage({
+        templateName: "spoof",
+        url: "https://example.com/spoof.vhdx",
+        expectedSha256: sha,
+        cacheDir: tmpRoot,
+        fetchImpl: fetchSpy,
+        maxBytes: 500,
+      }),
+    ).rejects.toThrow(/exceeded maxBytes cap 500/);
+
+    // No .tmp file remains — the catch path shreds it.
+    const tmpFiles = fs
+      .readdirSync(tmpRoot, { recursive: true })
+      .filter((f) => String(f).endsWith(".tmp"));
+    expect(tmpFiles).toEqual([]);
+  });
+
+  it("default cap admits typical VHDX downloads (50 GiB)", async () => {
+    // Sanity: the default maxBytes is large enough that a normal-size
+    // download isn't accidentally clipped. We don't actually download
+    // 25 GiB — just check that the option resolution doesn't refuse a
+    // 4 KiB body when no maxBytes is supplied.
+    const body = Buffer.from("y".repeat(4096));
+    const sha = sha256Hex(body);
+    const result = await fetchTemplateImage({
+      templateName: "default-cap",
+      url: "https://example.com/dc.vhdx",
+      expectedSha256: sha,
+      cacheDir: tmpRoot,
+      fetchImpl: fakeFetch(body),
+      // no maxBytes specified — default (50 GiB) applies
+    });
+    expect(result.sizeBytes).toBe(4096);
+  });
+});
+
 describe("sha256File", () => {
   it("computes the SHA of an on-disk file by streaming", async () => {
     const body = Buffer.from("contents-to-hash");

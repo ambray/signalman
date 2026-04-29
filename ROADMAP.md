@@ -762,9 +762,22 @@ clients can apply their own confirmation gates.
 | `direct` | `{ id, source: direct, url, sha256, args, verify }` | **most security-sensitive** |
 | `docker` | `{ id, source: docker, image, image_sha256, ports, env, restart_policy, verify }` | requires Docker on the VM (operator orders the prereq) |
 
-**Tier 2 sources (v0.1.2):** `scoop`, `github_release`, `git_repo`
-(with `ref:` for branch/tag/SHA, optional `submodules:`/`sparse:`),
-`powershell` (Install-Module), `npm`, `pip`, `cargo`, `custom_script`.
+**Tier 2 sources — ✅ landed 2026-04-29 (v0.1.1):** `scoop`,
+`github_release`, `git_repo` (with `ref:` for branch/tag/SHA, optional
+`submodules:` / `sparse:`), `powershell` (`Install-Module`), `npm`,
+`pip`, `cargo`, `custom_script`. Routing summary:
+- `scoop` → guest-side `installSoftware` RPC with new Rust handler arm.
+- `github_release` → host-side fetch of
+  `api.github.com/repos/<owner>/<repo>/releases/latest`, asset glob
+  match, then existing `installDirect` RPC.
+- `git_repo` → 1–3 `runCommand("git", [...])` calls (clone, optional
+  sparse-checkout init/set, optional submodules update).
+- `powershell` / `npm` / `pip` / `cargo` → `runCommand` shell-out with
+  language-specific argv. No new RPCs.
+- `custom_script` → single `runCommand("powershell", [..., script-block])`
+  that performs `Invoke-WebRequest` + `Get-FileHash` + `& <interpreter>`.
+  pwsh-only on Windows for v0.1.1; bash on Linux/macOS guests deferred
+  to v0.1.2 once a first-class download-verify-spawn RPC ships.
 
 **Tier 3 (later, multi-platform):** `brew`, `mas`, `apt`, `dnf`,
 `flatpak`, `snap`.
@@ -824,10 +837,14 @@ as success. No host-side install ledger (avoids drift).
   re-invoked despite warm cache", "scaffold restored after force
   overwrite") so a failed assertion immediately names which verb's
   idempotency contract broke.
-- **Deferred from P9.4 to v0.1.2**: the `provision_if_missing: true`
-  scenario YAML field. The integration tests currently exercise the
-  programmatic API; wiring this into `runRun`'s pre-scenario gate
-  is a small but separate change.
+- ✅ **`provision_if_missing: true` scenario YAML — landed 2026-04-29.**
+  New `vmConfigSchema.provision_if_missing` field (default `false`).
+  When set, `ScenarioOrchestrator.resolveVms` calls `provisionVM`
+  before the scenario starts when the named VM is absent on the host.
+  Idempotent (matches the rest of P9 — provisionVM no-ops in <100ms
+  when the VM + checkpoint already exist). Hard-fails with a
+  remediation hint pointing at the flag when a missing VM is seen
+  without `provision_if_missing` set.
 
 **P9.5 — Template registry + base-image fetch**
 - New template fields:
@@ -847,6 +864,24 @@ as success. No host-side install ledger (avoids drift).
 - **Out of scope for v0.1.1**: ISO-to-VHDX conversion. Operators
   provide pre-built VHDX (downloaded or `Convert-WindowsImage.ps1`).
   v0.2.0 may add an ISO build step.
+- ✅ **Disk-fill cap — landed 2026-04-29** (Sec follow-up flagged in
+  P9.5 audit). `fetchTemplateImage` accepts `maxBytes?` (default
+  `DEFAULT_MAX_BYTES = 50 GiB`). Pre-flight rejects when
+  `Content-Length` already exceeds the cap; mid-stream check shreds
+  the partial `.tmp` file when running total exceeds the cap (defends
+  against Content-Length spoofing). 3 new tests in
+  `template-fetch.test.ts`. Defends operators paste-pointing at a
+  multi-TB URL and hostile servers serving an unbounded body under a
+  hash that happens to match.
+- ✅ **`vm_install_bundle` MCP-server wiring — landed 2026-04-29.**
+  New `host/src/provisioning/guest-client-factory.ts` exports
+  `makeGuestClientResolver(getBackend)` — builds a per-VM
+  `GuestAgentClient` on demand from (backend, vmName) with no caching
+  (bundle installs are infrequent; stale clients across reboots would
+  be a worse footgun than the per-call IP-resolution cost). Wired
+  into `createAllTools` so `vm_install_bundle` is now registered in
+  the default MCP namespace alongside `vm_provision` /
+  `vm_fetch_template` / `vm_cleanup`.
 
 **P9.6 — Bootstrap docs — ✅ closed 2026-04-28**
 - `docs/bootstrap.md` landed with the full end-to-end walkthrough:
@@ -867,6 +902,18 @@ as success. No host-side install ledger (avoids drift).
   cross-reference list; the lane itself plugs the bootstrap path in
   once self-hosted Hyper-V runners come online (P7 D4 follow-up,
   not blocked by this entry).
+
+**P9.8 — Resume context (`docs/STATUS.md`) — ✅ landed 2026-04-29.**
+Living document at `docs/STATUS.md` (~550 lines) captures the
+"where are we" snapshot for future sessions / other-machine resumes:
+versions, recent commits, audit closure table, test coverage map,
+roadmap status by milestone, outstanding TODOs in code, release
+process, architecture invariants (the 19 locked Q-decisions), and
+literal copy-pasteable prompts for both fresh-clone contributor
+onboarding and Claude-session continuation. The doc is the single
+read that future work should start with — it cross-references every
+other file but stands on its own. Trigger rules for keeping it
+current live in the doc's "Document maintenance" section.
 
 **P9.7 — DAG-resolved bundle dependencies (deferred to v0.1.2)**
 - Q10(a) gives v0.1.1 manual ordering. Once real bundles surface

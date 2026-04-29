@@ -127,6 +127,13 @@ export interface VmDefinition {
    * (see Sprint 60 P2 follow-up).
    */
   warm_checkpoint?: boolean;
+  /**
+   * P9.4 v0.1.1 — auto-provision the VM if missing before scenario
+   * starts. See `host/src/scenarios/schema.ts` `vmConfigSchema` for
+   * the YAML-side documentation. When false (default), a missing VM
+   * is a hard fail with a remediation hint pointing at this flag.
+   */
+  provision_if_missing?: boolean;
   /** Guest agent gRPC port (default: 50051). */
   guest_agent_port: number;
   /** Network configuration. */
@@ -1741,16 +1748,46 @@ export class ScenarioOrchestrator {
     for (const def of vmDefs) {
       // Resolve alias: check config.vmAliases first, then use the logical name
       const physicalName = this.config.vmAliases?.[def.name] ?? def.name;
-      const existing = allVms.find(
+      let existing = allVms.find(
         (vm) => vm.name.toLowerCase() === physicalName.toLowerCase(),
       );
+      // P9.4 v0.1.1 — `provision_if_missing: true` triggers a one-shot
+      // `signalman vm provision` before the rest of the scenario
+      // touches the VM. Idempotent: if the VM already exists with the
+      // matching template + checkpoint, provisionVM returns
+      // `alreadyProvisioned: true` in <100ms.
+      //
+      // Why we ALWAYS gate on provision_if_missing being explicitly
+      // true: silently bootstrapping VMs is exactly the kind of
+      // "magic" that makes scenarios non-portable across hosts.
+      // Operators opt in per-VM in scenario YAML; the default is the
+      // existing v0.1.0 "VM not found" hard fail.
+      if (!existing && def.provision_if_missing) {
+        // Lazy-import provisionVM to avoid a top-of-file dependency
+        // cycle (orchestrator → provision → templates → orchestrator
+        // for type-only imports). This is the same pattern
+        // cmdVmInstallBundle uses for its bundle helpers.
+        const { provisionVM } = await import("../provisioning/provision.js");
+        const provisionResult = await provisionVM(this.backend, {
+          vmName: physicalName,
+          templateName: def.template,
+          checkpointLabel: def.checkpoint_restore,
+        });
+        existing = provisionResult.vmHandle;
+        // Append the freshly-provisioned VM to allVms so subsequent
+        // iterations of this loop see it (a scenario with two VMs
+        // both opting in to provisioning, sharing a template).
+        allVms.push(existing);
+      }
       if (!existing) {
         const aliasHint = physicalName !== def.name
           ? ` (alias for '${physicalName}')`
           : "";
         throw new Error(
           `VM '${def.name}'${aliasHint} not found in hypervisor. ` +
-          `Available VMs: ${allVms.map((v) => v.name).join(", ")}`,
+          `Available VMs: ${allVms.map((v) => v.name).join(", ")}. ` +
+          `Set provision_if_missing: true on this VM in setup.yaml ` +
+          `to have signalman provision it automatically (P9.4).`,
         );
       }
       vmMap.set(def.name, existing);

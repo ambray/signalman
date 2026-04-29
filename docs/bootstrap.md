@@ -294,7 +294,39 @@ signalman vm install-bundle endpoint-1 examples/bundles/dev-tools.bundle.yaml
 The reference bundle exercises every Tier 1 source: `winget`,
 `choco`, `msstore`, `direct`, `docker` — see
 `examples/bundles/dev-tools.bundle.yaml` and the type system at
-`host/src/provisioning/bundle-types.ts:55-61`.
+`host/src/provisioning/bundle-types.ts`.
+
+**Tier 2 sources (also v0.1.1):** `scoop`, `github_release`,
+`git_repo` (with `ref:` for branch/tag/SHA, optional
+`submodules:` / `sparse:` paths), `powershell` (`Install-Module` from
+PSGallery), `npm`, `pip`, `cargo`, `custom_script`. The
+`examples/bundles/full-stack.bundle.yaml` exercises these and is the
+reference for source-source dependencies (the bundle author orders
+prerequisites manually — Q10(a) lock; place `git` before any
+`git_repo` entry, `python` before any `pip` entry, etc.). Schema +
+security gates per source: `bundle-types.ts` module docstring.
+
+```powershell
+signalman vm install-bundle endpoint-1 examples/bundles/full-stack.bundle.yaml
+```
+
+**`provision_if_missing`** (v0.1.1) — set on a `vms:` block to have
+`signalman run` auto-provision the VM transparently when it's
+missing on the host:
+
+```yaml
+vms:
+  - name: endpoint-1
+    template: win11-base
+    checkpoint_restore: agent-installed
+    provision_if_missing: true   # NEW v0.1.1
+    guest_agent_port: 50051
+```
+
+Idempotent: a 2-second no-op when the VM + checkpoint already exist.
+Hard-fails (with a remediation hint pointing at this flag) when a
+missing VM is seen WITHOUT the flag set, preserving the v0.1.0
+"explicit provision required" default.
 
 Expected output (per-package summary from
 `host/src/provisioning/install-bundle.ts:419-465`):

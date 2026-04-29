@@ -1,0 +1,178 @@
+# Full-stack reference bundle exercising every Tier 2 source (v0.1.1).
+#
+# Apply with:
+#   signalman vm install-bundle <vm> examples/bundles/full-stack.bundle.yaml
+#
+# This bundle is realistic: each entry uses a real package id you might
+# actually want on a developer VM. Source-source dependencies are
+# resolved by the AUTHOR, not the orchestrator — see the prereq block
+# below. If you re-order entries the bundle will fail with a "command
+# not found" error from the underlying tool.
+apiVersion: signalman.dev/v1alpha1
+kind: Bundle
+metadata:
+  name: full-stack
+  description: >
+    Full-stack developer baseline. Demonstrates every v0.1.1 Tier 2
+    source plus a concluding parallel group. Authoring order encodes
+    the prereq DAG: tools that PROVIDE a package manager must appear
+    before any package routed through that manager.
+
+packages:
+  # ── 0. Prereqs (Tier 1) ───────────────────────────────────────────
+  #
+  # Tier 2 sources route through their underlying tool, which the
+  # orchestrator calls via `runCommand`. The tool must already be on
+  # PATH inside the guest. We satisfy this by installing the tool via
+  # winget BEFORE any Tier 2 entry that depends on it. The orchestrator
+  # does no DAG analysis — declaration order IS the dependency graph.
+  #
+  #   - Git.Git              -> required by `git_repo`
+  #   - OpenJS.NodeJS.LTS    -> provides `node` + `npm` (npm source)
+  #   - Python.Python.3.12   -> provides `python` + `pip` (pip source)
+  #   - Rustlang.Rustup      -> provides `cargo` (cargo source)
+  #   - Microsoft.PowerShell -> provides `pwsh` 7+ (powershell + custom_script
+  #                              sources). Win11 ships pwsh 5.x by default;
+  #                              7.x is needed for Install-Module from the
+  #                              modern PSGallery gallery.
+  #
+  # Scoop has its own bootstrap that the operator handles out-of-band
+  # (it can't be installed by another package manager idempotently).
+  # The bundle assumes scoop is already present.
+  - id: Git.Git
+    source: winget
+    verify: git --version
+    verify_expect: "git version"
+  - id: OpenJS.NodeJS.LTS
+    source: winget
+    verify: node --version
+    verify_expect: "v"
+  - id: Python.Python.3.12
+    source: winget
+    verify: python --version
+    verify_expect: "Python 3."
+  - id: Rustlang.Rustup
+    source: winget
+    verify: cargo --version
+    verify_expect: "cargo "
+  - id: Microsoft.PowerShell
+    source: winget
+    verify: pwsh -Command "$PSVersionTable.PSVersion.Major"
+    verify_expect: "7"
+
+  # ── 1. scoop — Windows non-admin package manager ──────────────────
+  - id: Scoop fzf
+    source: scoop
+    package_id: fzf
+    verify: fzf --version
+
+  # ── 2. github_release — pin a tagged binary by glob ───────────────
+  #
+  # GitHub's anonymous API rate limit is 60 req/hr/IP. Bundles with
+  # many github_release entries can hit it; if you see a 403 in the
+  # error message, set GITHUB_TOKEN in the orchestrator environment.
+  #
+  # sha256 is OPTIONAL — without it, the orchestrator falls back to
+  # TLS-only trust on the asset. Supply a hash you computed yourself
+  # (e.g., from a release-notes-published checksum) for production.
+  - id: gh-release-fzf
+    source: github_release
+    repo: junegunn/fzf
+    asset_name_pattern: "fzf-*-windows_amd64.zip"
+    # sha256: REPLACE_WITH_64_HEX
+    install_dir: "C:\\Tools\\fzf"
+
+  # ── 3. git_repo — clone a checkout into the guest filesystem ──────
+  - id: clone-dotfiles
+    source: git_repo
+    url: https://github.com/example/dotfiles.git
+    ref: main
+    dest: "C:\\src\\dotfiles"
+    verify: git -C "C:\\src\\dotfiles" rev-parse HEAD
+
+  # git_repo with sparse-checkout — useful for monorepos. The
+  # orchestrator runs three git invocations: clone --filter=blob:none
+  # --no-checkout, sparse-checkout init --cone, sparse-checkout set.
+  - id: clone-monorepo-docs
+    source: git_repo
+    url: https://github.com/example/monorepo.git
+    ref: v2.0.0
+    dest: "C:\\src\\monorepo"
+    sparse:
+      - docs
+      - examples
+
+  # ── 4. powershell — PSGallery module ──────────────────────────────
+  - id: PSReadLine
+    source: powershell
+    module_id: PSReadLine
+    scope: AllUsers
+    version: "2.3.4"
+    verify: pwsh -NoProfile -Command "Get-Module -ListAvailable PSReadLine"
+    verify_expect: "PSReadLine"
+
+  # ── 5. npm — global package ───────────────────────────────────────
+  - id: npm-typescript
+    source: npm
+    package_id: typescript
+    version: "5.4.5"
+    verify: tsc --version
+    verify_expect: "Version 5.4.5"
+
+  # ── 6. pip — Python package ───────────────────────────────────────
+  - id: pip-requests
+    source: pip
+    package_id: requests
+    version: "2.32.3"
+    verify: python -c "import requests; print(requests.__version__)"
+    verify_expect: "2.32.3"
+
+  # ── 7. cargo — Rust crate ─────────────────────────────────────────
+  - id: cargo-just
+    source: cargo
+    crate_id: just
+    version: "1.30.0"
+    verify: just --version
+    verify_expect: "just 1.30.0"
+
+  # ── 8. custom_script — operator-supplied bootstrap ────────────────
+  #
+  # SHA-256 is REQUIRED for custom_script — there is no "trust the
+  # publisher" fallback. The interpreter enum is locked to
+  # `pwsh | bash` so the orchestrator never spawns an arbitrary
+  # operator-named interpreter.
+  #
+  # v0.1.1 supports `pwsh` cleanly on Windows. `bash` on Linux/macOS
+  # guests is on the roadmap for v0.1.2 / v0.2.0 once the guest agent
+  # gains a first-class download-verify-spawn RPC.
+  - id: custom-bootstrap
+    source: custom_script
+    url: https://example.com/bootstrap-flag.ps1
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    interpreter: pwsh
+    args:
+      - -Force
+    verify: pwsh -NoProfile -Command "Test-Path C:\\Custom\\done.flag"
+    verify_expect: "True"
+
+  # ── 9. parallel — Tier 2 sources can be parallelized ──────────────
+  #
+  # Only safe for *peer-independent* installs. The three below touch
+  # different package managers (npm / pip / cargo) so they can fire
+  # concurrently. If two parallel entries fight over the same lockfile
+  # or filesystem path, expect a flaky failure — author-asserted, not
+  # orchestrator-checked.
+  - parallel:
+      - id: npm-eslint
+        source: npm
+        package_id: eslint
+        verify: eslint --version
+      - id: pip-black
+        source: pip
+        package_id: black
+        verify: black --version
+      - id: cargo-ripgrep
+        source: cargo
+        crate_id: ripgrep
+        verify: rg --version
+        verify_expect: "ripgrep "
