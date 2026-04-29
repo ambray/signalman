@@ -118,6 +118,11 @@ exercise the full stack end-to-end (ETW + WFP + kernel-debug tooling).
 
 ## Quick Start
 
+> New operators: see [docs/bootstrap.md](docs/bootstrap.md) for the
+> end-to-end "fresh Hyper-V host → first `signalman run`" walkthrough
+> (prerequisites, dev certs, template fetch, VM provision, bundle
+> install, troubleshooting).
+
 ### Loom-fronted (default agent path; v0.1.0)
 
 The Loom plugin lives at `plugins/signalman-loom-plugin/`. It registers with

@@ -326,8 +326,11 @@ describe("installBundle: Tier 1 source routing", () => {
     const arg = (client.installDocker as ReturnType<typeof vi.fn>).mock
       .calls[0][0];
     expect(arg.image).toBe("mailhog/mailhog");
-    expect(arg.image_sha256).toMatch(/^sha256:/);
-    expect(arg.restart_policy).toBe("unless-stopped");
+    // P9.2 proto bump: client method takes camelCase to match the
+    // rest of the TS API; the YAML schema still uses snake_case for
+    // operator readability, install-bundle.ts translates.
+    expect(arg.imageSha256).toMatch(/^sha256:/);
+    expect(arg.restartPolicy).toBe("unless-stopped");
   });
 });
 

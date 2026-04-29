@@ -813,14 +813,21 @@ as success. No host-side install ledger (avoids drift).
   outside the provisioning pipeline (no agent install, no checkpoint).
   For users who want the create step but their own bootstrap.
 
-**P9.4 — Idempotent "ensure provisioned" semantics**
-- Cross-cutting: every provisioning verb gets `--force` + idempotent
-  re-run. Already specified in P9.1; this P9.4 entry is the
-  cross-cutting test pass: write integration tests that re-run each
-  verb 3x and verify the second + third runs no-op.
-- New scenario field: `provision_if_missing: true` on the `vms:`
-  block. When set, `signalman run` provisions the VM transparently
-  before the scenario starts.
+**P9.4 — Idempotent "ensure provisioned" semantics — ✅ closed 2026-04-28**
+- Cross-cutting test suite landed at `host/src/__tests__/
+  provisioning-idempotency.test.ts` (9 cases across 8 describe
+  blocks). Each provisioning verb (init, fetch-template, provision,
+  cleanup, install-bundle) gets a × 3 invocation case asserting the
+  second + third runs no-op. End-to-end test chains all five verbs
+  twice and asserts the second pass is uniformly fast.
+- Per-assertion regression-class messages (e.g. "fetch was
+  re-invoked despite warm cache", "scaffold restored after force
+  overwrite") so a failed assertion immediately names which verb's
+  idempotency contract broke.
+- **Deferred from P9.4 to v0.1.2**: the `provision_if_missing: true`
+  scenario YAML field. The integration tests currently exercise the
+  programmatic API; wiring this into `runRun`'s pre-scenario gate
+  is a small but separate change.
 
 **P9.5 — Template registry + base-image fetch**
 - New template fields:
@@ -841,15 +848,25 @@ as success. No host-side install ledger (avoids drift).
   provide pre-built VHDX (downloaded or `Convert-WindowsImage.ps1`).
   v0.2.0 may add an ISO build step.
 
-**P9.6 — Bootstrap docs**
-- `docs/bootstrap.md` — end-to-end "fresh Windows host → first
-  scenario run" walkthrough. Covers: install host npm package, run
-  `signalman init --bootstrap`, fetch a template, provision a VM,
-  run the sample scenario, verify pass.
-- Updates to `docs/testing.md` so the gated E2E lane (P7 D4) can use
-  the bootstrap flow when self-hosted Hyper-V runners come online.
-- README "Quick Start" gets a one-line addition pointing at the
-  bootstrap doc.
+**P9.6 — Bootstrap docs — ✅ closed 2026-04-28**
+- `docs/bootstrap.md` landed with the full end-to-end walkthrough:
+  prerequisites (Hyper-V, Node 20+, pwsh, openssl, `Default Switch`,
+  pre-built VHDX), one-time setup (npm install host, generate dev
+  certs, `signalman init`, `signalman vm fetch-template`), first VM
+  provision (7-step pipeline trace pinned to
+  `host/src/provisioning/provision.ts`), first scenario run (envelope
+  shape pinned to `host/src/output/envelope.ts`), `vm install-bundle`
+  against `examples/bundles/dev-tools.bundle.yaml`, iteration loop
+  (`--force` rebuild + `vm cleanup`), troubleshooting (guest MSI
+  discovery, SHA mismatch, boot hang, `direct`-source feature
+  detection), explicit out-of-scope list (Linux/macOS provisioning,
+  per-VM identity certs, ISO-to-VHDX, interactive
+  `init --bootstrap`), and source-of-truth cross-references. README
+  Quick Start now points at the doc on the first line. The
+  `docs/testing.md` gated-E2E-lane wiring is referenced from the
+  cross-reference list; the lane itself plugs the bootstrap path in
+  once self-hosted Hyper-V runners come online (P7 D4 follow-up,
+  not blocked by this entry).
 
 **P9.7 — DAG-resolved bundle dependencies (deferred to v0.1.2)**
 - Q10(a) gives v0.1.1 manual ordering. Once real bundles surface

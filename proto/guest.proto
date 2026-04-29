@@ -63,6 +63,14 @@ service GuestAgent {
 
   // ── Software Management ─────────────────────────────────────
   rpc InstallSoftware(InstallSoftwareRequest) returns (InstallSoftwareResponse);
+
+  // P9.2 — multi-source bundle installs. Sources that need
+  // installer-shape parameters (URL + SHA + silent args) or
+  // container-shape parameters (image digest + ports + env) get their
+  // own RPC rather than overloading InstallSoftwareRequest, which
+  // stays package-manager-shaped (package_id + source + version).
+  rpc InstallDirect(InstallDirectRequest) returns (InstallSoftwareResponse);
+  rpc InstallDocker(InstallDockerRequest) returns (InstallSoftwareResponse);
 }
 
 // ── Health ────────────────────────────────────────────────────────
@@ -494,7 +502,13 @@ message ListDirectoryResponse {
 
 message InstallSoftwareRequest {
   string package_id = 1;
-  string source = 2;  // "winget", "choco", "direct"
+  // Source is one of:
+  //   "winget"   — Windows Package Manager (default Windows source)
+  //   "choco"    — Chocolatey
+  //   "msstore"  — Microsoft Store (routed via `winget install --source msstore`)
+  // Use the dedicated InstallDirect / InstallDocker RPCs for sources
+  // whose parameter shape doesn't fit (url+sha vs image+digest).
+  string source = 2;
   string version = 3;  // Optional: specific version
   bool silent = 4;
 }
@@ -505,4 +519,55 @@ message InstallSoftwareResponse {
   string stdout = 3;
   string stderr = 4;
   string installed_path = 5;
+  // P9.2: when an idempotent re-run detects the package was already
+  // present, the guest sets this true and exit_code = 0. Bundle
+  // orchestrator counts these as "skipped" rather than "installed".
+  bool already_installed = 6;
+}
+
+// P9.2 — direct installer download. Guest fetches the URL over HTTPS,
+// verifies SHA-256, then spawns the installer with the supplied args.
+message InstallDirectRequest {
+  // Stable identifier for logging / dedup (matches bundle entry id).
+  string id = 1;
+  // HTTPS URL of the installer. Guest enforces https:// scheme.
+  string url = 2;
+  // 64-char lowercase hex SHA-256 of the installer bytes. REQUIRED.
+  // Guest hard-fails if computed digest does not match.
+  string sha256 = 3;
+  // Silent-install arguments for the installer (e.g. ["/SILENT", "/NORESTART"]).
+  repeated string args = 4;
+  // Optional: expected install directory. Guest does NOT enforce; the
+  // value travels through to the response so the orchestrator can log
+  // it for the user.
+  string install_dir = 5;
+  // Per-call timeout in milliseconds. Zero = service-default (5 min).
+  uint64 timeout_ms = 6;
+}
+
+// P9.2 — docker container install. Guest pulls the image (digest-pinned),
+// runs it with the supplied options. Requires Docker on the VM (operator
+// orders that prerequisite explicitly in the bundle).
+message InstallDockerRequest {
+  // Stable identifier for logging / dedup.
+  string id = 1;
+  // Image reference WITHOUT digest (e.g. "mailhog/mailhog").
+  // Guest pulls `<image>@<image_sha256>` so the digest pin is
+  // load-bearing. Tag-only references are rejected.
+  string image = 2;
+  // Image digest pin — `sha256:<64hex>` form. REQUIRED.
+  string image_sha256 = 3;
+  // Optional container name. Empty = docker-generated.
+  string container_name = 4;
+  // Port forwards in `host:container` form (e.g. "1025:1025").
+  repeated string ports = 5;
+  // Environment variables to set inside the container.
+  map<string, string> env = 6;
+  // One of "no" | "always" | "unless-stopped" | "on-failure".
+  // Empty defaults to "unless-stopped" per host-side schema.
+  string restart_policy = 7;
+  // Override the image entrypoint args. Empty = image default.
+  repeated string command = 8;
+  // Per-call timeout in milliseconds. Zero = service-default (5 min).
+  uint64 timeout_ms = 9;
 }

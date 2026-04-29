@@ -210,6 +210,35 @@ export interface InstallResult {
   stdout: string;
   stderr: string;
   installedPath: string;
+  /**
+   * P9.2: true when the guest detected the package was already
+   * present and skipped a re-install. The bundle orchestrator counts
+   * these as `skipped` rather than `installed`.
+   */
+  alreadyInstalled?: boolean;
+}
+
+/** P9.2: input for `installDirect`. */
+export interface InstallDirectOptions {
+  id: string;
+  url: string;
+  sha256: string;
+  args?: string[];
+  installDir?: string;
+  timeoutMs?: number;
+}
+
+/** P9.2: input for `installDocker`. */
+export interface InstallDockerOptions {
+  id: string;
+  image: string;
+  imageSha256: string;
+  containerName?: string;
+  ports?: string[];
+  env?: Record<string, string>;
+  restartPolicy?: "no" | "always" | "unless-stopped" | "on-failure";
+  command?: string[];
+  timeoutMs?: number;
 }
 
 /** Directory entry returned by the guest file API. */
@@ -771,6 +800,81 @@ export class GuestAgentClient {
           version: version ?? "",
           silent: true,
         }, deadline, this.options.authToken),
+      this.options.maxRetries,
+      this.options.initialRetryDelayMs,
+      this.options.maxRetryDelayMs,
+    );
+  }
+
+  /**
+   * P9.2 — Install software from a direct URL.
+   *
+   * The guest agent downloads the installer over HTTPS, verifies the
+   * SHA-256 against `opts.sha256`, then spawns the installer with
+   * `opts.args` as silent-install arguments. The download is streamed
+   * (no full-file-in-memory) and the partial file is shredded on any
+   * failure path so a hash mismatch can't leak a half-downloaded
+   * payload.
+   *
+   * Pre-conditions enforced server-side: HTTPS-only URL, 64-char
+   * lowercase hex sha256. The host-side `bundle-types.ts` Zod schema
+   * also enforces these — failure surfaces here only when the bundle
+   * was constructed in code (not from YAML) or the schema drifted.
+   */
+  async installDirect(opts: InstallDirectOptions): Promise<InstallResult> {
+    const deadline = opts.timeoutMs ?? this.options.defaultTimeoutMs;
+    return withRetry(
+      () =>
+        unaryCall(
+          this.client,
+          "installDirect",
+          {
+            id: opts.id,
+            url: opts.url,
+            sha256: opts.sha256,
+            args: opts.args ?? [],
+            installDir: opts.installDir ?? "",
+            timeoutMs: opts.timeoutMs ?? 0,
+          },
+          deadline,
+          this.options.authToken,
+        ),
+      this.options.maxRetries,
+      this.options.initialRetryDelayMs,
+      this.options.maxRetryDelayMs,
+    );
+  }
+
+  /**
+   * P9.2 — Install software as a docker container.
+   *
+   * Requires Docker on the VM (operator orders that prerequisite
+   * explicitly in the bundle, per Q10(a)). The guest pulls the image
+   * with the digest pin (`<image>@<image_sha256>`), then runs it with
+   * the supplied options. "Container already exists" is treated as
+   * `alreadyInstalled: true` (idempotent re-run).
+   */
+  async installDocker(opts: InstallDockerOptions): Promise<InstallResult> {
+    const deadline = opts.timeoutMs ?? this.options.defaultTimeoutMs;
+    return withRetry(
+      () =>
+        unaryCall(
+          this.client,
+          "installDocker",
+          {
+            id: opts.id,
+            image: opts.image,
+            imageSha256: opts.imageSha256,
+            containerName: opts.containerName ?? "",
+            ports: opts.ports ?? [],
+            env: opts.env ?? {},
+            restartPolicy: opts.restartPolicy ?? "",
+            command: opts.command ?? [],
+            timeoutMs: opts.timeoutMs ?? 0,
+          },
+          deadline,
+          this.options.authToken,
+        ),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
       this.options.maxRetryDelayMs,
