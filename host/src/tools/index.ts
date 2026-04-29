@@ -13,6 +13,7 @@ export { createVmCheckpointTools } from "./vm-checkpoint.js";
 export { createVmOperationTools } from "./vm-operations.js";
 export { createDockerTools } from "./docker-tools.js";
 export { createVmTemplateTools } from "./vm-template.js";
+export { createVmProvisioningTools } from "./vm-provisioning.js";
 // P9.2 — `vm_install_bundle` requires a per-VM GuestAgentClient
 // resolver, which createAllTools doesn't have on hand. Main session
 // wires the tool up alongside the orchestrator so the resolver
@@ -27,6 +28,7 @@ import { createVmCheckpointTools } from "./vm-checkpoint.js";
 import { createVmOperationTools } from "./vm-operations.js";
 import { createDockerTools } from "./docker-tools.js";
 import { createVmTemplateTools } from "./vm-template.js";
+import { createVmProvisioningTools } from "./vm-provisioning.js";
 import { DockerClient } from "../docker/client.js";
 
 /**
@@ -51,5 +53,10 @@ export function createAllTools(
     ...createVmOperationTools(getBackend),
     ...createDockerTools(() => dockerClient),
     ...createVmTemplateTools(),
+    // P9.1: vm_provision + vm_cleanup. Default MCP namespace (not
+    // signalman.advanced.*) per the locked Q6 decision; tool
+    // descriptions carry the "Destructive" marker so LLM clients
+    // gate on it.
+    ...createVmProvisioningTools(getBackend),
   ];
 }

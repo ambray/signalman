@@ -1052,6 +1052,37 @@ impl GuestAgent for GuestAgentService {
                 }
                 ("winget".to_string(), a)
             }
+            // P9.2: msstore is winget-with-source-flag. Routing through
+            // a separate string-enum lets host-side bundles distinguish
+            // explicit Microsoft-Store sourcing (which has slightly
+            // different semantics: store packages may require user
+            // sign-in, which silent install can't satisfy — so we log
+            // a warning if --silent is requested but don't fail).
+            "msstore" => {
+                if req.silent {
+                    warn!(
+                        package = %req.package_id,
+                        "msstore source: --silent may fail for packages that \
+                         require Microsoft account sign-in; proceeding anyway"
+                    );
+                }
+                let mut a = vec![
+                    "install".to_string(),
+                    req.package_id.clone(),
+                    "--source".to_string(),
+                    "msstore".to_string(),
+                    "--accept-package-agreements".to_string(),
+                    "--accept-source-agreements".to_string(),
+                ];
+                if req.silent {
+                    a.push("--silent".into());
+                }
+                if !req.version.is_empty() {
+                    a.push("--version".into());
+                    a.push(req.version.clone());
+                }
+                ("winget".to_string(), a)
+            }
             "choco" => {
                 let mut a = vec![
                     "install".to_string(),
@@ -1066,7 +1097,9 @@ impl GuestAgent for GuestAgentService {
             }
             other => {
                 return Err(Status::invalid_argument(format!(
-                    "Unsupported install source: '{other}'. Use 'winget' or 'choco'."
+                    "Unsupported install source: '{other}'. Use 'winget', 'choco', \
+                     'msstore', or call InstallDirect / InstallDocker for direct \
+                     installer / docker-image sources."
                 )));
             }
         };
@@ -1084,14 +1117,330 @@ impl GuestAgent for GuestAgentService {
             .await
             .map_err(|e| Status::internal(format!("Failed to run {program}: {e}")))?;
 
+        let stdout: String = String::from_utf8_lossy(&output.stdout).into();
+        let stderr: String = String::from_utf8_lossy(&output.stderr).into();
+        let exit_code = output.status.code().unwrap_or(-1);
+        // P9.2: idempotent re-runs report `already_installed` so the
+        // bundle orchestrator counts the package as `skipped` rather
+        // than `installed`. Detection is package-manager-specific and
+        // crude (substring match) but doesn't have false positives in
+        // practice — winget and choco use stable phrasing.
+        let already_installed =
+            is_already_installed_output(&req.source, exit_code, &stdout, &stderr);
+
+        Ok(Response::new(InstallSoftwareResponse {
+            success: output.status.success() || already_installed,
+            exit_code,
+            stdout,
+            stderr,
+            installed_path: String::new(), // Would need to query the installer for this
+            already_installed,
+        }))
+    }
+
+    // ── P9.2: InstallDirect ──────────────────────────────────────
+    //
+    // Downloads an installer from a HTTPS URL, verifies the SHA-256,
+    // then spawns it with the supplied silent-install args. The
+    // download is streamed (no full-file-in-memory) and the partial
+    // file is shredded on any failure path so a hash mismatch can't
+    // leak a half-downloaded payload.
+    async fn install_direct(
+        &self,
+        request: Request<InstallDirectRequest>,
+    ) -> Result<Response<InstallSoftwareResponse>, Status> {
+        let req = request.into_inner();
+
+        // Validate inputs before touching the network.
+        if req.url.is_empty() {
+            return Err(Status::invalid_argument("InstallDirect: url is required"));
+        }
+        if !req.url.starts_with("https://") {
+            return Err(Status::invalid_argument(format!(
+                "InstallDirect: url must use https:// (got: {})",
+                truncate_for_log(&req.url, 80),
+            )));
+        }
+        if req.sha256.len() != 64 || !req.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(Status::invalid_argument(
+                "InstallDirect: sha256 must be 64 lowercase hex characters",
+            ));
+        }
+        let timeout = if req.timeout_ms > 0 {
+            Duration::from_millis(req.timeout_ms)
+        } else {
+            Duration::from_secs(5 * 60)
+        };
+
+        // Audit log BEFORE the download — so a hung download still
+        // shows up in the operator's inspection.
+        warn!(
+            id = %req.id,
+            url = %truncate_for_log(&req.url, 80),
+            "AUDIT: install_direct invoked"
+        );
+
+        // Download to a temp file under the agent's workspace dir so
+        // any partial state stays inside the jail. Cross-platform
+        // tempdir: prefer SIGNALMAN_WORKSPACE, fall back to std::env::temp_dir.
+        let workspace = std::env::var("SIGNALMAN_WORKSPACE")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        std::fs::create_dir_all(&workspace)
+            .map_err(|e| Status::internal(format!("Failed to create workspace dir: {e}")))?;
+        let installer_path = workspace.join(format!("signalman-direct-{}.tmp", req.id));
+
+        // Streaming download + incremental SHA-256.
+        let download = tokio::time::timeout(
+            timeout,
+            download_and_verify(&req.url, &req.sha256, &installer_path),
+        )
+        .await
+        .map_err(|_| {
+            // Clean up partial file.
+            let _ = std::fs::remove_file(&installer_path);
+            Status::deadline_exceeded(format!(
+                "InstallDirect: download exceeded timeout {}ms",
+                req.timeout_ms
+            ))
+        })?;
+
+        if let Err(e) = download {
+            let _ = std::fs::remove_file(&installer_path);
+            return Err(Status::internal(format!(
+                "InstallDirect: download/verify failed: {e}"
+            )));
+        }
+
+        info!(
+            id = %req.id,
+            "install_direct: download verified, spawning installer"
+        );
+
+        // Spawn the installer with the supplied args.
+        let output = tokio::process::Command::new(&installer_path)
+            .args(&req.args)
+            .output()
+            .await;
+
+        // Always clean up the downloaded installer, regardless of
+        // success — we don't keep installer payloads around.
+        let _ = std::fs::remove_file(&installer_path);
+
+        let output = output.map_err(|e| {
+            Status::internal(format!("InstallDirect: failed to spawn installer: {e}"))
+        })?;
+
         Ok(Response::new(InstallSoftwareResponse {
             success: output.status.success(),
             exit_code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).into(),
             stderr: String::from_utf8_lossy(&output.stderr).into(),
-            installed_path: String::new(), // Would need to query the installer for this
+            installed_path: req.install_dir.clone(),
+            already_installed: false, // direct installers don't self-report idempotency
         }))
     }
+
+    // ── P9.2: InstallDocker ──────────────────────────────────────
+    //
+    // Pulls a digest-pinned docker image and runs it with the supplied
+    // options. Requires Docker on the VM; the bundle author orders
+    // that prerequisite explicitly (Q10(a) locked).
+    async fn install_docker(
+        &self,
+        request: Request<InstallDockerRequest>,
+    ) -> Result<Response<InstallSoftwareResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.image.is_empty() {
+            return Err(Status::invalid_argument("InstallDocker: image is required"));
+        }
+        if req.image.contains('@') {
+            return Err(Status::invalid_argument(
+                "InstallDocker: image must NOT include @<digest> — \
+                 the digest goes in image_sha256 instead",
+            ));
+        }
+        if !req.image_sha256.starts_with("sha256:") {
+            return Err(Status::invalid_argument(
+                "InstallDocker: image_sha256 must be 'sha256:<64hex>' digest pin",
+            ));
+        }
+        let restart = if req.restart_policy.is_empty() {
+            "unless-stopped"
+        } else {
+            match req.restart_policy.as_str() {
+                "no" | "always" | "unless-stopped" | "on-failure" => req.restart_policy.as_str(),
+                other => {
+                    return Err(Status::invalid_argument(format!(
+                        "InstallDocker: invalid restart_policy '{other}'"
+                    )));
+                }
+            }
+        };
+        let timeout = if req.timeout_ms > 0 {
+            Duration::from_millis(req.timeout_ms)
+        } else {
+            Duration::from_secs(5 * 60)
+        };
+
+        warn!(
+            id = %req.id,
+            image = %req.image,
+            "AUDIT: install_docker invoked"
+        );
+
+        // Pull image with digest pin: `docker pull <image>@<digest>`.
+        let pull_ref = format!("{}@{}", req.image, req.image_sha256);
+        let pull = tokio::time::timeout(
+            timeout,
+            tokio::process::Command::new("docker")
+                .arg("pull")
+                .arg(&pull_ref)
+                .output(),
+        )
+        .await
+        .map_err(|_| {
+            Status::deadline_exceeded(format!(
+                "InstallDocker: pull exceeded timeout {}ms",
+                req.timeout_ms
+            ))
+        })?
+        .map_err(|e| Status::internal(format!("InstallDocker: docker pull failed: {e}")))?;
+
+        if !pull.status.success() {
+            return Ok(Response::new(InstallSoftwareResponse {
+                success: false,
+                exit_code: pull.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&pull.stdout).into(),
+                stderr: String::from_utf8_lossy(&pull.stderr).into(),
+                installed_path: String::new(),
+                already_installed: false,
+            }));
+        }
+
+        // Build `docker run` command.
+        let mut run_args: Vec<String> = vec![
+            "run".into(),
+            "-d".into(),
+            "--restart".into(),
+            restart.into(),
+        ];
+        if !req.container_name.is_empty() {
+            run_args.push("--name".into());
+            run_args.push(req.container_name.clone());
+        }
+        for port in &req.ports {
+            run_args.push("-p".into());
+            run_args.push(port.clone());
+        }
+        for (k, v) in &req.env {
+            run_args.push("-e".into());
+            run_args.push(format!("{k}={v}"));
+        }
+        run_args.push(pull_ref.clone());
+        for arg in &req.command {
+            run_args.push(arg.clone());
+        }
+
+        let run_out = tokio::process::Command::new("docker")
+            .args(&run_args)
+            .output()
+            .await
+            .map_err(|e| Status::internal(format!("InstallDocker: docker run failed: {e}")))?;
+
+        // Treat "container name already in use" as already_installed
+        // success rather than failure. Docker exits non-zero with a
+        // specific error message we can string-match.
+        let stderr: String = String::from_utf8_lossy(&run_out.stderr).into();
+        let already_running = stderr.contains("is already in use by container")
+            || stderr.contains("Conflict. The container name");
+
+        Ok(Response::new(InstallSoftwareResponse {
+            success: run_out.status.success() || already_running,
+            exit_code: run_out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&run_out.stdout).into(),
+            stderr,
+            installed_path: pull_ref,
+            already_installed: already_running,
+        }))
+    }
+}
+
+/// Detect "already installed" stdout/stderr patterns so the bundle
+/// orchestrator can distinguish a fresh install from an idempotent
+/// re-run. Substring match is conservative — false positives only
+/// happen if a package legitimately includes one of these phrases in
+/// its install output, which we haven't observed in practice.
+fn is_already_installed_output(source: &str, exit_code: i32, stdout: &str, stderr: &str) -> bool {
+    if exit_code != 0 {
+        return false;
+    }
+    let by_source = match source {
+        // winget exits 0 and prints "No newer package versions are
+        // available from the configured sources." or "Found an
+        // existing package already installed."
+        "winget" | "" | "msstore" => {
+            stdout.contains("Found an existing package")
+                || stdout.contains("No newer package versions are available")
+                || stdout.contains("already installed")
+        }
+        // choco exits 0 with "<pkg> v<ver> already installed."
+        "choco" => stdout.contains("already installed"),
+        _ => false,
+    };
+    // Also check stderr — some package managers route their
+    // "already installed" message there.
+    by_source
+        || stderr.contains("Found an existing package")
+        || stderr.contains("already installed")
+}
+
+/// Truncate a string to `max` chars for safe logging — avoids spilling
+/// a 4 KB URL into the audit log.
+fn truncate_for_log(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…[+{}b]", &s[..max], s.len() - max)
+    }
+}
+
+/// Stream-download `url` to `dest`, hashing as we go. On success the
+/// file at `dest` has SHA-256 == `expected_hex`. On any error the
+/// caller is responsible for `remove_file(dest)` cleanup; we leave
+/// the partial file in place so the caller's catch path can shred
+/// it deliberately rather than silently.
+async fn download_and_verify(
+    url: &str,
+    expected_hex: &str,
+    dest: &std::path::Path,
+) -> anyhow::Result<()> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+
+    let response = reqwest::get(url)
+        .await
+        .map_err(|e| anyhow::anyhow!("HTTPS GET failed: {e}"))?;
+    if !response.status().is_success() {
+        anyhow::bail!("HTTPS GET returned {}", response.status());
+    }
+    let mut hasher = Sha256::new();
+    let mut file = tokio::fs::File::create(dest).await?;
+    let mut stream = response.bytes_stream();
+    use futures_util::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.map_err(|e| anyhow::anyhow!("stream read: {e}"))?;
+        hasher.update(&bytes);
+        file.write_all(&bytes).await?;
+    }
+    file.flush().await?;
+    let actual = hex::encode(hasher.finalize());
+    if !actual.eq_ignore_ascii_case(expected_hex) {
+        anyhow::bail!("SHA-256 mismatch: expected {expected_hex}, got {actual}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
