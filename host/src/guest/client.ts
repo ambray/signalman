@@ -438,6 +438,45 @@ export class GuestAgentClient {
   private readonly options: Required<ClientOptions>;
   private _connectionState: ConnectionState = "disconnected";
 
+  // ── Channel recovery state (Sprint 60.12 Phase B follow-up) ────────
+  //
+  // When the VM is under heavy load or a single chunk RPC stalls, the
+  // gRPC channel can poison: every subsequent call inherits the bad
+  // state even when the guest agent itself is healthy. We track
+  // consecutive transient failures and rebuild the channel once the
+  // count crosses the threshold below. Successful RPCs reset the
+  // counter; non-transient errors (NOT_FOUND, INVALID_ARGUMENT, etc.)
+  // don't count — they aren't channel poisoning, they're app-level.
+  private _consecutiveFailures = 0;
+  private static readonly RECOVER_CHANNEL_AFTER_FAILURES = 3;
+
+  /**
+   * Saved constructor inputs so `openChannel` (called both from the
+   * constructor and from [`recoverChannel`]) can rebuild the same
+   * channel shape without the caller threading them through.
+   */
+  private readonly _parsedEndpoint: ParsedEndpoint;
+  private readonly _tlsOptions?: TlsOptions;
+
+  /**
+   * The `host:port` this client connects to. Read-only — exposed for
+   * diagnostic error messages (`"guest at 172.30.0.10:50051 is
+   * unreachable"`) so callers don't have to thread the address through
+   * separately.
+   */
+  get target(): string {
+    return this.address;
+  }
+
+  /**
+   * Number of consecutive transient failures since the last successful
+   * RPC. Exposed for diagnostic logging in scenario runners. Resets on
+   * success or after [`recoverChannel`].
+   */
+  get consecutiveFailures(): number {
+    return this._consecutiveFailures;
+  }
+
   /**
    * Creates a new GuestAgentClient.
    *
@@ -466,33 +505,47 @@ export class GuestAgentClient {
     clientOptions?: ClientOptions,
   ) {
     const parsed = parseEndpoint(address, port);
+    this._parsedEndpoint = parsed;
+    this._tlsOptions = tlsOptions;
     this.address = parsed.target;
     this.options = { ...DEFAULT_OPTIONS, ...clientOptions };
 
+    // mTLS requires *both* client cert and key. Surface mis-configurations
+    // synchronously rather than at handshake time, so a recoverChannel()
+    // rebuild doesn't trip over them either.
+    if (
+      (tlsOptions?.certPath && !tlsOptions.keyPath) ||
+      (tlsOptions?.keyPath && !tlsOptions.certPath)
+    ) {
+      throw new Error(
+        "GuestAgentClient TLS: certPath and keyPath must be specified together",
+      );
+    }
+
+    this.openChannel();
+  }
+
+  /**
+   * Build a fresh gRPC channel and assign it to `this.client`. Called
+   * from the constructor and again from [`recoverChannel`] after
+   * consecutive failures cross the threshold. Idempotent — safe to call
+   * multiple times.
+   */
+  private openChannel(): void {
     // TLS is requested if the endpoint URL declares it, OR if the caller
     // supplied any TLS material. Either path produces an Ssl credential.
-    const wantsTls = parsed.tls || tlsOptions !== undefined;
+    const wantsTls = this._parsedEndpoint.tls || this._tlsOptions !== undefined;
 
     let credentials: grpc.ChannelCredentials;
     if (wantsTls) {
-      const rootCert = tlsOptions?.caPath
-        ? fs.readFileSync(tlsOptions.caPath)
+      const rootCert = this._tlsOptions?.caPath
+        ? fs.readFileSync(this._tlsOptions.caPath)
         : null;
-      // mTLS requires *both* client cert and key. Supplying only one is a
-      // configuration error — surface it now rather than at handshake.
-      if (
-        (tlsOptions?.certPath && !tlsOptions.keyPath) ||
-        (tlsOptions?.keyPath && !tlsOptions.certPath)
-      ) {
-        throw new Error(
-          "GuestAgentClient TLS: certPath and keyPath must be specified together",
-        );
-      }
-      const clientCert = tlsOptions?.certPath
-        ? fs.readFileSync(tlsOptions.certPath)
+      const clientCert = this._tlsOptions?.certPath
+        ? fs.readFileSync(this._tlsOptions.certPath)
         : null;
-      const clientKey = tlsOptions?.keyPath
-        ? fs.readFileSync(tlsOptions.keyPath)
+      const clientKey = this._tlsOptions?.keyPath
+        ? fs.readFileSync(this._tlsOptions.keyPath)
         : null;
       credentials = grpc.credentials.createSsl(
         rootCert,
@@ -524,6 +577,63 @@ export class GuestAgentClient {
       this._connectionState = "error";
       throw err;
     }
+  }
+
+  /**
+   * Recreate the underlying gRPC channel.
+   *
+   * Closes the current channel (best effort) and rebuilds with the same
+   * credentials and options as the original constructor call. Resets
+   * the consecutive-failure counter. Used by RPC wrappers when the
+   * channel appears poisoned by a stuck in-flight call — observed
+   * empirically: once a handful of timeouts pile up, every subsequent
+   * call inherits the bad state until the channel is rebuilt.
+   *
+   * Idempotent and cheap (creates a new in-process socket on the next
+   * actual call); safe to invoke from any RPC failure path.
+   */
+  recoverChannel(): void {
+    try {
+      this.client?.close?.();
+    } catch {
+      /* best-effort — old channel may already be in a bad state */
+    }
+    this.openChannel();
+    this._consecutiveFailures = 0;
+  }
+
+  /**
+   * Track a successful RPC. Resets the consecutive-failure counter so
+   * isolated transient hiccups don't compound across calls.
+   */
+  private noteSuccess(): void {
+    this._consecutiveFailures = 0;
+  }
+
+  /**
+   * Track a failed RPC. When `RECOVER_CHANNEL_AFTER_FAILURES` is hit
+   * the channel is recreated synchronously so the NEXT RPC starts
+   * fresh. Returns the new failure count for diagnostic logging at the
+   * call site. Non-transient errors (NOT_FOUND, INVALID_ARGUMENT, etc.)
+   * are application-level and don't count — they aren't channel
+   * poisoning.
+   */
+  private noteFailure(err: unknown): number {
+    if (isTransientError(err)) {
+      this._consecutiveFailures += 1;
+      if (
+        this._consecutiveFailures >=
+        GuestAgentClient.RECOVER_CHANNEL_AFTER_FAILURES
+      ) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `[signalman] guest channel ${this.address} hit ${this._consecutiveFailures} ` +
+            `consecutive transient failures — recreating channel`,
+        );
+        this.recoverChannel();
+      }
+    }
+    return this._consecutiveFailures;
   }
 
   /** Returns the current connection state. */
@@ -673,9 +783,26 @@ export class GuestAgentClient {
   /**
    * Run a command inside the VM and capture output.
    *
+   * # `maxRetries` override
+   *
+   * Defaults to the client's configured `maxRetries` (3). Callers
+   * driving throughput-sensitive loops (the chunked file-transfer
+   * helper is the canonical example) should pass `maxRetries: 1` to
+   * avoid 4 × 60 s retry stacking on a single transient
+   * `DEADLINE_EXCEEDED` — that pattern can turn a single chunk failure
+   * into a multi-minute hang and hides genuine unresponsiveness behind
+   * opaque retry storms.
+   *
+   * # Channel-recovery hookup
+   *
+   * Wraps the call in success/failure counting so the channel auto-
+   * rebuilds after [`RECOVER_CHANNEL_AFTER_FAILURES`] consecutive
+   * transient errors. Other RPC wrappers can opt in incrementally as
+   * we observe their failure patterns.
+   *
    * @param command - The command to execute.
    * @param args - Command arguments.
-   * @param timeoutMs - Per-RPC timeout in milliseconds (default from config).
+   * @param options - Per-RPC timeout, run-as identity, and retry override.
    */
   async runCommand(
     command: string,
@@ -683,24 +810,35 @@ export class GuestAgentClient {
     options?: number | {
       timeoutMs?: number;
       runAs?: string;
+      maxRetries?: number;
     },
   ): Promise<CommandResult> {
     const deadline = (typeof options === "number" ? options : options?.timeoutMs) ?? this.options.defaultTimeoutMs;
     const runAs = (typeof options === "object" && options !== null) ? (options.runAs ?? "") : "";
-    return withRetry(
-      () =>
-        unaryCall(this.client, "runCommand", {
-          command,
-          args,
-          workingDirectory: "",
-          timeoutMs: deadline,
-          captureOutput: true,
-          run_as: runAs,
-        }, deadline, this.options.authToken),
-      this.options.maxRetries,
-      this.options.initialRetryDelayMs,
-      this.options.maxRetryDelayMs,
-    );
+    const maxRetries = (typeof options === "object" && options !== null && options.maxRetries !== undefined)
+      ? options.maxRetries
+      : this.options.maxRetries;
+    try {
+      const result = await withRetry(
+        () =>
+          unaryCall(this.client, "runCommand", {
+            command,
+            args,
+            workingDirectory: "",
+            timeoutMs: deadline,
+            captureOutput: true,
+            run_as: runAs,
+          }, deadline, this.options.authToken),
+        maxRetries,
+        this.options.initialRetryDelayMs,
+        this.options.maxRetryDelayMs,
+      );
+      this.noteSuccess();
+      return result as CommandResult;
+    } catch (err) {
+      this.noteFailure(err);
+      throw err;
+    }
   }
 
   /**
