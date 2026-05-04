@@ -115,21 +115,86 @@ fn validate_package_id(id: &str) -> Result<(), Status> {
 
 /// Check if a command + args string matches any denied command pattern.
 ///
-/// **Case-insensitive substring match** (P4.c-B9 / Sec F9): both sides
-/// are lowercased before `.contains(...)` runs. See the doc-comment on
-/// [`DENIED_COMMANDS`] for the rationale + the explicit statement that
-/// this is a tripwire, not a security boundary.
+/// # Match semantics
+///
+/// **Case-insensitive** (P4.c-B9 / Sec F9): both sides are lowercased
+/// before testing.
+///
+/// **Multi-token patterns** (e.g. `"rm -rf /"`, `"format c:"`,
+/// `"cipher /w"`) match as plain substrings. The internal spaces give
+/// them enough specificity that an embedded false-positive is
+/// effectively impossible (`"format c:"` doesn't substring-match
+/// inside any benign command line we've seen).
+///
+/// **Single-token patterns** (e.g. `"format"`, `"mkfs"`) match with a
+/// word-boundary check via [`find_token`]. This rules out a class of
+/// false-positives that bit us in scenario flakiness:
+/// `Test-NetConnection -InformationLevel Quiet` was getting denied
+/// because the substring `"format"` appears inside `"Information"`.
+/// We require the matched token to be surrounded by non-word
+/// characters (or start/end of the input) so the denylist actually
+/// triggers on `format c:` and not on every PowerShell cmdlet that
+/// happens to contain those six letters.
+///
+/// See the doc-comment on [`DENIED_COMMANDS`] for the rationale + the
+/// explicit statement that this is a tripwire, not a security
+/// boundary.
 fn is_denied_command(command: &str, args: &[String]) -> bool {
     let full_lc = format!("{} {}", command, args.join(" ")).to_ascii_lowercase();
     for denied in DENIED_COMMANDS {
         // Each pattern in DENIED_COMMANDS is already lowercase by
         // construction; we lowercase the input side to make the match
         // direction-independent.
-        if full_lc.contains(denied) {
+        if denied.contains(' ') {
+            // Multi-token — surrounding spaces in the pattern already
+            // give us enough specificity, so plain substring is fine.
+            if full_lc.contains(denied) {
+                return true;
+            }
+        } else if find_token(&full_lc, denied) {
+            // Single-token pattern — word-boundary search prevents
+            // benign-cmdlet false positives like `format` matching
+            // inside `Information`.
             return true;
         }
     }
     false
+}
+
+/// Single-token word-boundary search. Returns `true` iff `needle`
+/// appears in `haystack` surrounded by characters that aren't
+/// alphanumeric, `-`, or `_` (so flags like `-NoProfile` and option
+/// values like `format_c` count as separate tokens). Boundaries at
+/// start / end of the haystack also count.
+///
+/// Inputs are expected to be ASCII — the denylist is, and the caller
+/// lowercases the haystack before calling. Behaviour on multibyte
+/// UTF-8 is "no false positive" since the byte indices we test as
+/// boundary chars are always ASCII boundaries.
+fn find_token(haystack: &str, needle: &str) -> bool {
+    let nb = needle.as_bytes();
+    let hb = haystack.as_bytes();
+    if nb.is_empty() || nb.len() > hb.len() {
+        return false;
+    }
+    let mut i = 0usize;
+    while i + nb.len() <= hb.len() {
+        if hb[i..i + nb.len()] == *nb {
+            let prev_ok = i == 0 || !is_token_char(hb[i - 1]);
+            let next_ok =
+                i + nb.len() == hb.len() || !is_token_char(hb[i + nb.len()]);
+            if prev_ok && next_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+#[inline]
+fn is_token_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
 
 /// Argument flags whose VALUES are likely credentials. The value

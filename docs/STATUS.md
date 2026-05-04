@@ -96,12 +96,12 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
 
 | Crate / package | Test count (source) | Files | Last verified |
 |---|---|---|---|
-| Host (TypeScript / vitest) — `host/src/__tests__/` | 887 | 35 | 2026-05-04 |
+| Host (TypeScript / vitest) — `host/src/__tests__/` | 965 | 39 | 2026-05-04 |
 | Host (TypeScript / vitest) — `host/src/verbs/__tests__/` | 46 | 5 | 2026-05-04 |
 | Guest (Rust / cargo) | 105 | 8 | 2026-04-28 |
 | Service (Rust / cargo) | 95 | 8 (incl. 2 integration files) | 2026-04-28 |
 | Plugin (Rust / cargo) | 135 | 11 (incl. 2 integration files) | 2026-04-28 |
-| **Total** | **1268** test attributes / `it()` calls | **67** files | |
+| **Total** | **1346** test attributes / `it()` calls | **71** files | |
 
 > The ROADMAP headline "151 Rust + 769 TS = 920" predates the v0.1.1
 > P9 work (which added the provisioning, bundle, idempotency, and

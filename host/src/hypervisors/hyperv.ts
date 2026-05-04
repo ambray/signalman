@@ -11,7 +11,6 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync } from "node:fs";
 import type {
   CheckpointHandle,
   CheckpointInfo,
@@ -54,24 +53,32 @@ export interface HyperVBackendOptions {
   ) => Promise<boolean>;
 }
 
-// ── Elevation Helpers ─────────────────────────────────────────────
+// PowerShell command resolution
+//
+// signalman has its own SystemBackend service that runs as SYSTEM and
+// covers the elevated PowerShell commands; the host CLI itself never
+// needs to auto-elevate.  The previous gsudo-based auto-elevation
+// silently failed under unattended runs (the UAC prompt has no human
+// to click "Yes" and gsudo cancels after a timeout) — turning what
+// should be a clear "you need to be elevated for this cmdlet" error
+// into a 30 s hang followed by a cryptic "User cancelled" message.
+//
+// resolvePsCommand() now always returns plain `powershell.exe`.
+// Cmdlets that genuinely require elevation surface their native
+// access-denied error if the operator runs the host CLI unprivileged,
+// and operators driving Hyper-V management directly (without the
+// SYSTEM service) are expected to launch the CLI from an elevated
+// shell themselves.
 
-/** Well-known gsudo install locations on Windows. */
-const GSUDO_PATHS = [
-  "C:\\Program Files\\gsudo\\Current\\gsudo.exe",
-  "C:\\Program Files (x86)\\gsudo\\Current\\gsudo.exe",
-];
-
-/** Cached elevation state — computed once on first use. */
+/** Cached elevation state — exposed only for the diagnostic helper
+ *  in cli.ts; nothing in the orchestrator hot path consults it. */
 let _isElevated: boolean | null = null;
-let _gsudoPath: string | null = null;
-let _elevationChecked = false;
 
 /**
  * Check whether the current process is running elevated (Administrator).
  * Result is cached for the lifetime of the process.
  */
-function isElevated(): boolean {
+export function isElevated(): boolean {
   if (_isElevated !== null) return _isElevated;
   try {
     execFileSync("net", ["session"], {
@@ -87,66 +94,13 @@ function isElevated(): boolean {
 }
 
 /**
- * Find gsudo on the system. Checks well-known paths and PATH.
- * Returns the full path to gsudo.exe, or null if not found.
- * Result is cached.
- */
-function findGsudo(): string | null {
-  if (_elevationChecked) return _gsudoPath;
-  _elevationChecked = true;
-
-  // Check well-known install locations
-  for (const p of GSUDO_PATHS) {
-    if (existsSync(p)) {
-      _gsudoPath = p;
-      console.error(`[signalman] Found gsudo at: ${p}`);
-      return _gsudoPath;
-    }
-  }
-
-  // Check PATH
-  try {
-    const result = execFileSync(
-      process.platform === "win32" ? "where" : "which",
-      ["gsudo"],
-      { stdio: "pipe", timeout: 5_000, windowsHide: true },
-    );
-    const found = result.toString().trim().split(/\r?\n/)[0];
-    if (found && existsSync(found)) {
-      _gsudoPath = found;
-      console.error(`[signalman] Found gsudo in PATH: ${found}`);
-      return _gsudoPath;
-    }
-  } catch {
-    // gsudo not in PATH
-  }
-
-  return null;
-}
-
-/**
  * Resolve the command and args to use for running a PowerShell script.
  *
- * If already elevated: runs powershell.exe directly.
- * If not elevated but gsudo is available: wraps via gsudo for transparent
- * elevation. gsudo caches credentials so only the first call prompts UAC.
- * If neither: runs powershell.exe directly (will fail on Hyper-V cmdlets
- * that require admin, but non-admin cmdlets still work).
+ * Always plain `powershell.exe` — see the doc-comment block above for
+ * the rationale.  `prefixArgs` stays in the return type for API
+ * compatibility with the older gsudo-based shape; it is always empty.
  */
 function resolvePsCommand(): { cmd: string; prefixArgs: string[] } {
-  if (isElevated()) {
-    return { cmd: "powershell.exe", prefixArgs: [] };
-  }
-
-  const gsudo = findGsudo();
-  if (gsudo) {
-    return {
-      cmd: gsudo,
-      prefixArgs: ["powershell.exe"],
-    };
-  }
-
-  // Fall through — no elevation available, commands may fail
   return { cmd: "powershell.exe", prefixArgs: [] };
 }
 
