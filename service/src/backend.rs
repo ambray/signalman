@@ -769,7 +769,7 @@ impl Backend for HyperVBackend {
         let start = std::time::Instant::now();
         let script = format!(
             "$safeName = '{safe_name}'; \
-             $ready = 'OkApplicationsHealthy'; \
+             $ready = @('OkApplicationsHealthy', 'OkApplicationsUnknown'); \
              $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds({safe_timeout}); \
              function EmitHeartbeat {{ \
                param([string]$State) \
@@ -778,7 +778,7 @@ impl Backend for HyperVBackend {
              $current = $null; \
              try {{ $current = (Get-VM -Name $safeName).Heartbeat.ToString() }} catch {{}}; \
              EmitHeartbeat $current; \
-             if ($current -eq $ready) {{ 'READY'; return }}; \
+             if ($ready -contains $current) {{ 'READY'; return }}; \
              $query = \"SELECT * FROM __InstanceModificationEvent WITHIN 1 \
                WHERE TargetInstance ISA 'Msvm_ComputerSystem' \
                  AND TargetInstance.ElementName = '{safe_name}'\"; \
@@ -794,7 +794,7 @@ impl Backend for HyperVBackend {
                  $current = $null; \
                  try {{ $current = (Get-VM -Name $safeName).Heartbeat.ToString() }} catch {{}}; \
                  EmitHeartbeat $current; \
-                 if ($current -eq $ready) {{ 'READY'; return }} \
+                 if ($ready -contains $current) {{ 'READY'; return }} \
                }} \
              }} finally {{ \
                Unregister-Event -SourceIdentifier $sourceId -ErrorAction SilentlyContinue \
@@ -1259,6 +1259,20 @@ mod tests {
         }
         assert!(saw_no_contact);
         assert!(saw_timeout);
+    }
+
+    #[tokio::test]
+    async fn wait_for_heartbeat_treats_unknown_application_health_as_ready() {
+        let runner = Arc::new(ScriptedRunner::new(vec![Ok(
+            "HEARTBEAT\tOkApplicationsUnknown\nREADY".to_string(),
+        )]));
+        let backend = HyperVBackend::with_runner(runner);
+        let (tx, _rx) = mpsc::channel(8);
+
+        assert!(backend
+            .wait_for_heartbeat(&handle("vm1"), 30_000, tx)
+            .await
+            .unwrap());
     }
 
     #[test]

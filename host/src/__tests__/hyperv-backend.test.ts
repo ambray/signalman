@@ -115,3 +115,27 @@ describe("HyperVBackend.getStatus", () => {
     expect(status.guestAgentReachable).toBe(false);
   });
 });
+
+describe("HyperVBackend.waitForHeartbeat", () => {
+  it("accepts unknown application health as heartbeat-ready", async () => {
+    const { HyperVBackend } = await loadBackend();
+    let encodedScript = "";
+    childProcessMock.execFile.mockImplementation(
+      (
+        _cmd: string,
+        args: string[],
+        _opts: object,
+        cb: (err: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        encodedScript = args.join(" ");
+        cb(null, { stdout: "READY", stderr: "" } as unknown as string, "");
+      },
+    );
+
+    const backend = new HyperVBackend();
+    await expect(
+      backend.waitForHeartbeat({ id: "vm-1", name: "endpoint-1", backend: "hyperv" }, 30_000),
+    ).resolves.toBe(true);
+    expect(encodedScript).toContain("OkApplicationsUnknown");
+  });
+});
