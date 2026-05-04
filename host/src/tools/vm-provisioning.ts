@@ -20,7 +20,10 @@
 import type { ToolDefinition, ToolResult } from "./types.js";
 import type { HypervisorBackend } from "../hypervisors/interface.js";
 import { provisionVM, type ProvisionEvent } from "../provisioning/provision.js";
-import { cleanupVM } from "../provisioning/cleanup.js";
+import {
+  cleanupOrphanedProvisioningVms,
+  cleanupVM,
+} from "../provisioning/cleanup.js";
 import { GuestMsiDiscoveryError } from "../provisioning/guest-msi-discovery.js";
 
 /**
@@ -162,6 +165,49 @@ export function createVmProvisioningTools(
           await cleanupVM(backend, name);
           return {
             content: [{ type: "text", text: `VM '${name}' cleaned up.` }],
+          };
+        } catch (err) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ error: (err as Error).message }, null, 2),
+              },
+            ],
+          };
+        }
+      },
+    },
+    {
+      name: "vm_cleanup_orphans",
+      description:
+        "Scans Signalman provisioning manifests for incomplete VM provisioning runs. Defaults to dry_run=true and only reports candidates. " +
+        "When dry_run=false, deletes only manifest-owned VMs that lack the target checkpoint and removes stale manifest/cert tempdirs. Destructive when dry_run=false.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          dry_run: {
+            type: "boolean",
+            description: "Defaults to true. Set false only after reviewing the reported candidates.",
+          },
+          include_manifest_only: {
+            type: "boolean",
+            description:
+              "Defaults to true. Includes stale Signalman manifest directories whose VM is already gone.",
+          },
+        },
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const backend = await getBackend();
+        try {
+          const result = await cleanupOrphanedProvisioningVms(backend, {
+            dryRun: params.dry_run as boolean | undefined,
+            includeManifestOnly: params.include_manifest_only as boolean | undefined,
+          });
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           };
         } catch (err) {
           return {

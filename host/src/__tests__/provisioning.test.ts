@@ -38,11 +38,17 @@ import type {
   CommandResult,
 } from "../hypervisors/interface.js";
 import { provisionVM, ProvisioningError } from "../provisioning/provision.js";
-import { cleanupVM } from "../provisioning/cleanup.js";
+import {
+  cleanupOrphanedProvisioningVms,
+  cleanupVM,
+  provisioningManifestPath,
+  writeProvisioningManifest,
+} from "../provisioning/cleanup.js";
 import {
   discoverGuestMsi,
   GuestMsiDiscoveryError,
 } from "../provisioning/guest-msi-discovery.js";
+import { createVmProvisioningTools } from "../tools/vm-provisioning.js";
 import { globalVmCache } from "../vm-cache.js";
 
 // ── Mock factories (mirror workflow-api.test.ts) ──────────────────
@@ -94,6 +100,12 @@ afterEach(() => {
   globalVmCache.invalidate("vm1");
   globalVmCache.invalidate("vm-force");
   globalVmCache.invalidate("vm-error");
+  for (const vmName of ["vm1", "vm-force", "vm-error"]) {
+    fs.rmSync(path.dirname(provisioningManifestPath(vmName)), {
+      recursive: true,
+      force: true,
+    });
+  }
 });
 
 // ── provisionVM idempotency ───────────────────────────────────────
@@ -375,5 +387,188 @@ describe("cleanupVM", () => {
     expect(backend.deleteVM).toHaveBeenCalledWith(
       expect.objectContaining({ name: "vm1" }),
     );
+  });
+});
+
+describe("cleanupOrphanedProvisioningVms", () => {
+  it("dry-runs manifest-owned VMs that lack the target checkpoint", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalman-reaper-"));
+    const handle = makeHandle("orphan-vm");
+    const backend = makeMockBackend({
+      listVMs: vi.fn().mockResolvedValue([handle]),
+      listCheckpoints: vi.fn().mockResolvedValue([]),
+    });
+
+    try {
+      writeProvisioningManifest(
+        {
+          vmName: "orphan-vm",
+          templateName: "win11-base",
+          checkpointLabel: "agent-installed",
+          startedAt: "2026-05-04T00:00:00.000Z",
+          createdVm: true,
+        },
+        tmpDir,
+      );
+
+      const result = await cleanupOrphanedProvisioningVms(backend, { tmpDir });
+
+      expect(result.candidates).toEqual([
+        expect.objectContaining({
+          vmName: "orphan-vm",
+          checkpointLabel: "agent-installed",
+          reason: "missing_checkpoint",
+        }),
+      ]);
+      expect(result.cleaned).toEqual([]);
+      expect(backend.deleteVM).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips completed provisioning runs that have the target checkpoint", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalman-reaper-"));
+    const handle = makeHandle("ready-vm");
+    const backend = makeMockBackend({
+      listVMs: vi.fn().mockResolvedValue([handle]),
+      listCheckpoints: vi.fn().mockResolvedValue([
+        {
+          id: "cp-agent-installed",
+          label: "agent-installed",
+          createdAt: new Date("2026-05-04T00:00:00.000Z"),
+        },
+      ]),
+    });
+
+    try {
+      writeProvisioningManifest(
+        {
+          vmName: "ready-vm",
+          templateName: "win11-base",
+          checkpointLabel: "agent-installed",
+          startedAt: "2026-05-04T00:00:00.000Z",
+          createdVm: true,
+        },
+        tmpDir,
+      );
+
+      const result = await cleanupOrphanedProvisioningVms(backend, { tmpDir });
+
+      expect(result.candidates).toEqual([]);
+      expect(backend.deleteVM).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("deletes orphan VMs only when dryRun is false", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalman-reaper-"));
+    const handle = makeHandle("delete-me");
+    const backend = makeMockBackend({
+      listVMs: vi.fn().mockResolvedValue([handle]),
+      listCheckpoints: vi.fn().mockResolvedValue([]),
+    });
+
+    try {
+      writeProvisioningManifest(
+        {
+          vmName: "delete-me",
+          templateName: "win11-base",
+          checkpointLabel: "agent-installed",
+          startedAt: "2026-05-04T00:00:00.000Z",
+          createdVm: true,
+        },
+        tmpDir,
+      );
+
+      const result = await cleanupOrphanedProvisioningVms(backend, {
+        tmpDir,
+        dryRun: false,
+      });
+
+      expect(result.cleaned).toEqual(["delete-me"]);
+      expect(backend.stopVM).toHaveBeenCalledWith(handle, true);
+      expect(backend.deleteVM).toHaveBeenCalledWith(handle);
+      expect(
+        fs.existsSync(provisioningManifestPath("delete-me", tmpDir)),
+      ).toBe(false);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("vm_cleanup_orphans tool", () => {
+  it("defaults to dry-run so discovery does not delete candidate VMs", async () => {
+    const vmName = `tool-orphan-${Date.now()}`;
+    const handle = makeHandle(vmName);
+    const backend = makeMockBackend({
+      listVMs: vi.fn().mockResolvedValue([handle]),
+      listCheckpoints: vi.fn().mockResolvedValue([]),
+    });
+    const tools = createVmProvisioningTools(async () => backend);
+    const tool = tools.find((entry) => entry.name === "vm_cleanup_orphans");
+
+    try {
+      writeProvisioningManifest({
+        vmName,
+        templateName: "win11-base",
+        checkpointLabel: "agent-installed",
+        startedAt: "2026-05-04T00:00:00.000Z",
+        createdVm: true,
+      });
+
+      const result = await tool?.handler({});
+      const payload = JSON.parse(result?.content[0]?.text ?? "{}") as {
+        candidates?: Array<{ vmName: string }>;
+        cleaned?: string[];
+      };
+
+      expect(payload.candidates).toContainEqual(
+        expect.objectContaining({ vmName }),
+      );
+      expect(payload.cleaned).toEqual([]);
+      expect(backend.deleteVM).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(path.dirname(provisioningManifestPath(vmName)), {
+        recursive: true,
+        force: true,
+      });
+    }
+  });
+
+  it("deletes manifest-owned orphan VMs when dry_run is false", async () => {
+    const vmName = `tool-delete-${Date.now()}`;
+    const handle = makeHandle(vmName);
+    const backend = makeMockBackend({
+      listVMs: vi.fn().mockResolvedValue([handle]),
+      listCheckpoints: vi.fn().mockResolvedValue([]),
+    });
+    const tools = createVmProvisioningTools(async () => backend);
+    const tool = tools.find((entry) => entry.name === "vm_cleanup_orphans");
+
+    try {
+      writeProvisioningManifest({
+        vmName,
+        templateName: "win11-base",
+        checkpointLabel: "agent-installed",
+        startedAt: "2026-05-04T00:00:00.000Z",
+        createdVm: true,
+      });
+
+      const result = await tool?.handler({ dry_run: false });
+      const payload = JSON.parse(result?.content[0]?.text ?? "{}") as {
+        cleaned?: string[];
+      };
+
+      expect(payload.cleaned).toEqual([vmName]);
+      expect(backend.deleteVM).toHaveBeenCalledWith(handle);
+    } finally {
+      fs.rmSync(path.dirname(provisioningManifestPath(vmName)), {
+        recursive: true,
+        force: true,
+      });
+    }
   });
 });
