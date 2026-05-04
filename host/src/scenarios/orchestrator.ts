@@ -757,6 +757,9 @@ export class ScenarioOrchestrator {
     let scenarioName = "unknown";
     let status: "passed" | "failed" | "error" = "passed";
     let error: string | undefined;
+    let resolvedVmMap: Map<string, VMHandle> | undefined;
+    let teardownSteps: SetupStep[] = [];
+    let scenarioRetry: ValidatedRetryPolicy | undefined;
     // Hoisted so the post-run JUnit/report block (after the outer try)
     // can snapshot workflow step outputs into workflow-outputs.json for
     // post-mortem when assertions fail.
@@ -789,6 +792,8 @@ export class ScenarioOrchestrator {
         kernel_debug: vm.kernel_debug,
       }));
       const vmMap = await this.resolveVms(vmDefs);
+      resolvedVmMap = vmMap;
+      teardownSteps = scenarioConfig.teardown ?? [];
 
       // Phase 1e/follow-up C — spawn per-VM KdSession when
       // `kernel_debug.enabled: true` is set in setup.yaml. The
@@ -820,8 +825,7 @@ export class ScenarioOrchestrator {
       // Execute setup. The scenario-level retry policy (if declared)
       // applies as a default to every step; per-step `retry:` overrides it.
       const setupSteps = scenarioConfig.setup ?? [];
-      const scenarioRetry = (scenarioConfig as { retry?: ValidatedRetryPolicy })
-        .retry;
+      scenarioRetry = (scenarioConfig as { retry?: ValidatedRetryPolicy }).retry;
       const sResults = await this.executeSetup(
         setupSteps,
         vmMap,
@@ -965,20 +969,36 @@ export class ScenarioOrchestrator {
         }
       }
 
-      // Execute teardown
-      const teardownSteps = scenarioConfig.teardown ?? [];
-      const tResults = await this.executeTeardown(
-        teardownSteps,
-        vmMap,
-        scenarioRetry,
-        emit,
-        trace,
-      );
-      teardownResults.push(...tResults);
     } catch (err) {
       status = "error";
       error = err instanceof Error ? err.message : String(err);
     } finally {
+      // Always run declared scenario teardown once VMs have been resolved.
+      // This covers failures during guest readiness, setup, workflow, and
+      // assertion evaluation; before this guard, any throw before the
+      // in-try teardown block skipped scenario cleanup entirely.
+      if (resolvedVmMap && teardownSteps.length > 0) {
+        try {
+          const tResults = await this.executeTeardown(
+            teardownSteps,
+            resolvedVmMap,
+            scenarioRetry,
+            emit,
+            trace,
+          );
+          teardownResults.push(...tResults);
+          if (status === "passed" && tResults.some((r) => r.status === "failed")) {
+            status = "failed";
+          }
+        } catch (e) {
+          status = "error";
+          const teardownError = e instanceof Error ? e.message : String(e);
+          error = error
+            ? `${error}; teardown failed: ${teardownError}`
+            : `teardown failed: ${teardownError}`;
+        }
+      }
+
       // Always tear down kd sessions — even if the scenario errored
       // mid-run, we don't want orphan kd.exe processes for subsequent
       // scenarios to inherit. Follow-up C.
