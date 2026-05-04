@@ -43,7 +43,8 @@ bump the four version pins, `git tag v0.1.1 && git push origin v0.1.1`.
 ## Latest commits (top 10)
 
 ```
-d14034b Integrate service-first Hyper-V control plane
+HEAD Parallelize guest agent readiness waits
+3354ded Integrate service-first Hyper-V control plane
 50807f6 P9.2-followup + P9.4 + P9.6: proto bump, idempotency tests, bootstrap docs
 e1be740 P9.1 + P9.2 + P9.3 + P9.5: provisioning + bootstrap (v0.1.1)
 271559d ROADMAP: P9 provisioning + bootstrap (v0.1.1, NEW 2026-04-28)
@@ -57,7 +58,7 @@ b426756 P4.c-B8 + P6-A3-A6 + B12 + coverage wiring (parallel-agent batch + SHA p
 
 ## Audit closure (security findings)
 
-Local update: `d14034b` closes B13, C3, C4, and F3, and also folds in the
+Local update: `3354ded` closes B13, C3, C4, and F3, and also folds in the
 service-first Hyper-V audit closure, event-driven service heartbeat,
 guest-MSI release discovery, and bundle DAG dependency resolver.
 
@@ -79,12 +80,12 @@ the 2026-04-25 four-lens audit. Both refer to the same underlying gap.
 | B10 / Sec F10 | Medium | `file_ops.rs` path checks: case-insensitive, prefix-canonical | Closed | `119d117` (P4.c B10) |
 | B11 / Sec F11 | Medium | Strip credentials from `AUDIT: run_command` logs | Closed | `119d117` (P4.c B11) |
 | B12 / Sec F15 | Medium | Pin GitHub Actions by SHA, not tag | Closed | `b426756` (P6-A3-A6 + B12) |
-| B13 / Sec F14 | Medium | Document `protoc-bin-vendored` supply-chain stance or replace | Closed | `d14034b` |
-| C3 | High | Capability declaration enforcement (scenario `capabilities:` block actually gates execution) | Closed | `d14034b` |
-| C4 | High | `${secret:NAME}` resolution from host-side keychain or env (parses today, doesn't resolve) | Closed | `d14034b` |
-| F3 (P4.4) | Medium | Cert rotation lifecycle (initial gen lands; rotation does not) | Closed | `d14034b` |
+| B13 / Sec F14 | Medium | Document `protoc-bin-vendored` supply-chain stance or replace | Closed | `3354ded` |
+| C3 | High | Capability declaration enforcement (scenario `capabilities:` block actually gates execution) | Closed | `3354ded` |
+| C4 | High | `${secret:NAME}` resolution from host-side keychain or env (parses today, doesn't resolve) | Closed | `3354ded` |
+| F3 (P4.4) | Medium | Cert rotation lifecycle (initial gen lands; rotation does not) | Closed | `3354ded` |
 
-The v0.1.x security carry-over is closed in `d14034b`.
+The v0.1.x security carry-over is closed in `3354ded`.
 
 ## Test coverage map
 
@@ -95,12 +96,12 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
 
 | Crate / package | Test count (source) | Files | Last verified |
 |---|---|---|---|
-| Host (TypeScript / vitest) — `host/src/__tests__/` | 876 | 35 | 2026-04-28 (this doc) |
+| Host (TypeScript / vitest) — `host/src/__tests__/` | 877 | 35 | 2026-05-04 |
 | Host (TypeScript / vitest) — `host/src/verbs/__tests__/` | 45 | 5 | 2026-04-28 |
 | Guest (Rust / cargo) | 105 | 8 | 2026-04-28 |
 | Service (Rust / cargo) | 95 | 8 (incl. 2 integration files) | 2026-04-28 |
 | Plugin (Rust / cargo) | 135 | 11 (incl. 2 integration files) | 2026-04-28 |
-| **Total** | **1256** test attributes / `it()` calls | **67** files | |
+| **Total** | **1257** test attributes / `it()` calls | **67** files | |
 
 > The ROADMAP headline "151 Rust + 769 TS = 920" predates the v0.1.1
 > P9 work (which added the provisioning, bundle, idempotency, and
@@ -116,7 +117,8 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
   and scenario-hash determinism.
 - **`host/src/__tests__/orchestrator.test.ts`** + **`orchestrator-events.test.ts`** —
   orchestrator + mocked hypervisor backend; live-emit propagation
-  hook (closes P3 C2-residual).
+  hook (closes P3 C2-residual) and parallel guest-agent readiness waits
+  (closes P2 F1).
 - **`host/src/__tests__/proto-shape.test.ts`** — pins the v1 proto
   `oneof platform_details` shape so a stray rebuild can't silently
   change the wire contract.
@@ -171,7 +173,11 @@ All v0.1.0 phases are merged on `main`. Bullet status as of 2026-04-28:
   per ROADMAP). MSI scaffold, named-pipe + TCP, mTLS, SCM lifecycle.
   Audit A2 closure (default-executor service routing) folded into P3.
 - **P2 — Orchestrator Polish** — Closed via `0960ea6` (orphan sweep,
-  CI re-enable, schema versioning, env-var test serialization).
+  CI re-enable, schema versioning, env-var test serialization). The F1
+  readiness wait follow-up is closed by the current HEAD commit:
+  `waitForGuestAgents`
+  now checks VM guest agents concurrently while preserving each VM's retry
+  loop and timeout.
 - **P3 — Agent UX Baseline** — Closed: P3.a structured errors
   (`a52d3bb`), P3.b retry (`13f2b0a`), P3.c orchestrator event hook
   (`ec92f80`), P3.d trace-id propagation across TS / Rust / plugin
@@ -218,13 +224,13 @@ NEW 2026-04-28". Status as of 2026-04-28:
   (release-day swap).
 - **P9.6 — Bootstrap docs** — Closed (`50807f6`). `docs/bootstrap.md`
   is the end-to-end walkthrough; README points at it on the first line.
-- **P9.7 — DAG-resolved bundle dependencies** — Closed (`d14034b`).
+- **P9.7 — DAG-resolved bundle dependencies** — Closed (`3354ded`).
   `requires:` is parsed in `bundle-types.ts` and planned in
   `install-bundle.ts` with cycle / unknown-dependency checks.
 
-### v0.1.2 — Tier-2 sources + DAG dependencies (closed in `d14034b`)
+### v0.1.2 — Tier-2 sources + DAG dependencies (closed in `3354ded`)
 
-Promised work closed in `d14034b`:
+Promised work closed in `3354ded`:
 
 - P9.7 DAG `requires:` resolver for bundle ordering is closed.
 - `provision_if_missing: true` scenario YAML field is closed.
@@ -237,7 +243,7 @@ Promised work closed in `d14034b`:
   `custom_script`.
 - B13 (`protoc-bin-vendored` supply-chain documentation), C3
   (capability enforcement), C4 (`${secret:NAME}` resolution), and cert
-  rotation are closed in `d14034b`.
+  rotation are closed in `3354ded`.
 - Per-scenario denylist allowlists (B9 follow-up) — locked decision
   was to keep the tripwire-not-boundary stance for v0.1.x.
 
@@ -517,7 +523,7 @@ without explicit user instruction — those are operator actions.
   `host/src/provisioning/provision.ts:1-29`.
 - **Tier 1 / 2 / 3 (sources)** — Bundle-source taxonomy.
   Tier 1 ships in v0.1.1 (`winget`, `choco`, `msstore`, `direct`,
-  `docker`). Tier 2 is closed in `d14034b` (`scoop`, `github_release`,
+  `docker`). Tier 2 is closed in `3354ded` (`scoop`, `github_release`,
   `git_repo`, `powershell`, `npm`, `pip`, `cargo`, `custom_script`).
   Tier 3 later (`brew`, `mas`, `apt`, `dnf`, `flatpak`, `snap`).
 - **6-lens audit** — PM, QA, Arch, Sec, DX, Ops. Locked 2026-04-28 as

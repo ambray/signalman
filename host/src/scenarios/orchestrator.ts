@@ -1984,7 +1984,7 @@ export class ScenarioOrchestrator {
     const timeoutMs = 600_000;
     const pollIntervalMs = 2_000;
 
-    for (const def of vmDefs) {
+    await Promise.all(vmDefs.map(async (def) => {
       const handle = vmMap.get(def.name);
       let client = this.guestClients.get(def.name);
       if (!client) {
@@ -2019,6 +2019,6 @@ export class ScenarioOrchestrator {
           `Guest agent on VM '${def.name}' did not become reachable within ${timeoutMs}ms`,
         );
       }
-    }
+    }));
   }
 }
