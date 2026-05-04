@@ -192,6 +192,21 @@ then uninstalls, rebuilds, installs, and starts the LocalSystem service.
 That is the preferred loop when validating source changes against a real
 Hyper-V VM because the running SCM service locks the normal debug binary.
 
+After refreshing the service, run the backend smoke from a non-elevated
+PowerShell:
+
+```powershell
+.\scripts\live-service-smoke.ps1 `
+  -VmName Win11_test `
+  -Checkpoint base `
+  -GuestUsername test `
+  -GuestPassword '<guest password>'
+```
+
+The smoke wrapper writes credentials only to a temporary config file,
+runs `service-backend-smoke`, removes the temp config, and verifies that
+the named checkpoint still exists afterward.
+
 1. Build a release binary:
    ```powershell
    cargo build --release -p signalman-service
