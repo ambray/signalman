@@ -297,6 +297,33 @@ describe("ScenarioOrchestrator", () => {
     expect(waitForHeartbeat).toHaveBeenCalledWith(makeHandle("vm1"), 180_000);
   });
 
+  it("resolveVms can skip heartbeat for backend-only scenarios", async () => {
+    const waitForHeartbeat = vi.fn().mockResolvedValue(true);
+    backend = makeMockBackend({
+      getStatus: vi.fn().mockResolvedValue({
+        handle: makeHandle("vm1"),
+        state: "stopped",
+        guestAgentReachable: false,
+      } as VMStatus),
+      waitForHeartbeat,
+    });
+    orchestrator = new ScenarioOrchestrator(backend, clients, config);
+    const defs: VmDefinition[] = [
+      {
+        name: "vm1",
+        template: "win11-base",
+        checkpoint_restore: "base",
+        wait_for_heartbeat: false,
+        guest_agent_port: 50051,
+      },
+    ];
+
+    await orchestrator.resolveVms(defs);
+
+    expect(backend.startVM).toHaveBeenCalledWith(makeHandle("vm1"));
+    expect(waitForHeartbeat).not.toHaveBeenCalled();
+  });
+
   // ── pre_started bypass (Sprint 60.12 Phase B) ──────────────────
   //
   // Sub-suite locks down the contract that scenarios marked

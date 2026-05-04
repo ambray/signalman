@@ -725,6 +725,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vm_run_command_allows_powershell_command_arguments() {
+        let svc = service_with(vec![Ok(
+            r#"{"ExitCode":0,"Output":"service-backend-smoke:fixture\n"}"#.to_string(),
+        )]);
+        let req = Request::new(proto::VmRunCommandRequest {
+            handle: Some(proto::VmHandle {
+                id: "id1".to_string(),
+                name: "vm1".to_string(),
+                backend: "hyperv".to_string(),
+            }),
+            command: "powershell.exe".to_string(),
+            args: vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "$value = Get-Content -Raw C:\\SignalmanSmoke\\input.txt; Set-Content -Path C:\\SignalmanSmoke\\output.txt -Value \"service-backend-smoke:$value\"; Get-Content -Raw C:\\SignalmanSmoke\\output.txt".to_string(),
+            ],
+            timeout_ms: 60_000,
+            credentials: Some(proto::GuestCredentials {
+                username: "test".to_string(),
+                password: "secret".to_string(),
+            }),
+        });
+        let mut stream = svc.vm_run_command(req).await.unwrap().into_inner();
+        let mut got_result = false;
+        while let Some(ev) = stream.next().await {
+            let ev = ev.unwrap();
+            if let Some(proto::vm_run_command_event::Event::Result(r)) = ev.event {
+                got_result = true;
+                assert_eq!(r.exit_code, 0);
+                assert!(r.stdout.contains("service-backend-smoke:fixture"));
+            }
+        }
+        assert!(got_result);
+    }
+
+    #[tokio::test]
     async fn vm_install_rejects_bad_url_for_direct() {
         let svc = service_with(vec![]);
         let req = Request::new(proto::VmInstallRequest {
