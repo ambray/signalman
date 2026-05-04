@@ -179,6 +179,19 @@ fallback to direct/gsudo is automatic.
 This is the human-driven smoke test. Run after every change to the
 service binary, transport layer, or sanitization code.
 
+For a local developer checkout where the SCM service points at this repo's
+`target\debug\signalman-service.exe`, use the refresh helper from an
+elevated PowerShell:
+
+```powershell
+.\scripts\update-dev-service.ps1
+```
+
+The helper preflight-builds the service into a temporary target directory,
+then uninstalls, rebuilds, installs, and starts the LocalSystem service.
+That is the preferred loop when validating source changes against a real
+Hyper-V VM because the running SCM service locks the normal debug binary.
+
 1. Build a release binary:
    ```powershell
    cargo build --release -p signalman-service
