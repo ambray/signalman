@@ -15,7 +15,8 @@ use tonic::{Request, Response, Status};
 
 use crate::backend::{
     install_command_for, Backend, BackendError, CheckpointHandle as InternalCheckpointHandle,
-    CopyEvent, NetworkConfig as InternalNetworkConfig, RunEvent, VmConfig as InternalVmConfig,
+    CopyEvent, GuestCredentials as InternalGuestCredentials,
+    NetworkConfig as InternalNetworkConfig, RunEvent, VmConfig as InternalVmConfig,
     VmHandle as InternalVmHandle, WaitAgentEvent,
 };
 use crate::proto;
@@ -112,6 +113,13 @@ fn cp_handle_to_proto(h: InternalCheckpointHandle) -> proto::CheckpointHandleMes
         vm_handle: Some(handle_to_proto(h.vm_handle)),
         label: h.label,
     }
+}
+
+fn credentials_from_proto(c: Option<proto::GuestCredentials>) -> Option<InternalGuestCredentials> {
+    c.map(|c| InternalGuestCredentials {
+        username: c.username,
+        password: c.password,
+    })
 }
 
 fn config_from_proto(c: proto::VmConfig) -> InternalVmConfig {
@@ -327,6 +335,7 @@ impl proto::signalman_service::control_plane_server::ControlPlane for ControlPla
         let host_path = req.host_path;
         let guest_path = req.guest_path;
         let from_guest = req.from_guest;
+        let credentials = credentials_from_proto(req.credentials);
 
         let (event_tx, mut event_rx) = mpsc::channel::<CopyEvent>(8);
         let (out_tx, out_rx) = mpsc::channel::<Result<proto::VmCopyFileEvent, Status>>(8);
@@ -336,7 +345,14 @@ impl proto::signalman_service::control_plane_server::ControlPlane for ControlPla
         tokio::spawn(async move {
             let backend_fut = async {
                 backend
-                    .copy_file(&h, &host_path, &guest_path, from_guest, event_tx)
+                    .copy_file(
+                        &h,
+                        &host_path,
+                        &guest_path,
+                        from_guest,
+                        credentials,
+                        event_tx,
+                    )
                     .await
             };
 
@@ -389,6 +405,7 @@ impl proto::signalman_service::control_plane_server::ControlPlane for ControlPla
         let backend = self.backend.clone();
         let cmd = req.command;
         let args = req.args;
+        let credentials = credentials_from_proto(req.credentials);
         let timeout_ms = if req.timeout_ms == 0 {
             30_000
         } else {
@@ -400,7 +417,8 @@ impl proto::signalman_service::control_plane_server::ControlPlane for ControlPla
 
         tokio::spawn(async move {
             let forwarder = run_event_forwarder(event_rx, out_tx.clone());
-            let backend_fut = backend.execute_command(&h, &cmd, &args, timeout_ms, event_tx);
+            let backend_fut =
+                backend.execute_command(&h, &cmd, &args, timeout_ms, credentials, event_tx);
             let (res, ()) = tokio::join!(backend_fut, forwarder);
             if let Err(e) = res {
                 let _ = out_tx.send(Err(map_err(e))).await;
@@ -535,7 +553,7 @@ impl proto::signalman_service::control_plane_server::ControlPlane for ControlPla
 
         tokio::spawn(async move {
             let forwarder = run_event_forwarder(event_rx, out_tx.clone());
-            let backend_fut = backend.execute_command(&h, &cmd, &args, timeout_ms, event_tx);
+            let backend_fut = backend.execute_command(&h, &cmd, &args, timeout_ms, None, event_tx);
             let (res, ()) = tokio::join!(backend_fut, forwarder);
             if let Err(e) = res {
                 let _ = out_tx.send(Err(map_err(e))).await;
@@ -679,6 +697,7 @@ mod tests {
             command: "echo".to_string(),
             args: vec!["hello".to_string()],
             timeout_ms: 30_000,
+            credentials: None,
         });
         let mut stream = svc.vm_run_command(req).await.unwrap().into_inner();
         let mut got_start = false;
