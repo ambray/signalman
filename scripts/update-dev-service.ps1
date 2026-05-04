@@ -80,6 +80,21 @@ function Wait-ServiceState {
     throw "Signalman service did not reach state '$State' within ${TimeoutSeconds}s."
 }
 
+function Wait-ServiceDeleted {
+    param(
+        [int]$TimeoutSeconds = 30
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $svc = Get-Service -Name Signalman -ErrorAction SilentlyContinue
+        if ($null -eq $svc) { return }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+
+    throw "Signalman service was not deleted within ${TimeoutSeconds}s."
+}
+
 Assert-WindowsAdmin
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -124,6 +139,7 @@ if (Test-ServiceExists) {
         if ($LASTEXITCODE -ne 0) {
             throw "sc.exe delete Signalman failed with exit code $LASTEXITCODE"
         }
+        Wait-ServiceDeleted
     }
 }
 
