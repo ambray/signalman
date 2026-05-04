@@ -391,6 +391,19 @@ export function assertScenarioCapabilities(
 export interface OrchestratorOptions {
   /** Directory for writing output reports (JSON, Markdown, JUnit XML). */
   outputDir?: string;
+  /**
+   * Register a one-shot process `exit` hook that force-terminates any
+   * active kernel-debug sessions. Production `signalman run` enables
+   * this while unit tests leave it off by default to avoid global
+   * listener churn.
+   */
+  registerProcessExitCleanup?: boolean;
+}
+
+interface ProcessExitHookTarget {
+  once(event: "exit", listener: () => void): unknown;
+  off?(event: "exit", listener: () => void): unknown;
+  removeListener?(event: "exit", listener: () => void): unknown;
 }
 
 export class ScenarioOrchestrator {
@@ -423,6 +436,7 @@ export class ScenarioOrchestrator {
    * migrating them is a separate refactor with its own risk budget.
    */
   private readonly toolRegistry: import("../kernel-debug/tool-registry.js").ToolRegistry;
+  private processExitCleanup: (() => void) | undefined;
 
   constructor(
     private backend: HypervisorBackend,
@@ -437,6 +451,9 @@ export class ScenarioOrchestrator {
     // orchestrator).
 
     this.toolRegistry = createInitialToolRegistry();
+    if (options?.registerProcessExitCleanup) {
+      this.registerProcessExitCleanup();
+    }
   }
 
   /**
@@ -540,6 +557,46 @@ export class ScenarioOrchestrator {
         errors.map((e) => (e instanceof Error ? e.message : String(e))),
       );
     }
+    this.unregisterProcessExitCleanup();
+  }
+
+  /**
+   * Register emergency cleanup for Node process exit. The hook cannot
+   * await async detach, so it uses the synchronous KdSession emergency
+   * path when available and otherwise starts detach best-effort.
+   */
+  registerProcessExitCleanup(target: ProcessExitHookTarget = process): void {
+    if (this.processExitCleanup) return;
+
+    const handler = () => this.forceTerminateKernelDebugSessions();
+    target.once("exit", handler);
+    this.processExitCleanup = () => {
+      if (typeof target.off === "function") {
+        target.off("exit", handler);
+        return;
+      }
+      target.removeListener?.("exit", handler);
+    };
+  }
+
+  unregisterProcessExitCleanup(): void {
+    const cleanup = this.processExitCleanup;
+    if (!cleanup) return;
+    this.processExitCleanup = undefined;
+    cleanup();
+  }
+
+  forceTerminateKernelDebugSessions(): void {
+    for (const { session, breakLog } of this.kernelDebug.values()) {
+      breakLog.detach();
+      const maybeForce = session as typeof session & { forceTerminate?: () => void };
+      if (typeof maybeForce.forceTerminate === "function") {
+        maybeForce.forceTerminate();
+        continue;
+      }
+      void session.detach().catch(() => undefined);
+    }
+    this.kernelDebug.clear();
   }
 
   /**

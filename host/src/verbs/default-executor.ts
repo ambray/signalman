@@ -72,7 +72,9 @@ export function createDefaultExecutor(): RunExecutor {
       // client" error if the scenario actually needs one.
     }
 
-    const orchestrator = new ScenarioOrchestrator(backend, guestClients, config);
+    const orchestrator = new ScenarioOrchestrator(backend, guestClients, config, {
+      registerProcessExitCleanup: true,
+    });
     // P3.c: pass ctx.emit through to the orchestrator so step lifecycle
     // and assertion events arrive in the run's EventQueue as they
     // happen, not retrospectively after runScenario returns. The

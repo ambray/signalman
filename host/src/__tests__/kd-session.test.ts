@@ -633,6 +633,38 @@ describe("KdSession — detach()", () => {
 
 // ─── once() + stdin-destroyed paths ────────────────────────────────
 
+describe("KdSession - forceTerminate()", () => {
+  let cap: { proc: FakeChildProcess | null };
+  beforeEach(() => {
+    cap = { proc: null };
+  });
+
+  it("sends qd and kills synchronously", async () => {
+    const s = new KdSession({ kdArgs: ["-k"], spawnFn: makeFakeSpawn(cap) });
+    await s.start();
+    cap.proc!.stdinLines.length = 0;
+
+    s.forceTerminate();
+
+    expect(cap.proc!.stdinLines).toContain("qd");
+    expect(cap.proc!.killed).toBe(true);
+    expect(s.state).toBe("disconnected");
+  });
+
+  it("from idle transitions to disconnected without spawning", () => {
+    const spawnSpy = vi.fn(makeFakeSpawn(cap));
+    const s = new KdSession({
+      kdArgs: ["-k"],
+      spawnFn: spawnSpy as unknown as typeof import("node:child_process").spawn,
+    });
+
+    s.forceTerminate();
+
+    expect(spawnSpy).not.toHaveBeenCalled();
+    expect(s.state).toBe("disconnected");
+  });
+});
+
 describe("KdSession — typed once() + raw-line send guard", () => {
   let cap: { proc: FakeChildProcess | null };
   beforeEach(() => {
