@@ -18,7 +18,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 
 use crate::sanitize::{
-    escape_powershell_arg, sanitize_command, sanitize_label, sanitize_path,
+    escape_powershell_arg, sanitize_command, sanitize_command_arg, sanitize_label, sanitize_path,
     sanitize_timeout_default, sanitize_url, sanitize_vm_name, SanitizeError,
 };
 
@@ -693,10 +693,10 @@ impl Backend for HyperVBackend {
 
         let mut arg_parts: Vec<String> = Vec::with_capacity(args.len());
         for a in args {
-            // Defense in depth: each arg must be free of shell metas
-            // AND escaped for the PS single-quoted string. Mirrors the
-            // TS double-validation.
-            let validated = sanitize_command(a)?;
+            // Args are data passed to the executable, not command names.
+            // They may contain PowerShell syntax for `powershell -Command`;
+            // PowerShell interpolation safety comes from single-quote escaping.
+            let validated = sanitize_command_arg(a)?;
             arg_parts.push(format!("'{}'", escape_powershell_arg(validated)));
         }
         let arg_str = arg_parts.join(", ");
@@ -1098,15 +1098,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_command_rejects_metacharacter_arg() {
+    async fn execute_command_rejects_metacharacter_command_name() {
         let runner = Arc::new(ScriptedRunner::new(vec![]));
         let backend = HyperVBackend::with_runner(runner);
         let (tx, _rx) = mpsc::channel(8);
         let err = backend
             .execute_command(
                 &handle("vm1"),
-                "powershell",
-                &["whoami; rm -rf /".to_string()],
+                "powershell; rm -rf /",
+                &[],
                 30_000,
                 None,
                 tx,
@@ -1114,6 +1114,35 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, BackendError::InvalidArgument(_)));
+    }
+
+    #[tokio::test]
+    async fn execute_command_allows_powershell_syntax_in_arguments() {
+        let runner = Arc::new(ScriptedRunner::new(vec![Ok(
+            r#"{"ExitCode":0,"Output":"ok"}"#.to_string(),
+        )]));
+        let backend = HyperVBackend::with_runner(runner.clone());
+        let (tx, _rx) = mpsc::channel(8);
+
+        let result = backend
+            .execute_command(
+                &handle("vm1"),
+                "powershell.exe",
+                &[
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    "$value = 'ok'; Write-Output $value".to_string(),
+                ],
+                30_000,
+                None,
+                tx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.stdout, "ok");
+
+        let calls = runner.calls.lock().unwrap();
+        assert!(calls[0].0.contains("Write-Output"));
     }
 
     #[tokio::test]

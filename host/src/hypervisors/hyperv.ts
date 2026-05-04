@@ -27,6 +27,7 @@ import {
   sanitizeLabel,
   sanitizePath,
   sanitizeCommand,
+  sanitizeCommandArg,
   escapePowerShellArg,
   sanitizeTimeout,
 } from "../sanitize.js";
@@ -573,12 +574,12 @@ SELECT * FROM __InstanceModificationEvent WITHIN 1
     const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
     const safeCommand = escapePowerShellArg(sanitizeCommand(command));
     const safeTimeout = sanitizeTimeout(timeoutMs);
-    // Defense-in-depth: each arg element is validated through sanitizeCommand
-    // (rejects shell metacharacters) AND escaped for PowerShell single-quoted
-    // strings.  The sanitizeCommand check guards against injection even if
-    // the PowerShell escaping is somehow bypassed.
+    // Args are data passed to the executable, not command names. They may
+    // legitimately contain PowerShell syntax for `powershell -Command`, so
+    // reject only impossible string content and rely on single-quote escaping
+    // for PowerShell interpolation safety.
     const argStr = args
-      .map((a) => `'${escapePowerShellArg(sanitizeCommand(a))}'`)
+      .map((a) => `'${escapePowerShellArg(sanitizeCommandArg(a))}'`)
       .join(", ");
     const script = `
       $result = Invoke-Command -VMName '${safeName}' -ScriptBlock {
