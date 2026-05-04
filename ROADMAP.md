@@ -241,9 +241,11 @@ in `3354ded`; orphan handling remains.
   errors. The provisioning orphan reaper is also closed in this branch: VM
   creation now writes a Signalman manifest, and the dry-run-first
   `vm_cleanup_orphans` tool only targets manifest-owned VMs that lack the
-  target checkpoint. Remaining C7
-  scope is narrower orphan/GC policy: no GC on `.signalman/recordings/`, and no
-  process-exit hook if the host dies before `teardownKernelDebugSessions`.
+  target checkpoint. The process-exit kd cleanup hook is also closed in this
+  branch: active `signalman run` orchestrators register a one-shot exit hook
+  that synchronously terminates spawned kd sessions if the host exits before
+  normal teardown. Remaining C7 scope is narrower orphan/GC policy: no GC on
+  `.signalman/recordings/`.
 - **Audit F1**: parallelize `waitForGuestAgents` per VM — closed in this
   branch. Each VM keeps its own retry/deadline loop, while the outer wait
   runs all VM readiness checks concurrently.
@@ -1136,7 +1138,7 @@ correlator agent's behaviour on a real Hyper-V endpoint.
 |-------|----------|--------|------|
 | P0: MCP Surface Inversion | 4-5d | ✅ Merged 2026-04 | (closed) |
 | P1: Hyper-V Service | 5-8d | ✅ Merged 2026-04 | Closure bug A2 → P3 |
-| P2: Orchestrator Polish | 3-4d | Surgical + audit | f1c1f93 + cleanup reaper (C7 teardown guard + manifest-owned provisioning reaper closed in this branch; recordings GC / process-exit hook remain); parallel agents wait (F1) closed in `f0bebee` |
+| P2: Orchestrator Polish | 3-4d | Surgical + audit | f1c1f93 + cleanup reaper (C7 teardown guard + manifest-owned provisioning reaper + process-exit kd cleanup closed in this branch; recordings GC remains); parallel agents wait (F1) closed in `f0bebee` |
 | P3: Agent UX Baseline | 3-5d | ~50% / re-trimmed 2026-04-25 | Orchestrator event hook (C2-residual) + retry (C5) + structured errors (C6) + trace-id header (C10-residual). C1/C2/C10 substrate moved to P5. |
 | P4: Security Baseline | 9-11d | ~30% / re-scoped 2026-04-25 | 2 Critical (B1, B2) + 4 High (B3-B6) + capability/secrets enforcement (C3, C4) |
 | **P5: Loom Plugin (Agent-Front Surface)** | **4-7d** | **PROMOTED 2026-04-25** | **v0.1.0 critical path. Plugin manifest (P5.1) + scenario↔task mapping (P5.2) + EventBus streaming (P5.3) + TUI forms (P5.4) + directives (P5.5).** |
