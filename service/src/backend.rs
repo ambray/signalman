@@ -115,6 +115,12 @@ pub struct CommandResult {
     pub duration_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuestCredentials {
+    pub username: String,
+    pub password: String,
+}
+
 /// Errors a backend can raise. The service layer maps these onto
 /// gRPC `Code`s in `service.rs`.
 #[derive(Debug, Error)]
@@ -211,6 +217,7 @@ pub trait Backend: Send + Sync {
         host_path: &str,
         guest_path: &str,
         from_guest: bool,
+        credentials: Option<GuestCredentials>,
         events: mpsc::Sender<CopyEvent>,
     ) -> BackendResult<()>;
 
@@ -221,6 +228,7 @@ pub trait Backend: Send + Sync {
         command: &str,
         args: &[String],
         timeout_ms: u64,
+        credentials: Option<GuestCredentials>,
         events: mpsc::Sender<RunEvent>,
     ) -> BackendResult<CommandResult>;
 
@@ -622,21 +630,34 @@ impl Backend for HyperVBackend {
         host_path: &str,
         guest_path: &str,
         from_guest: bool,
+        credentials: Option<GuestCredentials>,
         events: mpsc::Sender<CopyEvent>,
     ) -> BackendResult<()> {
         let safe_name = escape_powershell_arg(sanitize_vm_name(&handle.name)?);
         let safe_host = escape_powershell_arg(sanitize_path(host_path)?);
         let safe_guest = escape_powershell_arg(sanitize_path(guest_path)?);
+        let credential_script = credential_prelude(credentials.as_ref())?;
 
         // Hyper-V's Copy-VMFile + Copy-Item -FromSession don't expose
         // progress callbacks. v0.1.0 emits a single Complete event;
         // future versions can poll the destination size on a side
         // task.  The proto already supports streaming progress.
-        let script = if from_guest {
+        let script = if credentials.is_some() {
+            let direction = if from_guest {
+                format!("Copy-Item -FromSession $session -Path '{safe_guest}' -Destination '{safe_host}'")
+            } else {
+                format!("Copy-Item -ToSession $session -Path '{safe_host}' -Destination '{safe_guest}' -Force")
+            };
+            format!(
+                "{credential_script} \
+                 $session = New-PSSession -VMName '{safe_name}' -Credential $credential; \
+                 try {{ {direction} }} finally {{ if ($session) {{ Remove-PSSession $session }} }}"
+            )
+        } else if from_guest {
             format!(
                 "$session = New-PSSession -VMName '{safe_name}'; \
-                 Copy-Item -FromSession $session -Path '{safe_guest}' -Destination '{safe_host}'; \
-                 Remove-PSSession $session"
+                 try {{ Copy-Item -FromSession $session -Path '{safe_guest}' -Destination '{safe_host}' }} \
+                 finally {{ if ($session) {{ Remove-PSSession $session }} }}"
             )
         } else {
             format!(
@@ -656,6 +677,7 @@ impl Backend for HyperVBackend {
         command: &str,
         args: &[String],
         timeout_ms: u64,
+        credentials: Option<GuestCredentials>,
         events: mpsc::Sender<RunEvent>,
     ) -> BackendResult<CommandResult> {
         let started_at_unix_ms = std::time::SystemTime::now()
@@ -678,9 +700,16 @@ impl Backend for HyperVBackend {
             arg_parts.push(format!("'{}'", escape_powershell_arg(validated)));
         }
         let arg_str = arg_parts.join(", ");
+        let credential_script = credential_prelude(credentials.as_ref())?;
+        let credential_arg = if credentials.is_some() {
+            "-Credential $credential "
+        } else {
+            ""
+        };
 
         let script = format!(
-            "$result = Invoke-Command -VMName '{safe_name}' -ScriptBlock {{ \
+            "{credential_script} \
+             $result = Invoke-Command -VMName '{safe_name}' {credential_arg}-ScriptBlock {{ \
                 $output = & '{safe_cmd}' {arg_str} 2>&1; \
                 @{{ ExitCode = $LASTEXITCODE; Output = ($output | Out-String) }} \
               }}; \
@@ -854,6 +883,34 @@ async fn wait_for_stable_state(runner: &dyn PsRunner, safe_name: &str) -> Backen
          }}"
     );
     runner.run(&script, 900_000).await?;
+    Ok(())
+}
+
+fn credential_prelude(credentials: Option<&GuestCredentials>) -> BackendResult<String> {
+    let Some(credentials) = credentials else {
+        return Ok(String::new());
+    };
+    validate_credential_field("username", &credentials.username)?;
+    validate_credential_field("password", &credentials.password)?;
+    let username = escape_powershell_arg(&credentials.username);
+    let password = escape_powershell_arg(&credentials.password);
+    Ok(format!(
+        "$securePassword = ConvertTo-SecureString '{password}' -AsPlainText -Force; \
+         $credential = [System.Management.Automation.PSCredential]::new('{username}', $securePassword);"
+    ))
+}
+
+fn validate_credential_field(name: &str, value: &str) -> BackendResult<()> {
+    if value.is_empty() {
+        return Err(BackendError::InvalidArgument(format!(
+            "Guest credential {name} must not be empty"
+        )));
+    }
+    if value.contains('\0') || value.chars().any(char::is_control) {
+        return Err(BackendError::InvalidArgument(format!(
+            "Guest credential {name} contains control characters"
+        )));
+    }
     Ok(())
 }
 
@@ -1051,11 +1108,71 @@ mod tests {
                 "powershell",
                 &["whoami; rm -rf /".to_string()],
                 30_000,
+                None,
                 tx,
             )
             .await
             .unwrap_err();
         assert!(matches!(err, BackendError::InvalidArgument(_)));
+    }
+
+    #[tokio::test]
+    async fn execute_command_uses_supplied_guest_credentials() {
+        let runner = Arc::new(ScriptedRunner::new(vec![Ok(
+            r#"{"ExitCode":0,"Output":"ok"}"#.to_string(),
+        )]));
+        let backend = HyperVBackend::with_runner(runner.clone());
+        let (tx, _rx) = mpsc::channel(8);
+
+        let result = backend
+            .execute_command(
+                &handle("vm1"),
+                "whoami",
+                &[],
+                30_000,
+                Some(GuestCredentials {
+                    username: "test".to_string(),
+                    password: "secret".to_string(),
+                }),
+                tx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+
+        let calls = runner.calls.lock().unwrap();
+        assert!(calls[0].0.contains("ConvertTo-SecureString 'secret'"));
+        assert!(calls[0].0.contains("PSCredential"));
+        assert!(calls[0].0.contains("-Credential $credential"));
+    }
+
+    #[tokio::test]
+    async fn copy_file_with_credentials_uses_powershell_direct_session() {
+        let runner = Arc::new(ScriptedRunner::new(vec![Ok(String::new())]));
+        let backend = HyperVBackend::with_runner(runner.clone());
+        let (tx, _rx) = mpsc::channel(8);
+
+        backend
+            .copy_file(
+                &handle("vm1"),
+                "C:\\host.txt",
+                "C:\\guest.txt",
+                false,
+                Some(GuestCredentials {
+                    username: "test".to_string(),
+                    password: "secret".to_string(),
+                }),
+                tx,
+            )
+            .await
+            .unwrap();
+
+        let calls = runner.calls.lock().unwrap();
+        assert!(calls[0]
+            .0
+            .contains("New-PSSession -VMName 'vm1' -Credential $credential"));
+        assert!(calls[0].0.contains("Copy-Item -ToSession $session"));
+        assert!(!calls[0].0.contains("Copy-VMFile"));
     }
 
     #[tokio::test]
