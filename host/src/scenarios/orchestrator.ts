@@ -733,8 +733,9 @@ export class ScenarioOrchestrator {
     guestPath: string,
   ): Promise<void> {
     const client = this.guestClients.get(vmName);
+    const resolvedHostPath = path.resolve(hostPath);
     if (!client) {
-      await this.backend.copyFileToVM(handle, hostPath, guestPath);
+      await this.backend.copyFileToVM(handle, resolvedHostPath, guestPath);
       return;
     }
 
@@ -752,11 +753,11 @@ export class ScenarioOrchestrator {
     // measurably faster on the cold-cache common case.
     if (handle.id === "pre-started") {
       const { copyFileToGuestViaHttp } = await import("../guest/file_transfer.js");
-      await copyFileToGuestViaHttp(client, hostPath, guestPath);
+      await copyFileToGuestViaHttp(client, resolvedHostPath, guestPath);
       return;
     }
 
-    const fd = fs.openSync(hostPath, "r");
+    const fd = fs.openSync(resolvedHostPath, "r");
     try {
       const buffer = Buffer.allocUnsafe(GUEST_FILE_CHUNK_BYTES);
       let offset = 0;
@@ -785,12 +786,13 @@ export class ScenarioOrchestrator {
     hostPath: string,
   ): Promise<void> {
     const client = this.guestClients.get(vmName);
+    const resolvedHostPath = path.resolve(hostPath);
     if (!client) {
-      await this.backend.copyFileFromVM(handle, guestPath, hostPath);
+      await this.backend.copyFileFromVM(handle, guestPath, resolvedHostPath);
       return;
     }
-    fs.mkdirSync(path.dirname(hostPath), { recursive: true });
-    const fd = fs.openSync(hostPath, "w");
+    fs.mkdirSync(path.dirname(resolvedHostPath), { recursive: true });
+    const fd = fs.openSync(resolvedHostPath, "w");
     try {
       let offset = 0;
       while (true) {
@@ -2107,6 +2109,14 @@ export class ScenarioOrchestrator {
       if (status.state !== "running") {
         await this.backend.startVM(existing);
       }
+      if (this.backend.waitForHeartbeat) {
+        const ready = await this.backend.waitForHeartbeat(existing, 180_000);
+        if (!ready) {
+          throw new Error(
+            `VM '${def.name}' heartbeat did not become ready within 180000ms`,
+          );
+        }
+      }
     }
 
     return vmMap;
@@ -2137,8 +2147,10 @@ export class ScenarioOrchestrator {
       const handle = vmMap.get(def.name);
       let client = this.guestClients.get(def.name);
       if (!client) {
-        if (!handle || this.backend.name !== "tart") {
-          throw new Error(`No guest client configured for VM '${def.name}'`);
+        const canDiscoverOrCreateClient =
+          Boolean(def.network?.static_ip) || this.backend.name === "tart";
+        if (!handle || !canDiscoverOrCreateClient) {
+          return;
         }
       }
 
