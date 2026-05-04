@@ -97,11 +97,11 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
 | Crate / package | Test count (source) | Files | Last verified |
 |---|---|---|---|
 | Host (TypeScript / vitest) — `host/src/__tests__/` | 887 | 35 | 2026-05-04 |
-| Host (TypeScript / vitest) — `host/src/verbs/__tests__/` | 45 | 5 | 2026-04-28 |
+| Host (TypeScript / vitest) — `host/src/verbs/__tests__/` | 46 | 5 | 2026-05-04 |
 | Guest (Rust / cargo) | 105 | 8 | 2026-04-28 |
 | Service (Rust / cargo) | 95 | 8 (incl. 2 integration files) | 2026-04-28 |
 | Plugin (Rust / cargo) | 135 | 11 (incl. 2 integration files) | 2026-04-28 |
-| **Total** | **1267** test attributes / `it()` calls | **67** files | |
+| **Total** | **1268** test attributes / `it()` calls | **67** files | |
 
 > The ROADMAP headline "151 Rust + 769 TS = 920" predates the v0.1.1
 > P9 work (which added the provisioning, bundle, idempotency, and
@@ -187,7 +187,9 @@ All v0.1.0 phases are merged on `main`. Bullet status as of 2026-04-28:
   that lack the target checkpoint, defaulting to dry-run. Process-exit kd
   cleanup is closed here as well: real run orchestrators register a one-shot
   exit hook that synchronously terminates spawned kd sessions if the host exits
-  before normal teardown.
+  before normal teardown. The final C7 recordings GC is also closed here:
+  completed runs prune stale metadata-only `last-run.json` directories for
+  deleted scenarios while preserving richer recording captures.
 - **P3 — Agent UX Baseline** — Closed: P3.a structured errors
   (`a52d3bb`), P3.b retry (`13f2b0a`), P3.c orchestrator event hook
   (`ec92f80`), P3.d trace-id propagation across TS / Rust / plugin
