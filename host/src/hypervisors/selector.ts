@@ -32,7 +32,9 @@ export function buildBackendList(
         }
       : undefined,
   });
-  const service = new ServiceBackend();
+  const service = new ServiceBackend({
+    guestCredentials: config.hypervisor.guestCredentials,
+  });
   const tart = new TartBackend({ tartPath: config.hypervisor.tartPath });
 
   const byName: Record<SignalmanConfig["hypervisor"]["backend"], HypervisorBackend> = {
