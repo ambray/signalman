@@ -18,6 +18,7 @@ class FakeKdSession extends EventEmitter {
   public state: KdSessionState = "idle";
   public startCalls = 0;
   public detachCalls = 0;
+  public forceTerminateCalls = 0;
   public startShouldThrow: Error | null = null;
 
   constructor(opts: KdSessionOptions) {
@@ -33,6 +34,22 @@ class FakeKdSession extends EventEmitter {
   async detach(): Promise<void> {
     this.detachCalls++;
     this.state = "disconnected";
+  }
+  forceTerminate(): void {
+    this.forceTerminateCalls++;
+    this.state = "disconnected";
+  }
+}
+
+class FakeProcessExitTarget extends EventEmitter {
+  override once(event: "exit", listener: () => void): this {
+    super.once(event, listener);
+    return this;
+  }
+
+  override off(event: "exit", listener: () => void): this {
+    super.off(event, listener);
+    return this;
   }
 }
 
@@ -364,6 +381,47 @@ describe("teardownKernelDebugSessions", () => {
 });
 
 // ─── KdSessionOptions plumbing smoke test ──────────────────────────
+
+describe("process-exit kd cleanup", () => {
+  it("force-terminates active kd sessions on process exit", async () => {
+    const { orchestrator, sessions } = await makeOrchestrator();
+    const processTarget = new FakeProcessExitTarget();
+    orchestrator.registerProcessExitCleanup(processTarget);
+    await spawnKd(orchestrator, [
+      {
+        name: "endpoint-1",
+        template: "win11",
+        guest_agent_port: 50051,
+        kernel_debug: { enabled: true },
+      },
+    ]);
+
+    processTarget.emit("exit");
+
+    expect(sessions[0].forceTerminateCalls).toBe(1);
+    expect(orchestrator.getKernelDebug("endpoint-1")).toBeUndefined();
+  });
+
+  it("unregisters the process-exit hook after normal kd teardown", async () => {
+    const { orchestrator, sessions } = await makeOrchestrator();
+    const processTarget = new FakeProcessExitTarget();
+    orchestrator.registerProcessExitCleanup(processTarget);
+    await spawnKd(orchestrator, [
+      {
+        name: "endpoint-1",
+        template: "win11",
+        guest_agent_port: 50051,
+        kernel_debug: { enabled: true },
+      },
+    ]);
+
+    await orchestrator.teardownKernelDebugSessions();
+    processTarget.emit("exit");
+
+    expect(sessions[0].detachCalls).toBe(1);
+    expect(sessions[0].forceTerminateCalls).toBe(0);
+  });
+});
 
 describe("KdSessionOptions composition", () => {
   it("kd CLI uses the com:pipe,port=...,reconnect form", async () => {

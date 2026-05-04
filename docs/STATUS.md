@@ -96,12 +96,12 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
 
 | Crate / package | Test count (source) | Files | Last verified |
 |---|---|---|---|
-| Host (TypeScript / vitest) — `host/src/__tests__/` | 883 | 35 | 2026-05-04 |
+| Host (TypeScript / vitest) — `host/src/__tests__/` | 887 | 35 | 2026-05-04 |
 | Host (TypeScript / vitest) — `host/src/verbs/__tests__/` | 45 | 5 | 2026-04-28 |
 | Guest (Rust / cargo) | 105 | 8 | 2026-04-28 |
 | Service (Rust / cargo) | 95 | 8 (incl. 2 integration files) | 2026-04-28 |
 | Plugin (Rust / cargo) | 135 | 11 (incl. 2 integration files) | 2026-04-28 |
-| **Total** | **1263** test attributes / `it()` calls | **67** files | |
+| **Total** | **1267** test attributes / `it()` calls | **67** files | |
 
 > The ROADMAP headline "151 Rust + 769 TS = 920" predates the v0.1.1
 > P9 work (which added the provisioning, bundle, idempotency, and
@@ -120,7 +120,8 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
   hook (closes P3 C2-residual) and parallel guest-agent readiness waits
   (closes P2 F1). It also pins the C7 teardown guard that runs declared
   teardown after guest-readiness failures, plus the manifest-owned
-  provisioning orphan reaper and its dry-run-first MCP tool.
+  provisioning orphan reaper and its dry-run-first MCP tool. It also
+  covers the process-exit kd cleanup hook.
 - **`host/src/__tests__/proto-shape.test.ts`** — pins the v1 proto
   `oneof platform_details` shape so a stray rebuild can't silently
   change the wire contract.
@@ -183,7 +184,10 @@ All v0.1.0 phases are merged on `main`. Bullet status as of 2026-04-28:
   readiness, setup, workflow, assertion, or runtime errors occur. The
   provisioning orphan reaper is also closed here: VM creation records a
   manifest, and the `vm_cleanup_orphans` tool only targets manifest-owned VMs
-  that lack the target checkpoint, defaulting to dry-run.
+  that lack the target checkpoint, defaulting to dry-run. Process-exit kd
+  cleanup is closed here as well: real run orchestrators register a one-shot
+  exit hook that synchronously terminates spawned kd sessions if the host exits
+  before normal teardown.
 - **P3 — Agent UX Baseline** — Closed: P3.a structured errors
   (`a52d3bb`), P3.b retry (`13f2b0a`), P3.c orchestrator event hook
   (`ec92f80`), P3.d trace-id propagation across TS / Rust / plugin
