@@ -266,9 +266,10 @@ async function cmdRecord(args: ParsedArgs): Promise<number> {
 
 // ── init (P9.3) ───────────────────────────────────────────────────
 //
-// Locked design: minimal scaffold by default, --bootstrap is reserved
-// for the interactive flow that composes vm fetch-template (P9.5) +
-// vm provision (P9.1). Re-runs are idempotent unless --force is set.
+// Locked design: minimal scaffold by default; --bootstrap prints the
+// explicit cert/template/provision sequence without doing expensive
+// operator-owned side effects. Re-runs are idempotent unless --force
+// is set.
 
 function cmdInit(args: ParsedArgs): number {
   const projectName = args.options.get("name");
@@ -282,8 +283,8 @@ function cmdInit(args: ParsedArgs): number {
     return 0;
   }
 
-  // Plaintext output — first the human-friendly summary, then the
-  // bootstrap-deferred message on stderr if --bootstrap was set.
+  // Plaintext output: first the human-friendly summary, then the
+  // bootstrap next-step message on stderr if --bootstrap was set.
   process.stdout.write(`Signalman project initialised at ${result.projectRoot}\n`);
   if (result.filesCreated.length > 0) {
     process.stdout.write(`  ${result.filesCreated.length} file(s) created:\n`);
@@ -299,8 +300,9 @@ function cmdInit(args: ParsedArgs): number {
       process.stdout.write(`    = ${path.relative(result.projectRoot, f)}\n`);
     }
   }
-  if (result.bootstrapDeferredMessage) {
-    process.stderr.write("\n" + result.bootstrapDeferredMessage + "\n");
+  const bootstrapMessage = result.bootstrapMessage ?? result.bootstrapDeferredMessage;
+  if (bootstrapMessage) {
+    process.stderr.write("\n" + bootstrapMessage + "\n");
   }
   process.stdout.write(`\nNext: signalman list\n`);
   return 0;
@@ -633,13 +635,15 @@ async function cmdVmInstallBundle(args: ParsedArgs): Promise<number> {
 /**
  * Resolve the active hypervisor backend for the CLI.
  *
- * Lazy import keeps the Hyper-V module out of the macOS code path so
- * `signalman list` / `signalman describe` etc still work
- * cross-platform on dev machines that aren't Hyper-V hosts.
+ * Uses the same selector as `signalman run`, so `signalman vm ...`
+ * honors the service-first daemon path and only falls back to direct
+ * Hyper-V/gsudo when the daemon is unavailable.
  */
 async function getCliBackend(): Promise<HypervisorBackend> {
-  const { HyperVBackend } = await import("./hypervisors/hyperv.js");
-  return new HyperVBackend();
+  const { loadConfig } = await import("./config.js");
+  const { selectBackend } = await import("./hypervisors/selector.js");
+  const config = loadConfig();
+  return await selectBackend(config);
 }
 
 async function cmdVmProvision(args: ParsedArgs): Promise<number> {

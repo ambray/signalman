@@ -7,7 +7,7 @@ import { defaultConfig, loadConfig } from '../config.js';
 describe('defaultConfig', () => {
   it('returns valid config structure', () => {
     const config = defaultConfig();
-    expect(config.hypervisor.backend).toBe('hyperv');
+    expect(config.hypervisor.backend).toBe('service');
     expect(config.guestAgent.defaultPort).toBe(50051);
     expect(config.guestAgent.tls.enabled).toBe(false);
     // v0.1.0: default scenario path is `.signalman/scenarios` (P0 MCP
@@ -22,7 +22,7 @@ describe('defaultConfig', () => {
     const b = defaultConfig();
     expect(a).toEqual(b);
     a.hypervisor.backend = 'vmware';
-    expect(b.hypervisor.backend).toBe('hyperv');
+    expect(b.hypervisor.backend).toBe('service');
   });
 
   it('includes screenshot directory', () => {

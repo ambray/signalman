@@ -196,15 +196,15 @@ export const checkpointConfigSchema = z
   })
   .passthrough();
 
-// ── P4-reserved blocks (accept-but-don't-enforce) ─────────────────
+// ── P4 runtime guard blocks ───────────────────────────────────────
 
 /**
- * `capabilities` block — reserved for P4. Documents what the scenario
- * is allowed to touch. v0.1.0 parses but does not enforce; P4 flips
- * the runner to refuse any action outside the declared set.
+ * `capabilities` block — documents what the scenario is allowed to
+ * touch. When present, the orchestrator refuses VM, network, and host
+ * path access outside the declared set.
  *
  * `.passthrough()` keeps unknown sub-fields so authors can experiment
- * before P4 lands.
+ * while the enforced subset stays backward-compatible.
  */
 export const capabilitiesSchema = z
   .object({
@@ -227,11 +227,10 @@ export const capabilitiesSchema = z
  * `parameters` arg or the CLI `--param k=v` flag.
  *
  * Per resolved Question 2 (option (a) — strict, doc-able through
- * `signalman.describe`), v0.1.0 records the declared shape. Reference
- * syntax `${param:NAME}` and `${secret:NAME}` is reserved and accepted
- * here without resolution; the runtime substitution implementation
- * lands alongside P4 secret resolution. Until then, scenarios that
- * use `${secret:NAME}` get a `plan`-time warning.
+ * `signalman.describe`), this records the declared shape. Runtime
+ * execution resolves `${param:NAME}` from caller-supplied parameters
+ * plus declared defaults and `${secret:NAME}` from host environment
+ * variables.
  *
  * Values are free-form (string, number, boolean, object) so authors
  * can declare nested-shape parameters without Zod limiting them.
@@ -280,9 +279,9 @@ export const scenarioConfigSchema = z
     teardown: z.array(setupStepSchema).default([]),
     checkpoints: checkpointConfigSchema.default({}),
     sandbox_modes: z.array(z.string()).optional(),
-    /** Reserved for P4 — see {@link capabilitiesSchema}. */
+    /** Runtime capability gate — see {@link capabilitiesSchema}. */
     capabilities: capabilitiesSchema.optional(),
-    /** Reserved for P4 — see {@link parametersSchema}. */
+    /** Runtime parameter/default declarations — see {@link parametersSchema}. */
     parameters: parametersSchema.optional(),
     /**
      * Default retry policy applied to every setup/teardown step that

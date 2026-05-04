@@ -30,10 +30,10 @@
  *
  * ── Source-source dependencies (Q10(a) lock) ───────────────────────────
  *
- * Bundle authors order entries manually. The orchestrator does no DAG
- * analysis. In particular, when a Tier-2 source is itself a tool that
- * must already be present on the guest, the *prerequisite* package must
- * appear earlier in `packages:`. Common prerequisites:
+ * Bundle authors may order entries manually or declare dependencies with
+ * `requires: ["package-id"]`. When any package uses `requires`, the
+ * orchestrator topologically sorts the bundle and runs independent ready
+ * packages in parallel. Common prerequisites:
  *
  *   - `git_repo`         requires `git` (install via `winget Git.Git`).
  *   - `npm`              requires `node` (install via `choco nodejs-lts`).
@@ -44,8 +44,8 @@
  *                        but not Win10 — install via winget if needed).
  *   - `custom_script`    requires the named interpreter (`pwsh` | `bash`).
  *
- * Authors who get the order wrong see a `failed` per-package result with
- * the underlying tool's "command not found" message — diagnosis is local.
+ * Authors who get `requires` wrong see a dependency-planning error before
+ * any guest RPC is issued.
  *
  * ── Security gates (REQUIRED for v0.1.1) ───────────────────────────────
  *
@@ -100,7 +100,7 @@ import { z } from "zod";
  * can quote it back at the operator without duplicating the prose.
  */
 export const SOURCE_SOURCE_DEPENDENCIES_DOCSTRING = [
-  "Tier-2 sources have implicit prerequisites the bundle author must order:",
+  "Tier-2 sources have implicit prerequisites; declare them with `requires`:",
   "  git_repo     -> git           (winget Git.Git)",
   "  npm          -> node          (choco nodejs-lts | winget OpenJS.NodeJS)",
   "  pip          -> python        (winget Python.Python.3)",
@@ -108,8 +108,9 @@ export const SOURCE_SOURCE_DEPENDENCIES_DOCSTRING = [
   "  scoop        -> scoop bootstrap on the guest",
   "  powershell   -> pwsh (PS 7+)  (winget Microsoft.PowerShell on Win10)",
   "  custom_script -> the named interpreter (pwsh | bash)",
-  "Place the prerequisite earlier in the `packages:` list. The orchestrator",
-  "does no DAG analysis — declaration order IS the dependency graph.",
+  "The orchestrator topologically sorts `requires` dependencies and runs",
+  "independent ready packages in parallel. Bundles without `requires` keep",
+  "author-declared order for backwards compatibility.",
 ].join("\n");
 
 // ── Source tiers ─────────────────────────────────────────────────────────
@@ -147,6 +148,8 @@ export interface BasePackage {
   source: PackageSource;
   /** Optional pinned version. */
   version?: string;
+  /** Package IDs that must complete before this package can install. */
+  requires?: string[];
   /** Post-install shell command run via `client.runCommand`; expected to exit 0. */
   verify?: string;
   /** Optional substring expected in stdout of `verify`. */
@@ -344,10 +347,9 @@ export type Package =
 /**
  * Group of packages installed concurrently.
  *
- * Bundle authors are responsible for asserting independence — the
- * orchestrator does no DAG analysis in v0.1.1. If two parallel packages
- * fight over the same resource, the failure surfaces in the per-package
- * results, not in the schema.
+ * Bundles without `requires` preserve this author-declared grouping. When
+ * any package declares `requires`, the orchestrator computes dependency
+ * levels across the flattened package list and uses those levels instead.
  */
 export interface ParallelGroup {
   parallel: Package[];
@@ -403,6 +405,7 @@ const GIT_REF_RE = /^[A-Za-z0-9._/-]+$/;
 const baseFields = {
   id: z.string().min(1, "package id is required"),
   version: z.string().optional(),
+  requires: z.array(z.string().min(1)).optional(),
   verify: z.string().optional(),
   verify_expect: z.string().optional(),
 };

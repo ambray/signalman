@@ -205,6 +205,10 @@ describe("provisionVM error propagation", () => {
 // ── discoverGuestMsi ──────────────────────────────────────────────
 
 describe("discoverGuestMsi", () => {
+  function failingReleaseFetch(): typeof fetch {
+    return vi.fn(async () => new Response("not found", { status: 404 })) as unknown as typeof fetch;
+  }
+
   // What this catches: the explicit path being silently ignored or
   // mis-resolved relative to cwd.
   it("returns kind=explicit when path is provided + exists", async () => {
@@ -248,11 +252,18 @@ describe("discoverGuestMsi", () => {
   // unhelpful line; LLM agents need the searched paths AND remediation
   // to recover unattended.
   it("hard-fails with multi-line remediation when no MSI is found", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "msi-cache-"));
     let caught: unknown;
     try {
-      await discoverGuestMsi();
+      await discoverGuestMsi(undefined, {
+        cacheDir: tmpDir,
+        fetchImpl: failingReleaseFetch(),
+        releaseTag: "v0.1.0",
+      });
     } catch (err) {
       caught = err;
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
     expect(caught).toBeInstanceOf(GuestMsiDiscoveryError);
     const e = caught as GuestMsiDiscoveryError;
@@ -264,6 +275,77 @@ describe("discoverGuestMsi", () => {
     expect(
       e.remediation.some((r) => r.includes("cargo wix")),
     ).toBe(true);
+  });
+
+  // What this catches: Source 3 staying a permanent stub instead of
+  // resolving the matching GitHub Release asset on demand.
+  it("downloads a guest MSI from a matching GitHub Release", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "msi-cache-"));
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const urlString = String(url);
+      if (urlString.includes("/releases/tags/v0.1.0")) {
+        return new Response(
+          JSON.stringify({
+            assets: [
+              {
+                name: "notes.txt",
+                browser_download_url: "https://example.test/notes.txt",
+              },
+              {
+                name: "signalman-guest-v0.1.0-x64.msi",
+                browser_download_url: "https://example.test/signalman-guest.msi",
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (urlString === "https://example.test/signalman-guest.msi") {
+        return new Response(new Uint8Array([0x4d, 0x5a]), { status: 200 });
+      }
+      return new Response("unexpected url", { status: 500 });
+    }) as unknown as typeof fetch;
+
+    try {
+      const source = await discoverGuestMsi(undefined, {
+        cacheDir: tmpDir,
+        fetchImpl,
+        releaseRepo: "ambray/signalman",
+        releaseTag: "v0.1.0",
+      });
+
+      expect(source.kind).toBe("github_release");
+      expect(path.basename(source.path)).toBe("signalman-guest-v0.1.0-x64.msi");
+      expect(fs.readFileSync(source.path)).toEqual(Buffer.from([0x4d, 0x5a]));
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // What this catches: repeated provisioning runs re-downloading the
+  // same MSI even though the matching release asset is already cached.
+  it("uses a cached GitHub Release MSI before fetching", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "msi-cache-"));
+    const cacheTagDir = path.join(tmpDir, "v0.1.0");
+    const cachedMsi = path.join(cacheTagDir, "signalman-guest-v0.1.0-x64.msi");
+    const fetchImpl = vi.fn(async () => new Response("unexpected", { status: 500 })) as unknown as typeof fetch;
+    fs.mkdirSync(cacheTagDir, { recursive: true });
+    fs.writeFileSync(cachedMsi, "MZ");
+
+    try {
+      const source = await discoverGuestMsi(undefined, {
+        cacheDir: tmpDir,
+        fetchImpl,
+        releaseRepo: "ambray/signalman",
+        releaseTag: "v0.1.0",
+      });
+
+      expect(source).toEqual({ kind: "github_release", path: cachedMsi });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 

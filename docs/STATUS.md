@@ -1,6 +1,6 @@
 # Signalman — Status & Resume Context
 
-> Last updated: 2026-04-28. Living document — update on every commit
+> Last updated: 2026-05-04. Living document — update on every commit
 > that changes scope, ships a feature, closes an audit finding, or
 > introduces a new TODO bucket. See [Document maintenance](#document-maintenance)
 > for the trigger rules.
@@ -43,6 +43,7 @@ bump the four version pins, `git tag v0.1.1 && git push origin v0.1.1`.
 ## Latest commits (top 10)
 
 ```
+d14034b Integrate service-first Hyper-V control plane
 50807f6 P9.2-followup + P9.4 + P9.6: proto bump, idempotency tests, bootstrap docs
 e1be740 P9.1 + P9.2 + P9.3 + P9.5: provisioning + bootstrap (v0.1.1)
 271559d ROADMAP: P9 provisioning + bootstrap (v0.1.1, NEW 2026-04-28)
@@ -52,10 +53,13 @@ dfb524b P5.3 + P5.4 + P5.5: EventBus streaming, form descriptors, integration pr
 7a07a87 P4.c-B9 + P7 D2 + P7 D4: denylist clarification, mTLS smoke, gated E2E
 89b0d1f P7 D2-prep + workflow API tests: validate snapshot/copy/install routing
 b426756 P4.c-B8 + P6-A3-A6 + B12 + coverage wiring (parallel-agent batch + SHA pin)
-119d117 P4.c-B10 + B11: case-insensitive system-dir denylist + audit log credential redaction
 ```
 
 ## Audit closure (security findings)
+
+Local update: `d14034b` closes B13, C3, C4, and F3, and also folds in the
+service-first Hyper-V audit closure, event-driven service heartbeat,
+guest-MSI release discovery, and bundle DAG dependency resolver.
 
 The audit numbering uses two parallel namespaces: `Bn` is the ROADMAP
 sub-bullet identifier; `Sec Fn` is the security-finding identifier from
@@ -75,14 +79,12 @@ the 2026-04-25 four-lens audit. Both refer to the same underlying gap.
 | B10 / Sec F10 | Medium | `file_ops.rs` path checks: case-insensitive, prefix-canonical | Closed | `119d117` (P4.c B10) |
 | B11 / Sec F11 | Medium | Strip credentials from `AUDIT: run_command` logs | Closed | `119d117` (P4.c B11) |
 | B12 / Sec F15 | Medium | Pin GitHub Actions by SHA, not tag | Closed | `b426756` (P6-A3-A6 + B12) |
-| B13 / Sec F14 | Medium | Document `protoc-bin-vendored` supply-chain stance or replace | Open | — |
-| C3 | High | Capability declaration enforcement (scenario `capabilities:` block actually gates execution) | Open | — |
-| C4 | High | `${secret:NAME}` resolution from host-side keychain or env (parses today, doesn't resolve) | Open | — |
-| F3 (P4.4) | Medium | Cert rotation lifecycle (initial gen lands; rotation does not) | Open | — |
+| B13 / Sec F14 | Medium | Document `protoc-bin-vendored` supply-chain stance or replace | Closed | `d14034b` |
+| C3 | High | Capability declaration enforcement (scenario `capabilities:` block actually gates execution) | Closed | `d14034b` |
+| C4 | High | `${secret:NAME}` resolution from host-side keychain or env (parses today, doesn't resolve) | Closed | `d14034b` |
+| F3 (P4.4) | Medium | Cert rotation lifecycle (initial gen lands; rotation does not) | Closed | `d14034b` |
 
-The three open items (B13, C3, C4) plus cert rotation are the remaining
-v0.1.x security backlog. None block the v0.1.1 tag — they are the
-v0.1.2 security carry-over.
+The v0.1.x security carry-over is closed in `d14034b`.
 
 ## Test coverage map
 
@@ -131,6 +133,10 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
   provisioning verb. Closes P9.4.
 - **`host/src/__tests__/template-fetch.test.ts`** + **`provisioning.test.ts`** +
   **`bundle.test.ts`** — P9.5 / P9.1 / P9.2 surfaces.
+- **`host/src/__tests__/hyperv-backend.test.ts`** — direct Hyper-V
+  backend status mapping and guest-agent health probing.
+- **`host/src/__tests__/selector.test.ts`** — service-first backend
+  ordering for both scenario runs and CLI VM verbs.
 - **`host/src/__tests__/scenario-retry.test.ts`** — closes P3 C5
   (scenario + step retry policy).
 - **`host/src/__tests__/trace.test.ts`** — `signalman-trace-id` header
@@ -198,13 +204,13 @@ NEW 2026-04-28". Status as of 2026-04-28:
   Closed (`e1be740`, follow-up `50807f6`). Tier 1 sources shipped
   (`winget`, `choco`, `msstore`, `direct`, `docker`).
 - **P9.3 — `signalman init` + `signalman vm create`** — Closed
-  (`e1be740`). `signalman init --bootstrap` ships the
-  `BOOTSTRAP_DEFERRED` message naming P9.1+P9.5; full interactive
-  composed flow deferred.
+  (`e1be740`). `signalman init --bootstrap` prints the current
+  cert/template/provision sequence without running image downloads or
+  VM creation implicitly.
 - **P9.4 — Idempotent "ensure provisioned" semantics** — Closed
   (`50807f6`, `host/src/__tests__/provisioning-idempotency.test.ts`).
-  Per-verb × 3 invocation suite; `provision_if_missing: true` scenario
-  YAML field deferred to v0.1.2.
+  Per-verb × 3 invocation suite; `provision_if_missing: true` is parsed
+  by the scenario schema and wired in `ScenarioOrchestrator.resolveVms`.
 - **P9.5 — Template registry + base-image fetch** — Closed
   (`e1be740`). `signalman vm fetch-template`, content-addressed cache
   at `%LOCALAPPDATA%\Signalman\templates\<name>\<sha-prefix>.vhdx`.
@@ -212,20 +218,26 @@ NEW 2026-04-28". Status as of 2026-04-28:
   (release-day swap).
 - **P9.6 — Bootstrap docs** — Closed (`50807f6`). `docs/bootstrap.md`
   is the end-to-end walkthrough; README points at it on the first line.
-- **P9.7 — DAG-resolved bundle dependencies** — Deferred to v0.1.2.
+- **P9.7 — DAG-resolved bundle dependencies** — Closed (`d14034b`).
+  `requires:` is parsed in `bundle-types.ts` and planned in
+  `install-bundle.ts` with cycle / unknown-dependency checks.
 
-### v0.1.2 — Tier-2 sources + DAG dependencies (DEFERRED)
+### v0.1.2 — Tier-2 sources + DAG dependencies (closed in `d14034b`)
 
-Promised work, not started:
+Promised work closed in `d14034b`:
 
-- P9.7 DAG `requires:` resolver for bundle ordering.
-- `provision_if_missing: true` scenario YAML field (P9.4 deferred fragment).
-- Tier 2 bundle sources: `scoop`, `github_release`, `git_repo` (with
-  `ref:` for branch/tag/SHA, `submodules:`/`sparse:`), `powershell`
-  (`Install-Module`), `npm`, `pip`, `cargo`, `custom_script`.
+- P9.7 DAG `requires:` resolver for bundle ordering is closed.
+- `provision_if_missing: true` scenario YAML field is closed.
+- Guest MSI GitHub Release fallback is closed:
+  `discoverGuestMsi` fetches and caches the matching
+  `signalman-guest-*.msi` release asset.
+- Tier 2 bundle sources are closed: `scoop`, `github_release`,
+  `git_repo` (with `ref:` for branch/tag/SHA, `submodules:`/`sparse:`),
+  `powershell` (`Install-Module`), `npm`, `pip`, `cargo`,
+  `custom_script`.
 - B13 (`protoc-bin-vendored` supply-chain documentation), C3
-  (capability enforcement), C4 (`${secret:NAME}` resolution), cert
-  rotation — the remaining audit backlog.
+  (capability enforcement), C4 (`${secret:NAME}` resolution), and cert
+  rotation are closed in `d14034b`.
 - Per-scenario denylist allowlists (B9 follow-up) — locked decision
   was to keep the tripwire-not-boundary stance for v0.1.x.
 
@@ -264,8 +276,6 @@ Format: `path:line — marker: description`.
   will drop.
 - `host/src/config.ts:388` — TODO(v0.2.0): top-level `signalman.yaml`
   resolution legacy path.
-- `host/src/hypervisors/hyperv.ts:384` — TODO: gRPC health check for
-  `guestAgentReachable`.
 - `host/src/hypervisors/vmware.ts:126` — TODO: gRPC health check for
   `guestAgentReachable`.
 - `host/src/scenarios/templates.ts:204` — TODO: real Microsoft eval URL
@@ -276,13 +286,6 @@ Format: `path:line — marker: description`.
   the next entry.
 - `host/src/scenarios/project-layout.ts:75` — TODO(v0.2.0): remove the
   legacy fallback entirely.
-- `host/src/provisioning/install-bundle.ts:21` — TODO(P9.2): proto
-  extension cast comment (proto bump landed; comment now historical;
-  candidate for cleanup).
-- `host/src/provisioning/guest-msi-discovery.ts:146` — Source 3 (GitHub
-  Releases) deferred to P9.5 follow-up; documented as the third tier
-  of the discovery chain.
-
 ### Guest (Rust)
 
 - `guest/src/process.rs:606` — TODO: `QueryFullProcessImageNameW` (path
@@ -395,8 +398,8 @@ All `uses:` references are SHA-pinned per B12 / Sec F15.
   the workflow header for the rationale).
 - **Steps**: build host (npm) + guest (cargo) + service (cargo) in
   release mode, then run `scripts/e2e-smoke.ps1`. The smoke script is
-  a placeholder verifying CLI `--help` / `--version` and binary
-  presence; the real lane lights up when a self-hosted Hyper-V runner
+  a placeholder verifying host `--help` plus guest/service `--version`;
+  the real lane lights up when a self-hosted Hyper-V runner
   is wired (P7 D4 follow-up).
 
 ## Architecture invariants (decisions that span features)
@@ -417,7 +420,7 @@ the codebase.
 | Failure recovery (provisioning): leave the VM around on failure for inspection; explicit `signalman vm cleanup` to remove. `--cleanup-on-failure` is opt-in. | `host/src/provisioning/provision.ts:25-28`; locked Q decision. |
 | `direct` source security gates (locked): SHA-256 REQUIRED, HTTPS-only, allowlist `.msi/.exe/.msix/.appx`. | ROADMAP § "P9.2 `direct` security gates"; `host/src/provisioning/bundle-types.ts:189`. |
 | `docker` source security gates (locked): `image_sha256` REQUIRED (digest, not tag), pulls go through the VM's daemon, `restart_policy` defaults to `unless-stopped`. | ROADMAP § "P9.2 `docker` security gates". |
-| Bundle ordering (Q10(a) locked): bundle author orders manually for v0.1.1; `requires:` DAG resolver lands in v0.1.2 (P9.7) when ergonomic complaints surface. | ROADMAP § "P9.2 Ordering". |
+| Bundle ordering: bundles without `requires:` keep author-declared order; bundles with `requires:` are topologically sorted and independent ready packages run in parallel. Unknown dependencies and cycles fail before guest RPCs. | `host/src/provisioning/install-bundle.ts`; `host/src/__tests__/bundle.test.ts`. |
 | ISO-to-VHDX conversion is **out of scope** for v0.1.1; operators bring pre-built VHDX. v0.2.0 may add an ISO build step. | `host/src/provisioning/template-fetch.ts:23-24`; ROADMAP § "P9.5". |
 | Loom-fronted topology is the default agent surface for v0.1.0; the standalone `signalman.*` MCP server in `host/` keeps shipping for direct CLI/CI consumers and as the substrate the Loom plugin shells to. | ROADMAP § "2026-04-25 architecture decision (Loom-fronted agent surface)"; `README.md` Quick Start. |
 | Plugin integration is **process-isolated**: the Loom plugin shells out to the Signalman CLI; Signalman is not a Rust dependency of Loom. | ROADMAP § "P5 Topology and boundaries". |
@@ -514,9 +517,9 @@ without explicit user instruction — those are operator actions.
   `host/src/provisioning/provision.ts:1-29`.
 - **Tier 1 / 2 / 3 (sources)** — Bundle-source taxonomy.
   Tier 1 ships in v0.1.1 (`winget`, `choco`, `msstore`, `direct`,
-  `docker`). Tier 2 in v0.1.2 (`scoop`, `github_release`, `git_repo`,
-  `powershell`, `npm`, `pip`, `cargo`, `custom_script`). Tier 3 later
-  (`brew`, `mas`, `apt`, `dnf`, `flatpak`, `snap`).
+  `docker`). Tier 2 is closed in `d14034b` (`scoop`, `github_release`,
+  `git_repo`, `powershell`, `npm`, `pip`, `cargo`, `custom_script`).
+  Tier 3 later (`brew`, `mas`, `apt`, `dnf`, `flatpak`, `snap`).
 - **6-lens audit** — PM, QA, Arch, Sec, DX, Ops. Locked 2026-04-28 as
   the per-milestone audit shape; runs at delivery milestone, not
   per-commit.

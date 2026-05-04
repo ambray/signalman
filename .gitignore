@@ -21,6 +21,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Agent-local settings
+.claude/settings.json
+
 # Environment
 .env
 .env.local
@@ -35,3 +38,14 @@ certs/*.pem
 certs/*.key
 certs/*.crt
 !certs/.gitkeep
+
+# BEGIN LOOM generated-artifacts
+# Generated Loom coordination and runtime state
+.loom/index/
+.loom/tasks/
+.loom/handoffs/
+.loom/follow-through/
+.loom/digests/
+.loom/metrics/
+.loom/review/
+# END LOOM generated-artifacts

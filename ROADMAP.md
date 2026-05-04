@@ -1,6 +1,6 @@
 # Signalman Development Roadmap
 
-**Last Updated**: 2026-04-26
+**Last Updated**: 2026-05-04
 **Current Version**: Pre-release (v0.0.x)
 **Target**: v0.1.0 (first public release as agent-first DevOps runner)
 **Test Count**: 151 Rust (guest/service) + 769 TypeScript (host) = 920 tests
@@ -201,9 +201,9 @@ shipping, CLI parity in place. `signalman.record` ships as the documented stub.
 ### P1: Hyper-V Control-Plane Service — ✅ MERGED 2026-04 (with audit closure)
 **Estimated Duration**: 5-8 days
 **Status**: Merged. Rust crate, named-pipe + TCP transports, mTLS, MSI scaffold,
-Windows SCM lifecycle. **Audit closure (A2)**: `default-executor.ts` does not
-use the service-backend selection that exists in `server.ts`, so
-`signalman.run` silently bypasses the service. ~0.5d to wire and verify.
+Windows SCM lifecycle. **Audit closure (A2)**: closed in `d14034b`. Scenario runs
+and CLI VM verbs now use the same service-first backend selector, so installed
+services are preferred before the direct Hyper-V fallback.
 **Why critical** (historical): Per-call gsudo prompts make the system unusable
 for agent-driven workflows. gsudo's daemon path is unreliable from detached
 Node children, so every PowerShell call re-elevates via Direct COM.
@@ -226,11 +226,12 @@ Node children, so every PowerShell call re-elevates via Direct COM.
 **Estimated Duration**: 3-4 days (was 2-3d; +1d for audit-driven cleanup)
 **Why constrained**: The 2026-04-24 audit found `f1c1f93` already did the
 heavy lifting (10/10 smoke, 189s vs. 954s, state mutations now block on
-`Wait-Job` against CIM events). Polling gaps and orphan handling remain.
+`Wait-Job` against CIM events). The avoidable heartbeat polling gap is closed
+in `d14034b`; orphan handling remains.
 
 - Replace `waitForHeartbeat()` polling with `Register-CimIndicationEvent`
-  on `Msvm_HeartbeatComponent` — closes the only avoidable polling site
-  ([hyperv.ts:610](host/src/hypervisors/hyperv.ts:610)).
+  on `Msvm_HeartbeatComponent` - closed in `d14034b` for the service path,
+  matching the direct Hyper-V backend semantics.
 - Make warm-checkpoint the default (already proven: 189s vs. 954s smoke).
 - VM cache TTL (30s) + `invalidate(name)` from `vm_delete` (Phase 3.4
   carry-over).
@@ -298,8 +299,10 @@ P5; in-Signalman residual deliverables are smaller.
 ### P4: Security Baseline for Product — RE-SCOPED 2026-04-25
 **Estimated Duration**: 9-11 days (was 3-5d; +6d for audit Critical/High
 findings + capability/secrets enforcement that were stubs)
-**Status**: ~30%. mTLS landed; ECDSA P-256 landed; capability + secrets
-parse but don't enforce; two Critical findings open from audit.
+**Status**: mTLS and ECDSA P-256 landed. Capability enforcement,
+environment-backed secret resolution, cert rotation, and the
+`protoc-bin-vendored` supply-chain note are closed in `d14034b`; remaining
+Critical/High audit hardening is tracked below.
 
 **Originally listed, confirmed shipped:**
 - mTLS for guest agent (P4 partial merge).
@@ -370,13 +373,12 @@ parse but don't enforce; two Critical findings open from audit.
   ([guest/src/service.rs:441-446](guest/src/service.rs:441)).
 
 **P4.3 — Capability and secrets ENFORCEMENT (originally listed, were stubs):**
-- **C3 — Capability declaration enforcement.** Scenario YAML
-  `capabilities:` block parses ([host/src/verbs/plan.ts](host/src/verbs/plan.ts))
-  but the runner does not refuse to execute outside declared scope. Wire
-  the gate.
-- **C4 — Secret primitive resolution.** `${secret:NAME}` parses but does
-  not resolve from a host-side keychain or env. Implement and ensure
-  zero log/recording leakage.
+- **C3 — Capability declaration enforcement.** Closed in `d14034b`.
+  Scenario `capabilities:` now gates declared VMs, networks, and host
+  file read/write paths before execution.
+- **C4 — Secret primitive resolution.** Closed in `d14034b` for the v0.1.x
+  env-backed model: `${secret:NAME}` resolves from
+  `SIGNALMAN_SECRET_NAME` or `NAME` and fails closed when missing.
 
 **P4.4 — Supply chain and lifecycle:**
 - **B12 / Sec F15** — Pin GitHub Actions by SHA, not tag (e.g.
@@ -915,17 +917,17 @@ read that future work should start with — it cross-references every
 other file but stands on its own. Trigger rules for keeping it
 current live in the doc's "Document maintenance" section.
 
-**P9.7 — DAG-resolved bundle dependencies (deferred to v0.1.2)**
-- Q10(a) gives v0.1.1 manual ordering. Once real bundles surface
-  ergonomic complaints, add a declarative `requires:` field with
-  topological sort:
+**P9.7 — DAG-resolved bundle dependencies — closed in `d14034b`**
+- Bundles can declare a `requires:` field with topological sorting:
   ```yaml
   - id: Mailhog
     source: docker
     image: mailhog/mailhog@sha256:...
     requires: ["Docker.DockerDesktop"]
   ```
-- Roughly 1-2 days of work; gated on actual bundle complexity.
+- Unknown dependencies, duplicate IDs, self-dependencies, and cycles fail
+  before guest RPCs. Independent dependency chains continue when an unrelated
+  chain fails.
 
 **Effort estimate**: 5-8 days for P9.1–P9.6.
 **Parallelizable**: P9.1, P9.2, P9.5 are disjoint after P9.5's
