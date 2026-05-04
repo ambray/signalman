@@ -2,7 +2,11 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ScenarioOrchestrator } from "../scenarios/orchestrator.js";
+import {
+  ScenarioOrchestrator,
+  assertScenarioCapabilities,
+  substituteRuntimeRefsDeep,
+} from "../scenarios/orchestrator.js";
 import { loadTemplates, resolveTemplate } from "../scenarios/templates.js";
 import type { VmDefinition, StepResult } from "../scenarios/orchestrator.js";
 import type {
@@ -22,6 +26,15 @@ const guestAgentClientMockState = vi.hoisted(() => ({
   constructorArgs: [] as Array<unknown[]>,
 }));
 
+const provisionMockState = vi.hoisted(() => ({
+  calls: [] as Array<unknown[]>,
+  nextHandle: {
+    id: "id-provisioned-vm",
+    name: "provisioned-vm",
+    backend: "mock",
+  } as VMHandle,
+}));
+
 vi.mock("../guest/client.js", () => ({
   GuestAgentClient: vi.fn().mockImplementation((...args: unknown[]) => {
     guestAgentClientMockState.constructorArgs.push(args);
@@ -32,6 +45,19 @@ vi.mock("../guest/client.js", () => ({
       dispose: vi.fn(),
       close: vi.fn(),
       ...next,
+    };
+  }),
+}));
+
+vi.mock("../provisioning/provision.js", () => ({
+  provisionVM: vi.fn().mockImplementation(async (...args: unknown[]) => {
+    provisionMockState.calls.push(args);
+    return {
+      vmName: provisionMockState.nextHandle.name,
+      vmHandle: provisionMockState.nextHandle,
+      checkpointLabel: "agent-installed",
+      alreadyProvisioned: false,
+      durationMs: 10,
     };
   }),
 }));
@@ -187,6 +213,12 @@ describe("ScenarioOrchestrator", () => {
   beforeEach(() => {
     guestAgentClientMockState.nextInstances = [];
     guestAgentClientMockState.constructorArgs = [];
+    provisionMockState.calls = [];
+    provisionMockState.nextHandle = {
+      id: "id-provisioned-vm",
+      name: "provisioned-vm",
+      backend: "mock",
+    };
     backend = makeMockBackend();
     clients = new Map([
       ["vm1", makeMockClient()],
@@ -628,6 +660,179 @@ describe("ScenarioOrchestrator", () => {
     ]);
     expect(emptyClients.get("vm1")).toBeDefined();
     expect(isConnected).toHaveBeenCalled();
+  });
+});
+
+describe("runtime references and capability gates", () => {
+  it("resolves supplied params and environment secrets recursively", () => {
+    process.env.SIGNALMAN_SECRET_API_KEY = "secret-value";
+    try {
+      const resolved = substituteRuntimeRefsDeep(
+        {
+          command: "tool",
+          args: ["--endpoint", "${param:endpoint:-https://default.example}", "${secret:API_KEY}"],
+        },
+        { endpoint: "https://override.example" },
+      ) as { args: string[] };
+
+      expect(resolved.args).toEqual([
+        "--endpoint",
+        "https://override.example",
+        "secret-value",
+      ]);
+    } finally {
+      delete process.env.SIGNALMAN_SECRET_API_KEY;
+    }
+  });
+
+  it("resolveVms provisions missing VM when provision_if_missing is true", async () => {
+    const localBackend = makeMockBackend({
+      listVMs: vi.fn().mockResolvedValue([]),
+    });
+    const localOrchestrator = new ScenarioOrchestrator(
+      localBackend,
+      new Map(),
+      makeConfig(),
+    );
+    provisionMockState.nextHandle = {
+      id: "id-auto-vm",
+      name: "auto-vm",
+      backend: "mock",
+    };
+    const defs: VmDefinition[] = [
+      {
+        name: "auto-vm",
+        template: "win11-base",
+        guest_agent_port: 50051,
+        checkpoint_restore: "agent-installed",
+        provision_if_missing: true,
+      },
+    ];
+
+    const vmMap = await localOrchestrator.resolveVms(defs);
+
+    expect(vmMap.get("auto-vm")?.id).toBe("id-auto-vm");
+    expect(provisionMockState.calls).toHaveLength(1);
+    expect(provisionMockState.calls[0][1]).toMatchObject({
+      vmName: "auto-vm",
+      templateName: "win11-base",
+      checkpointLabel: "agent-installed",
+    });
+  });
+
+  it("fails closed when a secret reference has no env value", () => {
+    expect(() =>
+      substituteRuntimeRefsDeep("${secret:MISSING_SIGNALMAN_TEST_SECRET}", {}),
+    ).toThrow("secret-unresolved: MISSING_SIGNALMAN_TEST_SECRET");
+  });
+
+  it("rejects undeclared VM capabilities before execution", () => {
+    expect(() =>
+      assertScenarioCapabilities(
+        {
+          name: "cap-test",
+          version: "1.0",
+          tags: [],
+          capabilities: { vms: ["vm1"] },
+          vms: [
+            { name: "vm1", template: "win11", guest_agent_port: 50051 },
+            { name: "vm2", template: "win11", guest_agent_port: 50051 },
+          ],
+          setup: [],
+          teardown: [],
+          checkpoints: {},
+        },
+        "",
+      ),
+    ).toThrow("capability-denied");
+  });
+
+  it("allows declared host path glob capabilities", () => {
+    expect(() =>
+      assertScenarioCapabilities(
+        {
+          name: "cap-test",
+          version: "1.0",
+          tags: [],
+          capabilities: {
+            vms: ["vm1"],
+            host_paths: { read: ["C:\\safe\\**"], write: ["C:\\out\\**"] },
+          },
+          vms: [{ name: "vm1", template: "win11", guest_agent_port: 50051 }],
+          setup: [
+            {
+              action: "vm_copy_file",
+              vm: "vm1",
+              direction: "host_to_guest",
+              host_path: "C:\\safe\\payload.txt",
+            },
+            {
+              action: "vm_copy_file",
+              vm: "vm1",
+              direction: "guest_to_host",
+              host_path: "C:\\out\\result.txt",
+            },
+          ],
+          teardown: [],
+          checkpoints: {},
+        },
+        "",
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects host file access when capabilities omit host_paths", () => {
+    expect(() =>
+      assertScenarioCapabilities(
+        {
+          name: "cap-test",
+          version: "1.0",
+          tags: [],
+          capabilities: { vms: ["vm1"] },
+          vms: [{ name: "vm1", template: "win11", guest_agent_port: 50051 }],
+          setup: [
+            {
+              action: "vm_copy_file",
+              vm: "vm1",
+              direction: "host_to_guest",
+              host_path: "C:\\safe\\payload.txt",
+            },
+          ],
+          teardown: [],
+          checkpoints: {},
+        },
+        "",
+      ),
+    ).toThrow("capability-denied");
+  });
+
+  it("checks legacy vm_copy_file src aliases against host path capabilities", () => {
+    expect(() =>
+      assertScenarioCapabilities(
+        {
+          name: "cap-test",
+          version: "1.0",
+          tags: [],
+          capabilities: {
+            vms: ["vm1"],
+            host_paths: { read: ["C:\\safe\\**"] },
+          },
+          vms: [{ name: "vm1", template: "win11", guest_agent_port: 50051 }],
+          setup: [
+            {
+              action: "vm_copy_file",
+              vm: "vm1",
+              direction: "host_to_guest",
+              src: "C:\\outside\\payload.txt",
+              dest: "C:\\guest\\payload.txt",
+            },
+          ],
+          teardown: [],
+          checkpoints: {},
+        },
+        "",
+      ),
+    ).toThrow("capability-denied");
   });
 });
 

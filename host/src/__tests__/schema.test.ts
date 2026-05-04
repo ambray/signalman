@@ -173,10 +173,9 @@ describe("validateScenarioConfig — happy paths", () => {
     expect(r.sandbox_modes).toEqual(["v1", "v2"]);
   });
 
-  // P0 MCP Surface Inversion (v0.1.0) — reserved blocks for P4.
-  // These fields are accepted by the schema but the runner does not
-  // enforce them yet; tests pin the accept-but-don't-enforce contract.
-  it("accepts the P4-reserved capabilities block", () => {
+  // Runtime guard blocks: schema accepts the declarative shape; the
+  // orchestrator tests pin enforcement behavior.
+  it("accepts the capabilities block", () => {
     const r = validateScenarioConfig(
       {
         ...validScenario(),
@@ -191,7 +190,7 @@ describe("validateScenarioConfig — happy paths", () => {
     expect(r.capabilities?.hosts).toEqual(["endpoint-1"]);
   });
 
-  it("accepts the P4-reserved parameters block (free-form values)", () => {
+  it("accepts the parameters block (free-form values)", () => {
     const r = validateScenarioConfig(
       {
         ...validScenario(),
