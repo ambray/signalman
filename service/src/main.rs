@@ -20,7 +20,7 @@ use tokio::sync::watch;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use signalman_service::backend::{Backend, HyperVBackend};
-use signalman_service::tls::ensure_certs;
+use signalman_service::tls::{ensure_certs, rotate_certs};
 use signalman_service::transport::{serve, TransportConfig};
 use signalman_service::{DEFAULT_GRPC_PORT, PIPE_NAME};
 
@@ -68,6 +68,14 @@ enum Command {
     /// Ask the SCM to stop the service.
     Stop,
 
+    /// Rotate the service mTLS cert bundle. Restart the service after this.
+    #[command(name = "rotate-certs")]
+    RotateCerts {
+        /// Cert directory (defaults to %ProgramData%\Signalman\certs).
+        #[arg(long)]
+        cert_dir: Option<PathBuf>,
+    },
+
     /// Run the service in the foreground (development).
     Run {
         /// Override the cert directory.
@@ -110,6 +118,7 @@ fn main() -> Result<()> {
         Command::Uninstall => uninstall(),
         Command::Start => start(),
         Command::Stop => stop(),
+        Command::RotateCerts { cert_dir } => rotate_cert_bundle(cert_dir),
         Command::Run {
             cert_dir,
             port,
@@ -242,4 +251,20 @@ fn run_foreground(cert_dir: Option<PathBuf>, port: u16, no_pipe: bool, no_tcp: b
         tracing::info!(?config.tcp, ?config.pipe, "starting signalman-service");
         serve(backend, config, rx).await
     })
+}
+
+fn rotate_cert_bundle(cert_dir: Option<PathBuf>) -> Result<()> {
+    let cert_dir = cert_dir.unwrap_or_else(signalman_service::tls::default_cert_dir);
+    let report = rotate_certs(&cert_dir)?;
+    println!(
+        "Rotated Signalman service cert bundle at {}.",
+        report.bundle.root.display()
+    );
+    if let Some(backup_dir) = report.backup_dir {
+        println!("Previous bundle backed up at {}.", backup_dir.display());
+    } else {
+        println!("No previous complete bundle was present; generated a fresh bundle.");
+    }
+    println!("Restart signalman-service for the TCP mTLS listener to load the new certs.");
+    Ok(())
 }

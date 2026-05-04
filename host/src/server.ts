@@ -251,7 +251,7 @@ server.tool(
   {
     id: z.string().describe("Scenario id."),
     parameters: z.record(z.string(), z.unknown()).optional().describe("Caller-supplied parameter overrides."),
-    network_class: z.enum(["isolated", "nat", "internet"]).optional().describe("Reserved for P4 — declared, not enforced in v0.1.0."),
+    network_class: z.enum(["isolated", "nat", "internet"]).optional().describe("Recorded in the result envelope; not a host network-policy switch."),
     trace_id: z.string().optional().describe(
       "P3.d: optional 32-char hex (or dashed UUID) correlation root. " +
       "When omitted, Signalman generates one and surfaces it on the run handle. " +

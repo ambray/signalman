@@ -48,7 +48,7 @@ import {
   type VmTemplate,
 } from "../scenarios/templates.js";
 import { discoverGuestMsi, type GuestMsiSource } from "./guest-msi-discovery.js";
-import { cleanupVM } from "./cleanup.js";
+import { cleanupVM, writeProvisioningManifest } from "./cleanup.js";
 import { cacheVM, globalVmCache } from "../vm-cache.js";
 
 const exec = promisify(execFile);
@@ -228,6 +228,13 @@ export async function provisionVM(
           network: template.networkSwitch ? { switchName: template.networkSwitch } : undefined,
         };
         handle = await backend.createVM(config);
+        writeProvisioningManifest({
+          vmName: opts.vmName,
+          templateName,
+          checkpointLabel,
+          startedAt: new Date(start).toISOString(),
+          createdVm: true,
+        });
         cacheVM(handle);
       } catch (err) {
         throw new ProvisioningError("create_vm", (err as Error).message, { cause: err });

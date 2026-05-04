@@ -38,11 +38,17 @@ import type {
   CommandResult,
 } from "../hypervisors/interface.js";
 import { provisionVM, ProvisioningError } from "../provisioning/provision.js";
-import { cleanupVM } from "../provisioning/cleanup.js";
+import {
+  cleanupOrphanedProvisioningVms,
+  cleanupVM,
+  provisioningManifestPath,
+  writeProvisioningManifest,
+} from "../provisioning/cleanup.js";
 import {
   discoverGuestMsi,
   GuestMsiDiscoveryError,
 } from "../provisioning/guest-msi-discovery.js";
+import { createVmProvisioningTools } from "../tools/vm-provisioning.js";
 import { globalVmCache } from "../vm-cache.js";
 
 // ── Mock factories (mirror workflow-api.test.ts) ──────────────────
@@ -94,6 +100,12 @@ afterEach(() => {
   globalVmCache.invalidate("vm1");
   globalVmCache.invalidate("vm-force");
   globalVmCache.invalidate("vm-error");
+  for (const vmName of ["vm1", "vm-force", "vm-error"]) {
+    fs.rmSync(path.dirname(provisioningManifestPath(vmName)), {
+      recursive: true,
+      force: true,
+    });
+  }
 });
 
 // ── provisionVM idempotency ───────────────────────────────────────
@@ -205,6 +217,10 @@ describe("provisionVM error propagation", () => {
 // ── discoverGuestMsi ──────────────────────────────────────────────
 
 describe("discoverGuestMsi", () => {
+  function failingReleaseFetch(): typeof fetch {
+    return vi.fn(async () => new Response("not found", { status: 404 })) as unknown as typeof fetch;
+  }
+
   // What this catches: the explicit path being silently ignored or
   // mis-resolved relative to cwd.
   it("returns kind=explicit when path is provided + exists", async () => {
@@ -248,11 +264,18 @@ describe("discoverGuestMsi", () => {
   // unhelpful line; LLM agents need the searched paths AND remediation
   // to recover unattended.
   it("hard-fails with multi-line remediation when no MSI is found", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "msi-cache-"));
     let caught: unknown;
     try {
-      await discoverGuestMsi();
+      await discoverGuestMsi(undefined, {
+        cacheDir: tmpDir,
+        fetchImpl: failingReleaseFetch(),
+        releaseTag: "v0.1.0",
+      });
     } catch (err) {
       caught = err;
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
     expect(caught).toBeInstanceOf(GuestMsiDiscoveryError);
     const e = caught as GuestMsiDiscoveryError;
@@ -264,6 +287,77 @@ describe("discoverGuestMsi", () => {
     expect(
       e.remediation.some((r) => r.includes("cargo wix")),
     ).toBe(true);
+  });
+
+  // What this catches: Source 3 staying a permanent stub instead of
+  // resolving the matching GitHub Release asset on demand.
+  it("downloads a guest MSI from a matching GitHub Release", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "msi-cache-"));
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const urlString = String(url);
+      if (urlString.includes("/releases/tags/v0.1.0")) {
+        return new Response(
+          JSON.stringify({
+            assets: [
+              {
+                name: "notes.txt",
+                browser_download_url: "https://example.test/notes.txt",
+              },
+              {
+                name: "signalman-guest-v0.1.0-x64.msi",
+                browser_download_url: "https://example.test/signalman-guest.msi",
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (urlString === "https://example.test/signalman-guest.msi") {
+        return new Response(new Uint8Array([0x4d, 0x5a]), { status: 200 });
+      }
+      return new Response("unexpected url", { status: 500 });
+    }) as unknown as typeof fetch;
+
+    try {
+      const source = await discoverGuestMsi(undefined, {
+        cacheDir: tmpDir,
+        fetchImpl,
+        releaseRepo: "ambray/signalman",
+        releaseTag: "v0.1.0",
+      });
+
+      expect(source.kind).toBe("github_release");
+      expect(path.basename(source.path)).toBe("signalman-guest-v0.1.0-x64.msi");
+      expect(fs.readFileSync(source.path)).toEqual(Buffer.from([0x4d, 0x5a]));
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // What this catches: repeated provisioning runs re-downloading the
+  // same MSI even though the matching release asset is already cached.
+  it("uses a cached GitHub Release MSI before fetching", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "msi-cache-"));
+    const cacheTagDir = path.join(tmpDir, "v0.1.0");
+    const cachedMsi = path.join(cacheTagDir, "signalman-guest-v0.1.0-x64.msi");
+    const fetchImpl = vi.fn(async () => new Response("unexpected", { status: 500 })) as unknown as typeof fetch;
+    fs.mkdirSync(cacheTagDir, { recursive: true });
+    fs.writeFileSync(cachedMsi, "MZ");
+
+    try {
+      const source = await discoverGuestMsi(undefined, {
+        cacheDir: tmpDir,
+        fetchImpl,
+        releaseRepo: "ambray/signalman",
+        releaseTag: "v0.1.0",
+      });
+
+      expect(source).toEqual({ kind: "github_release", path: cachedMsi });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -293,5 +387,188 @@ describe("cleanupVM", () => {
     expect(backend.deleteVM).toHaveBeenCalledWith(
       expect.objectContaining({ name: "vm1" }),
     );
+  });
+});
+
+describe("cleanupOrphanedProvisioningVms", () => {
+  it("dry-runs manifest-owned VMs that lack the target checkpoint", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalman-reaper-"));
+    const handle = makeHandle("orphan-vm");
+    const backend = makeMockBackend({
+      listVMs: vi.fn().mockResolvedValue([handle]),
+      listCheckpoints: vi.fn().mockResolvedValue([]),
+    });
+
+    try {
+      writeProvisioningManifest(
+        {
+          vmName: "orphan-vm",
+          templateName: "win11-base",
+          checkpointLabel: "agent-installed",
+          startedAt: "2026-05-04T00:00:00.000Z",
+          createdVm: true,
+        },
+        tmpDir,
+      );
+
+      const result = await cleanupOrphanedProvisioningVms(backend, { tmpDir });
+
+      expect(result.candidates).toEqual([
+        expect.objectContaining({
+          vmName: "orphan-vm",
+          checkpointLabel: "agent-installed",
+          reason: "missing_checkpoint",
+        }),
+      ]);
+      expect(result.cleaned).toEqual([]);
+      expect(backend.deleteVM).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips completed provisioning runs that have the target checkpoint", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalman-reaper-"));
+    const handle = makeHandle("ready-vm");
+    const backend = makeMockBackend({
+      listVMs: vi.fn().mockResolvedValue([handle]),
+      listCheckpoints: vi.fn().mockResolvedValue([
+        {
+          id: "cp-agent-installed",
+          label: "agent-installed",
+          createdAt: new Date("2026-05-04T00:00:00.000Z"),
+        },
+      ]),
+    });
+
+    try {
+      writeProvisioningManifest(
+        {
+          vmName: "ready-vm",
+          templateName: "win11-base",
+          checkpointLabel: "agent-installed",
+          startedAt: "2026-05-04T00:00:00.000Z",
+          createdVm: true,
+        },
+        tmpDir,
+      );
+
+      const result = await cleanupOrphanedProvisioningVms(backend, { tmpDir });
+
+      expect(result.candidates).toEqual([]);
+      expect(backend.deleteVM).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("deletes orphan VMs only when dryRun is false", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "signalman-reaper-"));
+    const handle = makeHandle("delete-me");
+    const backend = makeMockBackend({
+      listVMs: vi.fn().mockResolvedValue([handle]),
+      listCheckpoints: vi.fn().mockResolvedValue([]),
+    });
+
+    try {
+      writeProvisioningManifest(
+        {
+          vmName: "delete-me",
+          templateName: "win11-base",
+          checkpointLabel: "agent-installed",
+          startedAt: "2026-05-04T00:00:00.000Z",
+          createdVm: true,
+        },
+        tmpDir,
+      );
+
+      const result = await cleanupOrphanedProvisioningVms(backend, {
+        tmpDir,
+        dryRun: false,
+      });
+
+      expect(result.cleaned).toEqual(["delete-me"]);
+      expect(backend.stopVM).toHaveBeenCalledWith(handle, true);
+      expect(backend.deleteVM).toHaveBeenCalledWith(handle);
+      expect(
+        fs.existsSync(provisioningManifestPath("delete-me", tmpDir)),
+      ).toBe(false);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("vm_cleanup_orphans tool", () => {
+  it("defaults to dry-run so discovery does not delete candidate VMs", async () => {
+    const vmName = `tool-orphan-${Date.now()}`;
+    const handle = makeHandle(vmName);
+    const backend = makeMockBackend({
+      listVMs: vi.fn().mockResolvedValue([handle]),
+      listCheckpoints: vi.fn().mockResolvedValue([]),
+    });
+    const tools = createVmProvisioningTools(async () => backend);
+    const tool = tools.find((entry) => entry.name === "vm_cleanup_orphans");
+
+    try {
+      writeProvisioningManifest({
+        vmName,
+        templateName: "win11-base",
+        checkpointLabel: "agent-installed",
+        startedAt: "2026-05-04T00:00:00.000Z",
+        createdVm: true,
+      });
+
+      const result = await tool?.handler({});
+      const payload = JSON.parse(result?.content[0]?.text ?? "{}") as {
+        candidates?: Array<{ vmName: string }>;
+        cleaned?: string[];
+      };
+
+      expect(payload.candidates).toContainEqual(
+        expect.objectContaining({ vmName }),
+      );
+      expect(payload.cleaned).toEqual([]);
+      expect(backend.deleteVM).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(path.dirname(provisioningManifestPath(vmName)), {
+        recursive: true,
+        force: true,
+      });
+    }
+  });
+
+  it("deletes manifest-owned orphan VMs when dry_run is false", async () => {
+    const vmName = `tool-delete-${Date.now()}`;
+    const handle = makeHandle(vmName);
+    const backend = makeMockBackend({
+      listVMs: vi.fn().mockResolvedValue([handle]),
+      listCheckpoints: vi.fn().mockResolvedValue([]),
+    });
+    const tools = createVmProvisioningTools(async () => backend);
+    const tool = tools.find((entry) => entry.name === "vm_cleanup_orphans");
+
+    try {
+      writeProvisioningManifest({
+        vmName,
+        templateName: "win11-base",
+        checkpointLabel: "agent-installed",
+        startedAt: "2026-05-04T00:00:00.000Z",
+        createdVm: true,
+      });
+
+      const result = await tool?.handler({ dry_run: false });
+      const payload = JSON.parse(result?.content[0]?.text ?? "{}") as {
+        cleaned?: string[];
+      };
+
+      expect(payload.cleaned).toEqual([vmName]);
+      expect(backend.deleteVM).toHaveBeenCalledWith(handle);
+    } finally {
+      fs.rmSync(path.dirname(provisioningManifestPath(vmName)), {
+        recursive: true,
+        force: true,
+      });
+    }
   });
 });

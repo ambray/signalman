@@ -8,12 +8,11 @@
  *     No network calls, no cert generation, no VM creation. Safe to
  *     re-run.
  *
- *   - **`--bootstrap` opt-in.** Reserved for the interactive bootstrap
- *     flow (cert generation, base-image fetch, VM provision).
- *     Reserved here as a flag check + descriptive "not yet
- *     implemented" message — the flag's existence pins the future
- *     surface so docs and tests can refer to it. P9.5 (template
- *     fetch) and P9.1 (provision) compose into this once they land.
+ *   - **`--bootstrap` opt-in.** Prints the current bootstrap sequence
+ *     for cert generation, base-image fetch, VM provision, and the
+ *     first smoke run. It does not fetch images or create VMs by
+ *     itself because those actions need operator-chosen template,
+ *     storage, and MSI inputs.
  *
  *   - **`--force` to overwrite existing scaffolding.** Default is
  *     fail-with-explanation when `.signalman/` already exists. We do
@@ -39,10 +38,9 @@ export interface InitParams {
   /** When true, overwrites existing `.signalman/` content. Default false. */
   force?: boolean;
   /**
-   * Reserved for the interactive bootstrap flow (cert gen + template
-   * fetch + VM provision). v0.1.1 surfaces the flag but emits a
-   * descriptive "not yet implemented" message so the surface stays
-   * pinned.
+   * Print the bootstrap sequence after scaffolding. This is deliberately
+   * guidance-only: fetching multi-GB images and creating VMs remain
+   * explicit operator actions.
    */
   bootstrap?: boolean;
   /** Project name written into config.yaml. Default: directory basename. */
@@ -58,6 +56,8 @@ export interface InitResult {
   /** Files that already existed and were left untouched (only when `force=false`). */
   filesSkipped: string[];
   /** When `bootstrap=true`, the next-step instruction printed to stderr. */
+  bootstrapMessage?: string;
+  /** @deprecated Use `bootstrapMessage`; retained for JSON compatibility. */
   bootstrapDeferredMessage?: string;
 }
 
@@ -123,8 +123,8 @@ metadata:
   name: ${JSON.stringify(projectName)}
 
 # Default hypervisor backend. Override per-scenario via vms[].backend.
-# Supported: hyperv (Windows), tart (macOS), vmware (cross-platform).
-hypervisor: hyperv
+# Supported: service (preferred on Windows), hyperv, tart, vmware.
+hypervisor: service
 
 # Per-template defaults are read from .signalman/templates/<name>.yaml
 # (see \`signalman init --bootstrap\` for managed defaults; or copy
@@ -208,15 +208,19 @@ When you're ready to validate against a real VM:
 
 // ── Implementation ────────────────────────────────────────────────
 
-const BOOTSTRAP_DEFERRED = `\
---bootstrap is reserved for v0.1.1's interactive bootstrap flow. It
-will compose:
-  1. signalman vm fetch-template <name>          (P9.5)
-  2. dev cert generation (scripts/generate-dev-certs.ps1)
-  3. signalman vm provision <name>               (P9.1)
+const BOOTSTRAP_NEXT_STEPS = `\
+--bootstrap next steps:
+  1. Generate development certs:
+       pwsh ./scripts/generate-dev-certs.ps1
+  2. Fetch or verify a base image:
+       signalman vm fetch-template <template>
+  3. Provision a guest VM and install the agent:
+       signalman vm provision <vm-name> --template <template>
+  4. Confirm the scaffolded smoke scenario:
+       signalman run sample
 
-Until P9.1 + P9.5 land, run those steps manually after \`signalman
-init\` completes. See ROADMAP.md > P9 (v0.1.1) for status.`;
+Use --guest-msi <PATH> on the provision step when working from a source
+clone without a bundled or release-published guest MSI.`;
 
 /**
  * Scaffold a Signalman project. Pure-ish: filesystem writes are
@@ -263,7 +267,8 @@ export function runInit(params: InitParams = {}): InitResult {
   };
 
   if (params.bootstrap) {
-    result.bootstrapDeferredMessage = BOOTSTRAP_DEFERRED;
+    result.bootstrapMessage = BOOTSTRAP_NEXT_STEPS;
+    result.bootstrapDeferredMessage = BOOTSTRAP_NEXT_STEPS;
   }
 
   return result;

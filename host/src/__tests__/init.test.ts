@@ -11,7 +11,7 @@
  *   - Default scaffold lays down config + sample scenario + dirs.
  *   - Re-running with no flags is idempotent (skipped, not error).
  *   - --force overwrites existing content.
- *   - --bootstrap surfaces the deferred-message contract.
+ *   - --bootstrap surfaces the current manual bootstrap sequence.
  *   - Project name validation refuses unsafe characters.
  *   - Project root is the cwd absolute path, not relative.
  *   - Scaffolded YAML parses (no embedded \\r\\n / encoding bug).
@@ -103,15 +103,18 @@ describe("runInit (P9.3)", () => {
   });
 
   // What this catches: --bootstrap silently doing nothing instead of
-  // surfacing the deferred-feature path. The flag's existence is part
-  // of the v0.1.1 surface contract.
-  it("--bootstrap returns a deferred-feature message naming P9.1 + P9.5", () => {
+  // surfacing the now-landed bootstrap sequence. The flag is still
+  // guidance-only because VM image fetch + provision need operator
+  // choices.
+  it("--bootstrap returns the current bootstrap sequence", () => {
     const result = runInit({ cwd: tmpDir, bootstrap: true });
-    expect(result.bootstrapDeferredMessage).toBeDefined();
-    expect(result.bootstrapDeferredMessage).toMatch(/P9\.1/);
-    expect(result.bootstrapDeferredMessage).toMatch(/P9\.5/);
-    expect(result.bootstrapDeferredMessage).toMatch(/fetch-template/);
-    expect(result.bootstrapDeferredMessage).toMatch(/provision/);
+    expect(result.bootstrapMessage).toBeDefined();
+    expect(result.bootstrapMessage).toMatch(/generate-dev-certs/);
+    expect(result.bootstrapMessage).toMatch(/fetch-template/);
+    expect(result.bootstrapMessage).toMatch(/provision/);
+    expect(result.bootstrapMessage).toMatch(/run sample/);
+    expect(result.bootstrapMessage).not.toMatch(/not yet implemented/i);
+    expect(result.bootstrapDeferredMessage).toBe(result.bootstrapMessage);
   });
 
   // What this catches: a malicious / typo'd projectName injecting a

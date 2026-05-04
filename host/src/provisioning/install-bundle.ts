@@ -2,10 +2,11 @@
  * `installBundle` — apply a parsed {@link Bundle} to a single VM.
  *
  * P9.2 + Tier-2 v0.1.1. The function:
- *   1. Iterates `bundle.packages` in declaration order.
+ *   1. Iterates `bundle.packages` in declaration order, or computes a
+ *      DAG plan when packages declare `requires:`.
  *   2. Routes each package to the right `GuestAgentClient` method based
  *      on `source`.
- *   3. Honours `parallel:` groups via `Promise.all`.
+ *   3. Honours `parallel:` groups and DAG-ready levels via `Promise.all`.
  *   4. Runs the optional `verify` post-install command.
  *   5. Counts "already installed" / "container already exists" as
  *      `skipped` (idempotency without a host-side ledger).
@@ -32,11 +33,9 @@
  *                                  operator-named interpreter against the local copy.
  *                                  See {@link runCustomScript} for details + tradeoffs.
  *
- * Per the locked design decisions, this file does NOT touch
- * `proto/guest.proto`. Where a new RPC is needed, the call site has a
- * `// TODO(P9.2): proto extension needed` comment and we cast the client
- * through {@link BundleCapableClient} so the host code compiles ahead of
- * the Rust handler landing.
+ * The bundle RPC extensions have landed on `GuestAgentClient`; the
+ * `BundleCapableClient` alias remains only as a compatibility name for
+ * downstream call sites.
  */
 
 import type { HypervisorBackend } from "../hypervisors/interface.js";
@@ -70,6 +69,13 @@ export interface InstallBundleResult {
   failed: number;
   perPackageResults: PerPackageResult[];
   durationMs: number;
+}
+
+export class BundleDependencyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BundleDependencyError";
+  }
 }
 
 /**
@@ -503,7 +509,6 @@ async function dispatchInstall(
         // failure so the operator either supplies the hash or
         // accepts the risk by switching to `direct` with `# nosec`
         // commentary.
-        // eslint-disable-next-line no-console
         console.warn(
           `github_release: "${pkg.id}" has no sha256 — TLS-only trust on asset "${resolved.name}"`,
         );
@@ -828,13 +833,86 @@ async function installEntry(
   return [await installOne(client, single, opts)];
 }
 
+function flattenBundleEntries(entries: BundleEntry[]): Package[] {
+  const packages: Package[] = [];
+  for (const entry of entries) {
+    if (isParallelGroup(entry)) {
+      packages.push(...entry.parallel);
+    } else {
+      packages.push(entry);
+    }
+  }
+  return packages;
+}
+
+function hasDeclaredDependencies(entries: BundleEntry[]): boolean {
+  return flattenBundleEntries(entries).some(
+    (pkg) => (pkg.requires ?? []).length > 0,
+  );
+}
+
+function dependencyLevels(entries: BundleEntry[]): Package[][] {
+  const packages = flattenBundleEntries(entries);
+  const byId = new Map<string, Package>();
+  for (const pkg of packages) {
+    if (byId.has(pkg.id)) {
+      throw new BundleDependencyError(
+        `bundle dependency graph has duplicate package id "${pkg.id}"`,
+      );
+    }
+    byId.set(pkg.id, pkg);
+  }
+
+  for (const pkg of packages) {
+    for (const dep of pkg.requires ?? []) {
+      if (!byId.has(dep)) {
+        throw new BundleDependencyError(
+          `package "${pkg.id}" requires unknown package "${dep}"`,
+        );
+      }
+      if (dep === pkg.id) {
+        throw new BundleDependencyError(
+          `package "${pkg.id}" cannot require itself`,
+        );
+      }
+    }
+  }
+
+  const completed = new Set<string>();
+  const remaining = new Map(byId);
+  const levels: Package[][] = [];
+  while (remaining.size > 0) {
+    const ready: Package[] = [];
+    for (const pkg of packages) {
+      if (!remaining.has(pkg.id)) continue;
+      if ((pkg.requires ?? []).every((dep) => completed.has(dep))) {
+        ready.push(pkg);
+      }
+    }
+    if (ready.length === 0) {
+      const blocked = Array.from(remaining.values())
+        .map((pkg) => `${pkg.id} -> ${(pkg.requires ?? []).join(", ")}`)
+        .join("; ");
+      throw new BundleDependencyError(
+        `bundle dependency graph contains a cycle or unsatisfied edge: ${blocked}`,
+      );
+    }
+    for (const pkg of ready) {
+      remaining.delete(pkg.id);
+      completed.add(pkg.id);
+    }
+    levels.push(ready);
+  }
+  return levels;
+}
+
 // ── Public API ───────────────────────────────────────────────────────────
 
 /**
  * Apply a parsed {@link Bundle} to the named VM.
  *
- * Iterates `bundle.packages` in author-declared order, dispatching each
- * to the appropriate guest-agent RPC. Returns the full
+ * Iterates `bundle.packages` in author-declared order, or topologically
+ * sorts packages when any package declares `requires:`. Returns the full
  * {@link InstallBundleResult} including per-package status, even when
  * individual installs fail — callers (CLI, MCP, scenario orchestrator)
  * decide whether to halt based on `failed > 0`.
@@ -866,13 +944,47 @@ export async function installBundle(
   // installDocker fields are feature-detected in the dispatcher.
   const capable = client as BundleCapableClient;
 
-  // Sequential entry iteration; each entry may itself be a parallel
-  // group, but groups are sequenced *between* entries. This is the
-  // ordering contract: bundle authors order entries to express
-  // dependencies, and parallel-grouped peers express independence.
-  for (const entry of bundle.packages) {
-    const entryResults = await installEntry(capable, entry, opts);
-    perPackageResults.push(...entryResults);
+  if (hasDeclaredDependencies(bundle.packages)) {
+    const levels = dependencyLevels(bundle.packages);
+    const failedPackages = new Set<string>();
+    for (const level of levels) {
+      const blocked = level.filter((pkg) =>
+        (pkg.requires ?? []).some((dep) => failedPackages.has(dep)),
+      );
+      perPackageResults.push(
+        ...blocked.map((pkg) => ({
+          package: pkg.id,
+          source: pkg.source,
+          status: "failed" as const,
+          error: "dependency failed; package was not attempted",
+          durationMs: 0,
+        })),
+      );
+      for (const pkg of blocked) {
+        failedPackages.add(pkg.id);
+      }
+
+      const runnable = level.filter((pkg) => !failedPackages.has(pkg.id));
+      if (runnable.length === 0) continue;
+      const levelResults = await Promise.all(
+        runnable.map((pkg) => installOne(capable, pkg, opts)),
+      );
+      perPackageResults.push(...levelResults);
+      for (const result of levelResults) {
+        if (result.status === "failed") {
+          failedPackages.add(result.package);
+        }
+      }
+    }
+  } else {
+    // Sequential entry iteration; each entry may itself be a parallel
+    // group, but groups are sequenced *between* entries. This preserves
+    // the v0.1.1 author-ordering contract for bundles that do not opt
+    // into `requires:`.
+    for (const entry of bundle.packages) {
+      const entryResults = await installEntry(capable, entry, opts);
+      perPackageResults.push(...entryResults);
+    }
   }
 
   const installed = perPackageResults.filter(
