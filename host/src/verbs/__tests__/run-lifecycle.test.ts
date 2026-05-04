@@ -186,4 +186,32 @@ describe("run lifecycle (handle → events → envelope)", () => {
     const lr = JSON.parse(fs.readFileSync(lastRunPath, "utf-8"));
     expect(lr.result).toBe("pass");
   });
+
+  it("prunes orphan last-run metadata while preserving richer recordings", async () => {
+    const root = makeProject({ smoke: { "setup.yaml": minimalSetup } });
+    const staleMetadataDir = path.join(root, ".signalman", "recordings", "deleted");
+    const richRecordingDir = path.join(root, ".signalman", "recordings", "deleted-rich");
+    fs.mkdirSync(staleMetadataDir, { recursive: true });
+    fs.mkdirSync(richRecordingDir, { recursive: true });
+    fs.writeFileSync(path.join(staleMetadataDir, "last-run.json"), JSON.stringify({ result: "pass" }));
+    fs.writeFileSync(path.join(richRecordingDir, "last-run.json"), JSON.stringify({ result: "pass" }));
+    fs.writeFileSync(path.join(richRecordingDir, "workflow.md"), "# captured workflow\n");
+
+    const passer: RunExecutor = async () => ({
+      result: "pass",
+      assertions: { total: 0, passed: 0, failed: 0, results: [] },
+      errors: [],
+    });
+    const handle = await runRun({ id: "smoke" }, passer, root);
+    let safety = 20;
+    while (safety-- > 0) {
+      const status = await runStatus({ run_id: handle.run_id, wait_ms: 500 });
+      if ("envelope" in status && status.envelope) break;
+    }
+
+    expect(fs.existsSync(staleMetadataDir)).toBe(false);
+    expect(fs.existsSync(path.join(richRecordingDir, "last-run.json"))).toBe(true);
+    expect(fs.existsSync(path.join(richRecordingDir, "workflow.md"))).toBe(true);
+    expect(fs.existsSync(path.join(root, ".signalman", "recordings", "smoke", "last-run.json"))).toBe(true);
+  });
 });
