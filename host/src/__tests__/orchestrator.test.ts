@@ -271,6 +271,109 @@ describe("ScenarioOrchestrator", () => {
     );
   });
 
+  // ── pre_started bypass (Sprint 60.12 Phase B) ──────────────────
+  //
+  // Sub-suite locks down the contract that scenarios marked
+  // `pre_started: true` skip ALL hypervisor lifecycle calls. The
+  // scenarios depending on this are unprivileged-host-CLI runs
+  // where the listVMs cmdlet would either fail with access-denied
+  // or hang behind a UAC prompt.
+
+  it("resolveVms with pre_started: true skips listVMs entirely", async () => {
+    const defs: VmDefinition[] = [
+      {
+        name: "vm1",
+        template: "win11-base",
+        guest_agent_port: 50051,
+        pre_started: true,
+      },
+    ];
+
+    const vmMap = await orchestrator.resolveVms(defs);
+
+    expect(vmMap.get("vm1")?.id).toBe("pre-started");
+    // The whole point — we don't query the hypervisor at all.
+    expect(backend.listVMs).not.toHaveBeenCalled();
+    expect(backend.restoreCheckpoint).not.toHaveBeenCalled();
+    expect(backend.startVM).not.toHaveBeenCalled();
+    expect(backend.getStatus).not.toHaveBeenCalled();
+  });
+
+  it("resolveVms with pre_started: true honours vmAliases for the synthetic handle", async () => {
+    const cfgWithAlias: SignalmanConfig = {
+      ...config,
+      vmAliases: { vm1: "Win11x64-Real" },
+    };
+    const orch = new ScenarioOrchestrator(backend, clients, cfgWithAlias);
+    const defs: VmDefinition[] = [
+      {
+        name: "vm1",
+        template: "win11-base",
+        guest_agent_port: 50051,
+        pre_started: true,
+      },
+    ];
+
+    const vmMap = await orch.resolveVms(defs);
+    const handle = vmMap.get("vm1");
+    expect(handle?.id).toBe("pre-started");
+    expect(handle?.name).toBe("Win11x64-Real");
+  });
+
+  // ── REGRESSION: unprivileged host-CLI hang ────────────────────
+  //
+  // Field bug:
+  //   ospiri-agent-driver-e2e Sprint 60.12 Phase B run.
+  //   Without the pre_started fast-path, signalman would call
+  //   `Get-VM` (via `listVMs`) under an unprivileged shell. On
+  //   unattended runs (no human watching the screen) this either
+  //   exited with access-denied OR hung 30 seconds behind a UAC
+  //   prompt no human ever clicked, then surfaced a cryptic
+  //   "User cancelled" error.
+  //
+  // Contract under test:
+  //   When EVERY VM in the scenario is marked `pre_started: true`,
+  //   listVMs is never called. The only hypervisor-side work is
+  //   constructing synthetic VMHandles with id `"pre-started"` so
+  //   downstream code (vm_copy_file, scenario hooks) can detect
+  //   the shape and route around hypervisor-level operations.
+  it("REGRESSION: unprivileged scenario does NOT touch the hypervisor", async () => {
+    // Make listVMs throw the way an unprivileged Get-VM would:
+    // we want to PROVE the bypass — if anything internally tries to
+    // list VMs the test fails loudly rather than silently masking
+    // the regression.
+    const angryBackend = makeMockBackend({
+      listVMs: vi.fn().mockRejectedValue(
+        new Error(
+          "Get-VM: access denied (this scenario must run elevated, " +
+            "or be marked pre_started: true on every VM def)",
+        ),
+      ),
+    });
+    const orch = new ScenarioOrchestrator(angryBackend, clients, config);
+
+    const defs: VmDefinition[] = [
+      {
+        name: "vm1",
+        template: "win11-base",
+        guest_agent_port: 50051,
+        pre_started: true,
+      },
+      {
+        name: "vm2",
+        template: "win11-base",
+        guest_agent_port: 50051,
+        pre_started: true,
+      },
+    ];
+
+    // No throw — the bypass kicked in.
+    const vmMap = await orch.resolveVms(defs);
+    expect(vmMap.size).toBe(2);
+    expect([...vmMap.values()].every((h) => h.id === "pre-started")).toBe(true);
+    expect(angryBackend.listVMs).not.toHaveBeenCalled();
+  });
+
   // ── executeSetup ────────────────────────────────────────────────
 
   it("executeSetup runs steps in order", async () => {

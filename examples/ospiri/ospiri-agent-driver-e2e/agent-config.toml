@@ -1,0 +1,47 @@
+# Ospiri agent configuration — Sprint 60.12 driver-integration scenario.
+#
+# Pushed to the guest at C:\Ospiri\agent.toml during setup.  The agent
+# loads this via `--config C:\Ospiri\agent.toml`, baked into the SCM
+# service binPath in setup step `patch-binpath` (because
+# `WindowsServiceHost::install_service` doesn't accept a config path —
+# the only way to feed it to `service_main` is through the binPath).
+#
+# Schema reference: agent/src/config.rs::AgentConfig.
+
+# Agent points at the host backend over the test switch.
+#
+# Backend in this scenario is launched with `--insecure` (no TLS),
+# matching the http:// scheme below and `backend_insecure = true`.
+# Production deployments leave `backend_insecure` at its default
+# (false) and use https:// + provisioned mTLS.
+backend_url = "http://172.30.0.1:48051"
+backend_insecure = true
+
+# Any non-empty enrollment token.  The backend's `Register` RPC
+# accepts ANY token when `--enrollment-token` isn't passed at
+# startup (see backend/src/grpc/service.rs::register), and self-signs
+# a client cert in response.  The agent persists that cert and uses
+# it for subsequent SubmitBatch uploads.  E2E-only — production uses
+# tenant-issued tokens via the enrollment portal.
+enrollment_token = "e2e-scenario-token"
+
+log_level = "info"
+
+[driver]
+# Sprint 60.12 — primary lever for this scenario.  Without this, the
+# agent's lib.rs leaves the kernel driver subsystem in degraded mode
+# and `Kernel rule enforcer not wired` lands in the log.
+enabled = true
+sys_path = 'C:\Ospiri\drv\ospiri.sys'
+om_drain_interval_ms = 1000
+om_drain_max_records_per_tick = 1024
+# Skip the `Ospiri.Driver` ETW consumer.  The Phase 8a-era driver
+# in this scenario doesn't yet emit the kernel-side TraceLogging
+# provider (Sprint 60.11 dependency); attempting to subscribe to it
+# crashes the agent inside `EnableTraceEx2`'s rundown wait via a
+# Win32 fault that escapes Rust's `catch_unwind`.  Skipping the
+# consumer keeps the rest of the driver subsystem (lifecycle
+# ownership, IOCTL policy push, OM evidence drain) running.  Flip
+# back to false once Sprint 60.11 ships and `drv.sys` exposes the
+# provider.
+skip_etw_consumer = true
