@@ -96,12 +96,12 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
 
 | Crate / package | Test count (source) | Files | Last verified |
 |---|---|---|---|
-| Host (TypeScript / vitest) — `host/src/__tests__/` | 877 | 35 | 2026-05-04 |
+| Host (TypeScript / vitest) — `host/src/__tests__/` | 878 | 35 | 2026-05-04 |
 | Host (TypeScript / vitest) — `host/src/verbs/__tests__/` | 45 | 5 | 2026-04-28 |
 | Guest (Rust / cargo) | 105 | 8 | 2026-04-28 |
 | Service (Rust / cargo) | 95 | 8 (incl. 2 integration files) | 2026-04-28 |
 | Plugin (Rust / cargo) | 135 | 11 (incl. 2 integration files) | 2026-04-28 |
-| **Total** | **1257** test attributes / `it()` calls | **67** files | |
+| **Total** | **1258** test attributes / `it()` calls | **67** files | |
 
 > The ROADMAP headline "151 Rust + 769 TS = 920" predates the v0.1.1
 > P9 work (which added the provisioning, bundle, idempotency, and
@@ -118,7 +118,8 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
 - **`host/src/__tests__/orchestrator.test.ts`** + **`orchestrator-events.test.ts`** —
   orchestrator + mocked hypervisor backend; live-emit propagation
   hook (closes P3 C2-residual) and parallel guest-agent readiness waits
-  (closes P2 F1).
+  (closes P2 F1). It also pins the C7 teardown guard that runs declared
+  teardown after guest-readiness failures.
 - **`host/src/__tests__/proto-shape.test.ts`** — pins the v1 proto
   `oneof platform_details` shape so a stray rebuild can't silently
   change the wire contract.
@@ -174,10 +175,11 @@ All v0.1.0 phases are merged on `main`. Bullet status as of 2026-04-28:
   Audit A2 closure (default-executor service routing) folded into P3.
 - **P2 — Orchestrator Polish** — Closed via `0960ea6` (orphan sweep,
   CI re-enable, schema versioning, env-var test serialization). The F1
-  readiness wait follow-up is closed by the current HEAD commit:
-  `waitForGuestAgents`
+  readiness wait follow-up is closed in `f0bebee`: `waitForGuestAgents`
   now checks VM guest agents concurrently while preserving each VM's retry
-  loop and timeout.
+  loop and timeout. The C7 teardown guard is closed in this branch: once VMs
+  are resolved, declared teardown now runs from `finally` even when guest
+  readiness, setup, workflow, assertion, or runtime errors occur.
 - **P3 — Agent UX Baseline** — Closed: P3.a structured errors
   (`a52d3bb`), P3.b retry (`13f2b0a`), P3.c orchestrator event hook
   (`ec92f80`), P3.d trace-id propagation across TS / Rust / plugin
