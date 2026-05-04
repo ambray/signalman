@@ -567,6 +567,7 @@ pub fn inspect_process(pid: u32) -> anyhow::Result<ProcessDetail> {
 
 /// List running processes, optionally filtered by name.
 pub fn list_processes(name_filter: Option<&str>) -> anyhow::Result<Vec<ProcessInfo>> {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     let mut processes = Vec::new();
 
     #[cfg(target_os = "windows")]
@@ -675,6 +676,9 @@ pub fn list_processes(name_filter: Option<&str>) -> anyhow::Result<Vec<ProcessIn
             });
         }
     }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let processes = Vec::new();
 
     Ok(processes)
 }
