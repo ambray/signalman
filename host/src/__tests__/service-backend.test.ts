@@ -155,6 +155,16 @@ describe("ServiceBackend.isAvailable", () => {
     await expect(b.isAvailable()).resolves.toBe(false);
     b.dispose();
   });
+
+  it("uses the configured service host and port", async () => {
+    fakeState.unary.set("health", (_req, _opts, cb) => {
+      cb(null, { activeBackend: "hyperv", availableBackends: ["hyperv"] });
+    });
+    const b = new ServiceBackend({ host: "127.0.0.2", port: 17778 });
+    await expect(b.isAvailable()).resolves.toBe(true);
+    expect(fakeState.ctorCalls[0].address).toBe("127.0.0.2:17778");
+    b.dispose();
+  });
 });
 
 describe("ServiceBackend.listVMs", () => {

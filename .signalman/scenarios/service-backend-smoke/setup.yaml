@@ -6,6 +6,7 @@ vms:
   - name: endpoint-1
     template: win11-base
     checkpoint_restore: base
+    wait_for_heartbeat: false
     guest_agent_port: 50051
 
 capabilities:
@@ -22,8 +23,8 @@ setup:
     command: powershell.exe
     args:
       - -NoProfile
-      - -EncodedCommand
-      - TgBlAHcALQBJAHQAZQBtACAALQBJAHQAZQBtAFQAeQBwAGUAIABEAGkAcgBlAGMAdABvAHIAeQAgAC0ARgBvAHIAYwBlACAALQBQAGEAdABoACAAQwA6AFwAUwBpAGcAbgBhAGwAbQBhAG4AUwBtAG8AawBlACAAfAAgAE8AdQB0AC0ATgB1AGwAbAA=
+      - -Command
+      - New-Item -ItemType Directory -Force -Path C:\SignalmanSmoke | Out-Null
     timeout_ms: 60000
 
   - action: vm_copy_file

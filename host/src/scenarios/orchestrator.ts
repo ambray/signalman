@@ -145,6 +145,12 @@ export interface VmDefinition {
    * unprivileged host-CLI runs).
    */
   pre_started?: boolean;
+  /**
+   * Whether to wait for the hypervisor heartbeat integration service
+   * after restore/start. Defaults to true; backend-only smoke scenarios
+   * can set false when they only need PowerShell Direct / VM file copy.
+   */
+  wait_for_heartbeat?: boolean;
   /** Guest agent gRPC port (default: 50051). */
   guest_agent_port: number;
   /** Network configuration. */
@@ -875,6 +881,9 @@ export class ScenarioOrchestrator {
         // re-apply here so direct construction (tests, future loaders)
         // gets the same behavior.
         warm_checkpoint: vm.warm_checkpoint ?? true,
+        wait_for_heartbeat: vm.wait_for_heartbeat ?? true,
+        provision_if_missing: vm.provision_if_missing,
+        pre_started: vm.pre_started,
         guest_agent_port: vm.guest_agent_port,
         network: vm.network,
         kernel_debug: vm.kernel_debug,
@@ -2109,7 +2118,7 @@ export class ScenarioOrchestrator {
       if (status.state !== "running") {
         await this.backend.startVM(existing);
       }
-      if (this.backend.waitForHeartbeat) {
+      if ((def.wait_for_heartbeat ?? true) && this.backend.waitForHeartbeat) {
         const ready = await this.backend.waitForHeartbeat(existing, 180_000);
         if (!ready) {
           throw new Error(

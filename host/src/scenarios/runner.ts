@@ -101,6 +101,7 @@ export interface VmConfig {
   template: string;
   checkpoint_restore?: string;
   provision_if_missing?: boolean;
+  pre_started?: boolean;
   /**
    * Whether `checkpoint_restore` names a warm-state (Running-state)
    * checkpoint. Defaults to `true` — the schema layer fills in the
@@ -114,6 +115,11 @@ export interface VmConfig {
    * default and keep the code paths aligned.
    */
   warm_checkpoint?: boolean;
+  /**
+   * Whether lifecycle resolution waits for the hypervisor heartbeat
+   * integration service after restore/start. Defaults to true.
+   */
+  wait_for_heartbeat?: boolean;
   guest_agent_port: number;
   network?: {
     switch: string;
