@@ -19,6 +19,98 @@ import * as os from "node:os";
 import type { HypervisorBackend, VMHandle } from "../hypervisors/interface.js";
 import { globalVmCache } from "../vm-cache.js";
 
+const PROVISION_TEMP_PREFIX = "signalman-provision-";
+const PROVISION_MANIFEST_FILE = "provisioning.json";
+
+export interface ProvisioningRunManifest {
+  vmName: string;
+  templateName: string;
+  checkpointLabel: string;
+  startedAt: string;
+  createdVm: boolean;
+}
+
+export interface OrphanedProvisioningVmCandidate {
+  vmName: string;
+  manifestPath: string;
+  checkpointLabel: string;
+  createdVm: boolean;
+  startedAt?: string;
+  handle?: VMHandle;
+  reason: "missing_checkpoint" | "manifest_without_vm";
+}
+
+export interface CleanupOrphanedProvisioningVmsOptions {
+  tmpDir?: string;
+  dryRun?: boolean;
+  includeManifestOnly?: boolean;
+}
+
+export interface CleanupOrphanedProvisioningVmsResult {
+  candidates: OrphanedProvisioningVmCandidate[];
+  cleaned: string[];
+  artifactDirsRemoved: string[];
+}
+
+export function provisioningManifestPath(
+  vmName: string,
+  tmpDir = os.tmpdir(),
+): string {
+  return path.join(provisioningTempDir(vmName, tmpDir), PROVISION_MANIFEST_FILE);
+}
+
+export function writeProvisioningManifest(
+  manifest: ProvisioningRunManifest,
+  tmpDir = os.tmpdir(),
+): void {
+  const dir = provisioningTempDir(manifest.vmName, tmpDir);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, PROVISION_MANIFEST_FILE),
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    { encoding: "utf8" },
+  );
+}
+
+/**
+ * Find incomplete Signalman provisioning runs and optionally reap them.
+ *
+ * The reaper only targets VMs with a Signalman provisioning manifest,
+ * createdVm=true, and no target post-install checkpoint. Without that
+ * manifest it refuses to infer ownership from a VM name.
+ */
+export async function cleanupOrphanedProvisioningVms(
+  backend: HypervisorBackend,
+  options: CleanupOrphanedProvisioningVmsOptions = {},
+): Promise<CleanupOrphanedProvisioningVmsResult> {
+  const dryRun = options.dryRun ?? true;
+  const includeManifestOnly = options.includeManifestOnly ?? true;
+  const candidates = await findOrphanedProvisioningVms(backend, options.tmpDir);
+  const scopedCandidates = candidates.filter(
+    (candidate) => candidate.reason !== "manifest_without_vm" || includeManifestOnly,
+  );
+  const cleaned: string[] = [];
+  const artifactDirsRemoved: string[] = [];
+
+  if (dryRun) {
+    return { candidates: scopedCandidates, cleaned, artifactDirsRemoved };
+  }
+
+  for (const candidate of scopedCandidates) {
+    if (candidate.handle) {
+      await cleanupVM(backend, candidate.vmName);
+      cleaned.push(candidate.vmName);
+      removePerVmCertDir(candidate.vmName, options.tmpDir);
+      artifactDirsRemoved.push(path.dirname(candidate.manifestPath));
+      continue;
+    }
+    removePerVmCertDir(candidate.vmName, options.tmpDir);
+    artifactDirsRemoved.push(path.dirname(candidate.manifestPath));
+  }
+
+  return { candidates: scopedCandidates, cleaned, artifactDirsRemoved };
+}
+
 // ── Public API ────────────────────────────────────────────────────
 
 /**
@@ -80,6 +172,103 @@ export async function cleanupVM(
 
 // ── Helpers ───────────────────────────────────────────────────────
 
+async function findOrphanedProvisioningVms(
+  backend: HypervisorBackend,
+  tmpDir = os.tmpdir(),
+): Promise<OrphanedProvisioningVmCandidate[]> {
+  const manifests = readProvisioningManifests(tmpDir);
+  const candidates: OrphanedProvisioningVmCandidate[] = [];
+
+  for (const { manifest, manifestPath } of manifests) {
+    if (!manifest.createdVm) continue;
+
+    const handle = await tryResolve(backend, manifest.vmName);
+    if (!handle) {
+      candidates.push({
+        vmName: manifest.vmName,
+        manifestPath,
+        checkpointLabel: manifest.checkpointLabel,
+        createdVm: manifest.createdVm,
+        startedAt: manifest.startedAt,
+        reason: "manifest_without_vm",
+      });
+      continue;
+    }
+
+    if (!(await checkpointExists(backend, handle, manifest.checkpointLabel))) {
+      candidates.push({
+        vmName: manifest.vmName,
+        manifestPath,
+        checkpointLabel: manifest.checkpointLabel,
+        createdVm: manifest.createdVm,
+        startedAt: manifest.startedAt,
+        handle,
+        reason: "missing_checkpoint",
+      });
+    }
+  }
+
+  return candidates;
+}
+
+function readProvisioningManifests(
+  tmpDir: string,
+): Array<{ manifest: ProvisioningRunManifest; manifestPath: string }> {
+  if (!fs.existsSync(tmpDir)) return [];
+
+  const entries = fs.readdirSync(tmpDir, { withFileTypes: true });
+  const manifests: Array<{
+    manifest: ProvisioningRunManifest;
+    manifestPath: string;
+  }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(PROVISION_TEMP_PREFIX)) {
+      continue;
+    }
+    const manifestPath = path.join(tmpDir, entry.name, PROVISION_MANIFEST_FILE);
+    const manifest = readProvisioningManifest(manifestPath);
+    if (manifest) manifests.push({ manifest, manifestPath });
+  }
+
+  return manifests;
+}
+
+function readProvisioningManifest(
+  manifestPath: string,
+): ProvisioningRunManifest | null {
+  if (!fs.existsSync(manifestPath)) return null;
+  try {
+    const parsed = JSON.parse(
+      fs.readFileSync(manifestPath, "utf8"),
+    ) as Partial<ProvisioningRunManifest>;
+    if (
+      typeof parsed.vmName === "string" &&
+      typeof parsed.templateName === "string" &&
+      typeof parsed.checkpointLabel === "string" &&
+      typeof parsed.startedAt === "string" &&
+      typeof parsed.createdVm === "boolean"
+    ) {
+      return parsed as ProvisioningRunManifest;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function checkpointExists(
+  backend: HypervisorBackend,
+  handle: VMHandle,
+  label: string,
+): Promise<boolean> {
+  try {
+    const checkpoints = await backend.listCheckpoints(handle);
+    return checkpoints.some((checkpoint) => checkpoint.label === label);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Resolve a VM name to a handle, returning null instead of throwing
  * when the VM doesn't exist. Used for idempotent "already gone" paths.
@@ -103,8 +292,8 @@ async function tryResolve(
  * `<os.tmpdir()>/signalman-provision-<vmName>/`. Remove that tree.
  * No-op if it doesn't exist.
  */
-function removePerVmCertDir(vmName: string): void {
-  const certDir = path.join(os.tmpdir(), `signalman-provision-${vmName}`);
+function removePerVmCertDir(vmName: string, tmpDir = os.tmpdir()): void {
+  const certDir = provisioningTempDir(vmName, tmpDir);
   if (!fs.existsSync(certDir)) return;
   try {
     fs.rmSync(certDir, { recursive: true, force: true });
@@ -113,4 +302,8 @@ function removePerVmCertDir(vmName: string): void {
       `[provisioning] cleanupVM(${vmName}): failed to remove cert tempdir ${certDir}: ${(err as Error).message}`,
     );
   }
+}
+
+function provisioningTempDir(vmName: string, tmpDir = os.tmpdir()): string {
+  return path.join(tmpDir, `${PROVISION_TEMP_PREFIX}${vmName}`);
 }
