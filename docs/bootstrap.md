@@ -24,6 +24,7 @@ Confirm everything below before running any Signalman command.
 | Node 20 LTS or newer (the host package targets ESM + Node 18+ `fetch`) | yes | `node --version` reports `v20.x` or higher |
 | PowerShell 7 (`pwsh`) — the cert script and `scripts/release-dry-run.ps1` use it | yes | `pwsh --version` |
 | Rust stable toolchain | only when building from source | `rustc --version` |
+| `cargo-wix` 0.3.9 | only when building MSI packages locally | `cargo install cargo-wix --locked --version 0.3.9` |
 | `openssl` on `PATH` (Git for Windows ships one at `C:\Program Files\Git\usr\bin\openssl.exe` — auto-detected by the cert script) | yes (cert generation) | `openssl version` |
 | Hyper-V virtual switch named `Default Switch` | yes | `Get-VMSwitch "Default Switch"` returns a row |
 | Pre-built guest VHDX | yes | the URL form (Microsoft Eval) or a local `base_image_path:` |
@@ -101,10 +102,10 @@ client.key    ...
 <openssl verify>: OK
 ```
 
-> Until `signalman init --bootstrap` lands (see `host/src/verbs/init.ts`
-> — the flag currently emits a deferred-feature message naming P9.1 +
-> P9.5), invoke the script directly. When the bootstrap flow lands,
-> this step will be folded into `signalman init --bootstrap`.
+> `signalman init --bootstrap` prints the current cert/template/provision
+> sequence after scaffolding. It does not run this script for you because
+> cert location, base image choice, and VM creation remain explicit
+> operator-owned actions.
 
 ### 2.3 Initialise the project
 
@@ -130,9 +131,8 @@ Signalman project initialised at <cwd>
 Next: signalman list
 ```
 
-`--force` overwrites existing scaffold. `--bootstrap` is reserved and
-currently prints the deferred message on stderr (see
-`host/src/verbs/init.ts:211-219`).
+`--force` overwrites existing scaffold. `--bootstrap` prints the manual
+bootstrap sequence on stderr after the scaffold summary.
 
 ### 2.4 Fetch a base image
 
@@ -301,10 +301,11 @@ The reference bundle exercises every Tier 1 source: `winget`,
 `submodules:` / `sparse:` paths), `powershell` (`Install-Module` from
 PSGallery), `npm`, `pip`, `cargo`, `custom_script`. The
 `examples/bundles/full-stack.bundle.yaml` exercises these and is the
-reference for source-source dependencies (the bundle author orders
-prerequisites manually — Q10(a) lock; place `git` before any
-`git_repo` entry, `python` before any `pip` entry, etc.). Schema +
-security gates per source: `bundle-types.ts` module docstring.
+reference for source-source dependencies. Use `requires:` when a package
+needs a prerequisite (`git` before `git_repo`, `python` before `pip`,
+etc.); the orchestrator topologically sorts those dependencies and runs
+independent ready packages in parallel. Schema + security gates per
+source: `bundle-types.ts` module docstring.
 
 ```powershell
 signalman vm install-bundle endpoint-1 examples/bundles/full-stack.bundle.yaml
@@ -396,8 +397,9 @@ Discovery chain (in priority order, from
 
 Hard-fails with a remediation list naming every searched location.
 When running from a fresh source clone, `dist/guest/` is empty until
-you build the guest MSI; pass `--guest-msi` explicitly or build it
-first.
+you build the guest MSI. Signalman will also check the matching GitHub
+Release and cache `signalman-guest-*.msi` under the local app cache, so
+release installs do not need an explicit `--guest-msi` path.
 
 ### "SHA-256 mismatch for <template>: expected <a>, got <b>"
 
@@ -427,12 +429,11 @@ gets an IP:
 
 ### "client does not support 'direct' source"
 
-Surfaces from `install-bundle.ts:257-261`. The `installDirect` /
-`installDocker` RPCs are feature-detected in v0.1.1; the schema
-accepts them but the host gRPC client method ships when the proto
-extension lands (TODO P9.2 in the file). Until then, restrict
-bundles to `winget` / `choco` / `msstore`, or build the proto
-extension locally.
+This means the host is talking to an older guest agent that does not
+implement the `installDirect` / `installDocker` RPCs. Rebuild or upgrade
+the guest MSI for the VM, then rerun the bundle. As a temporary
+workaround, restrict that bundle to `winget` / `choco` / `msstore`
+sources.
 
 ### "direct.url ... sha256 ... 64 lowercase hex"
 
@@ -465,10 +466,11 @@ items below are documented elsewhere or deferred to v0.2.0:
   the `vms:` block in `setup.yaml`, but bootstrap walks the
   one-VM path. See the smoke example in [README — Setup
   DSL](../README.md#setup-dsl-setupyaml).
-- **`signalman init --bootstrap` interactive flow.** Reserved
-  surface in v0.1.1; emits a deferred-feature message until P9.1 +
-  P9.5 land in the same composed CLI verb (see
-  `host/src/verbs/init.ts:211-219`).
+- **`signalman init --bootstrap` side effects.** The flag prints the
+  bootstrap sequence, but it intentionally does not download base
+  images or create VMs. Operators still run `vm fetch-template` and
+  `vm provision` explicitly with the chosen template, storage, and MSI
+  inputs.
 
 ## 9. Cross-references
 

@@ -72,7 +72,9 @@ export function createDefaultExecutor(): RunExecutor {
       // client" error if the scenario actually needs one.
     }
 
-    const orchestrator = new ScenarioOrchestrator(backend, guestClients, config);
+    const orchestrator = new ScenarioOrchestrator(backend, guestClients, config, {
+      registerProcessExitCleanup: true,
+    });
     // P3.c: pass ctx.emit through to the orchestrator so step lifecycle
     // and assertion events arrive in the run's EventQueue as they
     // happen, not retrospectively after runScenario returns. The
@@ -84,6 +86,7 @@ export function createDefaultExecutor(): RunExecutor {
       ctx.scenarioDir,
       ctx.emit,
       { traceId: ctx.traceId, runId: ctx.runId },
+      ctx.parameters,
     );
 
     // Build the per-assertion summary from the orchestrator's normalised

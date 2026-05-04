@@ -81,7 +81,7 @@ Execute a scenario. **Returns a run handle synchronously**; events stream via `s
 
 Why handle, not block-to-completion: scenarios run for minutes. MCP stdio has no server-push primitive, and an agent blocked on `run` can't react step-by-step. Handle + subscribe is the only design that gives CLI tailing and agent reasoning the same primitive.
 
-Params: `id: string`, `parameters?: object`, `network_class?: "isolated"|"nat"|"internet"` (default `"isolated"`; declared, not enforced — P4).
+Params: `id: string`, `parameters?: object`, `network_class?: "isolated"|"nat"|"internet"` (default `"isolated"`; recorded in the result envelope, not a host network-policy switch).
 
 Return (immediate):
 ```json
@@ -347,4 +347,4 @@ Items unresolved from code + ROADMAP. Ordered by blocking-impact.
 
 7. Loom + advanced namespace. P5 says sibling-MCP / decoupled lifecycle. Confirm Loom registers only the six verbs, never the advanced ones (so the Loom-surfaced agent loop is inverted by default).
 
-8. `network_class` enforcement timing. Declared-only in v0.1.0. Should v0.1.0 at least *log* declared-vs-actual divergence (cheap, loud if mismatched), or wait for P4?
+8. `network_class` semantics. It is envelope metadata in v0.1.x, not an enforcement switch. Network access policy belongs in scenario capabilities and backend/provisioning configuration.

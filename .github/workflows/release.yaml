@@ -3,9 +3,10 @@
 # Tag-triggered: pushing a `v*.*.*` git tag (e.g. `v0.1.0`) builds and
 # publishes:
 #   1. signalman-service.msi (Windows MSI installer for the host service)
-#   2. @signalman/host (npm package)
-#   3. signalman-guest (crates.io)
-#   4. GitHub Release with all of the above attached
+#   2. signalman-guest.msi (Windows MSI installer for the guest agent)
+#   3. @signalman/host (npm package)
+#   4. signalman-guest (crates.io)
+#   5. GitHub Release with all of the above attached
 #
 # The workflow is split into independent jobs so a single-target failure
 # (e.g. cargo publish rate limit) doesn't block the others. Each job
@@ -57,9 +58,12 @@ jobs:
   # ─────────────────────────────────────────────────────────────────
   # Service MSI — Windows-only. Builds + (when secrets are present)
   # signs `signalman-service.msi`. Output: `signalman-service-<ver>.msi`
-  # in the release-msi artifact.
+  # in the release-service-msi artifact.
   service-msi:
     runs-on: windows-latest
+    env:
+      WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -111,9 +115,6 @@ jobs:
 
       - name: Sign MSI
         if: env.WINDOWS_CERT_BASE64 != ''
-        env:
-          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
-          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         shell: pwsh
         run: |
           # Decode the cert into a tempfile, sign, then shred. Never
@@ -143,7 +144,95 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-msi
+          name: release-service-msi
+          path: ${{ steps.msi.outputs.path }}
+          if-no-files-found: error
+
+  # Guest MSI - Windows-only. Builds + (when secrets are present)
+  # signs `signalman-guest.msi`. Output: `signalman-guest-<ver>-<arch>.msi`
+  # in the release-guest-msi artifact.
+  guest-msi:
+    runs-on: windows-latest
+    env:
+      WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+      WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          workspaces: . -> target
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "25.x"
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked --version 0.3.9
+
+      - name: Verify version matches tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $manifestVersion = (Select-String -Path guest\Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $expected = "v$manifestVersion"
+          if ("${{ github.event_name }}" -eq "push" -and $tag -ne $expected) {
+            Write-Error "Tag $tag does not match guest/Cargo.toml version $manifestVersion (expected $expected). Bump versions before tagging."
+            exit 1
+          }
+          Write-Host "Guest manifest version: $manifestVersion ; tag: $tag"
+
+      - name: Build guest (release)
+        run: cargo build -p signalman-guest --release
+
+      - name: Build guest MSI via cargo-wix
+        run: cargo wix --package signalman-guest --no-build --nocapture
+
+      - name: Locate guest MSI
+        id: msi
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem target\wix\signalman-guest*.msi | Select-Object -First 1
+          if (-not $msi) { Write-Error "No guest MSI produced by cargo-wix"; exit 1 }
+          "path=$($msi.FullName)" | Out-File -Append $env:GITHUB_OUTPUT
+          "name=$($msi.Name)" | Out-File -Append $env:GITHUB_OUTPUT
+
+      - name: Sign guest MSI
+        if: env.WINDOWS_CERT_BASE64 != ''
+        shell: pwsh
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
+          try {
+            & signtool sign `
+              /f $pfxPath `
+              /p $env:WINDOWS_CERT_PASSWORD `
+              /tr http://timestamp.digicert.com `
+              /td sha256 `
+              /fd sha256 `
+              "${{ steps.msi.outputs.path }}"
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+            & signtool verify /pa /v "${{ steps.msi.outputs.path }}"
+          } finally {
+            Remove-Item -Force $pfxPath -ErrorAction SilentlyContinue
+          }
+
+      - name: Skip-sign warning (no cert configured)
+        if: env.WINDOWS_CERT_BASE64 == ''
+        run: |
+          echo "::warning::WINDOWS_CERT_BASE64 secret is not set - guest MSI is unsigned."
+          echo "::warning::Configure WINDOWS_CERT_BASE64 + WINDOWS_CERT_PASSWORD in repo secrets to sign release builds."
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-guest-msi
           path: ${{ steps.msi.outputs.path }}
           if-no-files-found: error
 
@@ -152,6 +241,8 @@ jobs:
   # final gate, and (when NPM_TOKEN is present) publishes to npm.
   host-npm:
     runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -199,8 +290,7 @@ jobs:
         if: env.NPM_TOKEN != ''
         working-directory: host
         env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
         run: npm publish --access public
 
       - name: Skip-publish warning (no NPM_TOKEN)
@@ -220,6 +310,8 @@ jobs:
   # publish`, then publishes when CARGO_REGISTRY_TOKEN is present.
   guest-crate:
     runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -267,8 +359,6 @@ jobs:
       - name: Publish to crates.io
         if: env.CARGO_REGISTRY_TOKEN != ''
         working-directory: guest
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --allow-dirty
 
       - name: Skip-publish warning (no CARGO_REGISTRY_TOKEN)
@@ -282,7 +372,7 @@ jobs:
   # uploaded above. Only fires on tag pushes (manual dispatches don't
   # produce a stable release page).
   github-release:
-    needs: [service-msi, host-npm, guest-crate]
+    needs: [service-msi, guest-msi, host-npm, guest-crate]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -293,7 +383,8 @@ jobs:
       - name: Stage artifacts for release
         run: |
           mkdir -p release-staging
-          cp artifacts/release-msi/*.msi release-staging/ 2>/dev/null || true
+          cp artifacts/release-service-msi/*.msi release-staging/ 2>/dev/null || true
+          cp artifacts/release-guest-msi/*.msi release-staging/ 2>/dev/null || true
           cp artifacts/release-npm-tgz/*.tgz release-staging/ 2>/dev/null || true
           ls -la release-staging/
 

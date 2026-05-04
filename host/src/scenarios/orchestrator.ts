@@ -259,6 +259,137 @@ export function substituteVarsDeep(
   return value;
 }
 
+class ReferenceResolutionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReferenceResolutionError";
+  }
+}
+
+function mergeRuntimeParams(
+  declared: Record<string, unknown> | undefined,
+  supplied: Record<string, unknown>,
+): Record<string, unknown> {
+  return { ...(declared ?? {}), ...supplied };
+}
+
+function secretFromEnv(name: string): string | undefined {
+  return process.env[`SIGNALMAN_SECRET_${name}`] ?? process.env[name];
+}
+
+function substituteRuntimeRefs(input: string, params: Record<string, unknown>): string {
+  return input.replace(
+    /\$\{(param|secret):([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g,
+    (_match, kind: string, name: string, def?: string) => {
+      if (kind === "secret") {
+        const value = secretFromEnv(name);
+        if (value === undefined) {
+          throw new ReferenceResolutionError(`secret-unresolved: ${name}`);
+        }
+        return value;
+      }
+      if (Object.prototype.hasOwnProperty.call(params, name)) {
+        return String(params[name]);
+      }
+      if (def !== undefined) return def;
+      throw new ReferenceResolutionError(`parameter-unresolved: ${name}`);
+    },
+  );
+}
+
+export function substituteRuntimeRefsDeep(
+  value: unknown,
+  params: Record<string, unknown>,
+): unknown {
+  if (typeof value === "string") return substituteRuntimeRefs(value, params);
+  if (Array.isArray(value)) return value.map((v) => substituteRuntimeRefsDeep(v, params));
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = substituteRuntimeRefsDeep(v, params);
+    }
+    return out;
+  }
+  return value;
+}
+
+function pathAllowed(actual: string, allowed: string[] | undefined): boolean {
+  if (!allowed || allowed.length === 0) return false;
+  const normalizeCapabilityPath = (p: string) =>
+    path.normalize(p).replace(/[\\/]+/g, "/").toLowerCase();
+  const norm = normalizeCapabilityPath(actual);
+  return allowed.some((pattern) => {
+    const normalizedPattern = normalizeCapabilityPath(pattern);
+    if (normalizedPattern.endsWith("/**")) {
+      const prefix = normalizedPattern.slice(0, -3);
+      return norm === prefix || norm.startsWith(`${prefix}/`);
+    }
+    return norm === normalizedPattern;
+  });
+}
+
+function copyStepHostPath(step: Record<string, unknown>): string | undefined {
+  if (typeof step.host_path === "string") return step.host_path;
+  if (step.action !== "vm_copy_file") return undefined;
+
+  const direction = (step.direction as string | undefined) ?? "host_to_guest";
+  const writesHost = direction === "from_vm" || direction === "guest_to_host";
+  const legacyField = writesHost ? step.dest : step.src;
+  return typeof legacyField === "string" ? legacyField : undefined;
+}
+
+function requireCapability(condition: boolean, message: string): void {
+  if (!condition) {
+    throw new Error(`capability-denied: ${message}`);
+  }
+}
+
+export function assertScenarioCapabilities(
+  config: import("./runner.js").ScenarioConfig,
+  workflowMarkdown: string,
+): void {
+  const caps = config.capabilities;
+  if (!caps) return;
+
+  const allowedVms = new Set([...(caps.vms ?? []), ...(caps.hosts ?? [])]);
+  const allowedNetworks = new Set(caps.networks ?? []);
+  const hostRead = caps.host_paths?.read;
+  const hostWrite = caps.host_paths?.write;
+
+  for (const vm of config.vms ?? []) {
+    if (allowedVms.size > 0) {
+      requireCapability(allowedVms.has(vm.name), `VM '${vm.name}' is not declared in capabilities.vms`);
+    }
+    const switchName = vm.network?.switch;
+    if (switchName && allowedNetworks.size > 0) {
+      requireCapability(
+        allowedNetworks.has(switchName),
+        `network '${switchName}' is not declared in capabilities.networks`,
+      );
+    }
+  }
+
+  const setupSteps = [...(config.setup ?? []), ...(config.teardown ?? [])];
+  const workflowSteps = extractToolBlocks(workflowMarkdown).map((block) => ({
+    action: block.tool,
+    ...block.params,
+  }));
+  for (const step of [...setupSteps, ...workflowSteps] as Array<Record<string, unknown>>) {
+    const vm = step.vm as string | undefined;
+    if (vm && allowedVms.size > 0) {
+      requireCapability(allowedVms.has(vm), `step '${step.action}' targets undeclared VM '${vm}'`);
+    }
+    const hostPath = copyStepHostPath(step);
+    if (!hostPath) continue;
+    const direction = (step.direction as string | undefined) ?? "host_to_guest";
+    const writesHost = direction === "from_vm" || direction === "guest_to_host";
+    requireCapability(
+      pathAllowed(hostPath, writesHost ? hostWrite : hostRead),
+      `step '${step.action}' ${writesHost ? "writes" : "reads"} undeclared host path '${hostPath}'`,
+    );
+  }
+}
+
 // ── Orchestrator ───────────────────────────────────────────────────
 
 /**
@@ -271,6 +402,19 @@ export function substituteVarsDeep(
 export interface OrchestratorOptions {
   /** Directory for writing output reports (JSON, Markdown, JUnit XML). */
   outputDir?: string;
+  /**
+   * Register a one-shot process `exit` hook that force-terminates any
+   * active kernel-debug sessions. Production `signalman run` enables
+   * this while unit tests leave it off by default to avoid global
+   * listener churn.
+   */
+  registerProcessExitCleanup?: boolean;
+}
+
+interface ProcessExitHookTarget {
+  once(event: "exit", listener: () => void): unknown;
+  off?(event: "exit", listener: () => void): unknown;
+  removeListener?(event: "exit", listener: () => void): unknown;
 }
 
 export class ScenarioOrchestrator {
@@ -303,6 +447,7 @@ export class ScenarioOrchestrator {
    * migrating them is a separate refactor with its own risk budget.
    */
   private readonly toolRegistry: import("../kernel-debug/tool-registry.js").ToolRegistry;
+  private processExitCleanup: (() => void) | undefined;
 
   constructor(
     private backend: HypervisorBackend,
@@ -317,6 +462,9 @@ export class ScenarioOrchestrator {
     // orchestrator).
 
     this.toolRegistry = createInitialToolRegistry();
+    if (options?.registerProcessExitCleanup) {
+      this.registerProcessExitCleanup();
+    }
   }
 
   /**
@@ -420,6 +568,46 @@ export class ScenarioOrchestrator {
         errors.map((e) => (e instanceof Error ? e.message : String(e))),
       );
     }
+    this.unregisterProcessExitCleanup();
+  }
+
+  /**
+   * Register emergency cleanup for Node process exit. The hook cannot
+   * await async detach, so it uses the synchronous KdSession emergency
+   * path when available and otherwise starts detach best-effort.
+   */
+  registerProcessExitCleanup(target: ProcessExitHookTarget = process): void {
+    if (this.processExitCleanup) return;
+
+    const handler = () => this.forceTerminateKernelDebugSessions();
+    target.once("exit", handler);
+    this.processExitCleanup = () => {
+      if (typeof target.off === "function") {
+        target.off("exit", handler);
+        return;
+      }
+      target.removeListener?.("exit", handler);
+    };
+  }
+
+  unregisterProcessExitCleanup(): void {
+    const cleanup = this.processExitCleanup;
+    if (!cleanup) return;
+    this.processExitCleanup = undefined;
+    cleanup();
+  }
+
+  forceTerminateKernelDebugSessions(): void {
+    for (const { session, breakLog } of this.kernelDebug.values()) {
+      breakLog.detach();
+      const maybeForce = session as typeof session & { forceTerminate?: () => void };
+      if (typeof maybeForce.forceTerminate === "function") {
+        maybeForce.forceTerminate();
+        continue;
+      }
+      void session.detach().catch(() => undefined);
+    }
+    this.kernelDebug.clear();
   }
 
   /**
@@ -646,6 +834,7 @@ export class ScenarioOrchestrator {
      * runId} pair is the run-level constant.
      */
     trace?: { traceId: string; runId: string },
+    parameters: Record<string, unknown> = {},
   ): Promise<ScenarioResult> {
     const startTime = Date.now();
     const setupResults: StepResult[] = [];
@@ -654,6 +843,9 @@ export class ScenarioOrchestrator {
     let scenarioName = "unknown";
     let status: "passed" | "failed" | "error" = "passed";
     let error: string | undefined;
+    let resolvedVmMap: Map<string, VMHandle> | undefined;
+    let teardownSteps: SetupStep[] = [];
+    let scenarioRetry: ValidatedRetryPolicy | undefined;
     // Hoisted so the post-run JUnit/report block (after the outer try)
     // can snapshot workflow step outputs into workflow-outputs.json for
     // post-mortem when assertions fail.
@@ -661,8 +853,15 @@ export class ScenarioOrchestrator {
 
     try {
       const loadResult = loadScenario(scenarioPath);
-      const { config: scenarioConfig, assertions } = loadResult;
+      const runtimeParams = mergeRuntimeParams(loadResult.config.parameters, parameters);
+      const scenarioConfig = substituteRuntimeRefsDeep(
+        loadResult.config,
+        runtimeParams,
+      ) as typeof loadResult.config;
+      const workflowMarkdown = substituteRuntimeRefs(loadResult.workflowMarkdown, runtimeParams);
+      const assertions = loadResult.assertions;
       scenarioName = scenarioConfig.name;
+      assertScenarioCapabilities(scenarioConfig, workflowMarkdown);
 
       // Resolve VMs
       const vmDefs: VmDefinition[] = scenarioConfig.vms.map((vm) => ({
@@ -679,6 +878,8 @@ export class ScenarioOrchestrator {
         kernel_debug: vm.kernel_debug,
       }));
       const vmMap = await this.resolveVms(vmDefs);
+      resolvedVmMap = vmMap;
+      teardownSteps = scenarioConfig.teardown ?? [];
 
       // Phase 1e/follow-up C — spawn per-VM KdSession when
       // `kernel_debug.enabled: true` is set in setup.yaml. The
@@ -710,8 +911,7 @@ export class ScenarioOrchestrator {
       // Execute setup. The scenario-level retry policy (if declared)
       // applies as a default to every step; per-step `retry:` overrides it.
       const setupSteps = scenarioConfig.setup ?? [];
-      const scenarioRetry = (scenarioConfig as { retry?: ValidatedRetryPolicy })
-        .retry;
+      scenarioRetry = (scenarioConfig as { retry?: ValidatedRetryPolicy }).retry;
       const sResults = await this.executeSetup(
         setupSteps,
         vmMap,
@@ -730,8 +930,8 @@ export class ScenarioOrchestrator {
       const workflowOutputs = workflowOutputsSnapshot;
       const workflowScreenshots = new Map<string, string>();
 
-      if (loadResult.workflowMarkdown) {
-        const narrative = loadResult.narrative ?? parseNarrative(loadResult.workflowMarkdown);
+      if (workflowMarkdown) {
+        const narrative = parseNarrative(workflowMarkdown);
         let stepIndex = 0;
 
         if (narrative.steps.length > 0) {
@@ -755,7 +955,7 @@ export class ScenarioOrchestrator {
           }
         } else {
           // Fallback: extract tool blocks directly
-          const blocks = extractToolBlocks(loadResult.workflowMarkdown);
+          const blocks = extractToolBlocks(workflowMarkdown);
           for (let i = 0; i < blocks.length; i++) {
             const sourceKey = `step-${i}`;
             try {
@@ -876,20 +1076,36 @@ export class ScenarioOrchestrator {
         }
       }
 
-      // Execute teardown
-      const teardownSteps = scenarioConfig.teardown ?? [];
-      const tResults = await this.executeTeardown(
-        teardownSteps,
-        vmMap,
-        scenarioRetry,
-        emit,
-        trace,
-      );
-      teardownResults.push(...tResults);
     } catch (err) {
       status = "error";
       error = err instanceof Error ? err.message : String(err);
     } finally {
+      // Always run declared scenario teardown once VMs have been resolved.
+      // This covers failures during guest readiness, setup, workflow, and
+      // assertion evaluation; before this guard, any throw before the
+      // in-try teardown block skipped scenario cleanup entirely.
+      if (resolvedVmMap && teardownSteps.length > 0) {
+        try {
+          const tResults = await this.executeTeardown(
+            teardownSteps,
+            resolvedVmMap,
+            scenarioRetry,
+            emit,
+            trace,
+          );
+          teardownResults.push(...tResults);
+          if (status === "passed" && tResults.some((r) => r.status === "failed")) {
+            status = "failed";
+          }
+        } catch (e) {
+          status = "error";
+          const teardownError = e instanceof Error ? e.message : String(e);
+          error = error
+            ? `${error}; teardown failed: ${teardownError}`
+            : `teardown failed: ${teardownError}`;
+        }
+      }
+
       // Always tear down kd sessions — even if the scenario errored
       // mid-run, we don't want orphan kd.exe processes for subsequent
       // scenarios to inherit. Follow-up C.
@@ -1917,7 +2133,7 @@ export class ScenarioOrchestrator {
     const timeoutMs = 600_000;
     const pollIntervalMs = 2_000;
 
-    for (const def of vmDefs) {
+    await Promise.all(vmDefs.map(async (def) => {
       const handle = vmMap.get(def.name);
       let client = this.guestClients.get(def.name);
       if (!client) {
@@ -1952,6 +2168,6 @@ export class ScenarioOrchestrator {
           `Guest agent on VM '${def.name}' did not become reachable within ${timeoutMs}ms`,
         );
       }
-    }
+    }));
   }
 }

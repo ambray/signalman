@@ -50,6 +50,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rcgen::{
@@ -184,17 +185,26 @@ impl CertBundle {
 
     /// True iff every cert/key file already exists.
     pub fn complete(&self) -> bool {
-        [
-            &self.ca_cert,
-            &self.ca_key,
-            &self.server_cert,
-            &self.server_key,
-            &self.client_cert,
-            &self.client_key,
-        ]
-        .iter()
-        .all(|p| p.exists())
+        self.files().iter().all(|p| p.exists())
     }
+
+    fn files(&self) -> [&Path; 6] {
+        [
+            self.ca_cert.as_path(),
+            self.ca_key.as_path(),
+            self.server_cert.as_path(),
+            self.server_key.as_path(),
+            self.client_cert.as_path(),
+            self.client_key.as_path(),
+        ]
+    }
+}
+
+/// Summary returned by [`rotate_certs`].
+#[derive(Debug, Clone)]
+pub struct CertRotationReport {
+    pub bundle: CertBundle,
+    pub backup_dir: Option<PathBuf>,
 }
 
 /// Default cert directory: `%ProgramData%\Signalman\certs` on Windows,
@@ -240,6 +250,91 @@ pub fn ensure_certs(dir: &Path) -> Result<CertBundle> {
     // only SYSTEM + Administrators.
     harden_cert_dir_acls(dir)?;
     Ok(bundle)
+}
+
+/// Rotate the service mTLS bundle, preserving the previous complete
+/// bundle under `.rotation-backups/<unix-ms>/`.
+///
+/// The service reads its TLS identity at startup, so callers should
+/// restart `signalman-service` after a successful rotation. If cert
+/// generation fails after a previous complete bundle was backed up, we
+/// best-effort restore the previous files before returning the error.
+pub fn rotate_certs(dir: &Path) -> Result<CertRotationReport> {
+    fs::create_dir_all(dir).with_context(|| format!("creating cert dir {}", dir.display()))?;
+    let bundle = CertBundle::at(dir.to_path_buf());
+    let backup_dir = if bundle.complete() {
+        let backup_dir = next_rotation_backup_dir(dir)?;
+        fs::create_dir_all(&backup_dir)
+            .with_context(|| format!("creating cert backup dir {}", backup_dir.display()))?;
+        backup_bundle(&bundle, &backup_dir)?;
+        Some(backup_dir)
+    } else {
+        None
+    };
+
+    if let Err(err) = generate_certs(&bundle) {
+        if let Some(backup_dir) = &backup_dir {
+            let _ = restore_bundle(&bundle, backup_dir);
+        }
+        return Err(err.context("rotating cert bundle"));
+    }
+
+    harden_cert_dir_acls(dir)?;
+    Ok(CertRotationReport { bundle, backup_dir })
+}
+
+fn next_rotation_backup_dir(dir: &Path) -> Result<PathBuf> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before UNIX_EPOCH")?
+        .as_millis();
+    let root = dir.join(".rotation-backups");
+    let candidate = root.join(millis.to_string());
+    if !candidate.exists() {
+        return Ok(candidate);
+    }
+    for suffix in 1..1000 {
+        let candidate = root.join(format!("{millis}-{suffix}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(anyhow::anyhow!(
+        "could not allocate a unique cert rotation backup directory under {}",
+        root.display()
+    ))
+}
+
+fn backup_bundle(bundle: &CertBundle, backup_dir: &Path) -> Result<()> {
+    for source in bundle.files() {
+        let file_name = source.file_name().ok_or_else(|| {
+            anyhow::anyhow!("cert bundle path has no file name: {}", source.display())
+        })?;
+        fs::copy(source, backup_dir.join(file_name)).with_context(|| {
+            format!(
+                "backing up cert file {} to {}",
+                source.display(),
+                backup_dir.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn restore_bundle(bundle: &CertBundle, backup_dir: &Path) -> Result<()> {
+    for target in bundle.files() {
+        let file_name = target.file_name().ok_or_else(|| {
+            anyhow::anyhow!("cert bundle path has no file name: {}", target.display())
+        })?;
+        fs::copy(backup_dir.join(file_name), target).with_context(|| {
+            format!(
+                "restoring cert file {} from {}",
+                target.display(),
+                backup_dir.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 /// Lock down the cert directory's ACLs so the principals that need
@@ -472,6 +567,48 @@ mod tests {
         assert!(ca_pem.contains("BEGIN CERTIFICATE"));
         let cli_key_pem = fs::read_to_string(&bundle.client_key).unwrap();
         assert!(cli_key_pem.contains("PRIVATE KEY"));
+    }
+
+    #[test]
+    fn rotate_certs_generates_missing_bundle_without_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = rotate_certs(tmp.path()).unwrap();
+
+        assert!(report.bundle.complete(), "rotation should create bundle");
+        assert!(
+            report.backup_dir.is_none(),
+            "missing bundle should not create an empty backup"
+        );
+    }
+
+    #[test]
+    fn rotate_certs_replaces_material_and_preserves_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = CertBundle::at(tmp.path().to_path_buf());
+        generate_certs(&bundle).unwrap();
+        let original_ca = fs::read_to_string(&bundle.ca_cert).unwrap();
+        let original_client_key = fs::read_to_string(&bundle.client_key).unwrap();
+
+        let report = rotate_certs(tmp.path()).unwrap();
+        let backup_dir = report.backup_dir.expect("existing bundle is backed up");
+        let rotated_ca = fs::read_to_string(&report.bundle.ca_cert).unwrap();
+        let rotated_client_key = fs::read_to_string(&report.bundle.client_key).unwrap();
+
+        assert_ne!(original_ca, rotated_ca, "CA cert should rotate");
+        assert_ne!(
+            original_client_key, rotated_client_key,
+            "client key should rotate"
+        );
+        assert_eq!(
+            fs::read_to_string(backup_dir.join(CA_CERT)).unwrap(),
+            original_ca,
+            "backup should preserve previous CA"
+        );
+        assert_eq!(
+            fs::read_to_string(backup_dir.join(CLIENT_KEY)).unwrap(),
+            original_client_key,
+            "backup should preserve previous client key"
+        );
     }
 
     // ── B8 / Sec F8 (Med): TLS protocol-version policy ────────────
