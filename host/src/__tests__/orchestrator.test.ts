@@ -605,6 +605,39 @@ describe("ScenarioOrchestrator", () => {
     expect(attempts).toBeGreaterThanOrEqual(3);
   });
 
+  it("waitForGuestAgents waits for all VMs in parallel", async () => {
+    let resolveVm1!: (value: boolean) => void;
+    let resolveVm2!: (value: boolean) => void;
+    const vm1Connected = vi.fn(
+      () => new Promise<boolean>((resolve) => { resolveVm1 = resolve; }),
+    );
+    const vm2Connected = vi.fn(
+      () => new Promise<boolean>((resolve) => { resolveVm2 = resolve; }),
+    );
+    clients.set("vm1", makeMockClient({ isConnected: vm1Connected }));
+    clients.set("vm2", makeMockClient({ isConnected: vm2Connected }));
+    orchestrator = new ScenarioOrchestrator(backend, clients, config);
+
+    const vmMap = new Map([
+      ["vm1", makeHandle("vm1")],
+      ["vm2", makeHandle("vm2")],
+    ]);
+    const defs: VmDefinition[] = [
+      { name: "vm1", template: "t", guest_agent_port: 50051 },
+      { name: "vm2", template: "t", guest_agent_port: 50052 },
+    ];
+
+    const wait = orchestrator.waitForGuestAgents(vmMap, defs);
+    await Promise.resolve();
+
+    expect(vm1Connected).toHaveBeenCalledTimes(1);
+    expect(vm2Connected).toHaveBeenCalledTimes(1);
+
+    resolveVm1(true);
+    resolveVm2(true);
+    await wait;
+  });
+
   it("waitForGuestAgents throws when no client is configured", async () => {
     const emptyClients = new Map<string, GuestAgentClient>();
     orchestrator = new ScenarioOrchestrator(backend, emptyClients, config);

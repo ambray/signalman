@@ -201,7 +201,7 @@ shipping, CLI parity in place. `signalman.record` ships as the documented stub.
 ### P1: Hyper-V Control-Plane Service — ✅ MERGED 2026-04 (with audit closure)
 **Estimated Duration**: 5-8 days
 **Status**: Merged. Rust crate, named-pipe + TCP transports, mTLS, MSI scaffold,
-Windows SCM lifecycle. **Audit closure (A2)**: closed in `d14034b`. Scenario runs
+Windows SCM lifecycle. **Audit closure (A2)**: closed in `3354ded`. Scenario runs
 and CLI VM verbs now use the same service-first backend selector, so installed
 services are preferred before the direct Hyper-V fallback.
 **Why critical** (historical): Per-call gsudo prompts make the system unusable
@@ -227,10 +227,10 @@ Node children, so every PowerShell call re-elevates via Direct COM.
 **Why constrained**: The 2026-04-24 audit found `f1c1f93` already did the
 heavy lifting (10/10 smoke, 189s vs. 954s, state mutations now block on
 `Wait-Job` against CIM events). The avoidable heartbeat polling gap is closed
-in `d14034b`; orphan handling remains.
+in `3354ded`; orphan handling remains.
 
 - Replace `waitForHeartbeat()` polling with `Register-CimIndicationEvent`
-  on `Msvm_HeartbeatComponent` - closed in `d14034b` for the service path,
+  on `Msvm_HeartbeatComponent` - closed in `3354ded` for the service path,
   matching the direct Hyper-V backend semantics.
 - Make warm-checkpoint the default (already proven: 189s vs. 954s smoke).
 - VM cache TTL (30s) + `invalidate(name)` from `vm_delete` (Phase 3.4
@@ -241,9 +241,9 @@ in `d14034b`; orphan handling remains.
   `kd.exe` reaper if the host process dies before
   `teardownKernelDebugSessions`. Add a try/finally revert-to-pre-run guard
   and a process-exit cleanup hook.
-- **Audit F1**: parallelize `waitForGuestAgents` per VM
-  ([orchestrator.ts:1291-1334](host/src/scenarios/orchestrator.ts:1291)) —
-  currently sequential `for (const def of vmDefs)`.
+- **Audit F1**: parallelize `waitForGuestAgents` per VM — closed in this
+  branch. Each VM keeps its own retry/deadline loop, while the outer wait
+  runs all VM readiness checks concurrently.
 - **Not addressed**: `waitForGuestAgents` server-push readiness — gRPC has
   no push primitive; deferred until guest exposes a readiness stream (proto
   change, see P8).
@@ -301,7 +301,7 @@ P5; in-Signalman residual deliverables are smaller.
 findings + capability/secrets enforcement that were stubs)
 **Status**: mTLS and ECDSA P-256 landed. Capability enforcement,
 environment-backed secret resolution, cert rotation, and the
-`protoc-bin-vendored` supply-chain note are closed in `d14034b`; remaining
+`protoc-bin-vendored` supply-chain note are closed in `3354ded`; remaining
 Critical/High audit hardening is tracked below.
 
 **Originally listed, confirmed shipped:**
@@ -373,10 +373,10 @@ Critical/High audit hardening is tracked below.
   ([guest/src/service.rs:441-446](guest/src/service.rs:441)).
 
 **P4.3 — Capability and secrets ENFORCEMENT (originally listed, were stubs):**
-- **C3 — Capability declaration enforcement.** Closed in `d14034b`.
+- **C3 — Capability declaration enforcement.** Closed in `3354ded`.
   Scenario `capabilities:` now gates declared VMs, networks, and host
   file read/write paths before execution.
-- **C4 — Secret primitive resolution.** Closed in `d14034b` for the v0.1.x
+- **C4 — Secret primitive resolution.** Closed in `3354ded` for the v0.1.x
   env-backed model: `${secret:NAME}` resolves from
   `SIGNALMAN_SECRET_NAME` or `NAME` and fails closed when missing.
 
@@ -917,7 +917,7 @@ read that future work should start with — it cross-references every
 other file but stands on its own. Trigger rules for keeping it
 current live in the doc's "Document maintenance" section.
 
-**P9.7 — DAG-resolved bundle dependencies — closed in `d14034b`**
+**P9.7 — DAG-resolved bundle dependencies — closed in `3354ded`**
 - Bundles can declare a `requires:` field with topological sorting:
   ```yaml
   - id: Mailhog
@@ -1133,7 +1133,7 @@ correlator agent's behaviour on a real Hyper-V endpoint.
 |-------|----------|--------|------|
 | P0: MCP Surface Inversion | 4-5d | ✅ Merged 2026-04 | (closed) |
 | P1: Hyper-V Service | 5-8d | ✅ Merged 2026-04 | Closure bug A2 → P3 |
-| P2: Orchestrator Polish | 3-4d | Surgical + audit | f1c1f93 + cleanup reaper (C7) + parallel agents wait (F1) |
+| P2: Orchestrator Polish | 3-4d | Surgical + audit | f1c1f93 + cleanup reaper (C7); parallel agents wait (F1) closed by the current HEAD commit |
 | P3: Agent UX Baseline | 3-5d | ~50% / re-trimmed 2026-04-25 | Orchestrator event hook (C2-residual) + retry (C5) + structured errors (C6) + trace-id header (C10-residual). C1/C2/C10 substrate moved to P5. |
 | P4: Security Baseline | 9-11d | ~30% / re-scoped 2026-04-25 | 2 Critical (B1, B2) + 4 High (B3-B6) + capability/secrets enforcement (C3, C4) |
 | **P5: Loom Plugin (Agent-Front Surface)** | **4-7d** | **PROMOTED 2026-04-25** | **v0.1.0 critical path. Plugin manifest (P5.1) + scenario↔task mapping (P5.2) + EventBus streaming (P5.3) + TUI forms (P5.4) + directives (P5.5).** |
