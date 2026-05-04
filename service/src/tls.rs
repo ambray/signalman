@@ -351,7 +351,10 @@ fn restore_bundle(bundle: &CertBundle, backup_dir: &Path) -> Result<()> {
 ///      MSI install.
 ///   3. Grants `BUILTIN\Administrators` full control (`*S-1-5-32-544`)
 ///      so install / uninstall / diagnostic flows work.
-///   4. **Grants the current process's user** read access. This is
+///   4. Grants `BUILTIN\Hyper-V Administrators` read access
+///      (`*S-1-5-32-578`) so non-admin Hyper-V operators can read
+///      the client cert bundle.
+///   5. **Grants the current process's interactive user** read access. This is
 ///      what makes the model work for non-Administrator host MCP
 ///      consumers: the host loads `client.pem` + `client.key` from
 ///      the same dir as the service, but typically runs as a
@@ -377,6 +380,8 @@ fn harden_cert_dir_acls(dir: &Path) -> Result<()> {
     let path_str = dir.to_string_lossy();
     let path_arg: &str = &path_str;
 
+    let current_user = current_user_acl_principal();
+
     // Two-step icacls flow so we replace the ENTIRE ACL atomically,
     // not just inherited ACEs. `/inheritance:r` alone leaves any
     // pre-existing EXPLICIT ACEs (e.g. an attacker who added
@@ -392,19 +397,28 @@ fn harden_cert_dir_acls(dir: &Path) -> Result<()> {
     // post-install state (which IS inherited only with
     // `Authenticated Users:R`), so an attacker racing the window
     // gains nothing they didn't already have.
-    let reset = Command::new("icacls")
-        .arg(path_arg)
-        .arg("/reset")
-        .arg("/T")
-        .output()
-        .with_context(|| format!("invoking icacls /reset on {}", dir.display()))?;
-    if !reset.status.success() {
-        return Err(anyhow::anyhow!(
-            "icacls /reset failed for {} (exit {}): {}",
-            dir.display(),
-            reset.status,
-            String::from_utf8_lossy(&reset.stderr).trim()
-        ));
+    //
+    // When running as LocalSystem there is no interactive user to
+    // re-grant. In that mode, do NOT reset first: reset would erase
+    // the installing/operator user's existing read ACE and make the
+    // unelevated host unable to read client certs. The subsequent
+    // `/inheritance:r /grant:r` still enforces the fixed service ACEs
+    // while preserving explicit operator grants laid down at install.
+    if current_user.is_some() {
+        let reset = Command::new("icacls")
+            .arg(path_arg)
+            .arg("/reset")
+            .arg("/T")
+            .output()
+            .with_context(|| format!("invoking icacls /reset on {}", dir.display()))?;
+        if !reset.status.success() {
+            return Err(anyhow::anyhow!(
+                "icacls /reset failed for {} (exit {}): {}",
+                dir.display(),
+                reset.status,
+                String::from_utf8_lossy(&reset.stderr).trim()
+            ));
+        }
     }
 
     // Build the harden invocation. SYSTEM and Administrators always
@@ -416,16 +430,16 @@ fn harden_cert_dir_acls(dir: &Path) -> Result<()> {
         .arg("/grant:r")
         .arg("*S-1-5-18:(OI)(CI)F") // Local SYSTEM SID
         .arg("/grant:r")
-        .arg("*S-1-5-32-544:(OI)(CI)F"); // BUILTIN\Administrators SID
+        .arg("*S-1-5-32-544:(OI)(CI)F") // BUILTIN\Administrators SID
+        .arg("/grant:r")
+        .arg("*S-1-5-32-578:(OI)(CI)R"); // BUILTIN\Hyper-V Administrators SID
 
-    // Add the current process's user as a Read grant. Use the
-    // USERNAME env var when available (set in every Windows session);
-    // skip silently if absent (the SYSTEM/Admins grants alone keep
-    // the dir functional for the service path).
-    if let Ok(user) = std::env::var("USERNAME") {
-        if !user.is_empty() {
-            cmd.arg("/grant:r").arg(format!("{user}:(OI)(CI)R"));
-        }
+    // Add the current process's interactive user as a Read grant when
+    // there is one. LocalSystem presents as the machine account
+    // (`COMPUTERNAME$`) and is not an account `icacls` can grant on
+    // the local machine; SYSTEM already has FullControl above.
+    if let Some(user) = current_user {
+        cmd.arg("/grant:r").arg(format!("{user}:(OI)(CI)R"));
     }
 
     let output = cmd
@@ -445,6 +459,26 @@ fn harden_cert_dir_acls(dir: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn current_user_acl_principal() -> Option<String> {
+    let username = std::env::var("USERNAME").ok()?;
+    let domain = std::env::var("USERDOMAIN").ok();
+    current_user_acl_principal_from(&username, domain.as_deref())
+}
+
+#[cfg(target_os = "windows")]
+fn current_user_acl_principal_from(username: &str, userdomain: Option<&str>) -> Option<String> {
+    let username = username.trim();
+    if username.is_empty() || username.eq_ignore_ascii_case("SYSTEM") || username.ends_with('$') {
+        return None;
+    }
+    let domain = userdomain.map(str::trim).filter(|d| !d.is_empty());
+    match domain {
+        Some(domain) => Some(format!("{domain}\\{username}")),
+        None => Some(username.to_string()),
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -763,6 +797,29 @@ mod tests {
             !stdout.contains("Everyone") && !stdout.contains("S-1-1-0"),
             "Everyone (S-1-1-0) must be re-stripped on the next ensure_certs call; got:\n{}",
             stdout
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn current_user_acl_principal_skips_local_system_machine_account() {
+        assert_eq!(
+            current_user_acl_principal_from("BARBARUS$", Some("WORKGROUP")),
+            None
+        );
+        assert_eq!(current_user_acl_principal_from("SYSTEM", None), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn current_user_acl_principal_qualifies_interactive_user() {
+        assert_eq!(
+            current_user_acl_principal_from("ucale", Some("BARBARUS")),
+            Some("BARBARUS\\ucale".to_string())
+        );
+        assert_eq!(
+            current_user_acl_principal_from("ucale", None),
+            Some("ucale".to_string())
         );
     }
 }
