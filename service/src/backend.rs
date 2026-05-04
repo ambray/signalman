@@ -738,35 +738,61 @@ impl Backend for HyperVBackend {
         let safe_name = escape_powershell_arg(sanitize_vm_name(&handle.name)?);
         let safe_timeout = sanitize_timeout_default(Some(timeout_ms));
         let start = std::time::Instant::now();
-        let deadline = start + std::time::Duration::from_millis(safe_timeout);
-
-        let poll_interval = std::time::Duration::from_millis(2_000);
-        while std::time::Instant::now() < deadline {
-            let script = format!("(Get-VM -Name '{safe_name}').Heartbeat.ToString()");
-            match self.runner.run(&script, 10_000).await {
-                Ok(state) => {
-                    let elapsed_ms = start.elapsed().as_millis() as u64;
-                    let _ = events
-                        .send(WaitAgentEvent::Heartbeat {
-                            state: state.clone(),
-                            elapsed_ms,
-                        })
-                        .await;
-                    if state == "OkApplicationsHealthy" {
-                        let _ = events.send(WaitAgentEvent::Ready).await;
-                        return Ok(true);
-                    }
-                }
-                Err(_) => { /* VM may not be running yet; keep polling */ }
+        let script = format!(
+            "$safeName = '{safe_name}'; \
+             $ready = 'OkApplicationsHealthy'; \
+             $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds({safe_timeout}); \
+             function EmitHeartbeat {{ \
+               param([string]$State) \
+               if ($State) {{ \"HEARTBEAT`t$State\" }} \
+             }}; \
+             $current = $null; \
+             try {{ $current = (Get-VM -Name $safeName).Heartbeat.ToString() }} catch {{}}; \
+             EmitHeartbeat $current; \
+             if ($current -eq $ready) {{ 'READY'; return }}; \
+             $query = \"SELECT * FROM __InstanceModificationEvent WITHIN 1 \
+               WHERE TargetInstance ISA 'Msvm_ComputerSystem' \
+                 AND TargetInstance.ElementName = '{safe_name}'\"; \
+             $sourceId = \"signalman-vmheartbeat-$([guid]::NewGuid())\"; \
+             Register-CimIndicationEvent -Query $query -Namespace 'root\\virtualization\\v2' -SourceIdentifier $sourceId | Out-Null; \
+             try {{ \
+               while ($true) {{ \
+                 $remaining = [int][Math]::Ceiling(($deadline - [DateTimeOffset]::UtcNow).TotalSeconds); \
+                 if ($remaining -le 0) {{ 'TIMEOUT'; return }}; \
+                 $ev = Wait-Event -SourceIdentifier $sourceId -Timeout $remaining; \
+                 if ($null -eq $ev) {{ 'TIMEOUT'; return }}; \
+                 Remove-Event -SourceIdentifier $sourceId -ErrorAction SilentlyContinue; \
+                 $current = $null; \
+                 try {{ $current = (Get-VM -Name $safeName).Heartbeat.ToString() }} catch {{}}; \
+                 EmitHeartbeat $current; \
+                 if ($current -eq $ready) {{ 'READY'; return }} \
+               }} \
+             }} finally {{ \
+               Unregister-Event -SourceIdentifier $sourceId -ErrorAction SilentlyContinue \
+             }}"
+        );
+        let out = self.runner.run(&script, safe_timeout + 5_000).await?;
+        let mut ready = false;
+        for line in out.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            if let Some(state) = line.strip_prefix("HEARTBEAT\t") {
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                let _ = events
+                    .send(WaitAgentEvent::Heartbeat {
+                        state: state.to_string(),
+                        elapsed_ms,
+                    })
+                    .await;
+            } else if line == "READY" {
+                ready = true;
             }
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            tokio::time::sleep(poll_interval.min(remaining)).await;
         }
-        let _ = events.send(WaitAgentEvent::Timeout).await;
-        Ok(false)
+        if ready {
+            let _ = events.send(WaitAgentEvent::Ready).await;
+            Ok(true)
+        } else {
+            let _ = events.send(WaitAgentEvent::Timeout).await;
+            Ok(false)
+        }
     }
 
     async fn set_vm_memory(&self, handle: &VmHandle, memory_mb: u32) -> BackendResult<()> {
@@ -1044,6 +1070,77 @@ mod tests {
             backend.set_vm_memory(&handle("vm1"), 2_000_000).await,
             Err(BackendError::InvalidArgument(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn wait_for_heartbeat_uses_single_event_subscription_and_reports_ready() {
+        let runner = Arc::new(ScriptedRunner::new(vec![Ok(
+            "HEARTBEAT\tStarting\nHEARTBEAT\tOkApplicationsHealthy\nREADY".to_string(),
+        )]));
+        let backend = HyperVBackend::with_runner(runner.clone());
+        let (tx, mut rx) = mpsc::channel(8);
+
+        assert!(backend
+            .wait_for_heartbeat(&handle("vm1"), 30_000, tx)
+            .await
+            .unwrap());
+
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("Register-CimIndicationEvent"));
+        assert!(calls[0].0.contains("Wait-Event"));
+        drop(calls);
+
+        let mut saw_starting = false;
+        let mut saw_ready_heartbeat = false;
+        let mut saw_ready = false;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                WaitAgentEvent::Heartbeat { state, .. } if state == "Starting" => {
+                    saw_starting = true;
+                }
+                WaitAgentEvent::Heartbeat { state, .. } if state == "OkApplicationsHealthy" => {
+                    saw_ready_heartbeat = true;
+                }
+                WaitAgentEvent::Ready => {
+                    saw_ready = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_starting);
+        assert!(saw_ready_heartbeat);
+        assert!(saw_ready);
+    }
+
+    #[tokio::test]
+    async fn wait_for_heartbeat_reports_timeout_from_event_wait() {
+        let runner = Arc::new(ScriptedRunner::new(vec![Ok(
+            "HEARTBEAT\tNoContact\nTIMEOUT".to_string(),
+        )]));
+        let backend = HyperVBackend::with_runner(runner);
+        let (tx, mut rx) = mpsc::channel(8);
+
+        assert!(!backend
+            .wait_for_heartbeat(&handle("vm1"), 30_000, tx)
+            .await
+            .unwrap());
+
+        let mut saw_no_contact = false;
+        let mut saw_timeout = false;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                WaitAgentEvent::Heartbeat { state, .. } if state == "NoContact" => {
+                    saw_no_contact = true;
+                }
+                WaitAgentEvent::Timeout => {
+                    saw_timeout = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_no_contact);
+        assert!(saw_timeout);
     }
 
     #[test]

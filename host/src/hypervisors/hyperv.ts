@@ -31,8 +31,28 @@ import {
   escapePowerShellArg,
   sanitizeTimeout,
 } from "../sanitize.js";
+import type { TlsOptions } from "../guest/client.js";
 
 const exec = promisify(execFile);
+
+export interface HyperVBackendOptions {
+  /** Default guest-agent port used by getStatus health checks. */
+  guestAgentPort?: number;
+  /** TLS material for guest-agent health checks. */
+  guestAgentTls?: TlsOptions;
+  /** Bearer token for guest-agent health checks. */
+  guestAgentAuthToken?: string;
+  /** Per-health-check timeout. Defaults to 1500ms. */
+  guestAgentHealthTimeoutMs?: number;
+  /** Injectable health probe for tests and alternate transports. */
+  guestAgentHealthCheck?: (
+    ipAddress: string,
+    port: number,
+    tlsOptions: TlsOptions | undefined,
+    authToken: string | undefined,
+    timeoutMs: number,
+  ) => Promise<boolean>;
+}
 
 // ── Elevation Helpers ─────────────────────────────────────────────
 
@@ -209,8 +229,43 @@ function mapState(hypervState: number | string): VMState {
   return stateMap[String(hypervState)] ?? "unknown";
 }
 
+async function defaultGuestAgentHealthCheck(
+  ipAddress: string,
+  port: number,
+  tlsOptions: TlsOptions | undefined,
+  authToken: string | undefined,
+  timeoutMs: number,
+): Promise<boolean> {
+  const { GuestAgentClient } = await import("../guest/client.js");
+  const client = new GuestAgentClient(ipAddress, port, tlsOptions, {
+    connectionTimeoutMs: timeoutMs,
+    defaultTimeoutMs: timeoutMs,
+    maxRetries: 0,
+    authToken,
+  });
+  try {
+    return await client.isConnected(timeoutMs);
+  } finally {
+    client.dispose();
+  }
+}
+
 export class HyperVBackend implements HypervisorBackend {
   readonly name = "hyperv";
+  private readonly options: Required<
+    Pick<HyperVBackendOptions, "guestAgentPort" | "guestAgentHealthTimeoutMs">
+  > &
+    Omit<HyperVBackendOptions, "guestAgentPort" | "guestAgentHealthTimeoutMs">;
+
+  constructor(options: HyperVBackendOptions = {}) {
+    this.options = {
+      guestAgentPort: options.guestAgentPort ?? 50051,
+      guestAgentHealthTimeoutMs: options.guestAgentHealthTimeoutMs ?? 1_500,
+      guestAgentTls: options.guestAgentTls,
+      guestAgentAuthToken: options.guestAgentAuthToken,
+      guestAgentHealthCheck: options.guestAgentHealthCheck,
+    };
+  }
 
   async isAvailable(): Promise<boolean> {
     try {
@@ -377,14 +432,36 @@ SELECT * FROM __InstanceModificationEvent WITHIN 1
       IPAddress: string | null;
     }>(script);
 
+    const state = mapState(info.State);
+    const ipAddress = info.IPAddress ?? undefined;
+    const guestAgentReachable =
+      state === "running" && ipAddress
+        ? await this.checkGuestAgentReachable(ipAddress)
+        : false;
+
     return {
       handle,
-      state: mapState(info.State),
-      ipAddress: info.IPAddress ?? undefined,
-      guestAgentReachable: false, // TODO: gRPC health check
+      state,
+      ipAddress,
+      guestAgentReachable,
       uptimeSeconds: info.Uptime,
       memoryUsedMB: info.MemoryAssigned,
     };
+  }
+
+  private async checkGuestAgentReachable(ipAddress: string): Promise<boolean> {
+    const check = this.options.guestAgentHealthCheck ?? defaultGuestAgentHealthCheck;
+    try {
+      return await check(
+        ipAddress,
+        this.options.guestAgentPort,
+        this.options.guestAgentTls,
+        this.options.guestAgentAuthToken,
+        this.options.guestAgentHealthTimeoutMs,
+      );
+    } catch {
+      return false;
+    }
   }
 
   async listVMs(): Promise<VMHandle[]> {

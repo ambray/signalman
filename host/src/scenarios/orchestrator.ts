@@ -248,6 +248,137 @@ export function substituteVarsDeep(
   return value;
 }
 
+class ReferenceResolutionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReferenceResolutionError";
+  }
+}
+
+function mergeRuntimeParams(
+  declared: Record<string, unknown> | undefined,
+  supplied: Record<string, unknown>,
+): Record<string, unknown> {
+  return { ...(declared ?? {}), ...supplied };
+}
+
+function secretFromEnv(name: string): string | undefined {
+  return process.env[`SIGNALMAN_SECRET_${name}`] ?? process.env[name];
+}
+
+function substituteRuntimeRefs(input: string, params: Record<string, unknown>): string {
+  return input.replace(
+    /\$\{(param|secret):([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g,
+    (_match, kind: string, name: string, def?: string) => {
+      if (kind === "secret") {
+        const value = secretFromEnv(name);
+        if (value === undefined) {
+          throw new ReferenceResolutionError(`secret-unresolved: ${name}`);
+        }
+        return value;
+      }
+      if (Object.prototype.hasOwnProperty.call(params, name)) {
+        return String(params[name]);
+      }
+      if (def !== undefined) return def;
+      throw new ReferenceResolutionError(`parameter-unresolved: ${name}`);
+    },
+  );
+}
+
+export function substituteRuntimeRefsDeep(
+  value: unknown,
+  params: Record<string, unknown>,
+): unknown {
+  if (typeof value === "string") return substituteRuntimeRefs(value, params);
+  if (Array.isArray(value)) return value.map((v) => substituteRuntimeRefsDeep(v, params));
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = substituteRuntimeRefsDeep(v, params);
+    }
+    return out;
+  }
+  return value;
+}
+
+function pathAllowed(actual: string, allowed: string[] | undefined): boolean {
+  if (!allowed || allowed.length === 0) return false;
+  const normalizeCapabilityPath = (p: string) =>
+    path.normalize(p).replace(/[\\/]+/g, "/").toLowerCase();
+  const norm = normalizeCapabilityPath(actual);
+  return allowed.some((pattern) => {
+    const normalizedPattern = normalizeCapabilityPath(pattern);
+    if (normalizedPattern.endsWith("/**")) {
+      const prefix = normalizedPattern.slice(0, -3);
+      return norm === prefix || norm.startsWith(`${prefix}/`);
+    }
+    return norm === normalizedPattern;
+  });
+}
+
+function copyStepHostPath(step: Record<string, unknown>): string | undefined {
+  if (typeof step.host_path === "string") return step.host_path;
+  if (step.action !== "vm_copy_file") return undefined;
+
+  const direction = (step.direction as string | undefined) ?? "host_to_guest";
+  const writesHost = direction === "from_vm" || direction === "guest_to_host";
+  const legacyField = writesHost ? step.dest : step.src;
+  return typeof legacyField === "string" ? legacyField : undefined;
+}
+
+function requireCapability(condition: boolean, message: string): void {
+  if (!condition) {
+    throw new Error(`capability-denied: ${message}`);
+  }
+}
+
+export function assertScenarioCapabilities(
+  config: import("./runner.js").ScenarioConfig,
+  workflowMarkdown: string,
+): void {
+  const caps = config.capabilities;
+  if (!caps) return;
+
+  const allowedVms = new Set([...(caps.vms ?? []), ...(caps.hosts ?? [])]);
+  const allowedNetworks = new Set(caps.networks ?? []);
+  const hostRead = caps.host_paths?.read;
+  const hostWrite = caps.host_paths?.write;
+
+  for (const vm of config.vms ?? []) {
+    if (allowedVms.size > 0) {
+      requireCapability(allowedVms.has(vm.name), `VM '${vm.name}' is not declared in capabilities.vms`);
+    }
+    const switchName = vm.network?.switch;
+    if (switchName && allowedNetworks.size > 0) {
+      requireCapability(
+        allowedNetworks.has(switchName),
+        `network '${switchName}' is not declared in capabilities.networks`,
+      );
+    }
+  }
+
+  const setupSteps = [...(config.setup ?? []), ...(config.teardown ?? [])];
+  const workflowSteps = extractToolBlocks(workflowMarkdown).map((block) => ({
+    action: block.tool,
+    ...block.params,
+  }));
+  for (const step of [...setupSteps, ...workflowSteps] as Array<Record<string, unknown>>) {
+    const vm = step.vm as string | undefined;
+    if (vm && allowedVms.size > 0) {
+      requireCapability(allowedVms.has(vm), `step '${step.action}' targets undeclared VM '${vm}'`);
+    }
+    const hostPath = copyStepHostPath(step);
+    if (!hostPath) continue;
+    const direction = (step.direction as string | undefined) ?? "host_to_guest";
+    const writesHost = direction === "from_vm" || direction === "guest_to_host";
+    requireCapability(
+      pathAllowed(hostPath, writesHost ? hostWrite : hostRead),
+      `step '${step.action}' ${writesHost ? "writes" : "reads"} undeclared host path '${hostPath}'`,
+    );
+  }
+}
+
 // ── Orchestrator ───────────────────────────────────────────────────
 
 /**
@@ -617,6 +748,7 @@ export class ScenarioOrchestrator {
      * runId} pair is the run-level constant.
      */
     trace?: { traceId: string; runId: string },
+    parameters: Record<string, unknown> = {},
   ): Promise<ScenarioResult> {
     const startTime = Date.now();
     const setupResults: StepResult[] = [];
@@ -632,8 +764,15 @@ export class ScenarioOrchestrator {
 
     try {
       const loadResult = loadScenario(scenarioPath);
-      const { config: scenarioConfig, assertions } = loadResult;
+      const runtimeParams = mergeRuntimeParams(loadResult.config.parameters, parameters);
+      const scenarioConfig = substituteRuntimeRefsDeep(
+        loadResult.config,
+        runtimeParams,
+      ) as typeof loadResult.config;
+      const workflowMarkdown = substituteRuntimeRefs(loadResult.workflowMarkdown, runtimeParams);
+      const assertions = loadResult.assertions;
       scenarioName = scenarioConfig.name;
+      assertScenarioCapabilities(scenarioConfig, workflowMarkdown);
 
       // Resolve VMs
       const vmDefs: VmDefinition[] = scenarioConfig.vms.map((vm) => ({
@@ -701,8 +840,8 @@ export class ScenarioOrchestrator {
       const workflowOutputs = workflowOutputsSnapshot;
       const workflowScreenshots = new Map<string, string>();
 
-      if (loadResult.workflowMarkdown) {
-        const narrative = loadResult.narrative ?? parseNarrative(loadResult.workflowMarkdown);
+      if (workflowMarkdown) {
+        const narrative = parseNarrative(workflowMarkdown);
         let stepIndex = 0;
 
         if (narrative.steps.length > 0) {
@@ -726,7 +865,7 @@ export class ScenarioOrchestrator {
           }
         } else {
           // Fallback: extract tool blocks directly
-          const blocks = extractToolBlocks(loadResult.workflowMarkdown);
+          const blocks = extractToolBlocks(workflowMarkdown);
           for (let i = 0; i < blocks.length; i++) {
             const sourceKey = `step-${i}`;
             try {

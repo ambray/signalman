@@ -84,6 +84,7 @@ export function createDefaultExecutor(): RunExecutor {
       ctx.scenarioDir,
       ctx.emit,
       { traceId: ctx.traceId, runId: ctx.runId },
+      ctx.parameters,
     );
 
     // Build the per-assertion summary from the orchestrator's normalised

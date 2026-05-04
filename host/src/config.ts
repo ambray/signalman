@@ -30,7 +30,7 @@ export interface SignalmanConfig {
   hypervisor: {
     /** Which hypervisor backend to prefer.
      *
-     * - "service": the signalman-service daemon (preferred-when-available, P1)
+     * - "service": the signalman-service daemon (default; preferred-when-available, P1)
      * - "hyperv": direct PowerShell + gsudo elevation
      * - "vmware": VMware Workstation/Fusion via vmrun
      * - "tart": Tart on Apple Silicon macOS hosts
@@ -117,7 +117,7 @@ export interface SignalmanConfig {
 export function defaultConfig(): SignalmanConfig {
   return {
     hypervisor: {
-      backend: "hyperv",
+      backend: "service",
     },
     guestAgent: {
       defaultPort: 50051,
