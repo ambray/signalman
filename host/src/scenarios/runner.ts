@@ -23,6 +23,7 @@ import {
   validateScenarioConfig,
   validateAssertionConfig,
 } from "./schema.js";
+import type { ValidatedRetryPolicy } from "./schema.js";
 import type { Narrative } from "./narrative.js";
 import {
   writeJsonReport,
@@ -62,6 +63,17 @@ export interface ScenarioConfig {
   version: string;
   tags: string[];
   vms: VmConfig[];
+  capabilities?: {
+    hosts?: string[];
+    networks?: string[];
+    vms?: string[];
+    host_paths?: {
+      read?: string[];
+      write?: string[];
+    };
+  };
+  parameters?: Record<string, unknown>;
+  retry?: unknown;
   /**
    * P9.2 — list of bundle paths applied before `setup:` runs. Each
    * bundle is parsed via {@link parseBundle} and dispatched against
@@ -88,6 +100,7 @@ export interface VmConfig {
   name: string;
   template: string;
   checkpoint_restore?: string;
+  provision_if_missing?: boolean;
   /**
    * Whether `checkpoint_restore` names a warm-state (Running-state)
    * checkpoint. Defaults to `true` — the schema layer fills in the
@@ -171,6 +184,7 @@ export interface KernelDebugConfig {
 export interface SetupStep {
   action: string;
   vm?: string;
+  retry?: ValidatedRetryPolicy;
   [key: string]: unknown;
 }
 

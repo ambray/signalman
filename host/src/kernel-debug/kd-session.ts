@@ -445,6 +445,40 @@ export class KdSession extends EventEmitter {
 
   // ─── Internal: stdout/stderr wiring ────────────────────────────────
 
+  /**
+   * Synchronous emergency shutdown for process-exit paths.
+   *
+   * Node's `exit` event cannot wait for async work, so callers that are
+   * already shutting down use this best-effort path instead of `detach()`.
+   * It sends `qd` when stdin is still writable, then kills the child
+   * immediately. Normal scenario teardown should still call `detach()`.
+   */
+  forceTerminate(): void {
+    if (this._state === "disconnected") return;
+    if (this._state === "idle") {
+      this._state = "disconnected";
+      return;
+    }
+    this._state = "detaching";
+
+    const proc = this.proc;
+    if (!proc) {
+      this._state = "disconnected";
+      return;
+    }
+
+    try {
+      this.sendRawLine("qd");
+    } catch {
+      // stdin may already be closed during process teardown.
+    }
+    try {
+      proc.kill();
+    } catch {
+      // Process may already be dead.
+    }
+  }
+
   private handleStdoutChunk(chunk: string): void {
     const { complete, residual } = splitLines(chunk, this.stdoutResidual);
     this.stdoutResidual = residual;

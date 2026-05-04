@@ -30,6 +30,7 @@ import {
 } from "../provisioning/bundle-types.js";
 import {
   installBundle,
+  BundleDependencyError,
   type BundleCapableClient,
 } from "../provisioning/install-bundle.js";
 import type { HypervisorBackend } from "../hypervisors/interface.js";
@@ -380,6 +381,237 @@ describe("installBundle: parallel groups", () => {
     expect(result.installed).toBe(3);
     expect(client.installSoftware).toHaveBeenCalledTimes(3);
     expect(elapsed).toBeLessThan(250);
+  });
+});
+
+describe("installBundle: requires DAG planning", () => {
+  it("accepts requires in package schemas", () => {
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "dag" },
+      packages: [
+        { id: "node", source: "choco" },
+        {
+          id: "tsc",
+          source: "npm",
+          package_id: "typescript",
+          requires: ["node"],
+        },
+      ],
+    });
+    expect(bundle.packages).toHaveLength(2);
+  });
+
+  it("orders packages by requires even when declaration order is reversed", async () => {
+    const backend = makeMockBackend();
+    const client = makeMockClient({
+      installSoftware: vi.fn().mockResolvedValue({
+        success: true,
+        exitCode: 0,
+        stdout: "installed node",
+        stderr: "",
+        installedPath: "",
+      }),
+      runCommand: vi.fn().mockResolvedValue({
+        exitCode: 0,
+        stdout: "installed npm package",
+        stderr: "",
+        durationMs: 5,
+      }),
+    });
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "dag" },
+      packages: [
+        {
+          id: "tsc",
+          source: "npm",
+          package_id: "typescript",
+          requires: ["node"],
+        },
+        { id: "node", source: "choco" },
+      ],
+    });
+
+    const result = await installBundle(
+      backend,
+      client as unknown as GuestAgentClient,
+      "vm",
+      bundle,
+    );
+
+    expect(result.installed).toBe(2);
+    const installCallOrder = (client.installSoftware as ReturnType<typeof vi.fn>).mock
+      .invocationCallOrder[0];
+    const runCallOrder = (client.runCommand as ReturnType<typeof vi.fn>).mock
+      .invocationCallOrder[0];
+    expect(installCallOrder).toBeLessThan(runCallOrder);
+  });
+
+  it("rejects unknown package dependencies before issuing guest RPCs", async () => {
+    const backend = makeMockBackend();
+    const client = makeMockClient();
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "bad-dag" },
+      packages: [
+        {
+          id: "tsc",
+          source: "npm",
+          package_id: "typescript",
+          requires: ["node"],
+        },
+      ],
+    });
+
+    await expect(
+      installBundle(
+        backend,
+        client as unknown as GuestAgentClient,
+        "vm",
+        bundle,
+      ),
+    ).rejects.toThrow(BundleDependencyError);
+    expect(client.installSoftware).not.toHaveBeenCalled();
+    expect(client.runCommand).not.toHaveBeenCalled();
+  });
+
+  it("rejects dependency cycles", async () => {
+    const backend = makeMockBackend();
+    const client = makeMockClient();
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "cycle" },
+      packages: [
+        { id: "a", source: "winget", requires: ["b"] },
+        { id: "b", source: "winget", requires: ["a"] },
+      ],
+    });
+
+    await expect(
+      installBundle(
+        backend,
+        client as unknown as GuestAgentClient,
+        "vm",
+        bundle,
+      ),
+    ).rejects.toThrow(/cycle/);
+    expect(client.installSoftware).not.toHaveBeenCalled();
+  });
+
+  it("does not attempt packages whose dependencies failed", async () => {
+    const backend = makeMockBackend();
+    const client = makeMockClient({
+      installSoftware: vi.fn().mockRejectedValue(new Error("node failed")),
+      runCommand: vi.fn().mockResolvedValue({
+        exitCode: 0,
+        stdout: "should not run",
+        stderr: "",
+        durationMs: 5,
+      }),
+    });
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "blocked" },
+      packages: [
+        { id: "node", source: "choco" },
+        {
+          id: "tsc",
+          source: "npm",
+          package_id: "typescript",
+          requires: ["node"],
+        },
+      ],
+    });
+
+    const result = await installBundle(
+      backend,
+      client as unknown as GuestAgentClient,
+      "vm",
+      bundle,
+    );
+
+    expect(result.failed).toBe(2);
+    expect(client.installSoftware).toHaveBeenCalledTimes(1);
+    expect(client.runCommand).not.toHaveBeenCalled();
+    expect(result.perPackageResults[1]).toMatchObject({
+      package: "tsc",
+      status: "failed",
+      error: "dependency failed; package was not attempted",
+    });
+  });
+
+  it("continues independent dependency chains after an unrelated dependency fails", async () => {
+    const backend = makeMockBackend();
+    const client = makeMockClient({
+      installSoftware: vi.fn().mockImplementation(async (id: string) => {
+        if (id === "bad-base") throw new Error("bad-base failed");
+        return {
+          success: true,
+          exitCode: 0,
+          stdout: `installed ${id}`,
+          stderr: "",
+          installedPath: "",
+        };
+      }),
+      runCommand: vi.fn().mockResolvedValue({
+        exitCode: 0,
+        stdout: "installed npm package",
+        stderr: "",
+        durationMs: 5,
+      }),
+    });
+    const bundle = parseBundle({
+      apiVersion: "signalman.dev/v1alpha1",
+      kind: "Bundle",
+      metadata: { name: "partial-failure" },
+      packages: [
+        { id: "bad-base", source: "choco" },
+        { id: "good-base", source: "choco" },
+        {
+          id: "blocked-child",
+          source: "npm",
+          package_id: "blocked-child",
+          requires: ["bad-base"],
+        },
+        {
+          id: "good-child",
+          source: "npm",
+          package_id: "good-child",
+          requires: ["good-base"],
+        },
+      ],
+    });
+
+    const result = await installBundle(
+      backend,
+      client as unknown as GuestAgentClient,
+      "vm",
+      bundle,
+    );
+
+    expect(result.installed).toBe(2);
+    expect(result.failed).toBe(2);
+    expect(client.installSoftware).toHaveBeenCalledTimes(2);
+    expect(client.runCommand).toHaveBeenCalledTimes(1);
+    expect(result.perPackageResults).toContainEqual(
+      expect.objectContaining({
+        package: "blocked-child",
+        status: "failed",
+        error: "dependency failed; package was not attempted",
+      }),
+    );
+    expect(result.perPackageResults).toContainEqual(
+      expect.objectContaining({
+        package: "good-child",
+        status: "installed",
+      }),
+    );
   });
 });
 

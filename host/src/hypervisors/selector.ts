@@ -21,7 +21,17 @@ export function buildBackendList(
     guestUser: config.hypervisor.guestCredentials?.username,
     guestPass: config.hypervisor.guestCredentials?.password,
   });
-  const hyperv = new HyperVBackend();
+  const hyperv = new HyperVBackend({
+    guestAgentPort: config.guestAgent.defaultPort,
+    guestAgentAuthToken: config.guestAgent.authToken,
+    guestAgentTls: config.guestAgent.tls.enabled
+      ? {
+          caPath: config.guestAgent.tls.caPath,
+          certPath: config.guestAgent.tls.certPath,
+          keyPath: config.guestAgent.tls.keyPath,
+        }
+      : undefined,
+  });
   const service = new ServiceBackend();
   const tart = new TartBackend({ tartPath: config.hypervisor.tartPath });
 

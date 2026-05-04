@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Signalman guest agent — process control, UI automation, and restriction verification inside VMs"
 license = "MIT"
-repository = "https://github.com/nickthecook/signalman"
+repository = "https://github.com/ambray/signalman"
 
 [dependencies]
 # Async runtime

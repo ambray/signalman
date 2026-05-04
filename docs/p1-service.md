@@ -20,6 +20,14 @@ P1 replaces the per-call elevation with an out-of-process daemon that
 *is* elevated, brokers cmdlet calls behind a gRPC contract, and is
 contacted over a local named pipe + mTLS-protected localhost TCP.
 
+The service still uses PowerShell/CIM cmdlets as the Hyper-V provider
+adapter. That is intentional for v0.1.x: Rust owns the privilege boundary,
+transport, input validation, lifecycle semantics, and testable backend
+contract, while PowerShell remains the supported Microsoft automation
+surface for Hyper-V operations. Replacing those cmdlets with lower-level
+WMI bindings would be a larger provider rewrite; it is not necessary to
+remove runtime UAC prompts or make agent workflows service-first.
+
 ## Architecture
 
 ```
@@ -147,10 +155,12 @@ Remove-Item -Recurse "$env:ProgramData\Signalman\certs"
 
 ## Migrating existing direct/gsudo users
 
-The host's backend selector is **service > hyperv (gsudo) > vmware**.
-No config change is needed: install the service, restart the MCP
-process, and `[signalman] Using service hypervisor backend` will
-appear in the log instead of `Using hyperv hypervisor backend`.
+The host's backend selector is **service > hyperv (gsudo) > vmware >
+tart** on Windows. No config change is needed: install the service,
+restart the MCP/CLI process, and `[signalman] Using service hypervisor
+backend` will appear in the log instead of `Using hyperv hypervisor
+backend`. Scenario runs and `signalman vm ...` subcommands both use this
+selector.
 
 To force the legacy path during migration, set
 `SIGNALMAN_BACKEND=hyperv` or:
@@ -213,9 +223,11 @@ The MCP `signalman.run` verb's default executor
 Every scenario fell through to the gsudo path even when the daemon
 was installed and healthy — defeating the entire P1 contract.
 
-Fix: import `ServiceBackend` in the executor and put it ahead of the
-direct-Hyper-V branch (`service > hyperv > vmware`, matching this
-doc's documented order).
+Fix: import `ServiceBackend` through the shared backend selector and put
+it ahead of the direct-Hyper-V branch (`service > hyperv > vmware`,
+matching this doc's documented order). The CLI `signalman vm ...`
+subcommands also use the same selector so provision/create/cleanup do
+not bypass the daemon.
 
 ### 2. `get_status` PowerShell pipeline returns `{}` for empty IP
 
@@ -258,9 +270,11 @@ host config is forwarded so mTLS scenarios get the right channel.
 * **Pipe ACLs.** The pipe is created with default ACLs (LocalSystem
   + Administrators). For v0.2.0, narrow this to Hyper-V Admins only
   via `SECURITY_ATTRIBUTES` on `ServerOptions`.
-* **Cert rotation.** v0.1.0 ships 1-year ECDSA P-256 certs. There is
-  no automatic renewal. Operators must `uninstall` + reinstall to
-  rotate. v0.2.0 should add `signalman-service certs renew`.
+* **Cert rotation.** Operators can run
+  `signalman-service rotate-certs` to generate a fresh service mTLS
+  bundle. The previous complete bundle is preserved under
+  `.rotation-backups/<unix-ms>/`; restart the service afterward so the
+  TCP mTLS listener loads the new identity.
 * **Client cert auth ≠ user identity.** The mTLS client cert proves
   *something running on this machine has read access to the cert
   bundle*, not *which user is calling*. For v0.1.0 this is fine

@@ -141,6 +141,12 @@ When you are ready to enable TLS, the recommended migration path is:
    audited the entire fleet and decided that the client-cert layer is
    sufficient on its own — the recommended posture is to keep both.
 
+For the host control-plane service cert bundle, rotate in place with
+`signalman-service rotate-certs --cert-dir <dir>` (or omit `--cert-dir`
+for `%ProgramData%\Signalman\certs`). The command preserves the prior
+complete bundle under `.rotation-backups/<unix-ms>/`; restart the service
+afterward so the TCP mTLS listener reloads the new files.
+
 ## Troubleshooting
 
 - `Invalid TLS configuration: --tls-cert and --tls-key must be specified together`
