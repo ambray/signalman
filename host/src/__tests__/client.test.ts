@@ -477,3 +477,203 @@ describe("GuestAgentClient TLS handling", () => {
     );
   });
 });
+
+// ── Channel recovery (Sprint 60.12 Phase B) ──────────────────────
+//
+// Sub-suite covers the consecutive-failure → channel-rebuild contract.
+// `runCommand` is the only RPC wrapper currently wired into the
+// counter; other wrappers can opt in incrementally as we observe their
+// failure patterns.
+
+describe("GuestAgentClient channel recovery", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let mockGuestAgent: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let GuestAgentClient: any;
+  let constructorCallCount: number;
+
+  // Re-init mocks per test so every `new GuestAgentClient` increments
+  // a fresh counter and we can assert on rebuild behaviour cleanly.
+  beforeEach(async () => {
+    constructorCallCount = 0;
+    mockGuestAgent = vi.fn().mockImplementation(function (this: Record<string, unknown>) {
+      constructorCallCount += 1;
+      this.runCommand = vi.fn();
+      this.health = vi.fn();
+      this.close = vi.fn();
+    });
+
+    vi.doMock("@grpc/proto-loader", () => ({
+      loadSync: vi.fn().mockReturnValue({}),
+    }));
+    vi.doMock("@grpc/grpc-js", async () => {
+      const actual = await vi.importActual<typeof grpc>("@grpc/grpc-js");
+      return {
+        ...actual,
+        loadPackageDefinition: vi.fn().mockReturnValue({
+          signalman: { guest: { GuestAgent: mockGuestAgent } },
+        }),
+      };
+    });
+
+    const mod = await import("../guest/client.js");
+    GuestAgentClient = mod.GuestAgentClient;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it("consecutiveFailures defaults to 0 on a fresh client", () => {
+    const client = new GuestAgentClient("127.0.0.1");
+    expect(client.consecutiveFailures).toBe(0);
+  });
+
+  it("target getter exposes the host:port pair", () => {
+    const client = new GuestAgentClient("172.30.0.10", 50051);
+    expect(client.target).toBe("172.30.0.10:50051");
+  });
+
+  it("recoverChannel rebuilds the gRPC client and resets the counter", () => {
+    const client = new GuestAgentClient("127.0.0.1");
+    expect(constructorCallCount).toBe(1);
+    client.recoverChannel();
+    expect(constructorCallCount).toBe(2);
+    expect(client.consecutiveFailures).toBe(0);
+  });
+
+  it("successful runCommand resets consecutiveFailures", async () => {
+    const client = new GuestAgentClient("127.0.0.1");
+    // Stub runCommand on the underlying gRPC client to succeed.
+    (client as { client: { runCommand: unknown } }).client.runCommand = (
+      _req: unknown,
+      _opts: unknown,
+      cb: (err: null, res: object) => void,
+    ) => {
+      cb(null, { exitCode: 0, stdout: "", stderr: "", durationMs: 0 });
+    };
+
+    // Inject a fake failure count first.
+    (client as { _consecutiveFailures: number })._consecutiveFailures = 2;
+    await client.runCommand("echo");
+    expect(client.consecutiveFailures).toBe(0);
+  });
+
+  it("3 consecutive UNAVAILABLE failures auto-recover the channel", async () => {
+    const client = new GuestAgentClient("127.0.0.1");
+    expect(constructorCallCount).toBe(1);
+    const unavailable = Object.assign(new Error("unavailable"), {
+      code: grpc.status.UNAVAILABLE,
+    });
+
+    // Stub runCommand to always fail with UNAVAILABLE. Underlying gRPC
+    // mock honours each invocation (no internal retry loop on the
+    // mock side).
+    (client as { client: { runCommand: unknown } }).client.runCommand = (
+      _req: unknown,
+      _opts: unknown,
+      cb: (err: unknown) => void,
+    ) => {
+      cb(unavailable);
+    };
+
+    // maxRetries: 0 → no internal retries on each runCommand call, so
+    // each call surfaces exactly one transient failure to the counter.
+    for (let i = 0; i < 3; i += 1) {
+      await expect(client.runCommand("x", [], { maxRetries: 0 })).rejects.toBe(
+        unavailable,
+      );
+    }
+
+    // 3 failures → recovery triggered → channel rebuilt → counter reset.
+    expect(constructorCallCount).toBe(2);
+    expect(client.consecutiveFailures).toBe(0);
+  });
+
+  it("non-transient errors don't bump the failure counter", async () => {
+    const client = new GuestAgentClient("127.0.0.1");
+    const notFound = Object.assign(new Error("not found"), {
+      code: grpc.status.NOT_FOUND,
+    });
+    (client as { client: { runCommand: unknown } }).client.runCommand = (
+      _req: unknown,
+      _opts: unknown,
+      cb: (err: unknown) => void,
+    ) => {
+      cb(notFound);
+    };
+
+    for (let i = 0; i < 5; i += 1) {
+      await expect(client.runCommand("x", [], { maxRetries: 0 })).rejects.toBe(
+        notFound,
+      );
+    }
+
+    // Application-level errors are not channel poisoning — counter stays 0,
+    // channel stays unchanged.
+    expect(constructorCallCount).toBe(1);
+    expect(client.consecutiveFailures).toBe(0);
+  });
+
+  // ── REGRESSION: gRPC channel poisoning (the 16-min hang) ──────
+  //
+  // Field bug:
+  //   example-agent-driver-e2e Sprint 60.12 Phase B run
+  //   Step-0 (`Get-Service ExampleAgent`) consistently degraded into
+  //   15-second timeouts after the file-transfer phase tripped on a
+  //   single bad chunk. The guest agent itself was healthy and
+  //   responsive on a fresh client; only the long-lived `setupClient`
+  //   was poisoned. The original failure mode was a 16-minute hang
+  //   while every subsequent RPC waited on a stuck queue head.
+  //
+  // Contract under test:
+  //   3 consecutive transient failures must rebuild the channel
+  //   *automatically*, without operator intervention. After the
+  //   rebuild, the next RPC starts with a fresh counter on a fresh
+  //   socket — there is no carry-over from the old channel state.
+  it("REGRESSION: poisoned channel auto-recovers after 3 transient failures", async () => {
+    const client = new GuestAgentClient("172.30.0.10", 50051);
+    expect(constructorCallCount).toBe(1);
+    const poisoned = Object.assign(new Error("DEADLINE_EXCEEDED"), {
+      code: grpc.status.DEADLINE_EXCEEDED,
+    });
+
+    let onRunCommand: (cb: (err: unknown, res?: object) => void) => void = (cb) =>
+      cb(poisoned);
+    (client as { client: { runCommand: unknown } }).client.runCommand = (
+      _req: unknown,
+      _opts: unknown,
+      cb: (err: unknown, res?: object) => void,
+    ) => {
+      onRunCommand(cb);
+    };
+
+    // 3 failures back-to-back trigger the rebuild on the third.
+    for (let i = 0; i < 3; i += 1) {
+      await expect(client.runCommand("Get-Service ExampleAgent", [], { maxRetries: 0 })).rejects.toBe(
+        poisoned,
+      );
+    }
+    expect(constructorCallCount).toBe(2);
+    expect(client.consecutiveFailures).toBe(0);
+
+    // After the rebuild, the *new* underlying client must be wired
+    // to a working stub for the next call to succeed. (recoverChannel
+    // calls the gRPC constructor again, which re-runs our mock impl
+    // and creates a fresh runCommand on the new instance — patch
+    // that to succeed.)
+    (client as { client: { runCommand: unknown } }).client.runCommand = (
+      _req: unknown,
+      _opts: unknown,
+      cb: (err: null, res: object) => void,
+    ) => cb(null, { exitCode: 0, stdout: "ok", stderr: "", durationMs: 1 });
+
+    onRunCommand = (cb) => cb(null, { exitCode: 0, stdout: "ok", stderr: "", durationMs: 1 });
+    const result = await client.runCommand("Get-Service ExampleAgent", []);
+    expect(result.exitCode).toBe(0);
+    // Counter stays at 0 because the call succeeded against the fresh
+    // channel; no carry-over from the pre-rebuild failures.
+    expect(client.consecutiveFailures).toBe(0);
+  });
+});
