@@ -134,6 +134,17 @@ export interface VmDefinition {
    * is a hard fail with a remediation hint pointing at this flag.
    */
   provision_if_missing?: boolean;
+  /**
+   * When true, skip ALL Hyper-V/VMware management for this VM
+   * (`listVMs`, `restoreCheckpoint`, `startVM`, `waitForHeartbeat`).
+   * The VM must already be running and at the desired state before the
+   * scenario runs; the orchestrator constructs a synthetic VMHandle
+   * with id `"pre-started"` and proceeds straight to
+   * `waitForGuestAgents`. See schema.ts `vmConfigSchema.pre_started`
+   * for the operator-facing rationale (Sprint 60.12 Phase B —
+   * unprivileged host-CLI runs).
+   */
+  pre_started?: boolean;
   /** Guest agent gRPC port (default: 50051). */
   guest_agent_port: number;
   /** Network configuration. */
@@ -539,6 +550,24 @@ export class ScenarioOrchestrator {
       return;
     }
 
+    // Sprint 60.12 Phase B — pre-started VMs route through the
+    // hardened HTTP-over-gRPC helper. The helper adds:
+    //   * SHA-cache fast-path (12 min → <2 s on no-op repeat runs)
+    //   * Atomic temp + rename (no half-written destination on failure)
+    //   * Overall transfer deadline (10 min default)
+    //   * Bounded retry (maxRetries: 1) — avoids 4×60 s retry storms
+    //   * 5 s health probe up front — fails fast on dead guests
+    //
+    // For non-pre-started VMs we keep the simpler chunked-writeFile
+    // loop: those scenarios run with the SystemBackend service which
+    // gives us Copy-VMFile elevation, and the writeFile path is
+    // measurably faster on the cold-cache common case.
+    if (handle.id === "pre-started") {
+      const { copyFileToGuestViaHttp } = await import("../guest/file_transfer.js");
+      await copyFileToGuestViaHttp(client, hostPath, guestPath);
+      return;
+    }
+
     const fd = fs.openSync(hostPath, "r");
     try {
       const buffer = Buffer.allocUnsafe(GUEST_FILE_CHUNK_BYTES);
@@ -761,6 +790,15 @@ export class ScenarioOrchestrator {
         // to care which evaluator produced the result.
         let normalized: AssertionResultEntry[];
 
+        // V2 returns an `overallPassed` verdict that respects
+        // `pass_threshold` and `critical_must_pass`. Stash it for the
+        // status-flip below so a single info-severity miss inside a
+        // scenario whose threshold permits it doesn't flip the whole
+        // run red. Stays `undefined` for V1, which doesn't have these
+        // gates and fall through to the legacy "any failure → failed"
+        // behaviour.
+        let v2OverallPassed: boolean | undefined;
+
         if (needsV2) {
           // Convert workflowOutputs (Map<string,string>) into CommandResult shape.
           const commandResults = new Map<string, CommandResult>();
@@ -772,7 +810,7 @@ export class ScenarioOrchestrator {
               error: "",
             } as unknown as CommandResult);
           }
-          const { results: v2Results } = await evaluateAssertionsV2(
+          const { results: v2Results, passed: v2Passed } = await evaluateAssertionsV2(
             assertions,
             commandResults,
             workflowScreenshots,
@@ -787,6 +825,7 @@ export class ScenarioOrchestrator {
             error: (r as { error?: string }).error,
             severity: ((assertions.assertions[i] as { severity?: string })?.severity ?? "medium") as AssertionResultEntry["severity"],
           }));
+          v2OverallPassed = v2Passed;
         } else {
           const { results: v1Results } = evaluateAssertions(
             assertions, workflowOutputs, workflowScreenshots,
@@ -820,9 +859,20 @@ export class ScenarioOrchestrator {
           );
         }
 
-        const anyFailed = assertionResults.some((r) => !r.passed);
-        if (anyFailed) {
-          status = "failed";
+        // For V2, honour the overall verdict computed against
+        // `pass_threshold` + `critical_must_pass`: a scenario with a
+        // 0.9 threshold and one info-severity miss should land green.
+        // For V1 keep the legacy "any failure → failed" behaviour
+        // since it has no threshold to honour.
+        if (v2OverallPassed !== undefined) {
+          if (!v2OverallPassed) {
+            status = "failed";
+          }
+        } else {
+          const anyFailed = assertionResults.some((r) => !r.passed);
+          if (anyFailed) {
+            status = "failed";
+          }
         }
       }
 
@@ -1743,9 +1793,31 @@ export class ScenarioOrchestrator {
     vmDefs: VmDefinition[],
   ): Promise<Map<string, VMHandle>> {
     const vmMap = new Map<string, VMHandle>();
-    const allVms = await this.backend.listVMs();
+
+    // Sprint 60.12 Phase B — unprivileged host-CLI fast path. When
+    // every VM in the scenario is `pre_started: true`, skip the
+    // hypervisor `listVMs` call entirely; it requires elevation on
+    // Hyper-V (Get-VM enumerates the management OS) and would hang
+    // the scenario behind a UAC prompt under unattended runs.
+    const allPreStarted = vmDefs.length > 0 && vmDefs.every((d) => d.pre_started);
+    const allVms = allPreStarted ? [] : await this.backend.listVMs();
 
     for (const def of vmDefs) {
+      // Pre-started fast path — no listVMs lookup, no checkpoint
+      // restore, no startVM. Construct a synthetic VMHandle whose `id`
+      // is the sentinel string `"pre-started"` so downstream code
+      // (`copyFileToGuest`, scenario hooks) can detect the shape and
+      // route around hypervisor-level operations.
+      if (def.pre_started) {
+        const physicalName = this.config.vmAliases?.[def.name] ?? def.name;
+        vmMap.set(def.name, {
+          id: "pre-started",
+          name: physicalName,
+          backend: this.backend.name,
+        });
+        continue;
+      }
+
       // Resolve alias: check config.vmAliases first, then use the logical name
       const physicalName = this.config.vmAliases?.[def.name] ?? def.name;
       let existing = allVms.find(

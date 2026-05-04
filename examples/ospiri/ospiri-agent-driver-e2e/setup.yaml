@@ -1,0 +1,298 @@
+# Ospiri Agent ↔ Driver End-to-End Scenario — Setup & Configuration
+#
+# Sprint 60.12 deliverable: validate the user-mode integration layer between
+# the Ospiri agent service and the `ospiri.sys` kernel driver.
+#
+# What this scenario proves (vs. ospiri-driver-smoke and ospiri-agent-service):
+#
+#   • ospiri-driver-smoke              — exercises driver IOCTL surface via a
+#                                        user-mode test harness; agent NOT
+#                                        running.
+#   • ospiri-agent-service             — exercises agent without driver
+#                                        (`config.driver.enabled = false`);
+#                                        proves baseline detect-and-report.
+#   • ospiri-agent-driver-e2e (this)   — exercises the FULL stack: agent owns
+#                                        driver lifecycle, agent attaches to
+#                                        the Ospiri.Driver ETW provider,
+#                                        agent OM-evidence drain loop runs.
+#
+# Acceptance criteria mapped from `docs/milestones/sprint-60.12-driver-integration.md`:
+#
+#   1. agent service registers, starts, stops `ospiri` kernel service
+#      automatically (Phase A). [VERIFIED HERE]
+#   2. backend-pushed Rego policy translates into INIT_SCOPE+ADD_RULE
+#      IOCTL sequence on agent start (Phase 7+). [PARTIAL — needs Rego
+#      bundle hand-off through DB policies + GetConfigUpdate gRPC; covered
+#      by the `policy-fetched` step below].
+#   3. RuleMatched ETW event captured by agent. [DEPENDS ON Sprint 60.11
+#      driver TraceLogging provider; this scenario only proves the
+#      consumer-side wiring is up.]
+#   4. AgentEvent.RegistryDeny arrives at backend within 2s. [DEPENDS ON
+#      criterion 3 plus end-to-end gRPC SubmitBatch path.]
+#
+# This scenario lands as the green-skeleton for sprint 60.12: it asserts what's
+# verifiable today and surfaces the criteria that still need wiring as
+# `severity: info` placeholders that flip to `critical` as each gap closes.
+
+name: "Ospiri Agent ↔ Driver End-to-End"
+version: "1.0"
+tags: ["agent", "driver", "kernel", "integration", "etw", "policy-push", "sprint-60.12"]
+
+# VM configuration
+vms:
+  - name: endpoint-1
+    template: windows-11-clean
+    # `pre_started: true` — the host CLI runs unprivileged, so we cannot
+    # let the orchestrator drive Hyper-V (no gsudo wrap, no `Restore-VMSnapshot`,
+    # no `Start-VM`).  Instead, the operator brings the VM up manually
+    # in `driver-ready` state via Hyper-V Manager (or an elevated
+    # bake-script run) BEFORE invoking signalman.  signalman then
+    # constructs a synthetic VMHandle and proceeds straight to
+    # `waitForGuestAgents` on TCP/50051.
+    #
+    # Required pre-state of the VM (matches `driver-ready` checkpoint):
+    #   * test-signing on, Secure Boot off, WDKTestCert in LocalMachine\Root
+    #   * Autologon for `aaron`
+    #   * SignalmanGuest scheduled task running, gRPC on 50051 reachable
+    #   * Firewall inbound rule for TCP/50051
+    #   * C:\Ospiri\drv\ exists
+    #   * NO agent installed (this scenario installs it fresh)
+    #
+    # If the VM is in some other state, the setup steps below will either
+    # idempotently clean up (sc stop / sc delete on agent + driver) or
+    # fail loudly on the first incompatible step — both are preferable
+    # to silently corrupting checkpoint state.
+    pre_started: true
+    guest_agent_port: 50051
+    network:
+      switch: "RevnTestSwitch"
+      static_ip: "172.30.0.10"
+
+# Pre-test setup. Each step runs sequentially; a failure aborts the
+# scenario before the workflow.md tool blocks fire.
+setup:
+  # 0a. Pre-cleanup: stop + delete any leftover ospiri service in the
+  #     driver-ready checkpoint.  Both are idempotent (ignore errors).
+  #     Required because the agent install will create the ospiri service
+  #     itself (Sprint 60.12 Phase A) and a leftover SCM entry would
+  #     cause `ServiceCreateFailed(ERROR_SERVICE_EXISTS)` on a path
+  #     that the lifecycle.install handler is supposed to swallow but
+  #     we don't want to confuse the scenario by relying on that.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "ospiri"]
+    ignore_exit_code: true
+
+  # 0b. Pre-cleanup: stop + delete any leftover OspiriAgent service.
+  #     Same rationale as 0a but for the user-mode service.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "OspiriAgent"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "OspiriAgent"]
+    ignore_exit_code: true
+
+  # 0c. Warm PowerShell (first pwsh cold-start on fresh VM can take 10-20s).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args: ["-Command", "1"]
+    timeout_ms: 30000
+
+  # 0d. Stop any leftover ETW sessions from a previous scenario run.
+  # Without this, the agent's `RealEtwSession::start()` call fails with
+  # `EtwNativeError(AlreadyExist)` because the kernel still has a
+  # session named `AIObservabilitySession` registered.  SCM then kills
+  # the agent service for failing to start within its watchdog timeout,
+  # which makes assertion `agent-service-running` flake on back-to-back
+  # scenario runs without an interleaving VM revert.  `logman stop -ets`
+  # is idempotent against missing sessions.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args:
+      - "-NoProfile"
+      - "-NonInteractive"
+      - "-Command"
+      - "logman stop AIObservabilitySession -ets 2>$null; logman stop 'Ospiri-AgentConsumer-*' -ets 2>$null; exit 0"
+    ignore_exit_code: true
+    timeout_ms: 15000
+
+  # 1a. Stage agent + driver binaries.  PowerShell `New-Item -Force` is
+  # idempotent (creates the dir if missing, no-ops if present) — replaces
+  # the original cmd.exe `if not exist X mkdir X & ...` form which the
+  # signalman-guest sanitiser rejects (the `&` between branches is
+  # detected as shell-chaining; that defence applies to cmd.exe but
+  # not to script interpreters in `is_script_interpreter()`).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args: ["-NoProfile", "-NonInteractive", "-Command", "New-Item -Path 'C:\\Ospiri','C:\\Ospiri\\drv','C:\\Ospiri\\logs','C:\\Ospiri\\policies' -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null"]
+
+  # Driver binaries (test-signed) — stage to the canonical location the
+  # agent's `lifecycle.install` writes into the SCM `ImagePath` field.
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.sys"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.sys"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.cat"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.cat"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.inf"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.inf"
+
+  # Agent binary — built from this worktree (Sprint 60.12 Phase B).
+  # Built via:
+  #   cargo build --release --package ai-observability-agent
+  # Phase B is mandatory for this scenario: the agent must own driver
+  # SCM lifecycle (Phase A) and apply backend-pushed ETW keyword-mask
+  # overrides at runtime (Phase B).  Pre-Phase-B agents lack the
+  # `agent/src/driver/` module entirely and `driver::start` is a no-op
+  # stub; the workflow's "ospiri service Running" assertion would
+  # always fail.
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\.claude\\worktrees\\suspicious-wozniak-0576fe\\target\\release\\ai-observability-agent.exe"
+    guest_path: "C:\\Ospiri\\ospiri-agent.exe"
+
+  # registry-sim.exe — re-used from ospiri-driver-smoke for step "drive
+  # registry traffic" in workflow.md. Source: docs/drv/registry-sim/.
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\target\\x86_64-pc-windows-msvc\\release\\registry-sim.exe"
+    guest_path: "C:\\Ospiri\\registry-sim.exe"
+
+  # 2. Stage agent config: driver subsystem ENABLED, pointing at the
+  # deployed ospiri.sys.  Pushed as a sibling TOML file (the agent's
+  # config schema is TOML, not YAML — `agent/src/config.rs::resolve_config`
+  # uses `toml::from_str`).  The earlier YAML attempt was silently
+  # ignored by the agent (it loaded embedded defaults instead), which
+  # left `driver.enabled = false` and broke every Phase A assertion.
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\signalman\\scenarios\\ospiri-agent-driver-e2e\\agent-config.toml"
+    guest_path: "C:\\Ospiri\\agent.toml"
+
+  # 3. Install + start the agent service.
+  #
+  # The agent's `install` subcommand registers the OspiriAgent SCM
+  # service with `binPath = <exe-path>` (ONLY — the install handler in
+  # `agent/src/main.rs` doesn't propagate a config-path argument).
+  # SCM then invokes the agent without `--config`, so `service_main`
+  # falls through to embedded defaults — which leaves `driver.enabled`
+  # at false.
+  #
+  # We patch the SCM `binPath` immediately after install via
+  # `sc.exe config <svc> binPath= "...exe --config <toml>"`.  After the
+  # patch, the next `sc start` runs the agent with the right `--config`
+  # argv and `service_main` reads our TOML.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: cmd.exe
+    args: ["/c", "C:\\Ospiri\\ospiri-agent.exe install"]
+    run_as: SYSTEM
+    timeout_ms: 30000
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["config", "OspiriAgent", "binPath=", "C:\\Ospiri\\ospiri-agent.exe --config C:\\Ospiri\\agent.toml"]
+    run_as: SYSTEM
+    timeout_ms: 15000
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["start", "OspiriAgent"]
+    run_as: SYSTEM
+    timeout_ms: 30000
+
+  # Give the agent ~10s after start for `driver::start` to complete:
+  #   1. lifecycle.install / lifecycle.start (~1–2s)
+  #   2. OspiriDeviceClient::open (sub-second)
+  #   3. ETW UserTrace session creation (~1–3s)
+  #   4. OM evidence drain loop spawn (instant)
+  - action: wait
+    duration_ms: 10000
+
+# Post-test teardown — gRPC-only cleanup (no Hyper-V calls).
+#
+# We can't `vm_restore` here because that would require the host CLI
+# to drive `Restore-VMSnapshot`, which the unprivileged-host model
+# explicitly avoids.  Instead, we drive the agent + driver back to
+# their pre-test state via the same SCM commands the setup uses.
+# The state delta we leave behind on the VM after teardown:
+#
+#   * `OspiriAgent` and `ospiri` services: removed (matches driver-ready).
+#   * `C:\Ospiri\drv\`, `C:\Ospiri\logs\`: contents preserved for
+#     post-mortem inspection on a failed run.  An operator who wants
+#     a fresh `driver-ready`-equivalent state can `Restore-VMSnapshot`
+#     themselves out-of-band.
+#   * Process state (registry-sim, stub claude.exe etc): killed.
+teardown:
+  # Stop agent first — its shutdown path stops the ospiri driver service
+  # cleanly via `lifecycle.stop`.  Manual `sc.exe stop ospiri` second is
+  # belt-and-suspenders in case the agent crashed before clean shutdown.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "OspiriAgent"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "OspiriAgent"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "ospiri"]
+    ignore_exit_code: true
+
+  # Kill any in-flight workload processes the workflow may have left
+  # running.  registry-sim is the obvious one; ignore_exit_code on each
+  # so a missing process doesn't fail the teardown.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args: ["-NoProfile", "-NonInteractive", "-Command", "Stop-Process -Name 'registry-sim' -Force -ErrorAction SilentlyContinue; 'cleaned up'"]
+    ignore_exit_code: true
+
+# Checkpoint creation requires Hyper-V cmdlets, which the unprivileged-
+# host model can't drive.  Disable both before_test and on_failure
+# snapshotting; recover-from-failure is an operator action via Hyper-V
+# Manager.
+checkpoints:
+  before_test: false
+  on_failure: false

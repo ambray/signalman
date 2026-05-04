@@ -104,6 +104,37 @@ export const vmConfigSchema = z
      * in scenario output.
      */
     warm_checkpoint: z.boolean().default(true),
+    /**
+     * When true, signalman skips ALL Hyper-V/VMware management for this
+     * VM (`listVMs`, `restoreCheckpoint`, `startVM`, `waitForHeartbeat`).
+     * The VM must already be running and at the desired state before
+     * the scenario runs; the orchestrator constructs a synthetic
+     * VMHandle with id `"pre-started"` and proceeds straight to
+     * `waitForGuestAgents` (which only talks to the guest gRPC
+     * endpoint).
+     *
+     * # When to use
+     *
+     * Unprivileged host-CLI runs.  signalman dropped gsudo-based
+     * auto-elevation, so any scenario that uses `vm_restore`,
+     * `vm_checkpoint`, or implicit `Start-VM` must run from an
+     * elevated shell or via the SystemBackend service.  Setting
+     * `pre_started: true` skips the elevation requirement entirely —
+     * the only PowerShell signalman runs is the read-only
+     * `Get-Command Get-VM` availability probe.
+     *
+     * # Interaction with `vm_copy_file`
+     *
+     * For pre-started VMs, `vm_copy_file: host_to_guest` routes
+     * through `copyFileToGuestViaHttp` (chunked-base64 over the guest
+     * gRPC channel) instead of `Copy-VMFile` (which requires Hyper-V
+     * Integration Services + elevation).  See
+     * `host/src/guest/file_transfer.ts` for the reliability contract.
+     *
+     * Default: `false` (existing v0.1.x behaviour — full lifecycle
+     * management).
+     */
+    pre_started: z.boolean().optional(),
     guest_agent_port: z
       .number()
       .int()
