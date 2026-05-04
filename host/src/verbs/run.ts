@@ -225,6 +225,7 @@ export async function runRun(
         scenario_hash: scenarioHash,
       };
       fs.writeFileSync(path.join(recordingDir, "last-run.json"), JSON.stringify(lastRun, null, 2));
+      pruneOrphanedLastRunDirs(layout.scenariosDir, layout.recordingsDir);
     } catch {
       // Recording-write failures should not affect the run result.
     }
@@ -238,4 +239,57 @@ export async function runRun(
     status: "running",
     trace_id,
   };
+}
+
+/**
+ * Garbage-collect stale v0.1.x last-run metadata for scenarios that no
+ * longer exist. This deliberately removes only leaf directories whose
+ * sole file is `last-run.json`; richer v0.2 record/replay captures are
+ * preserved even if their scenario has moved.
+ */
+function pruneOrphanedLastRunDirs(scenariosDir: string, recordingsDir: string): void {
+  if (!fs.existsSync(recordingsDir)) return;
+
+  for (const dir of findLastRunDirs(recordingsDir)) {
+    const rel = path.relative(recordingsDir, dir);
+    if (!rel || !isInside(recordingsDir, dir)) continue;
+    const scenarioSetup = path.join(scenariosDir, rel, "setup.yaml");
+    if (fs.existsSync(scenarioSetup)) continue;
+    if (!isLastRunOnlyDir(dir)) continue;
+    fs.rmSync(dir, { recursive: true, force: true });
+    pruneEmptyParents(path.dirname(dir), recordingsDir);
+  }
+}
+
+function findLastRunDirs(root: string): string[] {
+  const dirs: string[] = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const full = path.join(root, entry.name);
+    if (!entry.isDirectory()) continue;
+    if (fs.existsSync(path.join(full, "last-run.json"))) {
+      dirs.push(full);
+    }
+    dirs.push(...findLastRunDirs(full));
+  }
+  return dirs;
+}
+
+function isLastRunOnlyDir(dir: string): boolean {
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  return entries.length === 1 && entries[0].isFile() && entries[0].name === "last-run.json";
+}
+
+function pruneEmptyParents(dir: string, stopAt: string): void {
+  const stop = path.resolve(stopAt);
+  let current = path.resolve(dir);
+  while (current !== stop && isInside(stop, current)) {
+    if (fs.readdirSync(current).length > 0) return;
+    fs.rmdirSync(current);
+    current = path.dirname(current);
+  }
+}
+
+function isInside(parent: string, child: string): boolean {
+  const rel = path.relative(path.resolve(parent), path.resolve(child));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
