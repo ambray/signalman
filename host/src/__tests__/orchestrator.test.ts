@@ -580,6 +580,33 @@ describe("ScenarioOrchestrator", () => {
     expect(results.some((r) => r.status === "failed")).toBe(true);
   });
 
+  it("runScenario executes teardown after guest readiness failure", async () => {
+    const localBackend = makeMockBackend({
+      listVMs: vi.fn().mockResolvedValue([makeHandle("endpoint-1")]),
+    });
+    const emptyClients = new Map<string, GuestAgentClient>();
+    orchestrator = new ScenarioOrchestrator(localBackend, emptyClients, config);
+    const scenarioDir = path.resolve(
+      "..",
+      ".signalman",
+      "scenarios",
+      "cursor-restrict",
+    );
+
+    const result = await orchestrator.runScenario(scenarioDir);
+
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("No guest client configured for VM 'endpoint-1'");
+    expect(result.teardown_results).toEqual([
+      expect.objectContaining({
+        action: "vm_restore",
+        vm: "endpoint-1",
+        status: "success",
+      }),
+    ]);
+    expect(localBackend.restoreCheckpoint).toHaveBeenCalledTimes(2);
+  });
+
   // ── waitForGuestAgents ──────────────────────────────────────────
 
   it("waitForGuestAgents retries on connection failure", async () => {
