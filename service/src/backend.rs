@@ -1085,11 +1085,12 @@ mod tests {
             .await
             .unwrap());
 
-        let calls = runner.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert!(calls[0].0.contains("Register-CimIndicationEvent"));
-        assert!(calls[0].0.contains("Wait-Event"));
-        drop(calls);
+        {
+            let calls = runner.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert!(calls[0].0.contains("Register-CimIndicationEvent"));
+            assert!(calls[0].0.contains("Wait-Event"));
+        }
 
         let mut saw_starting = false;
         let mut saw_ready_heartbeat = false;
