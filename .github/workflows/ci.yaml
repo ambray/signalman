@@ -67,7 +67,7 @@ jobs:
         run: cargo build --release
       - name: Tests
         working-directory: guest
-        run: cargo test --lib
+        run: cargo test
       - name: Clippy
         working-directory: guest
         run: cargo clippy -- -D warnings
@@ -94,7 +94,7 @@ jobs:
         run: cargo build
       - name: Tests
         working-directory: guest
-        run: cargo test --lib
+        run: cargo test
       - name: Clippy
         working-directory: guest
         run: cargo clippy -- -D warnings

@@ -181,8 +181,7 @@ fn find_token(haystack: &str, needle: &str) -> bool {
     while i + nb.len() <= hb.len() {
         if hb[i..i + nb.len()] == *nb {
             let prev_ok = i == 0 || !is_token_char(hb[i - 1]);
-            let next_ok =
-                i + nb.len() == hb.len() || !is_token_char(hb[i + nb.len()]);
+            let next_ok = i + nb.len() == hb.len() || !is_token_char(hb[i + nb.len()]);
             if prev_ok && next_ok {
                 return true;
             }
