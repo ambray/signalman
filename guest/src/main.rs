@@ -30,15 +30,26 @@ pub mod process;
 mod service;
 pub mod tls;
 pub mod trace;
+mod ui_sidecar;
 pub mod verification;
 
 /// Default gRPC listen address (loopback only for security).
 const DEFAULT_BIND: &str = "127.0.0.1:50051";
+const DEFAULT_UI_SIDECAR_BIND: &str = "127.0.0.1:50151";
 
 /// Signalman Guest Agent — gRPC service for VM process control and verification.
 #[derive(Parser, Debug)]
 #[command(name = "signalman-guest", version, about)]
 struct Cli {
+    /// Run the interactive user-session UI sidecar instead of the
+    /// privileged/non-interactive gRPC guest agent.
+    #[arg(long)]
+    ui_sidecar: bool,
+
+    /// Bind address for `--ui-sidecar`.
+    #[arg(long, default_value = DEFAULT_UI_SIDECAR_BIND, env = "SIGNALMAN_UI_SIDECAR_BIND")]
+    ui_sidecar_bind: String,
+
     /// Bind address in `host:port` format.
     /// Defaults to 127.0.0.1:50051 (loopback only).
     /// Override with `--bind 0.0.0.0:50051` for VM-accessible binding.
@@ -260,6 +271,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    if cli.ui_sidecar {
+        let addr: SocketAddr = cli.ui_sidecar_bind.parse()?;
+        info!(%addr, "Starting Signalman UI sidecar");
+        ui_sidecar::run(addr).await?;
+        return Ok(());
+    }
 
     let addr: SocketAddr = cli.bind.parse()?;
 

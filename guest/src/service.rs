@@ -8,12 +8,13 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use serde_json::json;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
 use crate::guest_proto::guest_agent_server::GuestAgent;
 use crate::guest_proto::*;
-use crate::{process, verification};
+use crate::{process, ui_sidecar, verification};
 
 #[allow(dead_code)]
 #[path = "file_ops.rs"]
@@ -302,6 +303,39 @@ fn contains_shell_metacharacters(command: &str, args: &[String]) -> bool {
         }
     }
     false
+}
+
+fn decode_base64(input: &str) -> anyhow::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf = [0u8; 4];
+    let mut len = 0usize;
+    for b in input.bytes().filter(|b| !b.is_ascii_whitespace()) {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => 64,
+            _ => anyhow::bail!("invalid base64 byte 0x{b:02x}"),
+        };
+        buf[len] = v;
+        len += 1;
+        if len == 4 {
+            out.push((buf[0] << 2) | (buf[1] >> 4));
+            if buf[2] != 64 {
+                out.push((buf[1] << 4) | (buf[2] >> 2));
+            }
+            if buf[3] != 64 {
+                out.push((buf[2] << 6) | buf[3]);
+            }
+            len = 0;
+        }
+    }
+    if len != 0 {
+        anyhow::bail!("invalid base64 length");
+    }
+    Ok(out)
 }
 
 /// GuestAgent gRPC service implementation.
@@ -895,38 +929,157 @@ impl GuestAgent for GuestAgentService {
 
     async fn ui_click(
         &self,
-        _request: Request<UiClickRequest>,
+        request: Request<UiClickRequest>,
     ) -> Result<Response<UiActionResponse>, Status> {
-        Err(Status::unimplemented(
-            "UI automation requires Windows UI Automation API — not yet implemented",
-        ))
+        let req = request.into_inner();
+        let value = ui_sidecar::call(
+            "ui.click",
+            json!({
+                "selector": req.selector,
+                "window_title": req.window_title,
+                "click_type": req.click_type,
+            }),
+        )
+        .await
+        .map_err(|e| Status::failed_precondition(format!("UI sidecar click failed: {e}")))?;
+        Ok(Response::new(UiActionResponse {
+            success: value
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            error: value
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        }))
     }
 
     async fn ui_type(
         &self,
-        _request: Request<UiTypeRequest>,
+        request: Request<UiTypeRequest>,
     ) -> Result<Response<UiActionResponse>, Status> {
-        Err(Status::unimplemented(
-            "UI automation requires Windows UI Automation API — not yet implemented",
-        ))
+        let req = request.into_inner();
+        let value = ui_sidecar::call(
+            "ui.type",
+            json!({
+                "text": req.text,
+                "selector": req.selector,
+                "window_title": req.window_title,
+                "clear_first": req.clear_first,
+            }),
+        )
+        .await
+        .map_err(|e| Status::failed_precondition(format!("UI sidecar type failed: {e}")))?;
+        Ok(Response::new(UiActionResponse {
+            success: value
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            error: value
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        }))
     }
 
     async fn ui_find(
         &self,
-        _request: Request<UiFindRequest>,
+        request: Request<UiFindRequest>,
     ) -> Result<Response<UiFindResponse>, Status> {
-        Err(Status::unimplemented(
-            "UI automation requires Windows UI Automation API — not yet implemented",
-        ))
+        let req = request.into_inner();
+        let value = ui_sidecar::call(
+            "ui.find",
+            json!({
+                "selector": req.selector,
+                "window_title": req.window_title,
+                "timeout_ms": req.timeout_ms,
+            }),
+        )
+        .await
+        .map_err(|e| Status::failed_precondition(format!("UI sidecar find failed: {e}")))?;
+        let elements = value
+            .get("elements")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| UiElement {
+                        name: item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        automation_id: item
+                            .get("automation_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        control_type: item
+                            .get("control_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        class_name: item
+                            .get("class_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        is_enabled: item
+                            .get("is_enabled")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        is_visible: item
+                            .get("is_visible")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        x: item.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                        y: item.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                        width: item.get("width").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                        height: item.get("height").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                        value: item
+                            .get("value")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Response::new(UiFindResponse { elements }))
     }
 
     async fn ui_screenshot(
         &self,
-        _request: Request<UiScreenshotRequest>,
+        request: Request<UiScreenshotRequest>,
     ) -> Result<Response<UiScreenshotResponse>, Status> {
-        Err(Status::unimplemented(
-            "UI screenshot requires Windows GDI capture — not yet implemented",
-        ))
+        let req = request.into_inner();
+        let value = ui_sidecar::call(
+            "ui.screenshot",
+            json!({
+                "window_title": req.window_title,
+                "format": req.format,
+            }),
+        )
+        .await
+        .map_err(|e| Status::failed_precondition(format!("UI sidecar screenshot failed: {e}")))?;
+        let encoded = value
+            .get("image_data_base64")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Status::internal("UI sidecar screenshot omitted image_data_base64"))?;
+        let image_data = decode_base64(encoded)
+            .map_err(|e| Status::internal(format!("decode UI screenshot: {e}")))?;
+        Ok(Response::new(UiScreenshotResponse {
+            image_data,
+            format: value
+                .get("format")
+                .and_then(|v| v.as_str())
+                .unwrap_or("png")
+                .to_string(),
+            width: value.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            height: value.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        }))
     }
 
     // ── Browser Automation (unimplemented) ──────────────────────
@@ -1903,15 +2056,6 @@ mod tests {
     async fn test_unimplemented_rpcs() {
         let svc = make_service();
 
-        let r = svc.ui_click(Request::new(UiClickRequest::default())).await;
-        assert_eq!(r.unwrap_err().code(), tonic::Code::Unimplemented);
-
-        let r = svc.ui_type(Request::new(UiTypeRequest::default())).await;
-        assert_eq!(r.unwrap_err().code(), tonic::Code::Unimplemented);
-
-        let r = svc.ui_find(Request::new(UiFindRequest::default())).await;
-        assert_eq!(r.unwrap_err().code(), tonic::Code::Unimplemented);
-
         let r = svc
             .verify_restriction(Request::new(VerifyRestrictionRequest::default()))
             .await;
@@ -1921,6 +2065,25 @@ mod tests {
             .browser_navigate(Request::new(BrowserNavigateRequest::default()))
             .await;
         assert_eq!(r.unwrap_err().code(), tonic::Code::Unimplemented);
+    }
+
+    #[tokio::test]
+    async fn test_ui_rpcs_require_sidecar() {
+        let svc = make_service();
+
+        let r = svc.ui_click(Request::new(UiClickRequest::default())).await;
+        assert_eq!(r.unwrap_err().code(), tonic::Code::FailedPrecondition);
+
+        let r = svc.ui_type(Request::new(UiTypeRequest::default())).await;
+        assert_eq!(r.unwrap_err().code(), tonic::Code::FailedPrecondition);
+
+        let r = svc.ui_find(Request::new(UiFindRequest::default())).await;
+        assert_eq!(r.unwrap_err().code(), tonic::Code::FailedPrecondition);
+
+        let r = svc
+            .ui_screenshot(Request::new(UiScreenshotRequest::default()))
+            .await;
+        assert_eq!(r.unwrap_err().code(), tonic::Code::FailedPrecondition);
     }
 
     #[tokio::test]
