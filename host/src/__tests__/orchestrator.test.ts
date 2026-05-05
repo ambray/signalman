@@ -274,11 +274,17 @@ describe("ScenarioOrchestrator", () => {
   it("resolveVms waits for Hyper-V heartbeat after starting a restored VM", async () => {
     const waitForHeartbeat = vi.fn().mockResolvedValue(true);
     backend = makeMockBackend({
-      getStatus: vi.fn().mockResolvedValue({
-        handle: makeHandle("vm1"),
-        state: "stopped",
-        guestAgentReachable: false,
-      } as VMStatus),
+      getStatus: vi.fn()
+        .mockResolvedValueOnce({
+          handle: makeHandle("vm1"),
+          state: "stopped",
+          guestAgentReachable: false,
+        } as VMStatus)
+        .mockResolvedValue({
+          handle: makeHandle("vm1"),
+          state: "running",
+          guestAgentReachable: false,
+        } as VMStatus),
       waitForHeartbeat,
     });
     orchestrator = new ScenarioOrchestrator(backend, clients, config);
@@ -300,11 +306,17 @@ describe("ScenarioOrchestrator", () => {
   it("resolveVms can skip heartbeat for backend-only scenarios", async () => {
     const waitForHeartbeat = vi.fn().mockResolvedValue(true);
     backend = makeMockBackend({
-      getStatus: vi.fn().mockResolvedValue({
-        handle: makeHandle("vm1"),
-        state: "stopped",
-        guestAgentReachable: false,
-      } as VMStatus),
+      getStatus: vi.fn()
+        .mockResolvedValueOnce({
+          handle: makeHandle("vm1"),
+          state: "stopped",
+          guestAgentReachable: false,
+        } as VMStatus)
+        .mockResolvedValue({
+          handle: makeHandle("vm1"),
+          state: "running",
+          guestAgentReachable: false,
+        } as VMStatus),
       waitForHeartbeat,
     });
     orchestrator = new ScenarioOrchestrator(backend, clients, config);
