@@ -170,6 +170,39 @@ describe("GuestAgentClient", () => {
           ],
         });
       });
+      this.uIScreenshot = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+        cb(null, {
+          imageData: Buffer.from("png"),
+          format: "png",
+          width: 10,
+          height: 20,
+        });
+      });
+      this.uIFind = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+        cb(null, {
+          elements: [
+            {
+              name: "Save",
+              automationId: "save-button",
+              controlType: "ControlType.Button",
+              className: "Button",
+              isEnabled: true,
+              isVisible: true,
+              x: 1,
+              y: 2,
+              width: 3,
+              height: 4,
+              value: "",
+            },
+          ],
+        });
+      });
+      this.uIClick = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+        cb(null, { success: true, error: "" });
+      });
+      this.uIType = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+        cb(null, { success: true, error: "" });
+      });
       this.close = vi.fn();
     });
 
@@ -286,6 +319,25 @@ describe("GuestAgentClient", () => {
     await expect(client.listDirectory("/tmp")).resolves.toEqual([
       { name: "hello.txt", size: 5, isDir: false, modifiedUnixSecs: 1 },
     ]);
+  });
+
+  it("routes UI automation RPCs through the guest agent", async () => {
+    const client = new GuestAgentClient("127.0.0.1");
+    await expect(client.uiScreenshot()).resolves.toEqual({
+      imageData: Buffer.from("png"),
+      format: "png",
+      width: 10,
+      height: 20,
+    });
+    await expect(client.uiFind("[name='Save']")).resolves.toHaveLength(1);
+    await expect(client.uiClick("[name='Save']")).resolves.toEqual({
+      success: true,
+      error: "",
+    });
+    await expect(client.uiType("hello", { selector: "[automationId='input']" })).resolves.toEqual({
+      success: true,
+      error: "",
+    });
   });
 });
 
