@@ -46,11 +46,51 @@ function Invoke-Step {
 function ConvertTo-YamlScalar {
     param([string]$Value)
 
-    return '"' + ($Value -replace '\\', '\\' -replace '"', '\"') + '"'
+    return "'" + ($Value -replace "'", "''") + "'"
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
+
+Invoke-Step "verify smoke scenario checkpoint contract" {
+    $setupPath = Join-Path $repoRoot ".signalman/scenarios/service-backend-smoke/setup.yaml"
+    $scenarioCheck = @'
+import fs from "node:fs";
+import YAML from "yaml";
+
+const setupPath = process.env.SIGNALMAN_LIVE_SETUP_PATH;
+const expectedCheckpoint = process.env.SIGNALMAN_LIVE_CHECKPOINT;
+const parsed = YAML.parse(fs.readFileSync(setupPath, "utf8"));
+const vm = parsed?.vms?.find((candidate) => candidate?.name === "endpoint-1");
+if (!vm) {
+  throw new Error("service-backend-smoke setup.yaml does not define VM 'endpoint-1'.");
+}
+if (vm.checkpoint_restore !== expectedCheckpoint) {
+  throw new Error(
+    `service-backend-smoke restores checkpoint '${vm.checkpoint_restore}', not '${expectedCheckpoint}'.`,
+  );
+}
+const teardown = parsed?.teardown?.find((step) => step?.action === "vm_restore" && step?.vm === "endpoint-1");
+if (!teardown || teardown.checkpoint !== expectedCheckpoint) {
+  throw new Error(
+    `service-backend-smoke teardown does not restore checkpoint '${expectedCheckpoint}'.`,
+  );
+}
+'@
+    $env:SIGNALMAN_LIVE_SETUP_PATH = $setupPath
+    $env:SIGNALMAN_LIVE_CHECKPOINT = $Checkpoint
+    Push-Location host
+    try {
+        $scenarioCheck | node --input-type=module
+        if ($LASTEXITCODE -ne 0) {
+            throw "scenario checkpoint contract check failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        Pop-Location
+        Remove-Item Env:\SIGNALMAN_LIVE_SETUP_PATH -ErrorAction SilentlyContinue
+        Remove-Item Env:\SIGNALMAN_LIVE_CHECKPOINT -ErrorAction SilentlyContinue
+    }
+}
 
 if (-not $SkipBuild) {
     Invoke-Step "build host CLI" {
