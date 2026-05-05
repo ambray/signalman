@@ -4,6 +4,7 @@ import {
   sanitizeLabel,
   sanitizePath,
   sanitizeCommand,
+  sanitizeCommandArg,
   escapePowerShellArg,
   sanitizeUrl,
   sanitizeTimeout,
@@ -162,6 +163,18 @@ describe('sanitizeCommand', () => {
 
   it('accepts hyphenated commands', () => {
     expect(sanitizeCommand('Get-Process')).toBe('Get-Process');
+  });
+});
+
+describe('sanitizeCommandArg', () => {
+  it('accepts shell syntax because args are escaped data', () => {
+    expect(sanitizeCommandArg('$value = Get-Content file.txt; Write-Output $value')).toBe(
+      '$value = Get-Content file.txt; Write-Output $value',
+    );
+  });
+
+  it('rejects null bytes', () => {
+    expect(() => sanitizeCommandArg('arg\0evil')).toThrow();
   });
 });
 

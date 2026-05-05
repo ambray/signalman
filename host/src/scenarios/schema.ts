@@ -135,6 +135,14 @@ export const vmConfigSchema = z
      * management).
      */
     pre_started: z.boolean().optional(),
+    /**
+     * Whether the orchestrator should wait for the hypervisor's VM
+     * heartbeat integration service after restore/start. Defaults to
+     * true for lifecycle-managed VMs. Set false for backend-only smoke
+     * scenarios that use PowerShell Direct / Copy-VMFile but do not
+     * require guest agent readiness.
+     */
+    wait_for_heartbeat: z.boolean().default(true),
     guest_agent_port: z
       .number()
       .int()

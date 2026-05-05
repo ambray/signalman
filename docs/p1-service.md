@@ -179,6 +179,34 @@ fallback to direct/gsudo is automatic.
 This is the human-driven smoke test. Run after every change to the
 service binary, transport layer, or sanitization code.
 
+For a local developer checkout where the SCM service points at this repo's
+`target\debug\signalman-service.exe`, use the refresh helper from an
+elevated PowerShell:
+
+```powershell
+.\scripts\update-dev-service.ps1
+```
+
+The helper preflight-builds the service into a temporary target directory,
+then uninstalls, rebuilds, installs, and starts the LocalSystem service.
+That is the preferred loop when validating source changes against a real
+Hyper-V VM because the running SCM service locks the normal debug binary.
+
+After refreshing the service, run the backend smoke from a non-elevated
+PowerShell:
+
+```powershell
+.\scripts\live-service-smoke.ps1 `
+  -VmName Win11_test `
+  -Checkpoint base `
+  -GuestUsername test `
+  -GuestPassword '<guest password>'
+```
+
+The smoke wrapper writes credentials only to a temporary config file,
+runs `service-backend-smoke`, removes the temp config, and verifies that
+the named checkpoint still exists afterward.
+
 1. Build a release binary:
    ```powershell
    cargo build --release -p signalman-service

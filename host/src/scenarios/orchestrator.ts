@@ -74,6 +74,13 @@ function computeBackoff(policy: ValidatedRetryPolicy, _attempt: number): number 
   return Math.max(0, Math.floor(base * factor));
 }
 
+function resolveHostFilePath(hostPath: string): string {
+  if (path.isAbsolute(hostPath) || path.win32.isAbsolute(hostPath)) {
+    return hostPath;
+  }
+  return path.resolve(hostPath);
+}
+
 /**
  * Local helper so the class body can stay synchronous when wiring a
  * kernel-debug session. Importing BreakLog at the top is cheap (no
@@ -145,6 +152,12 @@ export interface VmDefinition {
    * unprivileged host-CLI runs).
    */
   pre_started?: boolean;
+  /**
+   * Whether to wait for the hypervisor heartbeat integration service
+   * after restore/start. Defaults to true; backend-only smoke scenarios
+   * can set false when they only need PowerShell Direct / VM file copy.
+   */
+  wait_for_heartbeat?: boolean;
   /** Guest agent gRPC port (default: 50051). */
   guest_agent_port: number;
   /** Network configuration. */
@@ -733,8 +746,9 @@ export class ScenarioOrchestrator {
     guestPath: string,
   ): Promise<void> {
     const client = this.guestClients.get(vmName);
+    const resolvedHostPath = resolveHostFilePath(hostPath);
     if (!client) {
-      await this.backend.copyFileToVM(handle, hostPath, guestPath);
+      await this.backend.copyFileToVM(handle, resolvedHostPath, guestPath);
       return;
     }
 
@@ -752,11 +766,11 @@ export class ScenarioOrchestrator {
     // measurably faster on the cold-cache common case.
     if (handle.id === "pre-started") {
       const { copyFileToGuestViaHttp } = await import("../guest/file_transfer.js");
-      await copyFileToGuestViaHttp(client, hostPath, guestPath);
+      await copyFileToGuestViaHttp(client, resolvedHostPath, guestPath);
       return;
     }
 
-    const fd = fs.openSync(hostPath, "r");
+    const fd = fs.openSync(resolvedHostPath, "r");
     try {
       const buffer = Buffer.allocUnsafe(GUEST_FILE_CHUNK_BYTES);
       let offset = 0;
@@ -785,12 +799,13 @@ export class ScenarioOrchestrator {
     hostPath: string,
   ): Promise<void> {
     const client = this.guestClients.get(vmName);
+    const resolvedHostPath = resolveHostFilePath(hostPath);
     if (!client) {
-      await this.backend.copyFileFromVM(handle, guestPath, hostPath);
+      await this.backend.copyFileFromVM(handle, guestPath, resolvedHostPath);
       return;
     }
-    fs.mkdirSync(path.dirname(hostPath), { recursive: true });
-    const fd = fs.openSync(hostPath, "w");
+    fs.mkdirSync(path.dirname(resolvedHostPath), { recursive: true });
+    const fd = fs.openSync(resolvedHostPath, "w");
     try {
       let offset = 0;
       while (true) {
@@ -873,6 +888,9 @@ export class ScenarioOrchestrator {
         // re-apply here so direct construction (tests, future loaders)
         // gets the same behavior.
         warm_checkpoint: vm.warm_checkpoint ?? true,
+        wait_for_heartbeat: vm.wait_for_heartbeat ?? true,
+        provision_if_missing: vm.provision_if_missing,
+        pre_started: vm.pre_started,
         guest_agent_port: vm.guest_agent_port,
         network: vm.network,
         kernel_debug: vm.kernel_debug,
@@ -2106,6 +2124,33 @@ export class ScenarioOrchestrator {
       const status = await this.backend.getStatus(existing);
       if (status.state !== "running") {
         await this.backend.startVM(existing);
+        const deadline = Date.now() + 60_000;
+        let running = false;
+        while (Date.now() < deadline) {
+          const current = await this.backend.getStatus(existing);
+          if (current.state === "running") {
+            running = true;
+            break;
+          }
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break;
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.min(1_000, remaining)),
+          );
+        }
+        if (!running) {
+          throw new Error(
+            `VM '${def.name}' did not reach running state within 60000ms`,
+          );
+        }
+      }
+      if ((def.wait_for_heartbeat ?? true) && this.backend.waitForHeartbeat) {
+        const ready = await this.backend.waitForHeartbeat(existing, 180_000);
+        if (!ready) {
+          throw new Error(
+            `VM '${def.name}' heartbeat did not become ready within 180000ms`,
+          );
+        }
       }
     }
 
@@ -2137,8 +2182,10 @@ export class ScenarioOrchestrator {
       const handle = vmMap.get(def.name);
       let client = this.guestClients.get(def.name);
       if (!client) {
-        if (!handle || this.backend.name !== "tart") {
-          throw new Error(`No guest client configured for VM '${def.name}'`);
+        const canDiscoverOrCreateClient =
+          Boolean(def.network?.static_ip) || this.backend.name === "tart";
+        if (!handle || !canDiscoverOrCreateClient) {
+          return;
         }
       }
 

@@ -25,7 +25,7 @@ interface FakeStream {
 
 const fakeState: {
   unary: Map<string, GrpcUnaryHandler>;
-  streams: Map<string, () => FakeStream>;
+  streams: Map<string, (req: unknown) => FakeStream>;
   ctorCalls: Array<{ address: string; options: unknown }>;
 } = {
   unary: new Map(),
@@ -84,10 +84,10 @@ vi.mock("@grpc/grpc-js", () => {
       };
     }
     for (const method of ["vmCopyFile", "vmRunCommand", "vmWaitAgent", "vmInstall"]) {
-      this[method] = (_req: unknown): FakeStream => {
+      this[method] = (req: unknown): FakeStream => {
         const handler = fakeState.streams.get(method);
         if (!handler) throw new Error(`unmocked stream ${method}`);
-        return handler();
+        return handler(req);
       };
     }
     this.close = () => {};
@@ -153,6 +153,16 @@ describe("ServiceBackend.isAvailable", () => {
     );
     const b = new ServiceBackend();
     await expect(b.isAvailable()).resolves.toBe(false);
+    b.dispose();
+  });
+
+  it("uses the configured service host and port", async () => {
+    fakeState.unary.set("health", (_req, _opts, cb) => {
+      cb(null, { activeBackend: "hyperv", availableBackends: ["hyperv"] });
+    });
+    const b = new ServiceBackend({ host: "127.0.0.2", port: 17778 });
+    await expect(b.isAvailable()).resolves.toBe(true);
+    expect(fakeState.ctorCalls[0].address).toBe("127.0.0.2:17778");
     b.dispose();
   });
 });
@@ -234,6 +244,27 @@ describe("ServiceBackend.getStatus", () => {
 });
 
 describe("ServiceBackend.executeCommand", () => {
+  it("forwards configured guest credentials", async () => {
+    let capturedReq: unknown = null;
+    fakeState.streams.set("vmRunCommand", (req) => {
+      capturedReq = req;
+      return makeStream([
+        { result: { exitCode: 0, stdout: "ok", stderr: "", durationMs: 1 } },
+      ]);
+    });
+    const b = new ServiceBackend({
+      guestCredentials: { username: "test", password: "secret" },
+    });
+    await b.executeCommand(
+      { id: "1", name: "vm-a", backend: "hyperv" },
+      "whoami",
+    );
+    expect(capturedReq).toMatchObject({
+      credentials: { username: "test", password: "secret" },
+    });
+    b.dispose();
+  });
+
   it("collects the terminal RunResult event from the stream", async () => {
     fakeState.streams.set("vmRunCommand", () =>
       makeStream([
@@ -279,6 +310,27 @@ describe("ServiceBackend.executeCommand", () => {
 });
 
 describe("ServiceBackend.copyFileToVM / copyFileFromVM", () => {
+  it("forwards configured guest credentials for file copy", async () => {
+    let capturedReq: unknown = null;
+    fakeState.streams.set("vmCopyFile", (req) => {
+      capturedReq = req;
+      return makeStream([{ complete: {} }]);
+    });
+    const b = new ServiceBackend({
+      guestCredentials: { username: "test", password: "secret" },
+    });
+    await b.copyFileFromVM(
+      { id: "1", name: "vm-a", backend: "hyperv" },
+      "C:\\guest",
+      "C:\\host",
+    );
+    expect(capturedReq).toMatchObject({
+      credentials: { username: "test", password: "secret" },
+      fromGuest: true,
+    });
+    b.dispose();
+  });
+
   it("invokes vmCopyFile with fromGuest=false for to-VM transfers", async () => {
     const captured: unknown = null;
     fakeState.streams.set("vmCopyFile", () => {

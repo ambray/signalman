@@ -76,6 +76,11 @@ message VmHandle {
   string backend = 3;
 }
 
+message GuestCredentials {
+  string username = 1;
+  string password = 2;
+}
+
 message NetworkConfig {
   string switch_name = 1;
   string static_ip = 2;
@@ -209,6 +214,7 @@ message VmCopyFileRequest {
   string guest_path = 3;
   // false = host -> guest; true = guest -> host
   bool from_guest = 4;
+  GuestCredentials credentials = 5;
 }
 
 message VmCopyFileEvent {
@@ -232,6 +238,7 @@ message VmRunCommandRequest {
   string command = 2;
   repeated string args = 3;
   uint32 timeout_ms = 4;
+  GuestCredentials credentials = 5;
 }
 
 message VmRunCommandEvent {

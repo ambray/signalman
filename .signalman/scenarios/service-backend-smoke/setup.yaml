@@ -1,0 +1,42 @@
+name: "Service Backend Smoke"
+version: "1.0"
+tags: ["hyperv", "service", "smoke"]
+
+vms:
+  - name: endpoint-1
+    template: win11-base
+    checkpoint_restore: base
+    wait_for_heartbeat: false
+    guest_agent_port: 50051
+
+capabilities:
+  vms: ["endpoint-1"]
+  host_paths:
+    read:
+      - ./.signalman/scenarios/service-backend-smoke/fixtures/input.txt
+    write:
+      - ./output/service-backend-smoke/output.txt
+
+setup:
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell.exe
+    args:
+      - -NoProfile
+      - -Command
+      - New-Item -ItemType Directory -Force -Path C:\SignalmanSmoke | Out-Null
+    timeout_ms: 60000
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    host_path: ./.signalman/scenarios/service-backend-smoke/fixtures/input.txt
+    guest_path: C:\SignalmanSmoke\input.txt
+
+teardown:
+  - action: vm_restore
+    vm: endpoint-1
+    checkpoint: base
+
+checkpoints:
+  before_test: false
+  on_failure: false

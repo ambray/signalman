@@ -27,6 +27,7 @@ import {
   sanitizeLabel,
   sanitizePath,
   sanitizeCommand,
+  sanitizeCommandArg,
   escapePowerShellArg,
   sanitizeTimeout,
 } from "../sanitize.js";
@@ -573,12 +574,12 @@ SELECT * FROM __InstanceModificationEvent WITHIN 1
     const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
     const safeCommand = escapePowerShellArg(sanitizeCommand(command));
     const safeTimeout = sanitizeTimeout(timeoutMs);
-    // Defense-in-depth: each arg element is validated through sanitizeCommand
-    // (rejects shell metacharacters) AND escaped for PowerShell single-quoted
-    // strings.  The sanitizeCommand check guards against injection even if
-    // the PowerShell escaping is somehow bypassed.
+    // Args are data passed to the executable, not command names. They may
+    // legitimately contain PowerShell syntax for `powershell -Command`, so
+    // reject only impossible string content and rely on single-quote escaping
+    // for PowerShell interpolation safety.
     const argStr = args
-      .map((a) => `'${escapePowerShellArg(sanitizeCommand(a))}'`)
+      .map((a) => `'${escapePowerShellArg(sanitizeCommandArg(a))}'`)
       .join(", ");
     const script = `
       $result = Invoke-Command -VMName '${safeName}' -ScriptBlock {
@@ -637,10 +638,10 @@ SELECT * FROM __InstanceModificationEvent WITHIN 1
     // ceiling, that's the only safety net needed and it exists only
     // for catastrophic CIM-broker failure, not for coordination.
     //
-    // The "ready" condition is preserved: heartbeat string equals
-    // 'OkApplicationsHealthy' (Hyper-V Heartbeat Service running and
-    // responsive). Any other value, including throws while the VM is
-    // still mid-boot, means "not yet" and we wait for the next event.
+    // Ready means Hyper-V is receiving guest heartbeat traffic.
+    // Windows commonly reports `OkApplicationsUnknown` when OS
+    // heartbeat is healthy but application health is not supplied, so
+    // accept it alongside `OkApplicationsHealthy`.
     //
     // Returns 'true' when ready, 'false' when the dead-man timeout
     // fires (no heartbeat indication delivered within the window).
@@ -648,10 +649,10 @@ SELECT * FROM __InstanceModificationEvent WITHIN 1
     // so callers' contract is unchanged.
     const result = await ps(`
       $safeName = '${safeName}'
-      $ready = 'OkApplicationsHealthy'
+      $ready = @('OkApplicationsHealthy', 'OkApplicationsUnknown')
       $current = $null
       try { $current = (Get-VM -Name $safeName).Heartbeat.ToString() } catch {}
-      if ($current -eq $ready) { 'READY'; return }
+      if ($ready -contains $current) { 'READY'; return }
 
       $query = @"
 SELECT * FROM __InstanceModificationEvent WITHIN 1
@@ -669,7 +670,7 @@ SELECT * FROM __InstanceModificationEvent WITHIN 1
           Remove-Event -SourceIdentifier $sourceId -ErrorAction SilentlyContinue
           $current = $null
           try { $current = (Get-VM -Name $safeName).Heartbeat.ToString() } catch {}
-          if ($current -eq $ready) { 'READY'; return }
+          if ($ready -contains $current) { 'READY'; return }
         }
       } finally {
         Unregister-Event -SourceIdentifier $sourceId -ErrorAction SilentlyContinue

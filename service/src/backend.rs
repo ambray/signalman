@@ -18,7 +18,7 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 
 use crate::sanitize::{
-    escape_powershell_arg, sanitize_command, sanitize_label, sanitize_path,
+    escape_powershell_arg, sanitize_command, sanitize_command_arg, sanitize_label, sanitize_path,
     sanitize_timeout_default, sanitize_url, sanitize_vm_name, SanitizeError,
 };
 
@@ -113,6 +113,12 @@ pub struct CommandResult {
     pub stdout: String,
     pub stderr: String,
     pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuestCredentials {
+    pub username: String,
+    pub password: String,
 }
 
 /// Errors a backend can raise. The service layer maps these onto
@@ -211,6 +217,7 @@ pub trait Backend: Send + Sync {
         host_path: &str,
         guest_path: &str,
         from_guest: bool,
+        credentials: Option<GuestCredentials>,
         events: mpsc::Sender<CopyEvent>,
     ) -> BackendResult<()>;
 
@@ -221,6 +228,7 @@ pub trait Backend: Send + Sync {
         command: &str,
         args: &[String],
         timeout_ms: u64,
+        credentials: Option<GuestCredentials>,
         events: mpsc::Sender<RunEvent>,
     ) -> BackendResult<CommandResult>;
 
@@ -622,21 +630,34 @@ impl Backend for HyperVBackend {
         host_path: &str,
         guest_path: &str,
         from_guest: bool,
+        credentials: Option<GuestCredentials>,
         events: mpsc::Sender<CopyEvent>,
     ) -> BackendResult<()> {
         let safe_name = escape_powershell_arg(sanitize_vm_name(&handle.name)?);
         let safe_host = escape_powershell_arg(sanitize_path(host_path)?);
         let safe_guest = escape_powershell_arg(sanitize_path(guest_path)?);
+        let credential_script = credential_prelude(credentials.as_ref())?;
 
         // Hyper-V's Copy-VMFile + Copy-Item -FromSession don't expose
         // progress callbacks. v0.1.0 emits a single Complete event;
         // future versions can poll the destination size on a side
         // task.  The proto already supports streaming progress.
-        let script = if from_guest {
+        let script = if credentials.is_some() {
+            let direction = if from_guest {
+                format!("Copy-Item -FromSession $session -Path '{safe_guest}' -Destination '{safe_host}'")
+            } else {
+                format!("Copy-Item -ToSession $session -Path '{safe_host}' -Destination '{safe_guest}' -Force")
+            };
+            format!(
+                "{credential_script} \
+                 $session = New-PSSession -VMName '{safe_name}' -Credential $credential; \
+                 try {{ {direction} }} finally {{ if ($session) {{ Remove-PSSession $session }} }}"
+            )
+        } else if from_guest {
             format!(
                 "$session = New-PSSession -VMName '{safe_name}'; \
-                 Copy-Item -FromSession $session -Path '{safe_guest}' -Destination '{safe_host}'; \
-                 Remove-PSSession $session"
+                 try {{ Copy-Item -FromSession $session -Path '{safe_guest}' -Destination '{safe_host}' }} \
+                 finally {{ if ($session) {{ Remove-PSSession $session }} }}"
             )
         } else {
             format!(
@@ -656,6 +677,7 @@ impl Backend for HyperVBackend {
         command: &str,
         args: &[String],
         timeout_ms: u64,
+        credentials: Option<GuestCredentials>,
         events: mpsc::Sender<RunEvent>,
     ) -> BackendResult<CommandResult> {
         let started_at_unix_ms = std::time::SystemTime::now()
@@ -671,16 +693,23 @@ impl Backend for HyperVBackend {
 
         let mut arg_parts: Vec<String> = Vec::with_capacity(args.len());
         for a in args {
-            // Defense in depth: each arg must be free of shell metas
-            // AND escaped for the PS single-quoted string. Mirrors the
-            // TS double-validation.
-            let validated = sanitize_command(a)?;
+            // Args are data passed to the executable, not command names.
+            // They may contain PowerShell syntax for `powershell -Command`;
+            // PowerShell interpolation safety comes from single-quote escaping.
+            let validated = sanitize_command_arg(a)?;
             arg_parts.push(format!("'{}'", escape_powershell_arg(validated)));
         }
         let arg_str = arg_parts.join(", ");
+        let credential_script = credential_prelude(credentials.as_ref())?;
+        let credential_arg = if credentials.is_some() {
+            "-Credential $credential "
+        } else {
+            ""
+        };
 
         let script = format!(
-            "$result = Invoke-Command -VMName '{safe_name}' -ScriptBlock {{ \
+            "{credential_script} \
+             $result = Invoke-Command -VMName '{safe_name}' {credential_arg}-ScriptBlock {{ \
                 $output = & '{safe_cmd}' {arg_str} 2>&1; \
                 @{{ ExitCode = $LASTEXITCODE; Output = ($output | Out-String) }} \
               }}; \
@@ -740,7 +769,7 @@ impl Backend for HyperVBackend {
         let start = std::time::Instant::now();
         let script = format!(
             "$safeName = '{safe_name}'; \
-             $ready = 'OkApplicationsHealthy'; \
+             $ready = @('OkApplicationsHealthy', 'OkApplicationsUnknown'); \
              $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds({safe_timeout}); \
              function EmitHeartbeat {{ \
                param([string]$State) \
@@ -749,7 +778,7 @@ impl Backend for HyperVBackend {
              $current = $null; \
              try {{ $current = (Get-VM -Name $safeName).Heartbeat.ToString() }} catch {{}}; \
              EmitHeartbeat $current; \
-             if ($current -eq $ready) {{ 'READY'; return }}; \
+             if ($ready -contains $current) {{ 'READY'; return }}; \
              $query = \"SELECT * FROM __InstanceModificationEvent WITHIN 1 \
                WHERE TargetInstance ISA 'Msvm_ComputerSystem' \
                  AND TargetInstance.ElementName = '{safe_name}'\"; \
@@ -765,7 +794,7 @@ impl Backend for HyperVBackend {
                  $current = $null; \
                  try {{ $current = (Get-VM -Name $safeName).Heartbeat.ToString() }} catch {{}}; \
                  EmitHeartbeat $current; \
-                 if ($current -eq $ready) {{ 'READY'; return }} \
+                 if ($ready -contains $current) {{ 'READY'; return }} \
                }} \
              }} finally {{ \
                Unregister-Event -SourceIdentifier $sourceId -ErrorAction SilentlyContinue \
@@ -854,6 +883,34 @@ async fn wait_for_stable_state(runner: &dyn PsRunner, safe_name: &str) -> Backen
          }}"
     );
     runner.run(&script, 900_000).await?;
+    Ok(())
+}
+
+fn credential_prelude(credentials: Option<&GuestCredentials>) -> BackendResult<String> {
+    let Some(credentials) = credentials else {
+        return Ok(String::new());
+    };
+    validate_credential_field("username", &credentials.username)?;
+    validate_credential_field("password", &credentials.password)?;
+    let username = escape_powershell_arg(&credentials.username);
+    let password = escape_powershell_arg(&credentials.password);
+    Ok(format!(
+        "$securePassword = ConvertTo-SecureString '{password}' -AsPlainText -Force; \
+         $credential = [System.Management.Automation.PSCredential]::new('{username}', $securePassword);"
+    ))
+}
+
+fn validate_credential_field(name: &str, value: &str) -> BackendResult<()> {
+    if value.is_empty() {
+        return Err(BackendError::InvalidArgument(format!(
+            "Guest credential {name} must not be empty"
+        )));
+    }
+    if value.contains('\0') || value.chars().any(char::is_control) {
+        return Err(BackendError::InvalidArgument(format!(
+            "Guest credential {name} contains control characters"
+        )));
+    }
     Ok(())
 }
 
@@ -1041,21 +1098,110 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_command_rejects_metacharacter_arg() {
+    async fn execute_command_rejects_metacharacter_command_name() {
         let runner = Arc::new(ScriptedRunner::new(vec![]));
         let backend = HyperVBackend::with_runner(runner);
         let (tx, _rx) = mpsc::channel(8);
         let err = backend
             .execute_command(
                 &handle("vm1"),
-                "powershell",
-                &["whoami; rm -rf /".to_string()],
+                "powershell; rm -rf /",
+                &[],
                 30_000,
+                None,
                 tx,
             )
             .await
             .unwrap_err();
         assert!(matches!(err, BackendError::InvalidArgument(_)));
+    }
+
+    #[tokio::test]
+    async fn execute_command_allows_powershell_syntax_in_arguments() {
+        let runner = Arc::new(ScriptedRunner::new(vec![Ok(
+            r#"{"ExitCode":0,"Output":"ok"}"#.to_string(),
+        )]));
+        let backend = HyperVBackend::with_runner(runner.clone());
+        let (tx, _rx) = mpsc::channel(8);
+
+        let result = backend
+            .execute_command(
+                &handle("vm1"),
+                "powershell.exe",
+                &[
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    "$value = 'ok'; Write-Output $value".to_string(),
+                ],
+                30_000,
+                None,
+                tx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.stdout, "ok");
+
+        let calls = runner.calls.lock().unwrap();
+        assert!(calls[0].0.contains("Write-Output"));
+    }
+
+    #[tokio::test]
+    async fn execute_command_uses_supplied_guest_credentials() {
+        let runner = Arc::new(ScriptedRunner::new(vec![Ok(
+            r#"{"ExitCode":0,"Output":"ok"}"#.to_string(),
+        )]));
+        let backend = HyperVBackend::with_runner(runner.clone());
+        let (tx, _rx) = mpsc::channel(8);
+
+        let result = backend
+            .execute_command(
+                &handle("vm1"),
+                "whoami",
+                &[],
+                30_000,
+                Some(GuestCredentials {
+                    username: "test".to_string(),
+                    password: "secret".to_string(),
+                }),
+                tx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+
+        let calls = runner.calls.lock().unwrap();
+        assert!(calls[0].0.contains("ConvertTo-SecureString 'secret'"));
+        assert!(calls[0].0.contains("PSCredential"));
+        assert!(calls[0].0.contains("-Credential $credential"));
+    }
+
+    #[tokio::test]
+    async fn copy_file_with_credentials_uses_powershell_direct_session() {
+        let runner = Arc::new(ScriptedRunner::new(vec![Ok(String::new())]));
+        let backend = HyperVBackend::with_runner(runner.clone());
+        let (tx, _rx) = mpsc::channel(8);
+
+        backend
+            .copy_file(
+                &handle("vm1"),
+                "C:\\host.txt",
+                "C:\\guest.txt",
+                false,
+                Some(GuestCredentials {
+                    username: "test".to_string(),
+                    password: "secret".to_string(),
+                }),
+                tx,
+            )
+            .await
+            .unwrap();
+
+        let calls = runner.calls.lock().unwrap();
+        assert!(calls[0]
+            .0
+            .contains("New-PSSession -VMName 'vm1' -Credential $credential"));
+        assert!(calls[0].0.contains("Copy-Item -ToSession $session"));
+        assert!(!calls[0].0.contains("Copy-VMFile"));
     }
 
     #[tokio::test]
@@ -1142,6 +1288,20 @@ mod tests {
         }
         assert!(saw_no_contact);
         assert!(saw_timeout);
+    }
+
+    #[tokio::test]
+    async fn wait_for_heartbeat_treats_unknown_application_health_as_ready() {
+        let runner = Arc::new(ScriptedRunner::new(vec![Ok(
+            "HEARTBEAT\tOkApplicationsUnknown\nREADY".to_string(),
+        )]));
+        let backend = HyperVBackend::with_runner(runner);
+        let (tx, _rx) = mpsc::channel(8);
+
+        assert!(backend
+            .wait_for_heartbeat(&handle("vm1"), 30_000, tx)
+            .await
+            .unwrap());
     }
 
     #[test]

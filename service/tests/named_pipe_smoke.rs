@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use signalman_service::backend::{
-    Backend, BackendResult, CheckpointHandle, CheckpointInfo, CommandResult, CopyEvent, RunEvent,
-    VmConfig, VmHandle, VmState, VmStatus, WaitAgentEvent,
+    Backend, BackendResult, CheckpointHandle, CheckpointInfo, CommandResult, CopyEvent,
+    GuestCredentials, RunEvent, VmConfig, VmHandle, VmState, VmStatus, WaitAgentEvent,
 };
 use signalman_service::proto::{self, signalman_service::control_plane_client::ControlPlaneClient};
 use signalman_service::service::ControlPlaneService;
@@ -104,6 +104,7 @@ impl Backend for MockBackend {
         _host_path: &str,
         _guest_path: &str,
         _from_guest: bool,
+        _credentials: Option<GuestCredentials>,
         events: mpsc::Sender<CopyEvent>,
     ) -> BackendResult<()> {
         let _ = events
@@ -121,6 +122,7 @@ impl Backend for MockBackend {
         _cmd: &str,
         _args: &[String],
         _timeout_ms: u64,
+        _credentials: Option<GuestCredentials>,
         events: mpsc::Sender<RunEvent>,
     ) -> BackendResult<CommandResult> {
         let _ = events
@@ -334,6 +336,7 @@ async fn pipe_smoke() {
             command: "echo".into(),
             args: vec!["hi".into()],
             timeout_ms: 30_000,
+            credentials: None,
         })
         .await
         .expect("run rpc")
