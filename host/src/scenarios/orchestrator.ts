@@ -2117,6 +2117,25 @@ export class ScenarioOrchestrator {
       const status = await this.backend.getStatus(existing);
       if (status.state !== "running") {
         await this.backend.startVM(existing);
+        const deadline = Date.now() + 60_000;
+        let running = false;
+        while (Date.now() < deadline) {
+          const current = await this.backend.getStatus(existing);
+          if (current.state === "running") {
+            running = true;
+            break;
+          }
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break;
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.min(1_000, remaining)),
+          );
+        }
+        if (!running) {
+          throw new Error(
+            `VM '${def.name}' did not reach running state within 60000ms`,
+          );
+        }
       }
       if ((def.wait_for_heartbeat ?? true) && this.backend.waitForHeartbeat) {
         const ready = await this.backend.waitForHeartbeat(existing, 180_000);
