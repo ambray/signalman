@@ -1,6 +1,6 @@
 # Signalman — Status & Resume Context
 
-> Last updated: 2026-05-04. Living document — update on every commit
+> Last updated: 2026-05-05. Living document — update on every commit
 > that changes scope, ships a feature, closes an audit finding, or
 > introduces a new TODO bucket. See [Document maintenance](#document-maintenance)
 > for the trigger rules.
@@ -12,7 +12,9 @@ v0.1.0 (six MCP verbs, Loom-fronted plugin, mTLS guest agent, signed-MSI
 release pipeline) plus the P9 provisioning + bootstrap stack that closes
 the onboarding gap (`signalman vm provision` / `vm fetch-template` /
 `vm install-bundle` / `vm cleanup`, `signalman init`, software-bundle
-schema, idempotency contract, `docs/bootstrap.md`). Versions in every
+schema, idempotency contract, `docs/bootstrap.md`) and the first
+interactive user-session UI sidecar (`signalman-guest --ui-sidecar`) with
+MCP tools for screenshots, UIA find, click, and type. Versions in every
 manifest read `0.1.0` and need to bump to `0.1.1` together with a tag
 push to ship — the release workflow validates the manifest version
 matches the tag before publishing. The four GitHub repo secrets
@@ -43,17 +45,16 @@ bump the four version pins, `git tag v0.1.1 && git push origin v0.1.1`.
 ## Latest commits (top 10)
 
 ```
-HEAD Parallelize guest agent readiness waits
-3354ded Integrate service-first Hyper-V control plane
-50807f6 P9.2-followup + P9.4 + P9.6: proto bump, idempotency tests, bootstrap docs
-e1be740 P9.1 + P9.2 + P9.3 + P9.5: provisioning + bootstrap (v0.1.1)
-271559d ROADMAP: P9 provisioning + bootstrap (v0.1.1, NEW 2026-04-28)
-e23d838 P6: release pipeline scaffolding (MSI sign + npm + crate publish)
-dfb524b P5.3 + P5.4 + P5.5: EventBus streaming, form descriptors, integration provider
-6608c06 P4.c-B2 / Sec F1: client-cert SHA-256 pinning on guest agent
-7a07a87 P4.c-B9 + P7 D2 + P7 D4: denylist clarification, mTLS smoke, gated E2E
-89b0d1f P7 D2-prep + workflow API tests: validate snapshot/copy/install routing
-b426756 P4.c-B8 + P6-A3-A6 + B12 + coverage wiring (parallel-agent batch + SHA pin)
+ba4e8ba Merge pull request #4 from ambray/codex/ui-sidecar-mcp
+19ca4e1 Add guest UI sidecar MCP tools
+24cb759 Merge pull request #3 from ambray/codex/service-credentials-scm-heartbeat
+d8bf2fb Preserve Windows host paths cross-platform
+a1c8679 Wait for VM running state before scenario steps
+60005d8 Harden live service smoke wrapper
+3dc6466 Add live service smoke helper
+b468bb8 Document dev service refresh workflow
+f81ae29 Allow service transport overrides
+288cb83 Add service-backed scenario smoke
 ```
 
 ## Audit closure (security findings)
@@ -96,12 +97,12 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
 
 | Crate / package | Test count (source) | Files | Last verified |
 |---|---|---|---|
-| Host (TypeScript / vitest) — `host/src/__tests__/` | 965 | 39 | 2026-05-04 |
-| Host (TypeScript / vitest) — `host/src/verbs/__tests__/` | 46 | 5 | 2026-05-04 |
-| Guest (Rust / cargo) | 105 | 8 | 2026-04-28 |
-| Service (Rust / cargo) | 95 | 8 (incl. 2 integration files) | 2026-04-28 |
+| Host (TypeScript / vitest) — `host/src/__tests__/` | 980 | 39 | 2026-05-05 |
+| Host (TypeScript / vitest) — `host/src/verbs/__tests__/` | 46 | 5 | 2026-05-05 |
+| Guest (Rust / cargo) | 108 | 9 | 2026-05-05 |
+| Service (Rust / cargo) | 108 | 8 (incl. 2 integration files) | 2026-05-05 |
 | Plugin (Rust / cargo) | 135 | 11 (incl. 2 integration files) | 2026-04-28 |
-| **Total** | **1346** test attributes / `it()` calls | **71** files | |
+| **Total** | **1377** test attributes / `it()` calls | **72** files | |
 
 > The ROADMAP headline "151 Rust + 769 TS = 920" predates the v0.1.1
 > P9 work (which added the provisioning, bundle, idempotency, and
@@ -146,6 +147,9 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
   (scenario + step retry policy).
 - **`host/src/__tests__/trace.test.ts`** — `signalman-trace-id` header
   generation + propagation (closes P3 C10-residual TS side).
+- **`host/src/__tests__/client.test.ts`** + **`host/src/verbs/__tests__/advanced-rename.test.ts`** —
+  guest-agent client RPC routing and advanced MCP tool registration,
+  including the `vm_ui_*` sidecar-facing UI tools.
 - **`host/src/verbs/__tests__/run-lifecycle.test.ts`** — six-verb
   surface end-to-end with mocked executor.
 - **`guest/src/cert_pin.rs` `tests` mod** (13 unit cases) +
@@ -153,6 +157,8 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
   `cert_pin_mismatched_*`) — pin enforcement (B2 / Sec F1).
 - **`guest/src/main.rs auth_tests`** — bearer-token parsing, constant-time
   compare, allow-insecure invariants (B3, B7).
+- **`guest/src/ui_sidecar.rs` `tests` mod** — JSON-line response shape
+  and unknown-method error contract for the user-session UI sidecar.
 - **`service/tests/named_pipe_smoke.rs`** — Rust↔Rust gRPC over Windows
   named pipe; the only existing integration test on the service crate
   before mtls_smoke landed.
@@ -262,6 +268,14 @@ Promised work closed in `3354ded`:
 ### v0.2.0+ — record/replay, ephemeral provisioning, per-VM cert identity
 
 Tracked in ROADMAP § "v0.2.0 Roadmap":
+
+- **User-session UI sidecar** — First slice closed in `ba4e8ba`:
+  `signalman-guest --ui-sidecar` runs in the interactive desktop session;
+  the service-facing guest agent proxies `UIClick`, `UIType`, `UIFind`,
+  and `UIScreenshot` to it over loopback; host MCP exposes
+  `vm_ui_screenshot`, `vm_ui_find`, `vm_ui_click`, and `vm_ui_type`.
+  Follow-up work should replace per-action PowerShell startup with a
+  native long-lived helper and add live VM smoke coverage.
 
 - **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
   calls into `.signalman/recordings/`. The agent-first DevOps
@@ -443,7 +457,7 @@ the codebase.
 | Loom-fronted topology is the default agent surface for v0.1.0; the standalone `signalman.*` MCP server in `host/` keeps shipping for direct CLI/CI consumers and as the substrate the Loom plugin shells to. | ROADMAP § "2026-04-25 architecture decision (Loom-fronted agent surface)"; `README.md` Quick Start. |
 | Plugin integration is **process-isolated**: the Loom plugin shells out to the Signalman CLI; Signalman is not a Rust dependency of Loom. | ROADMAP § "P5 Topology and boundaries". |
 | Hyper-V is the primary hypervisor backend; VMware Workstation remains a working fallback but is no longer the default. macOS support starts with a Tart-backed host backend (v0.2.0+ may add a first-party Swift helper). | ROADMAP § "2026-04-17 change" + "2026-04-26 Mac virtualization decision". |
-| UI / Browser / Verify guest RPCs ship as proto placeholders returning `Status::unimplemented`; the slot is reserved to avoid a breaking proto change later. Scenarios should rely on command-output assertions, ETW captures, and network/file-access tests. | ROADMAP § "Cuts and Deferrals 2026-04-25"; `proto/guest.proto`; `guest/src/service.rs:565-641`. |
+| UI automation uses a user-session sidecar, not the Windows service desktop. The guest service proxies UI RPCs to `SIGNALMAN_UI_SIDECAR_ADDR` over loopback; the sidecar is launched with `signalman-guest --ui-sidecar` in the logged-in user's session. Browser and some verification RPCs remain future slots. | `docs/ui-sidecar.md`; `guest/src/ui_sidecar.rs`; `guest/src/service.rs`; `host/src/tools/vm-ui.ts`. |
 | `template:` field on scenario `vms[]` is **decorative** for v0.1.0; orchestrator never calls `resolveTemplate`. Wired for real in v0.2.0-2 (C9). | ROADMAP § "Cuts and Deferrals" + § "v0.2.0-2"; `host/src/scenarios/templates.ts:36-74`. |
 | Denylist is a **tripwire, not a boundary**: catches blatant agent hallucinations cheaply; the actual security boundary is mTLS + named-pipe ACL + cert pin. Positive allowlist explicitly rejected for generic VM scenario execution. | `guest/src/service.rs:35-90`; ROADMAP § "P4.2 B9". |
 | Every cross-process contract needs at least one test pinning its shape. Today: host TS↔service Rust (P7 D2 closed via `service/tests/mtls_smoke.rs`); host TS↔guest agent gRPC (mock-backed today; real-wire test deferred); plugin↔CLI (state side covered, real CLI subprocess test deferred). | `docs/testing.md` § "Test-pyramid invariants"; ROADMAP § "P7.2". |
