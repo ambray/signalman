@@ -74,6 +74,13 @@ function computeBackoff(policy: ValidatedRetryPolicy, _attempt: number): number 
   return Math.max(0, Math.floor(base * factor));
 }
 
+function resolveHostFilePath(hostPath: string): string {
+  if (path.isAbsolute(hostPath) || path.win32.isAbsolute(hostPath)) {
+    return hostPath;
+  }
+  return path.resolve(hostPath);
+}
+
 /**
  * Local helper so the class body can stay synchronous when wiring a
  * kernel-debug session. Importing BreakLog at the top is cheap (no
@@ -739,7 +746,7 @@ export class ScenarioOrchestrator {
     guestPath: string,
   ): Promise<void> {
     const client = this.guestClients.get(vmName);
-    const resolvedHostPath = path.resolve(hostPath);
+    const resolvedHostPath = resolveHostFilePath(hostPath);
     if (!client) {
       await this.backend.copyFileToVM(handle, resolvedHostPath, guestPath);
       return;
@@ -792,7 +799,7 @@ export class ScenarioOrchestrator {
     hostPath: string,
   ): Promise<void> {
     const client = this.guestClients.get(vmName);
-    const resolvedHostPath = path.resolve(hostPath);
+    const resolvedHostPath = resolveHostFilePath(hostPath);
     if (!client) {
       await this.backend.copyFileFromVM(handle, guestPath, resolvedHostPath);
       return;
