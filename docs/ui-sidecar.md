@@ -14,6 +14,8 @@ The service-facing guest agent proxies UI RPCs to this loopback sidecar. The sid
 
 The host registers these MCP tools when guest-agent access is available:
 
+- `vm_ui_ensure_sidecar`: create or update the scheduled task that launches
+  the sidecar in a named user's interactive session.
 - `vm_ui_screenshot`: capture a PNG or JPEG screenshot from the interactive session.
 - `vm_ui_find`: find UI Automation elements by selector.
 - `vm_ui_click`: click a UI Automation element.
@@ -32,15 +34,16 @@ Plain selector text falls back to fuzzy name matching or exact automation id mat
 
 ## Deployment Pattern
 
-Start the sidecar at user logon, for example with a scheduled task configured for the test account and "Run only when user is logged on." Keep the guest service installed separately. The sidecar should bind loopback only; the host should still talk to the guest service over the existing guest-agent channel.
+Start the sidecar at user logon with a scheduled task configured for the test account and "Run only when user is logged on." `vm_ui_ensure_sidecar` creates that task through the guest agent using an `InteractiveToken` principal, so the sidecar runs on the user's desktop rather than in the service session. Keep the guest service installed separately. The sidecar should bind loopback only; the host should still talk to the guest service over the existing guest-agent channel.
 
 This gives LLM-enabled tests a practical path for desktop workflows:
 
 1. Restore or boot the VM.
-2. Ensure the test user is logged in and the UI sidecar is running.
-3. Use normal guest-agent RPCs for setup.
-4. Use `vm_ui_*` MCP tools for observation and interaction.
-5. Use screenshots plus UIA element data as the model's feedback loop.
+2. Ensure the test user is logged in.
+3. Run `vm_ui_ensure_sidecar` for that user, or rely on the scheduled task from a previous setup.
+4. Use normal guest-agent RPCs for setup.
+5. Use `vm_ui_*` MCP tools for observation and interaction.
+6. Use screenshots plus UIA element data as the model's feedback loop.
 
 ## Current Limits
 
