@@ -29,6 +29,7 @@ describe("advanced namespace contract", () => {
       "vm_list_checkpoints",
       "vm_run_command",
       "vm_copy_file",
+      "vm_ui_ensure_sidecar",
       "vm_ui_screenshot",
       "vm_ui_find",
       "vm_ui_click",

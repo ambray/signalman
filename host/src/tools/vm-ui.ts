@@ -8,12 +8,56 @@
 
 import type { ToolDefinition, ToolResult } from "./types.js";
 import type { GuestAgentClient } from "../guest/client.js";
+import { ensureUiSidecar } from "../guest/ui-sidecar.js";
 import { sanitizeTimeout, sanitizeVmName } from "../sanitize.js";
 
 export function createVmUiTools(
   getClient: (vmName: string) => Promise<GuestAgentClient>,
 ): ToolDefinition[] {
   return [
+    {
+      name: "vm_ui_ensure_sidecar",
+      description: "Create or update the VM's interactive user-session UI sidecar scheduled task",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+          username: {
+            type: "string",
+            description: "Windows user that owns the interactive desktop session",
+          },
+          bind: {
+            type: "string",
+            description: "Loopback bind address for the sidecar, default 127.0.0.1:50151",
+          },
+          task_name: {
+            type: "string",
+            description: "Scheduled task name, default SignalmanUiSidecar",
+          },
+          run_now: {
+            type: "boolean",
+            description: "Start the task immediately if the user is logged in",
+          },
+          timeout_ms: { type: "number", description: "Timeout in milliseconds" },
+        },
+        required: ["name", "username"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const name = sanitizeVmName(params.name as string);
+        const client = await getClient(name);
+        const result = await ensureUiSidecar(client, {
+          username: params.username as string,
+          bind: (params.bind as string | undefined) ?? undefined,
+          taskName: (params.task_name as string | undefined) ?? undefined,
+          runNow: (params.run_now as boolean | undefined) ?? true,
+          timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify({ vm: name, ...result }, null, 2) }],
+        };
+      },
+    },
     {
       name: "vm_ui_screenshot",
       description: "Capture a screenshot from the VM's interactive user session",
