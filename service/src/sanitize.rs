@@ -120,6 +120,16 @@ pub fn sanitize_command(command: &str) -> Result<&str, SanitizeError> {
     Ok(command)
 }
 
+/// Command argument validator. Arguments are passed as data to the
+/// executable after PowerShell single-quote escaping, so PowerShell
+/// syntax is allowed here for `powershell -Command` scenarios.
+pub fn sanitize_command_arg(arg: &str) -> Result<&str, SanitizeError> {
+    if arg.contains('\0') {
+        return Err(invalid("Command argument contains null byte"));
+    }
+    Ok(arg)
+}
+
 /// Escape a single argument for embedding in a PowerShell single-quoted
 /// string. The only escape is `''` for a literal `'`.
 ///
@@ -393,6 +403,21 @@ mod tests {
         #[test]
         fn accepts_hyphenated_commands() {
             assert_eq!(sanitize_command("Get-Process").unwrap(), "Get-Process");
+        }
+    }
+
+    mod sanitize_command_arg_tests {
+        use super::*;
+
+        #[test]
+        fn accepts_shell_syntax_because_args_are_escaped_data() {
+            let arg = "$value = Get-Content file.txt; Write-Output $value";
+            assert_eq!(sanitize_command_arg(arg).unwrap(), arg);
+        }
+
+        #[test]
+        fn rejects_null_bytes() {
+            assert!(sanitize_command_arg("arg\0evil").is_err());
         }
     }
 

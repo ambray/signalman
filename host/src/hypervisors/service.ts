@@ -45,6 +45,11 @@ export interface ServiceBackendOptions {
   certDir?: string;
   /** Per-RPC unary deadline in ms (default 60_000). */
   defaultDeadlineMs?: number;
+  /** Default guest credentials for PowerShell Direct operations. */
+  guestCredentials?: {
+    username: string;
+    password: string;
+  };
 }
 
 const DEFAULT_PORT = 17777;
@@ -190,6 +195,7 @@ export class ServiceBackend implements HypervisorBackend {
   private readonly port: number;
   private readonly certDir: string;
   private readonly defaultDeadlineMs: number;
+  private readonly guestCredentials?: ServiceBackendOptions["guestCredentials"];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _client: any | null = null;
   /** Backend name reported by the daemon (e.g. "hyperv"). */
@@ -200,6 +206,7 @@ export class ServiceBackend implements HypervisorBackend {
     this.port = opts.port ?? DEFAULT_PORT;
     this.certDir = opts.certDir ?? defaultCertDir();
     this.defaultDeadlineMs = opts.defaultDeadlineMs ?? DEFAULT_DEADLINE_MS;
+    this.guestCredentials = opts.guestCredentials;
   }
 
   /**
@@ -483,6 +490,7 @@ export class ServiceBackend implements HypervisorBackend {
         hostPath,
         guestPath,
         fromGuest,
+        credentials: this.credentialsToWire(),
       },
       progress
         ? (ev) => {
@@ -522,6 +530,7 @@ export class ServiceBackend implements HypervisorBackend {
         command,
         args,
         timeoutMs,
+        credentials: this.credentialsToWire(),
       },
       (ev) => {
         if (ev.result) {
@@ -586,6 +595,16 @@ export class ServiceBackend implements HypervisorBackend {
       { handle: handleToWire(handle), count },
       this.defaultDeadlineMs,
     );
+  }
+
+  private credentialsToWire():
+    | { username: string; password: string }
+    | undefined {
+    if (!this.guestCredentials) return undefined;
+    return {
+      username: this.guestCredentials.username,
+      password: this.guestCredentials.password,
+    };
   }
 }
 
