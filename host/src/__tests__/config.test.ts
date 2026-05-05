@@ -58,6 +58,11 @@ describe('defaultConfig', () => {
     expect(config.hypervisor.guestCredentials).toBeUndefined();
   });
 
+  it('has no service transport override by default', () => {
+    const config = defaultConfig();
+    expect(config.hypervisor.service).toBeUndefined();
+  });
+
   it('has no guest auth token by default', () => {
     const config = defaultConfig();
     expect(config.guestAgent.authToken).toBeUndefined();
@@ -75,6 +80,9 @@ describe('loadConfig — guestAgent.tls', () => {
     'SIGNALMAN_GUEST_CA',
     'SIGNALMAN_GUEST_CERT',
     'SIGNALMAN_GUEST_KEY',
+    'SIGNALMAN_SERVICE_HOST',
+    'SIGNALMAN_SERVICE_PORT',
+    'SIGNALMAN_SERVICE_CERT_DIR',
     'SIGNALMAN_CONFIG',
   ] as const;
 
@@ -173,5 +181,52 @@ describe('loadConfig — guestAgent.tls', () => {
     const cfg = loadConfig(cfgPath);
     expect(cfg.guestAgent.tls.enabled).toBe(false);
     expect(cfg.guestAgent.tls.caPath).toBeUndefined();
+  });
+
+  it('loads service transport overrides from YAML', () => {
+    const cfgPath = path.join(tmpDir, 'signalman.yaml');
+    fs.writeFileSync(
+      cfgPath,
+      [
+        'hypervisor:',
+        '  backend: service',
+        '  service:',
+        '    host: 127.0.0.2',
+        '    port: 17778',
+        '    certDir: C:/Signalman/certs',
+      ].join('\n'),
+    );
+
+    const cfg = loadConfig(cfgPath);
+    expect(cfg.hypervisor.service).toEqual({
+      host: '127.0.0.2',
+      port: 17778,
+      certDir: 'C:/Signalman/certs',
+    });
+  });
+
+  it('lets environment variables override service transport settings', () => {
+    const cfgPath = path.join(tmpDir, 'signalman.yaml');
+    fs.writeFileSync(
+      cfgPath,
+      [
+        'hypervisor:',
+        '  backend: service',
+        '  service:',
+        '    host: 127.0.0.2',
+        '    port: 17778',
+        '    certDir: C:/Signalman/yaml-certs',
+      ].join('\n'),
+    );
+    process.env.SIGNALMAN_SERVICE_HOST = '127.0.0.1';
+    process.env.SIGNALMAN_SERVICE_PORT = '17779';
+    process.env.SIGNALMAN_SERVICE_CERT_DIR = 'C:/Signalman/env-certs';
+
+    const cfg = loadConfig(cfgPath);
+    expect(cfg.hypervisor.service).toEqual({
+      host: '127.0.0.1',
+      port: 17779,
+      certDir: 'C:/Signalman/env-certs',
+    });
   });
 });

@@ -55,6 +55,14 @@ export function sanitizeCommand(command: string): string {
   return command;
 }
 
+/** Validate a command argument before PowerShell single-quote escaping. */
+export function sanitizeCommandArg(arg: string): string {
+  if (arg.includes("\0")) {
+    throw new Error("Command argument contains null byte");
+  }
+  return arg;
+}
+
 /** Escape a single argument for PowerShell single-quoted string. */
 export function escapePowerShellArg(arg: string): string {
   // In PowerShell single-quoted strings, the only escape is '' for literal '

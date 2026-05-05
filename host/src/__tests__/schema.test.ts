@@ -277,6 +277,24 @@ describe("validateScenarioConfig — validation errors", () => {
     expect(() => validateScenarioConfig(bad, "setup.yaml")).toThrow();
   });
 
+  it("allows backend-only scenarios to skip heartbeat readiness", () => {
+    const cfg = validateScenarioConfig(
+      {
+        ...validScenario(),
+        vms: [
+          {
+            name: "x",
+            template: "win11",
+            guest_agent_port: 50051,
+            wait_for_heartbeat: false,
+          },
+        ],
+      },
+      "setup.yaml",
+    );
+    expect(cfg.vms[0].wait_for_heartbeat).toBe(false);
+  });
+
   it("rejects kernel_debug.enabled as a string (not boolean)", () => {
     const bad = {
       ...validScenario(),

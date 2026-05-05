@@ -45,6 +45,12 @@ export interface SignalmanConfig {
       username: string;
       password: string;
     };
+    /** Service transport override for development/alternate listeners. */
+    service?: {
+      host?: string;
+      port?: number;
+      certDir?: string;
+    };
   };
   /** Guest agent connection settings. */
   guestAgent: {
@@ -188,6 +194,20 @@ function mergeConfig(
     if (partial.hypervisor.guestCredentials) {
       result.hypervisor.guestCredentials = partial.hypervisor.guestCredentials;
     }
+    if (partial.hypervisor.service) {
+      result.hypervisor.service = {
+        ...(result.hypervisor.service ?? {}),
+      };
+      if (partial.hypervisor.service.host !== undefined) {
+        result.hypervisor.service.host = partial.hypervisor.service.host;
+      }
+      if (partial.hypervisor.service.port !== undefined) {
+        result.hypervisor.service.port = partial.hypervisor.service.port;
+      }
+      if (partial.hypervisor.service.certDir !== undefined) {
+        result.hypervisor.service.certDir = partial.hypervisor.service.certDir;
+      }
+    }
   }
 
   if (partial.guestAgent) {
@@ -262,6 +282,9 @@ function mergeConfig(
  *
  * Supported environment variables:
  * - SIGNALMAN_BACKEND: hypervisor backend ("service" | "hyperv" | "vmware" | "tart")
+ * - SIGNALMAN_SERVICE_HOST: service backend host
+ * - SIGNALMAN_SERVICE_PORT: service backend port
+ * - SIGNALMAN_SERVICE_CERT_DIR: service backend cert directory
  * - SIGNALMAN_VMRUN_PATH: path to vmrun executable
  * - SIGNALMAN_TART_PATH: path to tart executable
  * - SIGNALMAN_GUEST_PORT: guest agent default port
@@ -282,6 +305,23 @@ function applyEnvOverrides(config: SignalmanConfig): SignalmanConfig {
   const backend = process.env.SIGNALMAN_BACKEND;
   if (backend === "hyperv" || backend === "vmware" || backend === "service" || backend === "tart") {
     result.hypervisor.backend = backend;
+  }
+
+  const serviceHost = process.env.SIGNALMAN_SERVICE_HOST;
+  const servicePort = process.env.SIGNALMAN_SERVICE_PORT;
+  const serviceCertDir = process.env.SIGNALMAN_SERVICE_CERT_DIR;
+  if (serviceHost || servicePort || serviceCertDir) {
+    result.hypervisor.service = {
+      ...(result.hypervisor.service ?? {}),
+    };
+    if (serviceHost) result.hypervisor.service.host = serviceHost;
+    if (servicePort) {
+      const parsed = parseInt(servicePort, 10);
+      if (!isNaN(parsed) && parsed > 0 && parsed <= 65535) {
+        result.hypervisor.service.port = parsed;
+      }
+    }
+    if (serviceCertDir) result.hypervisor.service.certDir = serviceCertDir;
   }
 
   if (process.env.SIGNALMAN_VMRUN_PATH) {

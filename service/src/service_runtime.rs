@@ -5,9 +5,11 @@
 //! to [`crate::transport::serve`].
 
 use std::ffi::OsString;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use tokio::sync::watch;
@@ -129,8 +131,12 @@ define_windows_service!(ffi_service_main, service_main);
 /// Entry point invoked by the SCM. The `windows-service` macro
 /// generates an `extern "system"` shim that forwards to this fn.
 fn service_main(_args: Vec<OsString>) {
+    append_service_log("service_main entered");
     if let Err(e) = run_service() {
+        append_service_log(&format!("service exited with error: {e:?}"));
         tracing::error!(error = ?e, "service exited with error");
+    } else {
+        append_service_log("service_main exited cleanly");
     }
 }
 
@@ -142,6 +148,7 @@ pub fn dispatch() -> Result<()> {
 }
 
 fn run_service() -> Result<()> {
+    append_service_log("run_service starting");
     let (tx, rx) = watch::channel(false);
     SHUTDOWN_TX.set(tx).ok();
 
@@ -161,23 +168,31 @@ fn run_service() -> Result<()> {
         }
     };
 
-    let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
-    status_handle.set_service_status(ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Running,
-        controls_accepted: windows_service::service::ServiceControlAccept::STOP
-            | windows_service::service::ServiceControlAccept::SHUTDOWN,
-        exit_code: windows_service::service::ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    })?;
+    append_service_log("registering service control handler");
+    let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)
+        .context("registering service control handler")?;
+    append_service_log("reporting service running");
+    status_handle
+        .set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::Running,
+            controls_accepted: windows_service::service::ServiceControlAccept::STOP
+                | windows_service::service::ServiceControlAccept::SHUTDOWN,
+            exit_code: windows_service::service::ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: Duration::default(),
+            process_id: None,
+        })
+        .context("reporting service running")?;
 
     // Build the tokio runtime here — service_main runs on a thread the
     // SCM owns and is *not* a tokio runtime.
+    append_service_log("building tokio runtime");
     let runtime = tokio::runtime::Runtime::new().context("building tokio runtime")?;
+    append_service_log("entering async serve loop");
     let res = runtime.block_on(async move {
         let cert_dir = crate::tls::default_cert_dir();
+        append_service_log(&format!("ensuring certs at {}", cert_dir.display()));
         let bundle: CertBundle = ensure_certs(&cert_dir)?;
         let backend: Arc<dyn Backend> = Arc::new(HyperVBackend::new());
         let config = TransportConfig {
@@ -187,6 +202,10 @@ fn run_service() -> Result<()> {
         };
         serve(backend, config, rx).await
     });
+    append_service_log(&format!(
+        "async serve loop returned: {:?}",
+        res.as_ref().map(|_| ())
+    ));
 
     status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
@@ -202,4 +221,16 @@ fn run_service() -> Result<()> {
         process_id: None,
     })?;
     res
+}
+
+fn append_service_log(message: &str) {
+    let root = std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    let dir = root.join("Signalman").join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("service-runtime.log");
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{:?} {message}", SystemTime::now());
+    }
 }

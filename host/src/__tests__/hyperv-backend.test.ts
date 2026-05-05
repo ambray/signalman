@@ -115,3 +115,58 @@ describe("HyperVBackend.getStatus", () => {
     expect(status.guestAgentReachable).toBe(false);
   });
 });
+
+describe("HyperVBackend.waitForHeartbeat", () => {
+  it("accepts unknown application health as heartbeat-ready", async () => {
+    const { HyperVBackend } = await loadBackend();
+    let encodedScript = "";
+    childProcessMock.execFile.mockImplementation(
+      (
+        _cmd: string,
+        args: string[],
+        _opts: object,
+        cb: (err: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        encodedScript = args.join(" ");
+        cb(null, { stdout: "READY", stderr: "" } as unknown as string, "");
+      },
+    );
+
+    const backend = new HyperVBackend();
+    await expect(
+      backend.waitForHeartbeat({ id: "vm-1", name: "endpoint-1", backend: "hyperv" }, 30_000),
+    ).resolves.toBe(true);
+    expect(encodedScript).toContain("OkApplicationsUnknown");
+  });
+});
+
+describe("HyperVBackend.executeCommand", () => {
+  it("allows PowerShell syntax in command arguments after escaping", async () => {
+    const { HyperVBackend } = await loadBackend();
+    let encodedScript = "";
+    childProcessMock.execFile.mockImplementation(
+      (
+        _cmd: string,
+        args: string[],
+        _opts: object,
+        cb: (err: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        encodedScript = args.join(" ");
+        cb(null, {
+          stdout: JSON.stringify({ ExitCode: 0, Output: "ok" }),
+          stderr: "",
+        } as unknown as string, "");
+      },
+    );
+
+    const backend = new HyperVBackend();
+    await expect(
+      backend.executeCommand(
+        { id: "vm-1", name: "endpoint-1", backend: "hyperv" },
+        "powershell.exe",
+        ["-NoProfile", "-Command", "$value = 'ok'; Write-Output $value"],
+      ),
+    ).resolves.toMatchObject({ exitCode: 0, stdout: "ok" });
+    expect(encodedScript).toContain("Write-Output");
+  });
+});

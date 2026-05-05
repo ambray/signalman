@@ -1,0 +1,10 @@
+assertions:
+  - id: service-command-output
+    type: stdout_contains
+    source: step-0
+    expected: service-backend-smoke:ok
+    severity: critical
+    description: "Service-backed command execution should read and write guest state"
+
+pass_threshold: 1.0
+critical_must_pass: true

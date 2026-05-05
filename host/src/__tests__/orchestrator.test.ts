@@ -271,6 +271,71 @@ describe("ScenarioOrchestrator", () => {
     );
   });
 
+  it("resolveVms waits for Hyper-V heartbeat after starting a restored VM", async () => {
+    const waitForHeartbeat = vi.fn().mockResolvedValue(true);
+    backend = makeMockBackend({
+      getStatus: vi.fn()
+        .mockResolvedValueOnce({
+          handle: makeHandle("vm1"),
+          state: "stopped",
+          guestAgentReachable: false,
+        } as VMStatus)
+        .mockResolvedValue({
+          handle: makeHandle("vm1"),
+          state: "running",
+          guestAgentReachable: false,
+        } as VMStatus),
+      waitForHeartbeat,
+    });
+    orchestrator = new ScenarioOrchestrator(backend, clients, config);
+    const defs: VmDefinition[] = [
+      {
+        name: "vm1",
+        template: "win11-base",
+        checkpoint_restore: "base",
+        guest_agent_port: 50051,
+      },
+    ];
+
+    await orchestrator.resolveVms(defs);
+
+    expect(backend.startVM).toHaveBeenCalledWith(makeHandle("vm1"));
+    expect(waitForHeartbeat).toHaveBeenCalledWith(makeHandle("vm1"), 180_000);
+  });
+
+  it("resolveVms can skip heartbeat for backend-only scenarios", async () => {
+    const waitForHeartbeat = vi.fn().mockResolvedValue(true);
+    backend = makeMockBackend({
+      getStatus: vi.fn()
+        .mockResolvedValueOnce({
+          handle: makeHandle("vm1"),
+          state: "stopped",
+          guestAgentReachable: false,
+        } as VMStatus)
+        .mockResolvedValue({
+          handle: makeHandle("vm1"),
+          state: "running",
+          guestAgentReachable: false,
+        } as VMStatus),
+      waitForHeartbeat,
+    });
+    orchestrator = new ScenarioOrchestrator(backend, clients, config);
+    const defs: VmDefinition[] = [
+      {
+        name: "vm1",
+        template: "win11-base",
+        checkpoint_restore: "base",
+        wait_for_heartbeat: false,
+        guest_agent_port: 50051,
+      },
+    ];
+
+    await orchestrator.resolveVms(defs);
+
+    expect(backend.startVM).toHaveBeenCalledWith(makeHandle("vm1"));
+    expect(waitForHeartbeat).not.toHaveBeenCalled();
+  });
+
   // ── pre_started bypass (Sprint 60.12 Phase B) ──────────────────
   //
   // Sub-suite locks down the contract that scenarios marked
@@ -683,23 +748,31 @@ describe("ScenarioOrchestrator", () => {
     expect(results.some((r) => r.status === "failed")).toBe(true);
   });
 
-  it("runScenario executes teardown after guest readiness failure", async () => {
+  it("runScenario executes teardown after setup failure", async () => {
     const localBackend = makeMockBackend({
       listVMs: vi.fn().mockResolvedValue([makeHandle("endpoint-1")]),
+      executeCommand: vi.fn().mockRejectedValue(new Error("setup command failed")),
     });
-    const emptyClients = new Map<string, GuestAgentClient>();
-    orchestrator = new ScenarioOrchestrator(localBackend, emptyClients, config);
+    orchestrator = new ScenarioOrchestrator(localBackend, new Map(), config);
     const scenarioDir = path.resolve(
       "..",
       ".signalman",
       "scenarios",
-      "cursor-restrict",
+      "service-backend-smoke",
     );
 
     const result = await orchestrator.runScenario(scenarioDir);
 
-    expect(result.status).toBe("error");
-    expect(result.error).toContain("No guest client configured for VM 'endpoint-1'");
+    expect(result.status).toBe("failed");
+    expect(result.setup_results).toEqual([
+      expect.objectContaining({
+        action: "vm_run_command",
+        vm: "endpoint-1",
+        status: "failed",
+        error: expect.stringContaining("setup command failed"),
+      }),
+      expect.any(Object),
+    ]);
     expect(result.teardown_results).toEqual([
       expect.objectContaining({
         action: "vm_restore",
@@ -768,7 +841,7 @@ describe("ScenarioOrchestrator", () => {
     await wait;
   });
 
-  it("waitForGuestAgents throws when no client is configured", async () => {
+  it("waitForGuestAgents skips VMs without an addressable guest agent", async () => {
     const emptyClients = new Map<string, GuestAgentClient>();
     orchestrator = new ScenarioOrchestrator(backend, emptyClients, config);
 
@@ -777,9 +850,36 @@ describe("ScenarioOrchestrator", () => {
       { name: "vm1", template: "t", guest_agent_port: 50051 },
     ];
 
-    await expect(
-      orchestrator.waitForGuestAgents(vmMap, defs),
-    ).rejects.toThrow("No guest client configured for VM 'vm1'");
+    await expect(orchestrator.waitForGuestAgents(vmMap, defs)).resolves.toBeUndefined();
+    expect(guestAgentClientMockState.constructorArgs).toEqual([]);
+  });
+
+  it("waitForGuestAgents creates a client when a static IP is declared", async () => {
+    const emptyClients = new Map<string, GuestAgentClient>();
+    const isConnected = vi.fn().mockResolvedValue(true);
+    guestAgentClientMockState.nextInstances.push({ isConnected });
+    orchestrator = new ScenarioOrchestrator(backend, emptyClients, config);
+
+    const vmMap = new Map([["vm1", makeHandle("vm1")]]);
+    const defs: VmDefinition[] = [
+      {
+        name: "vm1",
+        template: "t",
+        guest_agent_port: 50052,
+        network: { switch: "InternalSwitch", static_ip: "172.30.0.10" },
+      },
+    ];
+
+    await orchestrator.waitForGuestAgents(vmMap, defs);
+
+    expect(guestAgentClientMockState.constructorArgs[0]).toEqual([
+      "172.30.0.10",
+      50052,
+      undefined,
+      { authToken: undefined },
+    ]);
+    expect(emptyClients.get("vm1")).toBeDefined();
+    expect(isConnected).toHaveBeenCalled();
   });
 
   it("waitForGuestAgents retries Tart IP discovery before creating a client", async () => {
