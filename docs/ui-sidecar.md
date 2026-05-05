@@ -1,0 +1,47 @@
+# User Session UI Sidecar
+
+Signalman's guest agent is normally installed as a Windows service. That is the right place for privileged process, file, and verification RPCs, but services do not own the logged-in user's desktop. UI automation needs a small companion process running inside the interactive user session.
+
+The same guest binary can run in sidecar mode:
+
+```powershell
+signalman-guest.exe --ui-sidecar --ui-sidecar-bind 127.0.0.1:50151
+```
+
+The service-facing guest agent proxies UI RPCs to this loopback sidecar. The sidecar address defaults to `127.0.0.1:50151`; override it for the service process with `SIGNALMAN_UI_SIDECAR_ADDR` and for the sidecar process with `SIGNALMAN_UI_SIDECAR_BIND`.
+
+## MCP Tools
+
+The host registers these MCP tools when guest-agent access is available:
+
+- `vm_ui_screenshot`: capture a PNG or JPEG screenshot from the interactive session.
+- `vm_ui_find`: find UI Automation elements by selector.
+- `vm_ui_click`: click a UI Automation element.
+- `vm_ui_type`: type text into the active session, optionally targeting an element first.
+
+Selectors currently support these exact forms:
+
+```text
+[name='Save']
+[automationId='save-button']
+[className='Button']
+[controlType='ControlType.Button']
+```
+
+Plain selector text falls back to fuzzy name matching or exact automation id matching.
+
+## Deployment Pattern
+
+Start the sidecar at user logon, for example with a scheduled task configured for the test account and "Run only when user is logged on." Keep the guest service installed separately. The sidecar should bind loopback only; the host should still talk to the guest service over the existing guest-agent channel.
+
+This gives LLM-enabled tests a practical path for desktop workflows:
+
+1. Restore or boot the VM.
+2. Ensure the test user is logged in and the UI sidecar is running.
+3. Use normal guest-agent RPCs for setup.
+4. Use `vm_ui_*` MCP tools for observation and interaction.
+5. Use screenshots plus UIA element data as the model's feedback loop.
+
+## Current Limits
+
+The first implementation is intentionally narrow. It uses Windows UI Automation and SendKeys through a PowerShell STA process per action. That is fine for smoke tests and product flows, but more complex test runs should eventually move the automation engine into native Rust or a long-lived Windows helper so we avoid per-action PowerShell startup cost and get richer eventing.

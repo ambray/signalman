@@ -29,6 +29,10 @@ describe("advanced namespace contract", () => {
       "vm_list_checkpoints",
       "vm_run_command",
       "vm_copy_file",
+      "vm_ui_screenshot",
+      "vm_ui_find",
+      "vm_ui_click",
+      "vm_ui_type",
     ]));
     // Docker tools register too.
     const dockerNames = names.filter((n) => n.startsWith("docker_"));

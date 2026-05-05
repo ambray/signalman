@@ -249,6 +249,27 @@ export interface GuestDirectoryEntry {
   modifiedUnixSecs: number;
 }
 
+export interface UiElement {
+  name: string;
+  automationId: string;
+  controlType: string;
+  className: string;
+  isEnabled: boolean;
+  isVisible: boolean;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  value: string;
+}
+
+export interface UiScreenshot {
+  imageData: Buffer;
+  format: string;
+  width: number;
+  height: number;
+}
+
 // ── Proto Loading (lazy) ──────────────────────────────────────────
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1114,30 +1135,36 @@ export class GuestAgentClient {
     format: string = "png",
     timeoutMs?: number,
   ): Promise<Buffer> {
-    const deadline = timeoutMs ?? this.options.defaultTimeoutMs;
+    return (await this.uiScreenshot({ windowTitle, format, timeoutMs })).imageData;
+  }
+
+  async uiScreenshot(options: {
+    windowTitle?: string;
+    format?: string;
+    timeoutMs?: number;
+  } = {}): Promise<UiScreenshot> {
+    const deadline = options.timeoutMs ?? this.options.defaultTimeoutMs;
     const response = await withRetry(
       () =>
         unaryCall<
           { windowTitle: string; format: string },
           { imageData: Buffer; format: string; width: number; height: number }
         >(this.client, "uIScreenshot", {
-          windowTitle: windowTitle ?? "",
-          format,
+          windowTitle: options.windowTitle ?? "",
+          format: options.format ?? "png",
         }, deadline, this.options.authToken),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
       this.options.maxRetryDelayMs,
     );
-    return Buffer.from(response.imageData);
+    return {
+      imageData: Buffer.from(response.imageData),
+      format: response.format,
+      width: response.width,
+      height: response.height,
+    };
   }
 
-  // ── UI automation surface (Sprint 60 Phase 5, Story 5.5 prep) ────
-  // The orchestrator's `ui_click`/`ui_type`/`ui_find` workflow tools
-  // call these methods. The proto-level RPCs aren't wired yet (Story
-  // 5.5); these stubs document the expected shape and keep the host
-  // tsc green. Replace once the guest UI agent gRPC surface lands.
-
-  /** Click a UI element identified by `selector`. */
   async uiClick(
     selector: string,
     options: {
@@ -1145,15 +1172,21 @@ export class GuestAgentClient {
       clickType?: "left" | "right" | "double";
       timeoutMs?: number;
     } = {},
-  ): Promise<{ ok: boolean; selector: string; clickType: string }> {
-    void options;
-    throw new Error(
-      `uiClick(${selector}) is not yet implemented; UI automation is reserved for Sprint 60 Phase 5 Story 5.5. ` +
-        `The host-side surface exists so scenarios can declare ui_* tool blocks now and run once the guest RPCs land.`,
+  ): Promise<{ success: boolean; error: string }> {
+    const deadline = options.timeoutMs ?? this.options.defaultTimeoutMs;
+    return withRetry(
+      () =>
+        unaryCall(this.client, "uIClick", {
+          selector,
+          windowTitle: options.windowTitle ?? "",
+          clickType: options.clickType ?? "left",
+        }, deadline, this.options.authToken),
+      this.options.maxRetries,
+      this.options.initialRetryDelayMs,
+      this.options.maxRetryDelayMs,
     );
   }
 
-  /** Type `text` into a UI element. */
   async uiType(
     text: string,
     options: {
@@ -1162,15 +1195,22 @@ export class GuestAgentClient {
       clearFirst?: boolean;
       timeoutMs?: number;
     } = {},
-  ): Promise<{ ok: boolean; chars: number }> {
-    void options;
-    void text;
-    throw new Error(
-      `uiType is not yet implemented; UI automation is reserved for Sprint 60 Phase 5 Story 5.5.`,
+  ): Promise<{ success: boolean; error: string }> {
+    const deadline = options.timeoutMs ?? this.options.defaultTimeoutMs;
+    return withRetry(
+      () =>
+        unaryCall(this.client, "uIType", {
+          text,
+          selector: options.selector ?? "",
+          windowTitle: options.windowTitle ?? "",
+          clearFirst: options.clearFirst ?? false,
+        }, deadline, this.options.authToken),
+      this.options.maxRetries,
+      this.options.initialRetryDelayMs,
+      this.options.maxRetryDelayMs,
     );
   }
 
-  /** Find UI elements matching `selector`. */
   async uiFind(
     selector: string,
     options: {
@@ -1178,13 +1218,25 @@ export class GuestAgentClient {
       findTimeoutMs?: number;
       timeoutMs?: number;
     } = {},
-  ): Promise<Array<{ selector: string; is_enabled: boolean; bounds?: { x: number; y: number; w: number; h: number } }>> {
-    void options;
-    void selector;
-    throw new Error(
-      `uiFind is not yet implemented; UI automation is reserved for Sprint 60 Phase 5 Story 5.5.`,
+  ): Promise<UiElement[]> {
+    const deadline = options.timeoutMs ?? this.options.defaultTimeoutMs;
+    const response = await withRetry(
+      () =>
+        unaryCall<
+          { selector: string; windowTitle: string; timeoutMs: number },
+          { elements: UiElement[] }
+        >(this.client, "uIFind", {
+          selector,
+          windowTitle: options.windowTitle ?? "",
+          timeoutMs: options.findTimeoutMs ?? 5_000,
+        }, deadline, this.options.authToken),
+      this.options.maxRetries,
+      this.options.initialRetryDelayMs,
+      this.options.maxRetryDelayMs,
     );
+    return response.elements ?? [];
   }
+
 }
 
 // ── Internal Helpers ───────────────────────────────────────────────
