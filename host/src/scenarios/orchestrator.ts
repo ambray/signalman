@@ -884,11 +884,26 @@ export class ScenarioOrchestrator {
             const timeoutMs = (step.timeout_ms as number) ?? 60_000;
             const cmdArgs = (step.args as string[]) ?? [];
             const runAs = (step.run_as as string) ?? undefined;
-            await client.runCommand(
-              step.command as string,
-              cmdArgs,
-              { timeoutMs, runAs },
-            );
+
+            // Phase 3 §C1 follow-up (2026-05-06): retry once on
+            // DEADLINE_EXCEEDED for guest-agent cold-start. See the
+            // matching block in executeToolBlock for the rationale.
+            try {
+              await client.runCommand(
+                step.command as string,
+                cmdArgs,
+                { timeoutMs, runAs },
+              );
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              const isDeadline = /DEADLINE_EXCEEDED|CANCELLED.*Timeout/i.test(msg);
+              if (!isDeadline) throw e;
+              await client.runCommand(
+                step.command as string,
+                cmdArgs,
+                { timeoutMs, runAs },
+              );
+            }
             results.push({
               action: step.action,
               vm: vmName,
@@ -1052,7 +1067,30 @@ export class ScenarioOrchestrator {
         const args = (params.args as string[]) ?? [];
         const timeoutMs = (params.timeout_ms as number) ?? 60_000;
         const runAs = (params.run_as as string) ?? undefined;
-        const result = await client.runCommand(command, args, { timeoutMs, runAs });
+
+        // Phase 3 §C1 follow-up (2026-05-06): retry once on
+        // DEADLINE_EXCEEDED to absorb guest-agent cold-start jitter.
+        // After `vm_restore` the agent's TCP socket comes up before
+        // its runCommand-handler thread pool warms — `isConnected`
+        // (health RPC) returns true but the first real command can
+        // still hit a 10-15s queue delay. A single retry with the
+        // scenario's own timeout handles the cold path without
+        // changing per-scenario `timeout_ms` budgets.
+        //
+        // The retry is gated on the gRPC error being specifically a
+        // DEADLINE / CANCELLED — other errors (UNAVAILABLE, etc.)
+        // surface immediately so genuine failures aren't masked.
+        let result;
+        try {
+          result = await client.runCommand(command, args, { timeoutMs, runAs });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          const isDeadline = /DEADLINE_EXCEEDED|CANCELLED.*Timeout/i.test(msg);
+          if (!isDeadline) throw e;
+          // Cold-start retry once — note in the error so triage can
+          // see this happened.
+          result = await client.runCommand(command, args, { timeoutMs, runAs });
+        }
         const stdout = result.stdout ?? "";
 
         // Phase 3 §C1 follow-up (2026-05-06): enforce workflow.md
