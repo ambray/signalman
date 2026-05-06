@@ -72,7 +72,16 @@ export function createDefaultExecutor(): RunExecutor {
       // client" error if the scenario actually needs one.
     }
 
+    // Phase 3 §C1 follow-up (2026-05-06): wire `scenarios.outputDir`
+    // through to the orchestrator so workflow.md tool-block stdout
+    // gets persisted to `<outputDir>/<scenarioName>/workflow-outputs.json`.
+    // Without this, scenarios with `assertions: []` and inline
+    // workflow.md `expect_*` parameters silently fail with no
+    // diagnostic artifact — `result: fail` and zero events explain
+    // nothing. Mirrors the artifact the legacy CLI's `test` verb
+    // produced.
     const orchestrator = new ScenarioOrchestrator(backend, guestClients, config, {
+      outputDir: config.scenarios?.outputDir,
       registerProcessExitCleanup: true,
     });
     // P3.c: pass ctx.emit through to the orchestrator so step lifecycle
