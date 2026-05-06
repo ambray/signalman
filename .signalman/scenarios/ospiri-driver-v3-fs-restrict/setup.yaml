@@ -1,0 +1,150 @@
+# Ospiri Driver v3 — FS Restrict Smoke
+#
+# Sprint 60.9 Phase A.6+ deliverable. Comprehensive end-to-end exercise
+# of the FS minifilter: IOCTL surface (InitScope, AddRule, BindProcess,
+# ListRules, DestroyScope) plus per-step enforcement validation
+# (DENY_READ, DENY_WRITE, REDIRECT_WRITE+PREFIX, COW, dir-enum merge,
+# whiteout, recreate). Walks through steps 10c → 10l in order.
+#
+# Prerequisites in `driver-ready` checkpoint:
+#   - Trusted WDKTestCert (LocalMachine\Root)
+#   - bcdedit testsigning on
+#   - Autologon for aaron (survives reboot)
+#   - SignalmanGuest running on 172.30.0.10:50051
+#   - Firewall open on 50051
+#   - C:\Ospiri\drv\ exists
+
+name: "Ospiri Driver v3 FS Restrict Smoke"
+version: "1.0"
+tags: ["driver", "kernel", "smoke", "ospiri-sys", "fs-minifilter", "sprint-60.9"]
+
+vms:
+  - name: endpoint-1
+    template: windows-11-clean
+    checkpoint_restore: driver-ready
+    guest_agent_port: 50051
+    network:
+      switch: "RevnTestSwitch"
+      static_ip: "172.30.0.10"
+
+setup:
+  # 0. Pre-cleanup: stop + delete any leftover ospiri service in the
+  #    driver-ready checkpoint.  Both are idempotent (ignore errors).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "ospiri"]
+    ignore_exit_code: true
+
+  # 1. Stage the test-signed driver binaries. PowerShell New-Item
+  #    instead of cmd.exe `if not exist ... mkdir` (the latter trips
+  #    the guest agent's metacharacter guard).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: powershell
+    args:
+      - "-Command"
+      - "New-Item -ItemType Directory -Force -Path 'C:\\Ospiri\\drv' | Out-Null"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Release\\drv\\drv.sys"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.sys"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Release\\drv\\drv.cat"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.cat"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Release\\drv\\drv.inf"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.inf"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\target\\debug\\silo-test-harness.exe"
+    guest_path: "C:\\Ospiri\\silo-test-harness.exe"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\target\\debug\\silo-fs-test.exe"
+    guest_path: "C:\\Ospiri\\silo-fs-test.exe"
+
+  # 2. Register ospiri as type=filesys (critical - FltMgr won't attach
+  #    a minifilter whose service type is type=kernel).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args:
+      ["create", "ospiri", "type=", "filesys", "start=", "demand",
+       "binPath=", "C:\\Ospiri\\drv\\ospiri.sys",
+       "DisplayName=", "Ospiri Observability Driver",
+       "group=", "FSFilter Activity Monitor"]
+    run_as: SYSTEM
+
+  # 3. Populate Instances regkey (mirrors drv.inf's AddReg stanza).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Inner-Instance", "/v", "Altitude", "/t", "REG_SZ", "/d", "370000", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Inner-Instance", "/v", "Flags", "/t", "REG_DWORD", "/d", "0x0", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Outer-Instance", "/v", "Altitude", "/t", "REG_SZ", "/d", "370100", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Outer-Instance", "/v", "Flags", "/t", "REG_DWORD", "/d", "0x0", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances", "/v", "DefaultInstance", "/t", "REG_SZ", "/d", "OspriFs-Inner-Instance", "/f"]
+    run_as: SYSTEM
+
+  # 4. Confirm service is registered but not yet started.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["query", "ospiri"]
+    expect_stdout: "STOPPED"
+
+teardown:
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_restore
+    vm: endpoint-1
+    checkpoint: driver-ready
+
+checkpoints:
+  before_test: true
+  on_failure: true

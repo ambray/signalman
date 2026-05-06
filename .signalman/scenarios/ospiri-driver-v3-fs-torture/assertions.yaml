@@ -1,0 +1,22 @@
+# Ospiri Driver v3 FS Torture — Assertions
+#
+# The workflow.md tool blocks are self-asserting via per-block
+# `expect_status` / `expect_exit_code` / `expect_stdout_regex` /
+# `expect_stdout_not_regex` parameters. A green run proves:
+#   - driver_load + driver_unload returned 0 and reached the expected
+#     states (Running / Stopped) — proxy for no pool-tag leak bugcheck
+#   - fltmc filter-list transitions confirm OspriFs attached + detached
+#   - silo-fs-test redirect-write-prefix-torture reported passed:true,
+#     which in turn asserts:
+#       * 800 concurrent redirect writes all succeeded
+#       * source subtree has 0 files post-run
+#       * overlay subtree has exactly 800 files post-run
+#
+# Cross-step assertions (e.g. "driver unloads cleanly AFTER 800
+# redirect writes") are implicit in the scenario-level pass/fail —
+# if unload bugchecks, the guest reboots and Step 5 fails.
+
+assertions: []
+
+pass_threshold: 1.0
+critical_must_pass: true

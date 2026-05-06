@@ -1,0 +1,52 @@
+# Phase 3D OM eval scenario assertions.
+#
+# Most tool blocks self-assert via per-block expect_status /
+# expect_output_size_min params (a green run of those is the
+# enforcement-pipeline correctness proof on its own).
+#
+# Sprint 60.14 Phase 3F audit closure: the driver now emits three
+# subsystem-attributed TraceLogging events from the OB callback
+# (OmRuleMatched / OmRuleMatchedNameFailed / OmRuleObserved). The
+# audit's MAJOR finding was "ETW emission unverified end-to-end on
+# real hardware". Closed here by:
+#
+#   step-1  kernel_etw_start   subscribes to {5B7E6A1C-...} with
+#                              keyword 0x1030 (KW_OBJ | ENFORCEMENT
+#                              | CALLBACK) before any IOCTLs fire.
+#   step-12 kernel_etw_stop    flushes the session, parses the ETL
+#                              with Get-WinEvent, returns event_counts
+#                              keyed by event name.
+#
+# This `command_output` assertion regex-checks step-12's stdout
+# (the JSON-stringified KernelEtwStopResult) for any of the three
+# OM event names. Permissive match (Matched|MatchedNameFailed|Observed)
+# is correct for THIS scenario because the test rule targets
+# `\evil.exe` which the System process cannot match -- so the
+# empirically-emitted event is OmRuleObserved (NOTIFY).  A future
+# scenario that wires a DENY-matching workload will see
+# OmRuleMatched and the same assertion will continue to pass.
+#
+# Why not stricter ("OmRuleMatched" only)?
+#   The current scenario's binding (PID 4 = ntoskrnl.exe) cannot
+#   match an `\evil.exe` rule. Tightening to OmRuleMatched would
+#   require synthesizing a process that loads from a DENY-matching
+#   path -- worth doing in a follow-on scenario, but inflating this
+#   one's surface area would harm the smoke value. The audit
+#   closure only requires "ETW emission lands in a consumer", which
+#   any of the three events satisfies.
+
+assertions:
+  - id: om_etw_event_received
+    type: command_output
+    severity: critical
+    description: >
+      kernel_etw_stop must report at least one Sprint 60.14 Phase 3F
+      OM TraceLogging event in its event_counts map. Closes the
+      Phase 3F audit's MAJOR finding (ETW emission unverified on
+      hardware).
+    source: step-12
+    expect:
+      stdout_matches: '"OmRule(Matched|MatchedNameFailed|Observed)":\s*[1-9][0-9]*'
+
+pass_threshold: 1.0
+critical_must_pass: true

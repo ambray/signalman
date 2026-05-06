@@ -1,0 +1,22 @@
+# Ospiri Driver v3 OM PROCMAP Smoke (Phase 3C) — Assertions (empty)
+#
+# All Phase 3C checks are baked into per-tool-block expect_status /
+# expect_output_size_min parameters in workflow.md. The silo-test-harness.exe
+# exits non-zero on any mismatch; signalman surfaces that as a failed
+# tool block; the scenario fails. So a green run already proves:
+#   - driver_load / driver_unload: sc start/stop returned 0 AND the
+#     service reached Running / Stopped.
+#   - each driver_ioctl: NTSTATUS matched the expected value (the
+#     harness's Win32-alias resolver maps the I/O-manager-translated
+#     Win32 codes back to NTSTATUS names so the assertion holds across
+#     OS versions).
+#
+# No additional state checks: this scenario doesn't probe the evidence
+# ring contents (Phase 3D will add an end-to-end ScopeId-fill check
+# that requires draining the ring + parsing records, which the smoke
+# harness can't express today).
+
+assertions: []
+
+pass_threshold: 1.0
+critical_must_pass: true

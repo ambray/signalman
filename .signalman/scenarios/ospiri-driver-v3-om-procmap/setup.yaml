@@ -1,0 +1,157 @@
+# Ospiri Driver v3 - OM PROCMAP Smoke (Sprint 60.14 Phase 3C)
+#
+# Exercises the new OM PID->Scope binding surface (BIND_PROCESS /
+# UNBIND_PROCESS) end-to-end on a real Win11x64 guest under Driver
+# Verifier, with the test-signed Sprint 60.14 build of ospiri.sys.
+# Goals:
+#
+#   1. Driver loads cleanly with the Phase 3C wiring (procmap init +
+#      PsSetCreateProcessNotifyRoutineEx registration).
+#   2. OM_INIT_SCOPE creates a scope.
+#   3. OM_BIND_PROCESS for a real PID returns STATUS_SUCCESS.
+#   4. Re-bind same PID returns STATUS_OBJECT_NAME_COLLISION (per
+#      established BIND/UNBIND collision contract).
+#   5. OM_UNBIND_PROCESS un-binds; idempotent re-unbind returns SUCCESS.
+#   6. Negative paths: BIND with unknown ScopeId, UNBIND with
+#      Pid=0, undersized buffers all reject correctly.
+#   7. Spawn notepad, bind its PID, kill it, drain evidence -- the
+#      live count must drop via the kernel-only PsSetCreateProcessNotifyRoutineEx
+#      callback (this is the Phase 3C deliverable that unit tests
+#      cannot exercise; usersim doesn't fake the callback).
+#   8. Driver unloads cleanly under DV (no leak, no bugcheck).
+#
+# Starts from `driver-ready` -- same baseline as ospiri-driver-smoke.
+#
+# Sprint 60.14 Phase 3C deliverable.
+
+name: "Ospiri Driver v3 - OM PROCMAP Smoke (Phase 3C)"
+version: "1.0"
+tags: ["driver", "kernel", "smoke", "ospiri-sys", "om", "procmap", "sprint-60.14", "phase-3c"]
+
+vms:
+  - name: endpoint-1
+    template: windows-11-clean
+    # Use driver-ready-verifier so Driver Verifier is active during the
+    # smoke run -- we want DV's pool-tracking + IRQL-violation + leak
+    # checks fired against every BindProcess alloc, every UnbindProcess
+    # free, and every PsSetCreateProcessNotifyRoutineEx
+    # registration/deregistration. Phase 3C is the first OM phase that
+    # touches non-trivial allocator state from the kernel callback path
+    # so DV coverage is non-negotiable here.
+    checkpoint_restore: driver-ready-verifier
+    guest_agent_port: 50051
+    network:
+      switch: "RevnTestSwitch"
+      static_ip: "172.30.0.10"
+
+setup:
+  # 0. Pre-cleanup: stop + delete any leftover ospiri service.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "ospiri"]
+    ignore_exit_code: true
+
+  # Stage the Phase-3C-built driver into the guest tree.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: cmd.exe
+    args: ["/c", "if not exist C:\\Ospiri\\drv mkdir C:\\Ospiri\\drv"]
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.sys"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.sys"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.cat"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.cat"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.inf"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.inf"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\target\\debug\\silo-test-harness.exe"
+    guest_path: "C:\\Ospiri\\silo-test-harness.exe"
+
+  # Register the ospiri service. type=filesys is required by FltMgr
+  # (OspriFs minifilter registration); REG/NET/OM don't care about
+  # service type. Group matches drv.inf.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args:
+      ["create", "ospiri", "type=", "filesys", "start=", "demand",
+       "binPath=", "C:\\Ospiri\\drv\\ospiri.sys",
+       "DisplayName=", "Ospiri Observability Driver",
+       "group=", "FSFilter Activity Monitor"]
+    run_as: SYSTEM
+
+  # FltMgr Instances regkey (same as the smoke scenario; required for
+  # OspriFs registration even though Phase 3C doesn't exercise FS).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Inner-Instance", "/v", "Altitude", "/t", "REG_SZ", "/d", "370000", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Inner-Instance", "/v", "Flags", "/t", "REG_DWORD", "/d", "0x0", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Outer-Instance", "/v", "Altitude", "/t", "REG_SZ", "/d", "370100", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Outer-Instance", "/v", "Flags", "/t", "REG_DWORD", "/d", "0x0", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances", "/v", "DefaultInstance", "/t", "REG_SZ", "/d", "OspriFs-Inner-Instance", "/f"]
+    run_as: SYSTEM
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["query", "ospiri"]
+    expect_stdout: "STOPPED"
+
+teardown:
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_restore
+    vm: endpoint-1
+    checkpoint: driver-ready-verifier
+
+checkpoints:
+  before_test: true
+  on_failure: true

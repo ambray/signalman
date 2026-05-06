@@ -1,0 +1,209 @@
+# Ospiri Driver v3 — FS Driver-Verifier Cleanup Gates
+#
+# Sprint 60.13 deliverable. Runs the three new VM scenarios authored
+# in da62f64 / 6c846fa under Driver Verifier with the Ospiri-specific
+# 0x0298BB flag preset (Special Pool, Pool Tracking, I/O Verification,
+# Enhanced I/O, IRP Logger, Disk Integrity, DDI Compliance Checking,
+# IRQL Checking, Force Pending I/O).
+#
+# Goal: validate runtime invariants that unit tests can't reach (pool
+# tracking, IRQL inversions, IRP completion timing). Sprint 60.13's
+# pre-DV hardening pass (REG IRQL contract fix + FS POSIX semantics)
+# is exercised here for the first time end-to-end on real Windows.
+#
+# Prerequisites in `driver-ready-verifier` checkpoint
+# (built by `tmp-ps/bake-driver-ready-verifier.ps1`):
+#   - driver-ready baseline: WDKTestCert (LocalMachine\Root),
+#     bcdedit testsigning on, autologon for aaron, signalman-guest
+#     as Scheduled Task AtStartup on 172.30.0.10:50051, firewall
+#     open on 50051, C:\Ospiri\drv\ exists.
+#   - On top: `verifier.exe /flags 0x0298BB /driver drv.sys ospiri.sys`
+#     applied + reboot, with signalman-guest restored post-reboot.
+#
+# Setup adds on top:
+#   - Worktree-built drv.sys/cat (post-Sprint-60.13 hardening pass)
+#   - Worktree-built silo-fs-test.exe with the 3 new scenario subcommands
+#   - ospiri service registered as type=filesys with Instances regkey
+
+name: "Ospiri Driver v3 FS DV Cleanup Gates"
+version: "1.0"
+tags: ["driver", "kernel", "smoke", "ospiri-sys", "fs-minifilter", "driver-verifier", "sprint-60.13"]
+
+vms:
+  - name: endpoint-1
+    template: windows-11-clean
+    checkpoint_restore: driver-ready-verifier
+    guest_agent_port: 50051
+    network:
+      switch: "RevnTestSwitch"
+      static_ip: "172.30.0.10"
+
+setup:
+  # 0. Pre-cleanup: stop + delete any leftover ospiri service in the
+  #    parent checkpoint. Both are idempotent (ignore errors).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "ospiri"]
+    ignore_exit_code: true
+
+  # 0a. Confirm Driver Verifier is configured for ospiri.sys / drv.sys
+  #     (it was applied + reboot-cycled during the bake of the
+  #     driver-ready-verifier parent checkpoint). /querysettings
+  #     reports CONFIGURED drivers (vs /query which only shows
+  #     CURRENTLY-LOADED verified drivers); we expect drv.sys + ospiri.sys
+  #     in the list.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: verifier.exe
+    args: ["/querysettings"]
+    expect_stdout_regex: "(ospiri|drv)\\.sys"
+
+  # 1. Stage the test-signed driver binaries from the worktree's
+  #    Release build. The post-Sprint-60.13 driver carries:
+  #      - REG: TeardownState/FreeState are non-paged (DV 0xC4(0x21) fix)
+  #      - FS:  DeleteStagedOverlay uses POSIX semantics (DV 0xC9 fix)
+  - action: vm_run_command
+    vm: endpoint-1
+    command: cmd.exe
+    args: ["/c", "if not exist C:\\Ospiri\\drv mkdir C:\\Ospiri\\drv"]
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\.claude\\worktrees\\suspicious-wozniak-0576fe\\drv\\drv\\x64\\Release\\drv.sys"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.sys"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\.claude\\worktrees\\suspicious-wozniak-0576fe\\drv\\drv\\x64\\Release\\drv\\drv.cat"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.cat"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\.claude\\worktrees\\suspicious-wozniak-0576fe\\drv\\drv\\x64\\Release\\drv\\drv.inf"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.inf"
+
+  # 2. Stage silo-fs-test.exe + silo-test-harness.exe from the worktree's
+  #    Cargo Release build. silo-test-harness.exe is what signalman's
+  #    driver_ioctl tool block invokes (hardcoded path in
+  #    host/src/kernel-debug/driver-handlers.ts:237).
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\.claude\\worktrees\\suspicious-wozniak-0576fe\\target\\release\\silo-fs-test.exe"
+    guest_path: "C:\\Ospiri\\silo-fs-test.exe"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\.claude\\worktrees\\suspicious-wozniak-0576fe\\target\\release\\silo-test-harness.exe"
+    guest_path: "C:\\Ospiri\\silo-test-harness.exe"
+
+  # 3. Register ospiri as type=filesys (CRITICAL — FltMgr won't attach
+  #    a minifilter whose service type is type=kernel).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args:
+      ["create", "ospiri", "type=", "filesys", "start=", "demand",
+       "binPath=", "C:\\Ospiri\\drv\\ospiri.sys",
+       "DisplayName=", "Ospiri Observability Driver",
+       "group=", "FSFilter Activity Monitor"]
+    run_as: SYSTEM
+
+  # 4. Populate Instances regkey (mirrors drv.inf AddReg stanza).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Inner-Instance", "/v", "Altitude", "/t", "REG_SZ", "/d", "370000", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Inner-Instance", "/v", "Flags", "/t", "REG_DWORD", "/d", "0x0", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Outer-Instance", "/v", "Altitude", "/t", "REG_SZ", "/d", "370100", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Outer-Instance", "/v", "Flags", "/t", "REG_DWORD", "/d", "0x0", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances", "/v", "DefaultInstance", "/t", "REG_SZ", "/d", "OspriFs-Inner-Instance", "/f"]
+    run_as: SYSTEM
+
+  # 5. Confirm Verifier is active for ospiri.sys and drv.sys.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: cmd.exe
+    args: ["/c", "verifier.exe /query"]
+    expect_stdout_regex: "ospiri\\.sys"
+
+  # 6. Confirm service is registered but not yet started.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["query", "ospiri"]
+    expect_stdout: "STOPPED"
+
+  # 7. Create the temp dir each scenario uses for its working files.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: cmd.exe
+    args: ["/c", "if not exist C:\\Ospiri\\dv-tmp mkdir C:\\Ospiri\\dv-tmp"]
+
+teardown:
+  # Capture verifier statistics + any minidumps BEFORE service stop;
+  # Verifier counters reset when the driver unloads.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: cmd.exe
+    args: ["/c", "verifier.exe /query"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: cmd.exe
+    args: ["/c", "if exist C:\\Windows\\Minidump dir C:\\Windows\\Minidump"]
+    ignore_exit_code: true
+
+  # Stop + delete the service. sc stop on an already-stopped service
+  # returns 1062 (benign — the delete still works).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "ospiri"]
+    ignore_exit_code: true
+
+  # Roll back to driver-ready-verifier (the verifier-on baseline this
+  # scenario uses). The parent checkpoint already has Verifier
+  # configured + post-cycled; vm_restore just discards our per-run
+  # mutations (driver service create, regkey adds, scope state).
+  - action: vm_restore
+    vm: endpoint-1
+    checkpoint: driver-ready-verifier
+
+checkpoints:
+  before_test: true
+  on_failure: true

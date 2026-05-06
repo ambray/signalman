@@ -1,0 +1,152 @@
+# Ospiri Driver v3 FS — Multi-Threaded Torture
+#
+# Sprint 60.9 Phase B.3b follow-up. Companion to ospiri-driver-v3-
+# fs-restrict (single-threaded correctness); this one proves the
+# FS minifilter's REDIRECT_WRITE + PREFIX dispatch holds up under
+# concurrent load from a bound-PID process.
+#
+# What the torture asserts (on top of the v3-restrict smoke gates):
+#   * 8 worker threads × 100 iterations = 800 redirect writes all
+#     succeed — every write lands at the overlay, zero files leak
+#     through to the source tree.
+#   * 'OfNa' pool-tag hygiene under load: every temp NAMEBUF
+#     allocation in PreCreate's PREFIX path is paired with a
+#     free. Driver Verifier (if the run is against a verifier-
+#     enabled checkpoint) flags leaks at unload.
+#   * ETW ENFORCEMENT events continue flowing under concurrency —
+#     no drops.
+#   * PID hash-bucket reader fast-path is stable under many
+#     classify calls from the same PID.
+#
+# Uses driver-ready checkpoint (shared with v3-fs-restrict — has
+# test-signing enabled, autologon, signalman-guest listening,
+# filesys-typed ospiri service pre-registered with Instances
+# regkey populated).
+
+name: "Ospiri Driver v3 FS Multi-Threaded Torture (8 threads x 100 iter)"
+version: "1.0"
+tags: ["driver", "kernel", "ospiri-sys", "fs-minifilter", "torture", "redirect-write", "sprint-60.9"]
+
+vms:
+  - name: endpoint-1
+    template: windows-11-clean
+    checkpoint_restore: driver-ready
+    guest_agent_port: 50051
+    network:
+      switch: "RevnTestSwitch"
+      static_ip: "172.30.0.10"
+
+setup:
+  # 0. Pre-cleanup: stop + delete any leftover ospiri service in the
+  #    driver-ready checkpoint.  Both are idempotent (ignore errors).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "ospiri"]
+    ignore_exit_code: true
+
+  # 1. Stage the test-signed driver binaries.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: cmd.exe
+    args: ["/c", "if not exist C:\\Ospiri\\drv mkdir C:\\Ospiri\\drv"]
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Release\\drv\\drv.sys"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.sys"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Release\\drv\\drv.cat"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.cat"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Release\\drv\\drv.inf"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.inf"
+
+  # silo-fs-test carries the new redirect-write-prefix-torture
+  # subcommand (committed 2ec22b6). Debug build is used since the
+  # Rust-level performance cost of the write-loop is negligible
+  # relative to the kernel-side work we're torturing.
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\target\\debug\\silo-fs-test.exe"
+    guest_path: "C:\\Ospiri\\silo-fs-test.exe"
+
+  # 2. Register ospiri as type=filesys (FltMgr won't attach a
+  #    minifilter whose service type is kernel).
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args:
+      ["create", "ospiri", "type=", "filesys", "start=", "demand",
+       "binPath=", "C:\\Ospiri\\drv\\ospiri.sys",
+       "DisplayName=", "Ospiri Observability Driver",
+       "group=", "FSFilter Activity Monitor"]
+    run_as: SYSTEM
+
+  # 3. Populate Instances regkey.
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Inner-Instance", "/v", "Altitude", "/t", "REG_SZ", "/d", "370000", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Inner-Instance", "/v", "Flags", "/t", "REG_DWORD", "/d", "0x0", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Outer-Instance", "/v", "Altitude", "/t", "REG_SZ", "/d", "370100", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Outer-Instance", "/v", "Flags", "/t", "REG_DWORD", "/d", "0x0", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances", "/v", "DefaultInstance", "/t", "REG_SZ", "/d", "OspriFs-Inner-Instance", "/f"]
+    run_as: SYSTEM
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["query", "ospiri"]
+    expect_stdout: "STOPPED"
+
+teardown:
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_restore
+    vm: endpoint-1
+    checkpoint: driver-ready
+
+checkpoints:
+  before_test: true
+  on_failure: true

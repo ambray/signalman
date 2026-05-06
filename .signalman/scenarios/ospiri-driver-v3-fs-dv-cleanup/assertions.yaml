@@ -1,0 +1,23 @@
+# Ospiri Driver v3 FS DV Cleanup Gates — Assertions
+#
+# The workflow.md tool blocks are self-asserting via per-block
+# `expect_status` / `expect_exit_code` / `expect_stdout_regex` parameters.
+# A green run already proves:
+#   - driver_load + driver_unload returned 0 + reached expected states
+#   - fltmc filters confirmed OspriFs attached + detached
+#   - Each silo-fs-test scenario emitted "passed":true
+#   - verifier /query was queried (operator inspects post-run for
+#     "Bytes Leaked" > 0)
+#   - C:\Windows\Minidump\ was listed (operator inspects for any
+#     bugcheck dumps from the run)
+#
+# Cross-step assertions for things tool-block params can't express:
+# none yet. Future work could parse "Bytes Leaked: <N>" from the
+# step-7 verifier query stdout and assert N==0, but signalman's
+# assertions.yaml doesn't currently have a stdout-pattern-extract
+# mechanism.
+
+assertions: []
+
+pass_threshold: 1.0
+critical_must_pass: true

@@ -1053,7 +1053,77 @@ export class ScenarioOrchestrator {
         const timeoutMs = (params.timeout_ms as number) ?? 60_000;
         const runAs = (params.run_as as string) ?? undefined;
         const result = await client.runCommand(command, args, { timeoutMs, runAs });
-        return result.stdout ?? "";
+        const stdout = result.stdout ?? "";
+
+        // Phase 3 §C1 follow-up (2026-05-06): enforce workflow.md
+        // `expect_*` parameters here so a `vm_run_command` block that
+        // fails its expectations throws — the orchestrator's catch
+        // then sets `status = "failed"` and the per-block stdout is
+        // captured in `workflowOutputs` (with `ERROR:` prefix) for
+        // post-mortem in `workflow-outputs.json`. Pre-fix, these
+        // expectations were silently ignored, so a failing scenario
+        // looked indistinguishable from a green run.
+        const failures: string[] = [];
+        if (params.expect_exit_code !== undefined) {
+          const expected = params.expect_exit_code as number;
+          if (result.exitCode !== expected) {
+            failures.push(
+              `expect_exit_code: expected ${expected}, got ${result.exitCode}`,
+            );
+          }
+        }
+        if (params.expect_stdout !== undefined) {
+          const expected = params.expect_stdout as string;
+          if (!stdout.includes(expected)) {
+            failures.push(
+              `expect_stdout: expected substring ${JSON.stringify(expected)} not found in stdout`,
+            );
+          }
+        }
+        if (params.expect_stdout_regex !== undefined) {
+          const pattern = params.expect_stdout_regex as string;
+          let re: RegExp;
+          try {
+            re = new RegExp(pattern);
+          } catch (e) {
+            failures.push(
+              `expect_stdout_regex: invalid regex ${JSON.stringify(pattern)}: ${e instanceof Error ? e.message : String(e)}`,
+            );
+            re = /(?:)/;
+          }
+          if (!re.test(stdout)) {
+            failures.push(
+              `expect_stdout_regex: pattern ${JSON.stringify(pattern)} did not match stdout`,
+            );
+          }
+        }
+        if (params.expect_stdout_not_regex !== undefined) {
+          const pattern = params.expect_stdout_not_regex as string;
+          let re: RegExp;
+          try {
+            re = new RegExp(pattern);
+          } catch (e) {
+            failures.push(
+              `expect_stdout_not_regex: invalid regex ${JSON.stringify(pattern)}: ${e instanceof Error ? e.message : String(e)}`,
+            );
+            re = /^$/;
+          }
+          if (re.test(stdout)) {
+            failures.push(
+              `expect_stdout_not_regex: pattern ${JSON.stringify(pattern)} unexpectedly matched stdout`,
+            );
+          }
+        }
+        if (failures.length > 0) {
+          const snippet = stdout.length > 256
+            ? stdout.slice(0, 256) + "..."
+            : stdout;
+          throw new Error(
+            `vm_run_command expectations failed: ${failures.join("; ")} | stdout snippet: ${JSON.stringify(snippet)}`,
+          );
+        }
+
+        return stdout;
       }
 
       case "vm_copy_file": {

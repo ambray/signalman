@@ -1,0 +1,144 @@
+# Ospiri Driver v3 - OM Eval Smoke + Torture (Sprint 60.14 Phase 3D)
+#
+# End-to-end validation of the OM rule-evaluation enforcement primitive
+# on a real Win11x64 guest under Driver Verifier:
+#
+#   1. Driver loads cleanly with the Phase 3D rule-eval pipeline
+#      (SeLocateProcessImageName + EvaluateScope + DesiredAccess strip).
+#   2. Single-thread baseline: bind a real PID, add a DENY rule on its
+#      image name, OM_DRAIN_EVIDENCE shows DENY records emitted.
+#   3. Multi-threaded torture: bind multiple PIDs concurrently to the
+#      same scope while another agent thread mutates rules. Every
+#      handle op fires the OB callback. DV catches any leak / UAF in:
+#         - The image-name resolver allocation (SeLocateProcessImageName
+#           pool block, freed via ExFreePool).
+#         - The RCU read pattern under concurrent AddRule clones.
+#         - The DesiredAccess write-back composing with prior callbacks.
+#         - PID-reuse guard with terminate-notify draining the procmap.
+#   4. Driver unloads cleanly under DV (no leak, no IRQL violation,
+#      no missed deregistration).
+#
+# This is the VM coverage for the multi-thread / writer-vs-reader
+# stress that's deferred from the unit suite (usersim's no-op
+# OspOmScope_RcuBarrier doesn't model real RCU drain). Real
+# KeGenericCallDpc + KEVENT-wait protect readers against writer
+# table-free races.
+#
+# Sprint 60.14 Phase 3D deliverable.
+
+name: "Ospiri Driver v3 - OM Eval Smoke + Torture (Phase 3D)"
+version: "1.0"
+tags: ["driver", "kernel", "smoke", "torture", "ospiri-sys", "om", "eval", "sprint-60.14", "phase-3d"]
+
+vms:
+  - name: endpoint-1
+    template: windows-11-clean
+    # driver-ready-verifier so DV pool tracking + IRQL violation +
+    # leak checks fire on every BindProcess alloc, every AddRule
+    # clone, every SeLocateProcessImageName resolution, and the
+    # entire procmap drain + ProcessNotify deregister at unload.
+    checkpoint_restore: driver-ready-verifier
+    guest_agent_port: 50051
+    network:
+      switch: "RevnTestSwitch"
+      static_ip: "172.30.0.10"
+
+setup:
+  # Pre-cleanup
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: cmd.exe
+    args: ["/c", "if not exist C:\\Ospiri\\drv mkdir C:\\Ospiri\\drv"]
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.sys"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.sys"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.cat"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.cat"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\drv\\x64\\Debug\\drv\\drv.inf"
+    guest_path: "C:\\Ospiri\\drv\\ospiri.inf"
+
+  - action: vm_copy_file
+    vm: endpoint-1
+    direction: host_to_guest
+    host_path: "E:\\source\\repos\\correlator\\docs\\target\\debug\\silo-test-harness.exe"
+    guest_path: "C:\\Ospiri\\silo-test-harness.exe"
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args:
+      ["create", "ospiri", "type=", "filesys", "start=", "demand",
+       "binPath=", "C:\\Ospiri\\drv\\ospiri.sys",
+       "DisplayName=", "Ospiri Observability Driver",
+       "group=", "FSFilter Activity Monitor"]
+    run_as: SYSTEM
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Inner-Instance", "/v", "Altitude", "/t", "REG_SZ", "/d", "370000", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Inner-Instance", "/v", "Flags", "/t", "REG_DWORD", "/d", "0x0", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Outer-Instance", "/v", "Altitude", "/t", "REG_SZ", "/d", "370100", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances\\OspriFs-Outer-Instance", "/v", "Flags", "/t", "REG_DWORD", "/d", "0x0", "/f"]
+    run_as: SYSTEM
+  - action: vm_run_command
+    vm: endpoint-1
+    command: reg.exe
+    args: ["add", "HKLM\\SYSTEM\\CurrentControlSet\\Services\\ospiri\\Instances", "/v", "DefaultInstance", "/t", "REG_SZ", "/d", "OspriFs-Inner-Instance", "/f"]
+    run_as: SYSTEM
+
+teardown:
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["stop", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_run_command
+    vm: endpoint-1
+    command: sc.exe
+    args: ["delete", "ospiri"]
+    ignore_exit_code: true
+
+  - action: vm_restore
+    vm: endpoint-1
+    checkpoint: driver-ready-verifier
+
+checkpoints:
+  before_test: true
+  on_failure: true

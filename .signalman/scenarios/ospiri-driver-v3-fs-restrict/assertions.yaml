@@ -1,0 +1,20 @@
+# Ospiri Driver v3 FS Restrict — Assertions
+#
+# The workflow.md tool blocks are self-asserting via per-block
+# `expect_status` / `expect_output_size_min` / `expect_stdout` /
+# `expect_stdout_regex` parameters. A green run already proves:
+#   - driver_load + driver_unload returned 0 and reached the expected states
+#   - each driver_ioctl matched its NTSTATUS + output-size expectation
+#   - the fltmc filters regex-check confirmed OspriFs attached + detached
+#   - the unscoped-process file I/O command returned FIO_OK
+#
+# Additional cross-step assertions (e.g. "the RuleId returned by ADD_RULE
+# must match the RuleId in LIST_RULES output") belong here if they check
+# state that tool-block params can't express. That's a Phase B.1 target
+# once silo-test-harness gains an FS-IOCTL parser that can extract
+# RuleId from raw output bytes.
+
+assertions: []
+
+pass_threshold: 1.0
+critical_must_pass: true
