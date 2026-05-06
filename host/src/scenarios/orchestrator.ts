@@ -1920,7 +1920,13 @@ export class ScenarioOrchestrator {
           const pattern = params.expect_stdout_regex as string;
           let re: RegExp;
           try {
-            re = new RegExp(pattern);
+            // Multiline mode by default — existing scenarios assume
+            // `^` / `$` match line boundaries within multi-line
+            // command output (e.g., `^example\s+\d+\s+370000` against
+            // a `fltmc filters` table). Without `m`, `^` only matches
+            // start-of-string and silently fails for any line past
+            // the first.
+            re = new RegExp(pattern, "m");
           } catch (e) {
             failures.push(
               `expect_stdout_regex: invalid regex ${JSON.stringify(pattern)}: ${e instanceof Error ? e.message : String(e)}`,
@@ -1937,7 +1943,13 @@ export class ScenarioOrchestrator {
           const pattern = params.expect_stdout_not_regex as string;
           let re: RegExp;
           try {
-            re = new RegExp(pattern);
+            // Multiline mode by default — existing scenarios assume
+            // `^` / `$` match line boundaries within multi-line
+            // command output (e.g., `^example\s+\d+\s+370000` against
+            // a `fltmc filters` table). Without `m`, `^` only matches
+            // start-of-string and silently fails for any line past
+            // the first.
+            re = new RegExp(pattern, "m");
           } catch (e) {
             failures.push(
               `expect_stdout_not_regex: invalid regex ${JSON.stringify(pattern)}: ${e instanceof Error ? e.message : String(e)}`,
