@@ -1732,24 +1732,40 @@ export class ScenarioOrchestrator {
             const timeoutMs = (step.timeout_ms as number) ?? 60_000;
             const cmdArgs = (step.args as string[]) ?? [];
             const runAs = (step.run_as as string) ?? undefined;
-            if (client) {
-              await client.runCommand(
-                step.command as string,
-                cmdArgs,
-                { timeoutMs, runAs },
-              );
-            } else {
-              const result = await this.backend.executeCommand(
-                handle,
-                step.command as string,
-                cmdArgs,
-                timeoutMs,
-              );
-              if (result.exitCode !== 0) {
-                throw new Error(
-                  `vm_run_command exited ${result.exitCode}: ${result.stderr || result.stdout}`,
+
+            // Phase 3 §C1 follow-up (2026-05-06): retry once on
+            // DEADLINE_EXCEEDED for guest-agent cold-start. Both the
+            // guest-client and backend.executeCommand paths get the
+            // same retry treatment so scenarios that pin the very
+            // first command after a `vm_restore` don't flake.
+            const runOnce = async () => {
+              if (client) {
+                await client.runCommand(
+                  step.command as string,
+                  cmdArgs,
+                  { timeoutMs, runAs },
                 );
+              } else {
+                const result = await this.backend.executeCommand(
+                  handle,
+                  step.command as string,
+                  cmdArgs,
+                  timeoutMs,
+                );
+                if (result.exitCode !== 0) {
+                  throw new Error(
+                    `vm_run_command exited ${result.exitCode}: ${result.stderr || result.stdout}`,
+                  );
+                }
               }
+            };
+            try {
+              await runOnce();
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              const isDeadline = /DEADLINE_EXCEEDED|CANCELLED.*Timeout/i.test(msg);
+              if (!isDeadline) throw e;
+              await runOnce();
             }
             break;
           }
@@ -1880,15 +1896,37 @@ export class ScenarioOrchestrator {
         // `vm_run_command` supports both the guest-client and the
         // backend.executeCommand paths; the original commit only
         // handled guest-client. Merged shape: keep main's bifurcated
-        // dispatch, add expect_* enforcement on the result.  When
-        // `expect_exit_code` is unset, default to expecting 0 so
-        // main's "fail-on-nonzero" semantics are preserved for
-        // scenarios that don't declare an expectation.
-        const result = client
-          ? await client.runCommand(command, args, { timeoutMs, runAs })
-          : handle
-            ? await this.backend.executeCommand(handle, command, args, timeoutMs)
-            : undefined;
+        // dispatch, plus retry once on DEADLINE_EXCEEDED to absorb
+        // guest-agent cold-start jitter.
+        //
+        // After `vm_restore` the agent's TCP socket comes up before
+        // its runCommand-handler thread pool warms — `isConnected`
+        // (health RPC) returns true but the first real command can
+        // still hit a 10-15s queue delay. A single retry with the
+        // scenario's own timeout handles the cold path without
+        // changing per-scenario `timeout_ms` budgets.
+        //
+        // The retry is gated on the gRPC error being specifically a
+        // DEADLINE / CANCELLED — other errors (UNAVAILABLE, etc.)
+        // surface immediately so genuine failures aren't masked.
+        const dispatch = async () => {
+          if (client) {
+            return await client.runCommand(command, args, { timeoutMs, runAs });
+          }
+          if (handle) {
+            return await this.backend.executeCommand(handle, command, args, timeoutMs);
+          }
+          return undefined;
+        };
+        let result;
+        try {
+          result = await dispatch();
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          const isDeadline = /DEADLINE_EXCEEDED|CANCELLED.*Timeout/i.test(msg);
+          if (!isDeadline) throw e;
+          result = await dispatch();
+        }
         if (!result) throw new Error(`VM '${vmName}' not found`);
         const stdout = result.stdout ?? "";
 
