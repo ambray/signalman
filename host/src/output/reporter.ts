@@ -18,8 +18,40 @@ export interface TestResult {
   passed: boolean;
   score: number;
   assertions: AssertionResultEntry[];
+  /**
+   * Per-tool-block results from the workflow.md execution.
+   *
+   * **Phase-3 audit follow-up (2026-05-05):** added so the JUnit
+   * report counts workflow.md tool blocks as test cases, not just
+   * `assertions.yaml` entries.  Pre-fix, scenarios with empty
+   * `assertions:` (the canonical pattern for driver-V3 — assertions
+   * live as inline `expect_*` per block) reported `tests=0` even
+   * when a tool block's `expect_*` failed.  CI dashboards
+   * aggregating JUnit silently under-reported.
+   */
+  toolBlocks?: ToolBlockResult[];
   screenshots: string[];
   errors: string[];
+}
+
+/**
+ * Result of executing a single workflow.md tool block.
+ *
+ * **Phase-3 audit follow-up (2026-05-05).**  The orchestrator
+ * captures one entry per tool block executed; each becomes a
+ * synthetic `<testcase>` in the JUnit report.
+ */
+export interface ToolBlockResult {
+  /** Step index — matches the `step-N` key in `workflow-outputs.json`. */
+  stepIndex: number;
+  /** Tool name — `vm_run_command`, `driver_load`, `driver_ioctl`, etc. */
+  tool: string;
+  /** Whether the block ran without throwing.  `expect_*` failures throw. */
+  passed: boolean;
+  /** Error message when `passed === false`. */
+  error?: string;
+  /** Output snippet for diagnosis (cap recommended at ~256 chars). */
+  outputSnippet?: string;
 }
 
 export interface AssertionResultEntry {
@@ -99,13 +131,40 @@ export function writeJunitReport(
   const filePath = path.join(outputDir, "results.xml");
   fs.mkdirSync(outputDir, { recursive: true });
 
-  const testCount = result.assertions.length;
-  const failures = result.assertions.filter((a) => !a.passed).length;
+  const toolBlocks = result.toolBlocks ?? [];
+  // Phase-3 audit follow-up (2026-05-05): include workflow.md
+  // tool-block results in the JUnit count.  Pre-fix, scenarios
+  // with empty `assertions.yaml` (the canonical pattern for
+  // driver-V3) reported `tests=0` even with a failed scenario.
+  const testCount = result.assertions.length + toolBlocks.length;
+  const failures =
+    result.assertions.filter((a) => !a.passed).length +
+    toolBlocks.filter((tb) => !tb.passed).length;
   const durationSec = (result.durationMs / 1000).toFixed(3);
 
   let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
   xml += `<testsuites>\n`;
   xml += `  <testsuite name="${escapeXml(result.scenario)}" tests="${testCount}" failures="${failures}" time="${durationSec}" timestamp="${result.startedAt}">\n`;
+
+  // Workflow.md tool-block test cases — one per executed block.
+  // Test name is `step-<idx>.<tool>` so JUnit consumers can
+  // navigate the scenario's flow without consulting the
+  // workflow.md source.
+  for (const tb of toolBlocks) {
+    const testName = `step-${tb.stepIndex}.${tb.tool}`;
+    xml += `    <testcase name="${escapeXml(testName)}" classname="${escapeXml(result.scenario)}" time="0">\n`;
+
+    if (!tb.passed) {
+      const message = tb.error ?? `Tool block '${testName}' failed`;
+      xml += `      <failure message="${escapeXml(message)}" type="tool_block">\n`;
+      if (tb.outputSnippet) {
+        xml += `        Output snippet: ${escapeXml(tb.outputSnippet)}\n`;
+      }
+      xml += `      </failure>\n`;
+    }
+
+    xml += `    </testcase>\n`;
+  }
 
   for (const a of result.assertions) {
     xml += `    <testcase name="${escapeXml(a.id)}" classname="${escapeXml(result.scenario)}" time="0">\n`;

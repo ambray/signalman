@@ -107,7 +107,7 @@ function createInitialToolRegistry(): ToolRegistry {
 // as the default kdSessionFactory without touching the concrete
 // KdSession constructor.
 import { writeJunitReport } from "../output/reporter.js";
-import type { TestResult, AssertionResultEntry } from "../output/reporter.js";
+import type { TestResult, AssertionResultEntry, ToolBlockResult } from "../output/reporter.js";
 
 const GUEST_FILE_CHUNK_BYTES = 1024 * 1024;
 
@@ -865,6 +865,11 @@ export class ScenarioOrchestrator {
     // can snapshot workflow step outputs into workflow-outputs.json for
     // post-mortem when assertions fail.
     const workflowOutputsSnapshot = new Map<string, string>();
+    // Phase-3 audit (2026-05-05): hoisted so the post-run JUnit
+    // synthesis path can read per-tool-block pass/fail.  Populated
+    // inside the try block (one entry per tool block executed);
+    // empty when scenario fails before reaching workflow execution.
+    const toolBlockResults: ToolBlockResult[] = [];
 
     try {
       const loadResult = loadScenario(scenarioPath);
@@ -947,6 +952,33 @@ export class ScenarioOrchestrator {
       // Execute workflow tool blocks from workflow.md
       const workflowOutputs = workflowOutputsSnapshot;
       const workflowScreenshots = new Map<string, string>();
+      // `toolBlockResults` is hoisted to the runScenario scope —
+      // see the declaration above the outer try.  The closures
+      // below mutate it in place so the post-run JUnit synthesis
+      // can read it after this try/catch returns.
+
+      const recordToolBlockSuccess = (idx: number, tool: string, output: string) => {
+        const snippet = output.length > 256 ? output.slice(0, 256) + "..." : output;
+        toolBlockResults.push({
+          stepIndex: idx,
+          tool,
+          passed: true,
+          outputSnippet: snippet,
+        });
+      };
+      const recordToolBlockFailure = (
+        idx: number,
+        tool: string,
+        error: string,
+      ) => {
+        const snippet = error.length > 512 ? error.slice(0, 512) + "..." : error;
+        toolBlockResults.push({
+          stepIndex: idx,
+          tool,
+          passed: false,
+          error: snippet,
+        });
+      };
 
       if (workflowMarkdown) {
         const narrative = parseNarrative(workflowMarkdown);
@@ -963,9 +995,11 @@ export class ScenarioOrchestrator {
                   vmMap,
                 );
                 workflowOutputs.set(sourceKey, output);
+                recordToolBlockSuccess(stepIndex, block.tool, output);
               } catch (e) {
                 const msg = e instanceof Error ? e.message : String(e);
                 workflowOutputs.set(sourceKey, `ERROR: ${msg}`);
+                recordToolBlockFailure(stepIndex, block.tool, msg);
                 status = "failed";
               }
               stepIndex++;
@@ -983,9 +1017,11 @@ export class ScenarioOrchestrator {
                 vmMap,
               );
               workflowOutputs.set(sourceKey, output);
+              recordToolBlockSuccess(i, blocks[i].tool, output);
             } catch (e) {
               const msg = e instanceof Error ? e.message : String(e);
               workflowOutputs.set(sourceKey, `ERROR: ${msg}`);
+              recordToolBlockFailure(i, blocks[i].tool, msg);
               status = "failed";
             }
           }
@@ -1175,6 +1211,10 @@ export class ScenarioOrchestrator {
             error: r.error,
           }),
         ),
+        // Phase-3 audit follow-up (2026-05-05): include per-tool-block
+        // results so the JUnit report counts workflow.md tool blocks
+        // as test cases, not just `assertions.yaml` entries.
+        toolBlocks: toolBlockResults,
         screenshots: [],
         errors: error ? [error] : [],
       };
@@ -1836,18 +1876,90 @@ export class ScenarioOrchestrator {
         const args = (params.args as string[]) ?? [];
         const timeoutMs = (params.timeout_ms as number) ?? 60_000;
         const runAs = (params.run_as as string) ?? undefined;
+        // Cherry-pick reconciliation (2026-05-06): main's
+        // `vm_run_command` supports both the guest-client and the
+        // backend.executeCommand paths; the original commit only
+        // handled guest-client. Merged shape: keep main's bifurcated
+        // dispatch, add expect_* enforcement on the result.  When
+        // `expect_exit_code` is unset, default to expecting 0 so
+        // main's "fail-on-nonzero" semantics are preserved for
+        // scenarios that don't declare an expectation.
         const result = client
           ? await client.runCommand(command, args, { timeoutMs, runAs })
           : handle
             ? await this.backend.executeCommand(handle, command, args, timeoutMs)
             : undefined;
         if (!result) throw new Error(`VM '${vmName}' not found`);
-        if (result.exitCode !== 0) {
-          throw new Error(
-            `vm_run_command exited ${result.exitCode}: ${result.stderr || result.stdout}`,
+        const stdout = result.stdout ?? "";
+
+        // Phase-3 audit (2026-05-05): enforce workflow.md `expect_*`
+        // parameters here so a `vm_run_command` block that fails its
+        // expectations throws — the orchestrator then marks the
+        // step's `workflowOutputs` entry with the `ERROR:` prefix
+        // AND records the per-tool-block failure for JUnit synthesis.
+        const failures: string[] = [];
+        const expectedExit = params.expect_exit_code !== undefined
+          ? (params.expect_exit_code as number)
+          : 0;  // default: fail on nonzero (preserves pre-fix behavior)
+        if (result.exitCode !== expectedExit) {
+          failures.push(
+            `expect_exit_code: expected ${expectedExit}, got ${result.exitCode}: ${result.stderr || result.stdout}`,
           );
         }
-        return result.stdout ?? "";
+        if (params.expect_stdout !== undefined) {
+          const expected = params.expect_stdout as string;
+          if (!stdout.includes(expected)) {
+            failures.push(
+              `expect_stdout: expected substring ${JSON.stringify(expected)} not found in stdout`,
+            );
+          }
+        }
+        if (params.expect_stdout_regex !== undefined) {
+          const pattern = params.expect_stdout_regex as string;
+          let re: RegExp;
+          try {
+            re = new RegExp(pattern);
+          } catch (e) {
+            failures.push(
+              `expect_stdout_regex: invalid regex ${JSON.stringify(pattern)}: ${e instanceof Error ? e.message : String(e)}`,
+            );
+            re = /(?:)/;
+          }
+          if (!re.test(stdout)) {
+            failures.push(
+              `expect_stdout_regex: pattern ${JSON.stringify(pattern)} did not match stdout`,
+            );
+          }
+        }
+        if (params.expect_stdout_not_regex !== undefined) {
+          const pattern = params.expect_stdout_not_regex as string;
+          let re: RegExp;
+          try {
+            re = new RegExp(pattern);
+          } catch (e) {
+            failures.push(
+              `expect_stdout_not_regex: invalid regex ${JSON.stringify(pattern)}: ${e instanceof Error ? e.message : String(e)}`,
+            );
+            re = /^$/;
+          }
+          if (re.test(stdout)) {
+            failures.push(
+              `expect_stdout_not_regex: pattern ${JSON.stringify(pattern)} unexpectedly matched stdout`,
+            );
+          }
+        }
+        if (failures.length > 0) {
+          // Include a stdout snippet for diagnosis (capped to keep
+          // the orchestrator's `ERROR:` line compact).
+          const snippet = stdout.length > 256
+            ? stdout.slice(0, 256) + "..."
+            : stdout;
+          throw new Error(
+            `vm_run_command expectations failed: ${failures.join("; ")} | stdout snippet: ${JSON.stringify(snippet)}`,
+          );
+        }
+
+        return stdout;
       }
 
       case "vm_copy_file": {
