@@ -1897,10 +1897,12 @@ export class ScenarioOrchestrator {
         // expectations throws — the orchestrator then marks the
         // step's `workflowOutputs` entry with the `ERROR:` prefix
         // AND records the per-tool-block failure for JUnit synthesis.
+        // When `expect_exit_code` is unset, default to expecting 0
+        // (preserves main's "fail-on-nonzero" semantics).
         const failures: string[] = [];
         const expectedExit = params.expect_exit_code !== undefined
           ? (params.expect_exit_code as number)
-          : 0;  // default: fail on nonzero (preserves pre-fix behavior)
+          : 0;
         if (result.exitCode !== expectedExit) {
           failures.push(
             `expect_exit_code: expected ${expectedExit}, got ${result.exitCode}: ${result.stderr || result.stdout}`,
