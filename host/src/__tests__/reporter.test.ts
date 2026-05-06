@@ -213,4 +213,121 @@ describe('writeJunitReport', () => {
       cleanupDir(dir);
     }
   });
+
+  // ── Phase-3 audit follow-up (2026-05-05) — toolBlocks synthesis ──
+  //
+  // The signalman driver-V3 scenarios use empty `assertions: []` and
+  // express assertions inline as workflow.md `expect_*` parameters.
+  // Pre-fix the JUnit reporter only counted `assertions:` entries,
+  // so a scenario where step-2's `expect_exit_code` failed reported
+  // `tests=0 failures=0`, indistinguishable from a green run.  These
+  // tests pin the synthesis behaviour: every executed tool block
+  // becomes a synthetic <testcase> in the JUnit report.
+
+  function makeResultWithToolBlocks(): TestResult {
+    return {
+      scenario: 'fs-restrict-scenario',
+      startedAt: '2026-05-05T00:00:00Z',
+      finishedAt: '2026-05-05T00:02:00Z',
+      durationMs: 120000,
+      passed: false,
+      score: 0.5,
+      assertions: [], // canonical driver-V3 pattern
+      toolBlocks: [
+        { stepIndex: 0, tool: 'driver_load', passed: true, outputSnippet: '{"status":0}' },
+        { stepIndex: 1, tool: 'kernel_etw_start', passed: true, outputSnippet: '{"status":0}' },
+        {
+          stepIndex: 2,
+          tool: 'vm_run_command',
+          passed: false,
+          error: 'vm_run_command expectations failed: expect_exit_code: expected 0, got 1',
+          outputSnippet: '{"passed":false,"steps":[]}',
+        },
+        { stepIndex: 3, tool: 'driver_unload', passed: true, outputSnippet: '{"status":0}' },
+      ],
+      screenshots: [],
+      errors: [],
+    };
+  }
+
+  it('synthesizes one <testcase> per tool block when assertions is empty', () => {
+    const dir = makeTempDir();
+    try {
+      const filePath = writeJunitReport(makeResultWithToolBlocks(), dir);
+      const content = fs.readFileSync(filePath, 'utf-8');
+      // 4 tool blocks → tests=4
+      expect(content).toContain('tests="4"');
+      // 1 failed → failures=1
+      expect(content).toContain('failures="1"');
+      // Test names follow `step-<idx>.<tool>` shape
+      expect(content).toContain('name="step-0.driver_load"');
+      expect(content).toContain('name="step-2.vm_run_command"');
+      expect(content).toContain('name="step-3.driver_unload"');
+    } finally {
+      cleanupDir(dir);
+    }
+  });
+
+  it('emits <failure> with type="tool_block" for failed tool blocks', () => {
+    const dir = makeTempDir();
+    try {
+      const filePath = writeJunitReport(makeResultWithToolBlocks(), dir);
+      const content = fs.readFileSync(filePath, 'utf-8');
+      expect(content).toContain('type="tool_block"');
+      expect(content).toContain('expect_exit_code: expected 0, got 1');
+      expect(content).toContain('Output snippet:');
+    } finally {
+      cleanupDir(dir);
+    }
+  });
+
+  it('counts both assertions and tool blocks in the testsuite total', () => {
+    const dir = makeTempDir();
+    try {
+      // Combine: 2 assertions (1 fail) + 4 tool blocks (1 fail) = tests=6, failures=2
+      const result: TestResult = {
+        ...makeResultWithToolBlocks(),
+        assertions: [
+          { id: 'a1', description: 'first', severity: 'high', passed: true },
+          { id: 'a2', description: 'second', severity: 'critical', passed: false, error: 'bad' },
+        ],
+      };
+      const filePath = writeJunitReport(result, dir);
+      const content = fs.readFileSync(filePath, 'utf-8');
+      expect(content).toContain('tests="6"');
+      expect(content).toContain('failures="2"');
+    } finally {
+      cleanupDir(dir);
+    }
+  });
+
+  it('reports tests=0 when both assertions and tool blocks are empty', () => {
+    const dir = makeTempDir();
+    try {
+      const result: TestResult = {
+        ...makeResult(),
+        assertions: [],
+        toolBlocks: [],
+      };
+      const filePath = writeJunitReport(result, dir);
+      const content = fs.readFileSync(filePath, 'utf-8');
+      expect(content).toContain('tests="0"');
+      expect(content).toContain('failures="0"');
+    } finally {
+      cleanupDir(dir);
+    }
+  });
+
+  it('handles legacy results without toolBlocks (backwards compat)', () => {
+    const dir = makeTempDir();
+    try {
+      // Pre-Phase-3-audit TestResult shape (no toolBlocks key).
+      const filePath = writeJunitReport(makeResult(), dir);
+      const content = fs.readFileSync(filePath, 'utf-8');
+      // Counts only the 2 assertions; no synthesized tool-block tests.
+      expect(content).toContain('tests="2"');
+    } finally {
+      cleanupDir(dir);
+    }
+  });
 });
