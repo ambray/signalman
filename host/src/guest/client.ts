@@ -14,6 +14,7 @@
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import fs from "node:fs";
+import net from "node:net";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -40,6 +41,8 @@ export interface TlsOptions {
   certPath?: string;
   /** Path to client private key (PEM) for mTLS. */
   keyPath?: string;
+  /** TLS server name override for VM IP targets with stable guest cert names. */
+  serverNameOverride?: string;
 }
 
 /** Options for the GuestAgentClient constructor. */
@@ -409,14 +412,24 @@ function unaryCall<TReq, TRes>(
     };
 
     // gRPC's generated method accepts (request, metadata?, options?, cb).
+    // UI-prefixed RPC names are exposed as `UIScreenshot` by live
+    // proto-loader, while older tests/mocks used `uIScreenshot`.
+    // Accept either shape so the client stays compatible across both.
+    const fn =
+      (client as any)[method] ??
+      (method.startsWith("uI") ? (client as any)[`UI${method.slice(2)}`] : undefined);
+    if (typeof fn !== "function") {
+      reject(new TypeError(`gRPC client method '${method}' is not available`));
+      return;
+    }
     // Pass metadata only when present so un-traced calls go through
     // the original 3-arg path unchanged.
     if (metadata) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (client as any)[method](request, metadata, options, cb);
+      fn.call(client, request, metadata, options, cb);
     } else {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (client as any)[method](request, options, cb);
+      fn.call(client, request, options, cb);
     }
   });
 }
@@ -577,13 +590,23 @@ export class GuestAgentClient {
       credentials = grpc.credentials.createInsecure();
     }
 
-    const channelOptions: Record<string, number> = {
+    const channelOptions: Record<string, number | string> = {
       "grpc.keepalive_time_ms": 30_000,
       "grpc.keepalive_timeout_ms": 10_000,
       "grpc.max_connection_idle_ms": 60_000,
       "grpc.max_receive_message_length": 128 * 1024 * 1024,
       "grpc.max_send_message_length": 128 * 1024 * 1024,
     };
+    if (wantsTls) {
+      const targetHost = this._parsedEndpoint.target.split(":")[0] ?? "";
+      const serverNameOverride =
+        this._tlsOptions?.serverNameOverride ??
+        (net.isIP(targetHost) ? "localhost" : undefined);
+      if (serverNameOverride) {
+        channelOptions["grpc.ssl_target_name_override"] = serverNameOverride;
+        channelOptions["grpc.default_authority"] = serverNameOverride;
+      }
+    }
 
     this._connectionState = "connecting";
     try {

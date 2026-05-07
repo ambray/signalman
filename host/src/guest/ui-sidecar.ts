@@ -94,7 +94,7 @@ $exe = Resolve-SignalmanGuestExe
 $existed = [bool](Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)
 $action = New-ScheduledTaskAction -Execute $exe -Argument "--ui-sidecar --ui-sidecar-bind $bind"
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $username
-$principal = New-ScheduledTaskPrincipal -UserId $username -LogonType InteractiveToken -RunLevel LeastPrivilege
+$principal = New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Signalman interactive user-session UI sidecar' -Force | Out-Null
 
