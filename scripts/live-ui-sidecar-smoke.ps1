@@ -81,6 +81,7 @@ $env:SIGNALMAN_LIVE_TYPE_TEXT = $TypeText
 $env:SIGNALMAN_LIVE_SCREENSHOT = $ScreenshotPath
 $env:SIGNALMAN_LIVE_CONFIG_PATH = $configPath
 $env:SIGNALMAN_LIVE_BASE_CONFIG = Join-Path $repoRoot ".signalman/config.yaml"
+$env:SIGNALMAN_LIVE_REPO_ROOT = $repoRoot
 $env:SIGNALMAN_LIVE_BOOT_TIMEOUT_MS = [string]($BootTimeoutSeconds * 1000)
 $env:SIGNALMAN_LIVE_SIDECAR_TIMEOUT_MS = [string]($SidecarTimeoutSeconds * 1000)
 $env:SIGNALMAN_LIVE_SKIP_START = if ($SkipStart) { "true" } else { "false" }
@@ -110,6 +111,10 @@ const required = (name) => {
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const isUsableGuestIp = (ipAddress) =>
+  Boolean(ipAddress) &&
+  !ipAddress.startsWith("169.254.") &&
+  ipAddress !== "0.0.0.0";
 
 const vmName = required("SIGNALMAN_LIVE_VM");
 const checkpoint = process.env.SIGNALMAN_LIVE_CHECKPOINT ?? "";
@@ -121,12 +126,17 @@ const typeText = required("SIGNALMAN_LIVE_TYPE_TEXT");
 const screenshotPath = required("SIGNALMAN_LIVE_SCREENSHOT");
 const configPath = required("SIGNALMAN_LIVE_CONFIG_PATH");
 const baseConfigPath = required("SIGNALMAN_LIVE_BASE_CONFIG");
+const repoRoot = required("SIGNALMAN_LIVE_REPO_ROOT");
 const bootTimeoutMs = Number(process.env.SIGNALMAN_LIVE_BOOT_TIMEOUT_MS ?? 300_000);
 const sidecarTimeoutMs = Number(process.env.SIGNALMAN_LIVE_SIDECAR_TIMEOUT_MS ?? 60_000);
 const skipStart = process.env.SIGNALMAN_LIVE_SKIP_START === "true";
 
 const baseConfig = fs.existsSync(baseConfigPath) ? loadConfig(baseConfigPath) : loadConfig();
 const liveConfig = structuredClone(baseConfig);
+const resolveRepoPath = (value) => {
+  if (!value || path.isAbsolute(value)) return value;
+  return path.resolve(repoRoot, value);
+};
 liveConfig.hypervisor = {
   ...liveConfig.hypervisor,
   backend: "service",
@@ -143,6 +153,14 @@ if (process.env.SIGNALMAN_LIVE_SERVICE_PORT) {
 }
 if (process.env.SIGNALMAN_LIVE_SERVICE_CERT_DIR) {
   liveConfig.hypervisor.service.certDir = process.env.SIGNALMAN_LIVE_SERVICE_CERT_DIR;
+}
+if (liveConfig.hypervisor.service?.certDir) {
+  liveConfig.hypervisor.service.certDir = resolveRepoPath(liveConfig.hypervisor.service.certDir);
+}
+if (liveConfig.guestAgent?.tls?.enabled) {
+  liveConfig.guestAgent.tls.caPath = resolveRepoPath(liveConfig.guestAgent.tls.caPath);
+  liveConfig.guestAgent.tls.certPath = resolveRepoPath(liveConfig.guestAgent.tls.certPath);
+  liveConfig.guestAgent.tls.keyPath = resolveRepoPath(liveConfig.guestAgent.tls.keyPath);
 }
 liveConfig.vmAliases = {
   ...(liveConfig.vmAliases ?? {}),
@@ -184,12 +202,12 @@ try {
       ipAddress: status.ipAddress ?? "",
       guestAgentReachable: Boolean(status.guestAgentReachable),
     }));
-    if (status.state === "running" && status.ipAddress) break;
+    if (status.state === "running" && isUsableGuestIp(status.ipAddress)) break;
     await sleep(5_000);
   }
-  if (status.state !== "running" || !status.ipAddress) {
+  if (status.state !== "running" || !isUsableGuestIp(status.ipAddress)) {
     throw new Error(
-      `VM '${vmName}' did not reach running state with an IP within ${bootTimeoutMs}ms; ` +
+      `VM '${vmName}' did not reach running state with a usable IP within ${bootTimeoutMs}ms; ` +
         `last state=${status.state}, ip=${status.ipAddress ?? ""}.`,
     );
   }
@@ -204,9 +222,9 @@ try {
     timeoutMs: sidecarTimeoutMs,
   });
   console.log(JSON.stringify({ step: "sidecar", sidecar }));
-  if (!sidecar.running) {
+  if (sidecar.state !== "Running") {
     throw new Error(
-      `UI sidecar is not running for '${sidecarUsername}'. ` +
+      `UI sidecar is not running for '${sidecarUsername}' (state=${sidecar.state}). ` +
         `The user may need to be logged into an interactive Windows session.`,
     );
   }
@@ -278,6 +296,7 @@ try {
     Remove-Item Env:\SIGNALMAN_LIVE_SCREENSHOT -ErrorAction SilentlyContinue
     Remove-Item Env:\SIGNALMAN_LIVE_CONFIG_PATH -ErrorAction SilentlyContinue
     Remove-Item Env:\SIGNALMAN_LIVE_BASE_CONFIG -ErrorAction SilentlyContinue
+    Remove-Item Env:\SIGNALMAN_LIVE_REPO_ROOT -ErrorAction SilentlyContinue
     Remove-Item Env:\SIGNALMAN_LIVE_BOOT_TIMEOUT_MS -ErrorAction SilentlyContinue
     Remove-Item Env:\SIGNALMAN_LIVE_SIDECAR_TIMEOUT_MS -ErrorAction SilentlyContinue
     Remove-Item Env:\SIGNALMAN_LIVE_SKIP_START -ErrorAction SilentlyContinue

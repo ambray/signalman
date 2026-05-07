@@ -5,7 +5,7 @@ import {
 } from "../guest/ui-sidecar.js";
 
 describe("UI sidecar scheduling", () => {
-  it("builds an interactive-token scheduled task script", () => {
+  it("builds an interactive scheduled task script", () => {
     const script = buildEnsureUiSidecarScript({
       username: "test",
       bind: "127.0.0.1:50151",
@@ -14,7 +14,8 @@ describe("UI sidecar scheduling", () => {
     });
 
     expect(script).toContain("$username = 'test'");
-    expect(script).toContain("New-ScheduledTaskPrincipal -UserId $username -LogonType InteractiveToken");
+    expect(script).toContain("New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive");
+    expect(script).toContain("-RunLevel Limited");
     expect(script).toContain("--ui-sidecar --ui-sidecar-bind $bind");
     expect(script).toContain("Start-ScheduledTask -TaskName $taskName");
     expect(script).not.toContain("Password");
