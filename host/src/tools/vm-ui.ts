@@ -38,6 +38,10 @@ export function createVmUiTools(
             type: "boolean",
             description: "Start the task immediately if the user is logged in",
           },
+          wait_ready_ms: {
+            type: "number",
+            description: "How long to wait for the sidecar loopback port after starting it",
+          },
           timeout_ms: { type: "number", description: "Timeout in milliseconds" },
         },
         required: ["name", "username"],
@@ -46,11 +50,16 @@ export function createVmUiTools(
       handler: async (params): Promise<ToolResult> => {
         const name = sanitizeVmName(params.name as string);
         const client = await getClient(name);
+        const waitReadyMs =
+          params.wait_ready_ms == null
+            ? 5_000
+            : sanitizeTimeout(params.wait_ready_ms as number | undefined, 300_000);
         const result = await ensureUiSidecar(client, {
           username: params.username as string,
           bind: (params.bind as string | undefined) ?? undefined,
           taskName: (params.task_name as string | undefined) ?? undefined,
           runNow: (params.run_now as boolean | undefined) ?? true,
+          waitReadyMs,
           timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
         });
         return {

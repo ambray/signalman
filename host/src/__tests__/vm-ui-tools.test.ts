@@ -15,6 +15,8 @@ function makeClient(overrides: Partial<GuestAgentClient> = {}): GuestAgentClient
         created: true,
         runNow: true,
         state: "Running",
+        ready: true,
+        waitReadyMs: 5_000,
       }),
       stderr: "",
       durationMs: 10,
@@ -140,6 +142,7 @@ describe("VM UI MCP tools", () => {
       name: "Win11_test",
       username: "test",
       timeout_ms: 15_000,
+      wait_ready_ms: 12_000,
     });
 
     expect(client.runCommand).toHaveBeenCalledWith(
@@ -152,6 +155,10 @@ describe("VM UI MCP tools", () => {
       taskName: "SignalmanUiSidecar",
       username: "test",
       state: "Running",
+      ready: true,
     });
+    const args = (client.runCommand as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1] as string[];
+    const decoded = Buffer.from(args.at(-1) ?? "", "base64").toString("utf16le");
+    expect(decoded).toContain("$waitReadyMs = 12000");
   });
 });

@@ -18,6 +18,8 @@ describe("UI sidecar scheduling", () => {
     expect(script).toContain("-RunLevel Limited");
     expect(script).toContain("--ui-sidecar --ui-sidecar-bind $bind");
     expect(script).toContain("Start-ScheduledTask -TaskName $taskName");
+    expect(script).toContain("Wait-SignalmanSidecarReady -Bind $bind");
+    expect(script).toContain("$waitReadyMs = 5000");
     expect(script).not.toContain("Password");
   });
 
@@ -41,6 +43,8 @@ describe("UI sidecar scheduling", () => {
         created: true,
         runNow: true,
         state: "Running",
+        ready: true,
+        waitReadyMs: 5_000,
       }),
       stderr: "",
       durationMs: 10,
@@ -51,6 +55,7 @@ describe("UI sidecar scheduling", () => {
     });
 
     expect(result.state).toBe("Running");
+    expect(result.ready).toBe(true);
     expect(runCommand).toHaveBeenCalledWith(
       "powershell.exe",
       expect.arrayContaining(["-EncodedCommand", expect.any(String)]),
@@ -61,6 +66,19 @@ describe("UI sidecar scheduling", () => {
     const decoded = Buffer.from(encoded, "base64").toString("utf16le");
     expect(decoded).toContain("Register-ScheduledTask");
     expect(decoded).toContain("SignalmanGuest");
+    expect(decoded).toContain("Test-SignalmanSidecarPort");
+    expect(decoded).toContain("$waitReadyMs = 5000");
+  });
+
+  it("allows readiness waiting to be disabled", () => {
+    const script = buildEnsureUiSidecarScript({
+      username: "test",
+      runNow: false,
+      waitReadyMs: 0,
+    });
+
+    expect(script).toContain("$runNow = $false");
+    expect(script).toContain("$waitReadyMs = 0");
   });
 
   it("surfaces guest command failures", async () => {

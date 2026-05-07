@@ -5,6 +5,7 @@ export interface EnsureUiSidecarOptions {
   bind?: string;
   taskName?: string;
   runNow?: boolean;
+  waitReadyMs?: number;
   timeoutMs?: number;
 }
 
@@ -16,6 +17,8 @@ export interface EnsureUiSidecarResult {
   created: boolean;
   runNow: boolean;
   state: string;
+  ready: boolean;
+  waitReadyMs: number;
 }
 
 function psSingle(value: string): string {
@@ -54,11 +57,20 @@ function validateTaskName(taskName: string): string {
   return trimmed;
 }
 
+function validateWaitReadyMs(waitReadyMs: number | undefined, runNow: boolean): number {
+  const value = waitReadyMs ?? (runNow ? 5_000 : 0);
+  if (!Number.isFinite(value) || value < 0 || value > 300_000) {
+    throw new Error("UI sidecar waitReadyMs must be between 0 and 300000");
+  }
+  return Math.floor(value);
+}
+
 export function buildEnsureUiSidecarScript(options: EnsureUiSidecarOptions): string {
   const username = validateUsername(options.username);
   const bind = validateBind(options.bind ?? "127.0.0.1:50151");
   const taskName = validateTaskName(options.taskName ?? "SignalmanUiSidecar");
   const runNow = options.runNow ?? true;
+  const waitReadyMs = validateWaitReadyMs(options.waitReadyMs, runNow);
 
   return `
 $ErrorActionPreference = 'Stop'
@@ -66,6 +78,7 @@ $username = '${psSingle(username)}'
 $bind = '${psSingle(bind)}'
 $taskName = '${psSingle(taskName)}'
 $runNow = ${runNow ? "$true" : "$false"}
+$waitReadyMs = ${waitReadyMs}
 
 function Resolve-SignalmanGuestExe {
   $service = Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\SignalmanGuest' -ErrorAction SilentlyContinue
@@ -90,6 +103,34 @@ function Resolve-SignalmanGuestExe {
   throw 'signalman-guest.exe not found; install the guest MSI before enabling the UI sidecar'
 }
 
+function Test-SignalmanSidecarPort {
+  param([string]$Bind)
+  $uri = [Uri]("tcp://" + $Bind)
+  $client = [System.Net.Sockets.TcpClient]::new()
+  try {
+    $async = $client.BeginConnect($uri.Host, $uri.Port, $null, $null)
+    if (-not $async.AsyncWaitHandle.WaitOne(250, $false)) { return $false }
+    $client.EndConnect($async)
+    return $true
+  } catch {
+    return $false
+  } finally {
+    $client.Close()
+  }
+}
+
+function Wait-SignalmanSidecarReady {
+  param([string]$Bind, [int]$TimeoutMs)
+  if (Test-SignalmanSidecarPort -Bind $Bind) { return $true }
+  if ($TimeoutMs -le 0) { return $false }
+  $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+  do {
+    Start-Sleep -Milliseconds 100
+    if (Test-SignalmanSidecarPort -Bind $Bind) { return $true }
+  } while ([DateTime]::UtcNow -lt $deadline)
+  return $false
+}
+
 $exe = Resolve-SignalmanGuestExe
 $existed = [bool](Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)
 $action = New-ScheduledTaskAction -Execute $exe -Argument "--ui-sidecar --ui-sidecar-bind $bind"
@@ -104,6 +145,7 @@ if ($runNow) {
 }
 
 $task = Get-ScheduledTask -TaskName $taskName
+$ready = Wait-SignalmanSidecarReady -Bind $bind -TimeoutMs $waitReadyMs
 [pscustomobject]@{
   taskName = $taskName
   username = $username
@@ -112,6 +154,8 @@ $task = Get-ScheduledTask -TaskName $taskName
   created = -not $existed
   runNow = [bool]$runNow
   state = [string]$task.State
+  ready = [bool]$ready
+  waitReadyMs = [int]$waitReadyMs
 } | ConvertTo-Json -Compress
 `;
 }
