@@ -2144,9 +2144,10 @@ export class ScenarioOrchestrator {
       case "ui_screenshot": {
         const client = this.guestClients.get(vmName);
         if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const format = (params.format as string) ?? "png";
         const buffer = await client.screenshot(
           params.window_title as string | undefined,
-          (params.format as string) ?? "png",
+          format,
           params.timeout_ms as number | undefined,
         );
         // Optional persistence to disk for visual debugging — when
@@ -2160,6 +2161,7 @@ export class ScenarioOrchestrator {
           savedPath = params.output;
         }
         return JSON.stringify({
+          format,
           bytes: buffer.length,
           saved_path: savedPath ?? null,
         });
