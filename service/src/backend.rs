@@ -388,13 +388,26 @@ impl Backend for HyperVBackend {
         let script = format!(
             "$vm = Get-VM -Name '{safe_name}'; \
              if ($vm.State -eq 'Running') {{ return }}; \
-             $job = Start-VM -Name '{safe_name}' -AsJob; \
+             $job = Start-VM -Name '{safe_name}' -AsJob -ErrorAction Stop; \
              Wait-Job -Job $job | Out-Null; \
+             $jobOutput = ''; \
+             try {{ \
+               $jobOutput = ($job | Receive-Job -ErrorAction Stop 2>&1 | Out-String) \
+             }} catch {{ \
+               $err = ($_ | Out-String); \
+               Remove-Job -Job $job -Force -ErrorAction SilentlyContinue; \
+               throw \"Start-VM job failed: $err\" \
+             }}; \
              if ($job.State -ne 'Completed') {{ \
-               $err = ($job | Receive-Job 2>&1 | Out-String); \
+               $err = $jobOutput; \
+               Remove-Job -Job $job -Force -ErrorAction SilentlyContinue; \
                throw \"Start-VM job ended in state '$($job.State)': $err\" \
              }}; \
-             Remove-Job -Job $job"
+             $state = (Get-VM -Name '{safe_name}').State; \
+             Remove-Job -Job $job -Force -ErrorAction SilentlyContinue; \
+             if ($state -ne 'Running') {{ \
+               throw \"Start-VM completed but VM state is '$state': $jobOutput\" \
+             }}"
         );
         self.runner.run(&script, 600_000).await?;
         Ok(())
@@ -1095,6 +1108,23 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, BackendError::InvalidArgument(_)));
+    }
+
+    #[tokio::test]
+    async fn start_vm_receives_job_errors_and_verifies_running_state() {
+        let runner = Arc::new(ScriptedRunner::new(vec![
+            Ok(String::new()),
+            Ok(String::new()),
+        ]));
+        let backend = HyperVBackend::with_runner(runner.clone());
+
+        backend.start_vm(&handle("vm1")).await.unwrap();
+
+        let calls = runner.calls.lock().unwrap();
+        let start_script = &calls[1].0;
+        assert!(start_script.contains("Start-VM -Name 'vm1' -AsJob -ErrorAction Stop"));
+        assert!(start_script.contains("Receive-Job -ErrorAction Stop"));
+        assert!(start_script.contains("Start-VM completed but VM state is '$state'"));
     }
 
     #[tokio::test]
