@@ -50,6 +50,71 @@ function toolsFor(client: GuestAgentClient) {
 }
 
 describe("VM UI MCP tools", () => {
+  it("captures a combined screenshot and UI element snapshot", async () => {
+    const client = makeClient({
+      uiFind: vi.fn().mockResolvedValue([
+        {
+          name: "Start",
+          automationId: "StartButton",
+          controlType: "Button",
+          className: "Button",
+          isEnabled: true,
+          isVisible: true,
+          x: 0,
+          y: 0,
+          width: 48,
+          height: 48,
+          value: "",
+        },
+        {
+          name: "Search",
+          automationId: "SearchBox",
+          controlType: "Edit",
+          className: "TextBox",
+          isEnabled: true,
+          isVisible: true,
+          x: 50,
+          y: 0,
+          width: 300,
+          height: 48,
+          value: "",
+        },
+      ]),
+    } as Partial<GuestAgentClient>);
+    const { tools } = toolsFor(client);
+
+    const result = await tools.get("vm_ui_snapshot")!.handler({
+      name: "Win11_test",
+      window_title: "Shell",
+      format: "png",
+      max_elements: 1,
+      find_timeout_ms: 2_000,
+      timeout_ms: 12_000,
+    });
+
+    expect(client.uiScreenshot).toHaveBeenCalledWith({
+      windowTitle: "Shell",
+      format: "png",
+      timeoutMs: 12_000,
+    });
+    expect(client.uiFind).toHaveBeenCalledWith("", {
+      windowTitle: "Shell",
+      findTimeoutMs: 2_000,
+      timeoutMs: 12_000,
+    });
+    expect(result.content[0]).toMatchObject({
+      type: "image",
+      data: Buffer.from("fake-png").toString("base64"),
+      mimeType: "image/png",
+    });
+    expect(JSON.parse(result.content[1].text ?? "{}")).toMatchObject({
+      vm: "Win11_test",
+      element_count: 2,
+      elements: [expect.objectContaining({ name: "Start" })],
+      truncated: true,
+    });
+  });
+
   it("captures screenshots as MCP image content plus metadata", async () => {
     const client = makeClient();
     const { getClient, tools } = toolsFor(client);

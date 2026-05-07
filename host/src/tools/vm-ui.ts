@@ -68,6 +68,75 @@ export function createVmUiTools(
       },
     },
     {
+      name: "vm_ui_snapshot",
+      description: "Capture a screenshot plus visible UI Automation elements from the VM's interactive user session",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+          window_title: { type: "string", description: "Optional window title" },
+          format: { type: "string", enum: ["png", "jpeg"], description: "Image format" },
+          max_elements: {
+            type: "number",
+            description: "Maximum number of UI elements to include in the JSON metadata",
+          },
+          find_timeout_ms: { type: "number", description: "Element inventory timeout" },
+          timeout_ms: { type: "number", description: "RPC timeout" },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const name = sanitizeVmName(params.name as string);
+        const timeoutMs = sanitizeTimeout(params.timeout_ms as number | undefined);
+        const findTimeoutMs = sanitizeTimeout(params.find_timeout_ms as number | undefined, 5_000);
+        const maxElements = Math.max(
+          1,
+          Math.min(Math.floor((params.max_elements as number | undefined) ?? 50), 200),
+        );
+        const windowTitle = (params.window_title as string | undefined) ?? "";
+        const format = (params.format as string | undefined) ?? "png";
+        const client = await getClient(name);
+        const [screenshot, elements] = await Promise.all([
+          client.uiScreenshot({
+            windowTitle,
+            format,
+            timeoutMs,
+          }),
+          client.uiFind("", {
+            windowTitle,
+            findTimeoutMs,
+            timeoutMs,
+          }),
+        ]);
+        return {
+          content: [
+            {
+              type: "image",
+              data: screenshot.imageData.toString("base64"),
+              mimeType: `image/${screenshot.format === "jpeg" ? "jpeg" : "png"}`,
+            },
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  vm: name,
+                  format: screenshot.format,
+                  width: screenshot.width,
+                  height: screenshot.height,
+                  element_count: elements.length,
+                  elements: elements.slice(0, maxElements),
+                  truncated: elements.length > maxElements,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      },
+    },
+    {
       name: "vm_ui_screenshot",
       description: "Capture a screenshot from the VM's interactive user session",
       inputSchema: {
