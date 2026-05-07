@@ -81,6 +81,20 @@ function resolveHostFilePath(hostPath: string): string {
   return path.resolve(hostPath);
 }
 
+function resolveWorkflowScreenshotPath(
+  output: string,
+  config: SignalmanConfig,
+): string {
+  if (path.isAbsolute(output) || path.win32.isAbsolute(output)) {
+    return output;
+  }
+  const normalized = output.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (normalized === "output" || normalized.startsWith("output/")) {
+    return path.resolve(path.dirname(config.scenarios.outputDir), normalized);
+  }
+  return path.resolve(config.scenarios.screenshotDir, output);
+}
+
 /**
  * Local helper so the class body can stay synchronous when wiring a
  * kernel-debug session. Importing BreakLog at the top is cheap (no
@@ -703,7 +717,7 @@ export class ScenarioOrchestrator {
     return this.docker;
   }
 
-  private async ensureGuestClient(
+  protected async ensureGuestClient(
     vmName: string,
     handle: VMHandle,
     def?: VmDefinition,
@@ -2156,9 +2170,9 @@ export class ScenarioOrchestrator {
         let savedPath: string | undefined;
         if (typeof params.output === "string" && params.output.length > 0) {
           const fs = await import("node:fs");
-          fs.mkdirSync(path.dirname(params.output), { recursive: true });
-          fs.writeFileSync(params.output, buffer);
-          savedPath = params.output;
+          savedPath = resolveWorkflowScreenshotPath(params.output, this.config);
+          fs.mkdirSync(path.dirname(savedPath), { recursive: true });
+          fs.writeFileSync(savedPath, buffer);
         }
         return JSON.stringify({
           format,
@@ -2349,7 +2363,9 @@ export class ScenarioOrchestrator {
       let client = this.guestClients.get(def.name);
       if (!client) {
         const canDiscoverOrCreateClient =
-          Boolean(def.network?.static_ip) || this.backend.name === "tart";
+          Boolean(def.network?.static_ip) ||
+          Boolean(this.backend.getVmIpAddress) ||
+          this.backend.name === "tart";
         if (!handle || !canDiscoverOrCreateClient) {
           return;
         }
