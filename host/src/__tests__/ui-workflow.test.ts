@@ -157,6 +157,74 @@ describe("workflow UI tool blocks", () => {
     ).rejects.toThrow("ui_find missing 'selector'");
   });
 
+  it("returns combined UI snapshot metadata for workflow assertions", async () => {
+    const client = makeClient({
+      uiFind: vi.fn().mockResolvedValue([
+        {
+          name: "Start",
+          automationId: "StartButton",
+          controlType: "Button",
+          className: "Button",
+          isEnabled: true,
+          isVisible: true,
+          x: 0,
+          y: 0,
+          width: 48,
+          height: 48,
+          value: "",
+        },
+        {
+          name: "Search",
+          automationId: "SearchBox",
+          controlType: "Edit",
+          className: "TextBox",
+          isEnabled: true,
+          isVisible: true,
+          x: 50,
+          y: 0,
+          width: 300,
+          height: 48,
+          value: "",
+        },
+      ]),
+    } as Partial<GuestAgentClient>);
+    const { orchestrator, vmMap } = makeOrchestrator(client);
+
+    const snapshot = await orchestrator.executeToolBlock(
+      "ui_snapshot",
+      {
+        vm: "endpoint-1",
+        format: "png",
+        output: "./output/live-ui-sidecar-smoke/snapshot.png",
+        max_elements: 1,
+        find_timeout_ms: 2_000,
+        timeout_ms: 5_000,
+      },
+      vmMap,
+    );
+
+    expect(client.uiScreenshot).toHaveBeenCalledWith({
+      windowTitle: undefined,
+      format: "png",
+      timeoutMs: 5_000,
+    });
+    expect(client.uiFind).toHaveBeenCalledWith("", {
+      windowTitle: undefined,
+      findTimeoutMs: 2_000,
+      timeoutMs: 5_000,
+    });
+    expect(JSON.parse(snapshot)).toMatchObject({
+      format: "png",
+      width: 640,
+      height: 480,
+      bytes: Buffer.from("fake-png").byteLength,
+      element_count: 2,
+      elements: [expect.objectContaining({ name: "Start" })],
+      truncated: true,
+      saved_path: path.resolve("output/live-ui-sidecar-smoke/snapshot.png"),
+    });
+  });
+
   it("creates a guest client for pre-started Hyper-V/service VMs via backend IP discovery", async () => {
     const client = makeClient({
       isConnected: vi.fn().mockResolvedValue(true),

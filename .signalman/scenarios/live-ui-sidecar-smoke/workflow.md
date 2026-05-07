@@ -37,3 +37,13 @@ ui_type:
   text: "signalman ui smoke"
   timeout_ms: 15000
 ```
+
+```tool
+ui_snapshot:
+  vm: Win11_test
+  format: png
+  output: ./output/live-ui-sidecar-smoke/snapshot.png
+  max_elements: 25
+  find_timeout_ms: 15000
+  timeout_ms: 20000
+```

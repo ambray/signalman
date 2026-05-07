@@ -41,5 +41,23 @@ assertions:
     severity: critical
     description: "The UI sidecar should be able to type into the interactive session"
 
+  - id: snapshot-captured
+    type: json_field
+    source: step-5
+    field: bytes
+    comparison: gt
+    expected: 0
+    severity: critical
+    description: "The UI snapshot should include non-empty screenshot bytes"
+
+  - id: snapshot-elements-found
+    type: json_field
+    source: step-5
+    field: element_count
+    comparison: gt
+    expected: 0
+    severity: high
+    description: "The UI snapshot should include visible UI Automation elements"
+
 pass_threshold: 1.0
 critical_must_pass: true

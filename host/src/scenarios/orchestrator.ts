@@ -2181,6 +2181,46 @@ export class ScenarioOrchestrator {
         });
       }
 
+      case "ui_snapshot": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const format = (params.format as string) ?? "png";
+        const timeoutMs = params.timeout_ms as number | undefined;
+        const maxElements = Math.max(
+          1,
+          Math.min(Math.floor((params.max_elements as number | undefined) ?? 50), 200),
+        );
+        const [screenshot, elements] = await Promise.all([
+          client.uiScreenshot({
+            windowTitle: params.window_title as string | undefined,
+            format,
+            timeoutMs,
+          }),
+          client.uiFind("", {
+            windowTitle: params.window_title as string | undefined,
+            findTimeoutMs: params.find_timeout_ms as number | undefined,
+            timeoutMs,
+          }),
+        ]);
+        let savedPath: string | undefined;
+        if (typeof params.output === "string" && params.output.length > 0) {
+          const fs = await import("node:fs");
+          savedPath = resolveWorkflowScreenshotPath(params.output, this.config);
+          fs.mkdirSync(path.dirname(savedPath), { recursive: true });
+          fs.writeFileSync(savedPath, screenshot.imageData);
+        }
+        return JSON.stringify({
+          format: screenshot.format,
+          width: screenshot.width,
+          height: screenshot.height,
+          bytes: screenshot.imageData.length,
+          element_count: elements.length,
+          elements: elements.slice(0, maxElements),
+          truncated: elements.length > maxElements,
+          saved_path: savedPath ?? null,
+        });
+      }
+
       default:
         // Pluggable tool registry (Sprint 60.7.5 follow-up B). Tools
         // registered via `this.tools.register(...)` — currently the

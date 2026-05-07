@@ -13,6 +13,7 @@ capabilities:
   host_paths:
     write:
       - ./output/live-ui-sidecar-smoke/desktop.png
+      - ./output/live-ui-sidecar-smoke/snapshot.png
 
 setup: []
 
