@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import path from "node:path";
 
-import { ScenarioOrchestrator } from "../scenarios/orchestrator.js";
+import { ScenarioOrchestrator, type VmDefinition } from "../scenarios/orchestrator.js";
 import type { GuestAgentClient } from "../guest/client.js";
 import type { HypervisorBackend, VMHandle, VMStatus } from "../hypervisors/interface.js";
 import type { SignalmanConfig } from "../config.js";
@@ -24,6 +25,7 @@ function makeBackend(): HypervisorBackend {
       state: "running",
       guestAgentReachable: true,
     } as VMStatus),
+    getVmIpAddress: vi.fn().mockResolvedValue("172.23.14.201"),
     listVMs: vi.fn().mockResolvedValue([makeHandle("endpoint-1")]),
     createCheckpoint: vi.fn(),
     restoreCheckpoint: vi.fn(),
@@ -132,7 +134,12 @@ describe("workflow UI tool blocks", () => {
 
     const screenshot = await orchestrator.executeToolBlock(
       "ui_screenshot",
-      { vm: "endpoint-1", format: "png", timeout_ms: 5_000 },
+      {
+        vm: "endpoint-1",
+        format: "png",
+        output: "./output/live-ui-sidecar-smoke/desktop.png",
+        timeout_ms: 5_000,
+      },
       vmMap,
     );
 
@@ -140,6 +147,7 @@ describe("workflow UI tool blocks", () => {
     expect(JSON.parse(screenshot)).toMatchObject({
       format: "png",
       bytes: Buffer.from("fake-png").byteLength,
+      saved_path: path.resolve("output/live-ui-sidecar-smoke/desktop.png"),
     });
     await expect(
       orchestrator.executeToolBlock("ui_click", { vm: "endpoint-1" }, vmMap),
@@ -147,5 +155,54 @@ describe("workflow UI tool blocks", () => {
     await expect(
       orchestrator.executeToolBlock("ui_find", { vm: "endpoint-1" }, vmMap),
     ).rejects.toThrow("ui_find missing 'selector'");
+  });
+
+  it("creates a guest client for pre-started Hyper-V/service VMs via backend IP discovery", async () => {
+    const client = makeClient({
+      isConnected: vi.fn().mockResolvedValue(true),
+    } as Partial<GuestAgentClient>);
+    const backend = makeBackend();
+    const created: Array<{ vmName: string; handle: VMHandle; def: VmDefinition }> = [];
+
+    class TestOrchestrator extends ScenarioOrchestrator {
+      override async ensureGuestClient(
+        vmName: string,
+        handle: VMHandle,
+        def?: VmDefinition,
+      ): Promise<GuestAgentClient> {
+        created.push({ vmName, handle, def: def! });
+        return client;
+      }
+    }
+
+    const orchestrator = new TestOrchestrator(
+      backend,
+      new Map<string, GuestAgentClient>(),
+      {
+        hypervisor: { backend: "service" },
+        guestAgent: { defaultPort: 50051, authToken: "test-token", tls: { enabled: false } },
+      } as unknown as SignalmanConfig,
+    );
+    const vmMap = new Map<string, VMHandle>([
+      ["endpoint-1", { id: "pre-started", name: "Win11_test", backend: "service" }],
+    ]);
+
+    await orchestrator.waitForGuestAgents(vmMap, [
+      {
+        name: "endpoint-1",
+        template: "win11-test",
+        pre_started: true,
+        guest_agent_port: 50051,
+      } as VmDefinition,
+    ]);
+
+    expect(created).toEqual([
+      {
+        vmName: "endpoint-1",
+        handle: { id: "pre-started", name: "Win11_test", backend: "service" },
+        def: expect.objectContaining({ pre_started: true }),
+      },
+    ]);
+    expect(client.isConnected).toHaveBeenCalledWith(5_000);
   });
 });

@@ -1,0 +1,45 @@
+assertions:
+  - id: screenshot-captured
+    type: json_field
+    source: step-0
+    field: bytes
+    comparison: gt
+    expected: 0
+    severity: critical
+    description: "The UI sidecar should return non-empty screenshot bytes"
+
+  - id: screenshot-format
+    type: json_field
+    source: step-0
+    field: format
+    expected: png
+    severity: high
+    description: "The screenshot workflow output should identify the image format"
+
+  - id: start-button-found
+    type: json_field
+    source: step-1
+    field: count
+    comparison: gte
+    expected: 1
+    severity: critical
+    description: "The Windows Start button should be discoverable through UI Automation"
+
+  - id: start-button-clicked
+    type: json_field
+    source: step-2
+    field: success
+    expected: true
+    severity: critical
+    description: "The UI sidecar should be able to click a discovered desktop element"
+
+  - id: text-typed
+    type: json_field
+    source: step-4
+    field: success
+    expected: true
+    severity: critical
+    description: "The UI sidecar should be able to type into the interactive session"
+
+pass_threshold: 1.0
+critical_must_pass: true

@@ -150,24 +150,82 @@ let warnedLegacyConfig = false;
 /** Candidate paths to search for the config file. */
 function configSearchPaths(): string[] {
   const paths: string[] = [];
+  const seen = new Set<string>();
+  const add = (candidate: string) => {
+    const resolved = path.resolve(candidate);
+    if (!seen.has(resolved)) {
+      seen.add(resolved);
+      paths.push(resolved);
+    }
+  };
 
   // Environment variable override
   const envPath = process.env.SIGNALMAN_CONFIG;
   if (envPath) {
-    paths.push(path.resolve(envPath));
+    add(envPath);
   }
 
   // CWD — `.signalman/config.yaml` takes precedence over the legacy
   // `signalman.yaml`. The legacy path stays accessible during v0.1.0
   // for backwards compat; v0.2.0 will drop it (TODO marker).
-  paths.push(path.resolve(process.cwd(), ".signalman", "config.yaml"));
-  paths.push(path.resolve(process.cwd(), "signalman.yaml"));
+  let dir = process.cwd();
+  while (true) {
+    add(path.join(dir, ".signalman", "config.yaml"));
+    add(path.join(dir, "signalman.yaml"));
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
 
   // Home directory
   const home = os.homedir();
-  paths.push(path.resolve(home, ".signalman", "config.yaml"));
+  add(path.resolve(home, ".signalman", "config.yaml"));
 
   return paths;
+}
+
+function configBaseDir(configPath: string): string {
+  const dir = path.dirname(configPath);
+  if (path.basename(configPath) === "config.yaml" && path.basename(dir) === ".signalman") {
+    return path.dirname(dir);
+  }
+  return dir;
+}
+
+function resolveConfigPath(value: string | undefined, baseDir: string): string | undefined {
+  if (!value || path.isAbsolute(value) || path.win32.isAbsolute(value)) {
+    return value;
+  }
+  return path.resolve(baseDir, value);
+}
+
+function normalizeConfigPaths(
+  config: SignalmanConfig,
+  baseDir: string | undefined,
+): SignalmanConfig {
+  if (!baseDir) return config;
+  const result = structuredClone(config);
+  if (result.hypervisor.service?.certDir) {
+    result.hypervisor.service.certDir = resolveConfigPath(
+      result.hypervisor.service.certDir,
+      baseDir,
+    );
+  }
+  if (result.guestAgent.tls.caPath) {
+    result.guestAgent.tls.caPath = resolveConfigPath(result.guestAgent.tls.caPath, baseDir);
+  }
+  if (result.guestAgent.tls.certPath) {
+    result.guestAgent.tls.certPath = resolveConfigPath(result.guestAgent.tls.certPath, baseDir);
+  }
+  if (result.guestAgent.tls.keyPath) {
+    result.guestAgent.tls.keyPath = resolveConfigPath(result.guestAgent.tls.keyPath, baseDir);
+  }
+  result.scenarios.dir = resolveConfigPath(result.scenarios.dir, baseDir) ?? result.scenarios.dir;
+  result.scenarios.outputDir =
+    resolveConfigPath(result.scenarios.outputDir, baseDir) ?? result.scenarios.outputDir;
+  result.scenarios.screenshotDir =
+    resolveConfigPath(result.scenarios.screenshotDir, baseDir) ?? result.scenarios.screenshotDir;
+  return result;
 }
 
 /**
@@ -407,6 +465,7 @@ function applyEnvOverrides(config: SignalmanConfig): SignalmanConfig {
  */
 export function loadConfig(configPath?: string): SignalmanConfig {
   let config = defaultConfig();
+  let loadedConfigPath: string | undefined;
 
   if (configPath) {
     // Explicit path: must exist
@@ -419,6 +478,7 @@ export function loadConfig(configPath?: string): SignalmanConfig {
     if (parsed && typeof parsed === "object") {
       config = mergeConfig(config, parsed);
     }
+    loadedConfigPath = resolved;
   } else {
     // Search standard paths
     const candidates = configSearchPaths();
@@ -443,6 +503,7 @@ export function loadConfig(configPath?: string): SignalmanConfig {
         if (parsed && typeof parsed === "object") {
           config = mergeConfig(config, parsed);
         }
+        loadedConfigPath = candidate;
         break; // Use first found
       }
     }
@@ -450,6 +511,10 @@ export function loadConfig(configPath?: string): SignalmanConfig {
 
   // Environment overrides always win
   config = applyEnvOverrides(config);
+  config = normalizeConfigPaths(
+    config,
+    loadedConfigPath ? configBaseDir(loadedConfigPath) : undefined,
+  );
 
   return config;
 }

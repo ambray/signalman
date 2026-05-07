@@ -73,6 +73,7 @@ describe('defaultConfig', () => {
 
 describe('loadConfig — guestAgent.tls', () => {
   let tmpDir: string;
+  let savedCwd: string;
   const savedEnv: Record<string, string | undefined> = {};
   const TLS_ENV_KEYS = [
     'SIGNALMAN_GUEST_TLS',
@@ -88,6 +89,7 @@ describe('loadConfig — guestAgent.tls', () => {
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'signalman-cfg-'));
+    savedCwd = process.cwd();
     for (const k of TLS_ENV_KEYS) {
       savedEnv[k] = process.env[k];
       delete process.env[k];
@@ -95,6 +97,7 @@ describe('loadConfig — guestAgent.tls', () => {
   });
 
   afterEach(() => {
+    process.chdir(savedCwd);
     fs.rmSync(tmpDir, { recursive: true, force: true });
     for (const k of TLS_ENV_KEYS) {
       if (savedEnv[k] === undefined) {
@@ -203,6 +206,46 @@ describe('loadConfig — guestAgent.tls', () => {
       port: 17778,
       certDir: 'C:/Signalman/certs',
     });
+  });
+
+  it('discovers parent .signalman config and resolves repo-relative paths', () => {
+    const projectDir = path.join(tmpDir, 'project');
+    const childDir = path.join(projectDir, 'host');
+    fs.mkdirSync(path.join(projectDir, '.signalman'), { recursive: true });
+    fs.mkdirSync(childDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, '.signalman', 'config.yaml'),
+      [
+        'guestAgent:',
+        '  authToken: repo-token',
+        '  tls:',
+        '    enabled: true',
+        '    caPath: ./.signalman/service-certs/ca.pem',
+        '    certPath: ./.signalman/service-certs/client.pem',
+        '    keyPath: ./.signalman/service-certs/client.key',
+        'scenarios:',
+        '  dir: ./.signalman/scenarios',
+        '  outputDir: ./output',
+        '  screenshotDir: ./output/screenshots',
+      ].join('\n'),
+    );
+
+    process.chdir(childDir);
+    const cfg = loadConfig();
+
+    expect(cfg.guestAgent.authToken).toBe('repo-token');
+    expect(cfg.guestAgent.tls.caPath).toBe(
+      path.join(projectDir, '.signalman', 'service-certs', 'ca.pem'),
+    );
+    expect(cfg.guestAgent.tls.certPath).toBe(
+      path.join(projectDir, '.signalman', 'service-certs', 'client.pem'),
+    );
+    expect(cfg.guestAgent.tls.keyPath).toBe(
+      path.join(projectDir, '.signalman', 'service-certs', 'client.key'),
+    );
+    expect(cfg.scenarios.dir).toBe(path.join(projectDir, '.signalman', 'scenarios'));
+    expect(cfg.scenarios.outputDir).toBe(path.join(projectDir, 'output'));
+    expect(cfg.scenarios.screenshotDir).toBe(path.join(projectDir, 'output', 'screenshots'));
   });
 
   it('lets environment variables override service transport settings', () => {

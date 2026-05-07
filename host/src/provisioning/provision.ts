@@ -374,8 +374,7 @@ async function stageDevCerts(
   vmName: string,
   explicitToken?: string,
 ): Promise<StagedCertBundle> {
-  const dir = path.join(os.tmpdir(), `signalman-provision-${vmName}`);
-  fs.mkdirSync(dir, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `signalman-provision-${vmName}-`));
 
   // One-CA-many-VMs model: prefer to reuse the canonical dev cert
   // bundle at <project_root>/certs/dev/ when present; fall back to
