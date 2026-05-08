@@ -1,7 +1,23 @@
 assertions:
-  - id: screenshot-captured
+  - id: sidecar-reachable
     type: json_field
     source: step-0
+    field: sidecar_reachable
+    expected: true
+    severity: critical
+    description: "The interactive user-session UI sidecar should be reachable"
+
+  - id: native-engine-active
+    type: json_field
+    source: step-0
+    field: engine
+    expected: native
+    severity: critical
+    description: "The live smoke should exercise the native UI Automation engine"
+
+  - id: screenshot-captured
+    type: json_field
+    source: step-1
     field: bytes
     comparison: gt
     expected: 0
@@ -10,30 +26,21 @@ assertions:
 
   - id: screenshot-format
     type: json_field
-    source: step-0
+    source: step-1
     field: format
     expected: png
     severity: high
     description: "The screenshot workflow output should identify the image format"
 
-  - id: start-button-ready
+  - id: search-button-ready
     type: json_field
-    source: step-1
+    source: step-2
     field: found
     expected: true
     severity: critical
-    description: "The Windows Start button should appear before interaction begins"
+    description: "The Windows Search button should appear before interaction begins"
 
-  - id: start-button-found
-    type: json_field
-    source: step-2
-    field: count
-    comparison: gte
-    expected: 1
-    severity: critical
-    description: "The Windows Start button should be discoverable through UI Automation"
-
-  - id: start-button-clicked
+  - id: search-button-clicked
     type: json_field
     source: step-3
     field: success
@@ -41,25 +48,34 @@ assertions:
     severity: critical
     description: "The UI sidecar should be able to click a discovered desktop element"
 
-  - id: text-typed
+  - id: search-box-ready
     type: json_field
-    source: step-5
-    field: success
+    source: step-4
+    field: found
     expected: true
     severity: critical
-    description: "The UI sidecar should be able to type into the interactive session"
+    description: "The Windows Search edit box should be available after opening Search"
 
-  - id: key-sent
+  - id: text-typed
     type: json_field
     source: step-6
     field: success
     expected: true
     severity: critical
-    description: "The UI sidecar should be able to send keyboard input to the interactive session"
+    description: "The UI sidecar should be able to type into an explicitly selected edit control"
+
+  - id: typed-text-observed
+    type: json_field
+    source: step-8
+    field: count
+    comparison: gte
+    expected: 1
+    severity: critical
+    description: "The typed query should appear in the UI Automation tree"
 
   - id: snapshot-captured
     type: json_field
-    source: step-7
+    source: step-9
     field: bytes
     comparison: gt
     expected: 0
@@ -68,12 +84,20 @@ assertions:
 
   - id: snapshot-elements-found
     type: json_field
-    source: step-7
+    source: step-9
     field: element_count
     comparison: gt
     expected: 0
     severity: high
     description: "The UI snapshot should include visible UI Automation elements"
+
+  - id: key-sent
+    type: json_field
+    source: step-10
+    field: success
+    expected: true
+    severity: critical
+    description: "The UI sidecar should be able to send keyboard input to the selected edit control"
 
 pass_threshold: 1.0
 critical_must_pass: true
