@@ -99,6 +99,18 @@ describe("proto/guest.proto v1 freeze invariants", () => {
     expect(block).toMatch(/uint32\s+repeat\s*=\s*4\b/);
   });
 
+  it("UI responses expose per-RPC duration diagnostics", () => {
+    expect(extractMessageBlock(source, "UIActionResponse")).toMatch(
+      /uint64\s+duration_ms\s*=\s*3\b/,
+    );
+    expect(extractMessageBlock(source, "UIFindResponse")).toMatch(
+      /uint64\s+duration_ms\s*=\s*2\b/,
+    );
+    expect(extractMessageBlock(source, "UIScreenshotResponse")).toMatch(
+      /uint64\s+duration_ms\s*=\s*5\b/,
+    );
+  });
+
   it("WindowsProcessDetails carries the four expected fields", () => {
     const block = extractMessageBlock(source, "WindowsProcessDetails");
     expect(block).toMatch(/bool\s+is_appcontainer\s*=\s*1\b/);

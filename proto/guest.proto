@@ -329,11 +329,13 @@ message UIElement {
 
 message UIFindResponse {
   repeated UIElement elements = 1;
+  uint64 duration_ms = 2;
 }
 
 message UIActionResponse {
   bool success = 1;
   string error = 2;
+  uint64 duration_ms = 3;
 }
 
 message UIScreenshotRequest {
@@ -346,6 +348,7 @@ message UIScreenshotResponse {
   string format = 2;
   uint32 width = 3;
   uint32 height = 4;
+  uint64 duration_ms = 5;
 }
 
 // ── Browser Automation ────────────────────────────────────────────
