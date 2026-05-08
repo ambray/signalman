@@ -179,8 +179,8 @@ impl UiAutomationBackend for NativeUiBackend {
         Err(self.not_implemented())
     }
 
-    fn screenshot(&self, _params: &UiScreenshotParams) -> anyhow::Result<UiScreenshotResult> {
-        Err(self.not_implemented())
+    fn screenshot(&self, params: &UiScreenshotParams) -> anyhow::Result<UiScreenshotResult> {
+        native_ui_screenshot(params)
     }
 }
 
@@ -489,6 +489,214 @@ fn default_true() -> bool {
 
 fn default_screenshot_format() -> String {
     "png".to_string()
+}
+
+fn normalize_screenshot_format(value: &str) -> (&'static str, image::ImageFormat) {
+    if value.eq_ignore_ascii_case("jpeg") || value.eq_ignore_ascii_case("jpg") {
+        ("jpeg", image::ImageFormat::Jpeg)
+    } else {
+        ("png", image::ImageFormat::Png)
+    }
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_ui_screenshot(_params: &UiScreenshotParams) -> anyhow::Result<UiScreenshotResult> {
+    Err(anyhow!(
+        "native UI Automation screenshot is only supported on Windows"
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn native_ui_screenshot(params: &UiScreenshotParams) -> anyhow::Result<UiScreenshotResult> {
+    use image::{DynamicImage, ImageBuffer, Rgba};
+    use std::io::Cursor;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, GetDC, GetDIBits, GetDeviceCaps,
+        SelectObject, BITMAPINFO, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS, HORZRES, SRCCOPY, VERTRES,
+    };
+
+    let _window_title = &params.window_title;
+    let (format_name, image_format) = normalize_screenshot_format(&params.format);
+    unsafe {
+        let hwnd = HWND::default();
+        let screen_dc = GetDC(hwnd);
+        if screen_dc.is_invalid() {
+            return Err(anyhow!("native UI screenshot failed to acquire screen DC"));
+        }
+        let _screen_dc = ScreenDcGuard {
+            hwnd,
+            hdc: screen_dc,
+        };
+
+        let width = GetDeviceCaps(screen_dc, HORZRES);
+        let height = GetDeviceCaps(screen_dc, VERTRES);
+        if width <= 0 || height <= 0 {
+            return Err(anyhow!(
+                "native UI screenshot saw invalid desktop size {width}x{height}"
+            ));
+        }
+
+        let memory_dc = CreateCompatibleDC(screen_dc);
+        if memory_dc.is_invalid() {
+            return Err(anyhow!("native UI screenshot failed to create memory DC"));
+        }
+        let memory_dc = MemoryDcGuard { hdc: memory_dc };
+
+        let bitmap = CreateCompatibleBitmap(screen_dc, width, height);
+        if bitmap.is_invalid() {
+            return Err(anyhow!("native UI screenshot failed to create bitmap"));
+        }
+        let bitmap = BitmapGuard { bitmap };
+
+        let previous = SelectObject(memory_dc.hdc, bitmap.bitmap);
+        if previous.is_invalid() {
+            return Err(anyhow!("native UI screenshot failed to select bitmap"));
+        }
+        let selected = SelectedObjectGuard {
+            hdc: memory_dc.hdc,
+            previous,
+        };
+
+        BitBlt(
+            memory_dc.hdc,
+            0,
+            0,
+            width,
+            height,
+            screen_dc,
+            0,
+            0,
+            SRCCOPY | CAPTUREBLT,
+        )
+        .context("native UI screenshot BitBlt failed")?;
+
+        let mut bitmap_info = BITMAPINFO::default();
+        bitmap_info.bmiHeader.biSize = std::mem::size_of_val(&bitmap_info.bmiHeader) as u32;
+        bitmap_info.bmiHeader.biWidth = width;
+        bitmap_info.bmiHeader.biHeight = -height;
+        bitmap_info.bmiHeader.biPlanes = 1;
+        bitmap_info.bmiHeader.biBitCount = 32;
+        bitmap_info.bmiHeader.biCompression = BI_RGB.0;
+
+        let byte_len = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|px| px.checked_mul(4))
+            .ok_or_else(|| anyhow!("native UI screenshot dimensions overflow buffer size"))?;
+        let mut bgra = vec![0u8; byte_len];
+        let rows = GetDIBits(
+            memory_dc.hdc,
+            bitmap.bitmap,
+            0,
+            height as u32,
+            Some(bgra.as_mut_ptr().cast()),
+            &mut bitmap_info,
+            DIB_RGB_COLORS,
+        );
+        if rows == 0 {
+            return Err(anyhow!("native UI screenshot failed to read bitmap pixels"));
+        }
+
+        drop(selected);
+
+        for px in bgra.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+        let image = ImageBuffer::<Rgba<u8>, _>::from_raw(width as u32, height as u32, bgra)
+            .ok_or_else(|| anyhow!("native UI screenshot produced invalid pixel buffer"))?;
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut encoded, image_format)
+            .context("encode native UI screenshot")?;
+
+        Ok(UiScreenshotResult {
+            image_data_base64: encode_base64(&encoded.into_inner()),
+            format: format_name.to_string(),
+            width: width as u32,
+            height: height as u32,
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct ScreenDcGuard {
+    hwnd: windows::Win32::Foundation::HWND,
+    hdc: windows::Win32::Graphics::Gdi::HDC,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for ScreenDcGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::ReleaseDC(self.hwnd, self.hdc);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct MemoryDcGuard {
+    hdc: windows::Win32::Graphics::Gdi::HDC,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for MemoryDcGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::DeleteDC(self.hdc);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct BitmapGuard {
+    bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for BitmapGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::DeleteObject(self.bitmap);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct SelectedObjectGuard {
+    hdc: windows::Win32::Graphics::Gdi::HDC,
+    previous: windows::Win32::Graphics::Gdi::HGDIOBJ,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for SelectedObjectGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::SelectObject(self.hdc, self.previous);
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1037,6 +1245,23 @@ mod tests {
         assert!(err
             .to_string()
             .contains("native UI Automation backend is not implemented yet"));
+    }
+
+    #[test]
+    fn screenshot_format_normalizes_png_and_jpeg() {
+        assert_eq!(normalize_screenshot_format("").0, "png");
+        assert_eq!(normalize_screenshot_format("png").0, "png");
+        assert_eq!(normalize_screenshot_format("jpeg").0, "jpeg");
+        assert_eq!(normalize_screenshot_format("JPG").0, "jpeg");
+    }
+
+    #[test]
+    fn base64_encoder_handles_padding() {
+        assert_eq!(encode_base64(b""), "");
+        assert_eq!(encode_base64(b"f"), "Zg==");
+        assert_eq!(encode_base64(b"fo"), "Zm8=");
+        assert_eq!(encode_base64(b"foo"), "Zm9v");
+        assert_eq!(encode_base64(b"hello"), "aGVsbG8=");
     }
 
     #[test]
