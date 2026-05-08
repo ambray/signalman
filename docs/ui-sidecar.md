@@ -44,6 +44,7 @@ Selectors currently support these exact forms:
 [name='Save']
 [automationId='save-button']
 [className='Button']
+[controlType='Button']
 [controlType='ControlType.Button']
 ```
 
