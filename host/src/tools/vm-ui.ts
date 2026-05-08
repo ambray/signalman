@@ -82,6 +82,47 @@ export function createVmUiTools(
       },
     },
     {
+      name: "vm_ui_health",
+      description: "Report whether the VM's interactive user-session UI sidecar is reachable and which automation engine it is using",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+          timeout_ms: { type: "number", description: "Timeout in milliseconds" },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const name = sanitizeVmName(params.name as string);
+        const client = await getClient(name);
+        const result = await client.uiHealth(
+          sanitizeTimeout(params.timeout_ms as number | undefined),
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  vm: name,
+                  sidecar_reachable: result.sidecarReachable,
+                  engine: result.engine,
+                  pid: result.pid,
+                  uptime_ms: result.uptimeMs,
+                  error: result.error,
+                  duration_ms: result.durationMs,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+          isError: !result.sidecarReachable,
+        };
+      },
+    },
+    {
       name: "vm_ui_snapshot",
       description: "Capture a screenshot plus visible UI Automation elements from the VM's interactive user session",
       inputSchema: {

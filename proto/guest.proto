@@ -46,6 +46,7 @@ service GuestAgent {
   rpc UIKey(UIKeyRequest) returns (UIActionResponse);
   rpc UIFind(UIFindRequest) returns (UIFindResponse);
   rpc UIScreenshot(UIScreenshotRequest) returns (UIScreenshotResponse);
+  rpc UIHealth(UIHealthRequest) returns (UIHealthResponse);
 
   // ── Browser Automation ──────────────────────────────────────
   rpc BrowserNavigate(BrowserNavigateRequest) returns (BrowserActionResponse);
@@ -349,6 +350,18 @@ message UIScreenshotResponse {
   uint32 width = 3;
   uint32 height = 4;
   uint64 duration_ms = 5;
+}
+
+message UIHealthRequest {
+}
+
+message UIHealthResponse {
+  bool sidecar_reachable = 1;
+  string engine = 2;
+  uint32 pid = 3;
+  uint64 uptime_ms = 4;
+  string error = 5;
+  uint64 duration_ms = 6;
 }
 
 // ── Browser Automation ────────────────────────────────────────────

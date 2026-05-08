@@ -199,6 +199,16 @@ describe("GuestAgentClient", () => {
           ],
         });
       });
+      this.uIHealth = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+        cb(null, {
+          sidecarReachable: true,
+          engine: "powershell-process",
+          pid: 123,
+          uptimeMs: 456,
+          error: "",
+          durationMs: 16,
+        });
+      });
       this.uIClick = vi.fn(
         (_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
           cb(null, { success: true, error: "", durationMs: 13 });
@@ -345,6 +355,14 @@ describe("GuestAgentClient", () => {
     await expect(client.uiFindDetailed("[name='Save']")).resolves.toMatchObject({
       durationMs: 12,
       elements: [expect.objectContaining({ name: "Save" })],
+    });
+    await expect(client.uiHealth()).resolves.toEqual({
+      sidecarReachable: true,
+      engine: "powershell-process",
+      pid: 123,
+      uptimeMs: 456,
+      error: "",
+      durationMs: 16,
     });
     await expect(client.uiClick("[name='Save']")).resolves.toEqual({
       success: true,

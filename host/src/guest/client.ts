@@ -285,6 +285,15 @@ export interface UiFindResult {
   durationMs: number;
 }
 
+export interface UiHealthResult {
+  sidecarReachable: boolean;
+  engine: string;
+  pid: number;
+  uptimeMs: number;
+  error: string;
+  durationMs: number;
+}
+
 // ── Proto Loading (lazy) ──────────────────────────────────────────
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1209,6 +1218,35 @@ export class GuestAgentClient {
       format: response.format,
       width: response.width,
       height: response.height,
+      durationMs: response.durationMs ?? 0,
+    };
+  }
+
+  async uiHealth(timeoutMs?: number): Promise<UiHealthResult> {
+    const deadline = timeoutMs ?? this.options.defaultTimeoutMs;
+    const response = await withRetry(
+      () =>
+        unaryCall<
+          Record<string, never>,
+          {
+            sidecarReachable: boolean;
+            engine: string;
+            pid: number;
+            uptimeMs: number;
+            error: string;
+            durationMs?: number;
+          }
+        >(this.client, "uIHealth", {}, deadline, this.options.authToken),
+      this.options.maxRetries,
+      this.options.initialRetryDelayMs,
+      this.options.maxRetryDelayMs,
+    );
+    return {
+      sidecarReachable: response.sidecarReachable,
+      engine: response.engine,
+      pid: response.pid,
+      uptimeMs: response.uptimeMs,
+      error: response.error,
       durationMs: response.durationMs ?? 0,
     };
   }
