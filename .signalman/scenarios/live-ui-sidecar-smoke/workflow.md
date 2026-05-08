@@ -11,6 +11,14 @@ ui_screenshot:
 ```
 
 ```tool
+ui_wait_for:
+  vm: Win11_test
+  selector: "[name='Start']"
+  find_timeout_ms: 15000
+  timeout_ms: 20000
+```
+
+```tool
 ui_find:
   vm: Win11_test
   selector: "[name='Start']"

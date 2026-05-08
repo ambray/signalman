@@ -21,6 +21,7 @@ The host registers these MCP tools when guest-agent access is available:
   inventory in one response for LLM observation loops.
 - `vm_ui_screenshot`: capture a PNG or JPEG screenshot from the interactive session.
 - `vm_ui_find`: find UI Automation elements by selector.
+- `vm_ui_wait_for`: wait for an element and fail the tool call when it is absent.
 - `vm_ui_click`: click a UI Automation element.
 - `vm_ui_type`: type text into the active session, optionally targeting an element first.
 
@@ -46,8 +47,8 @@ This gives LLM-enabled tests a practical path for desktop workflows:
 3. Run `vm_ui_ensure_sidecar` for that user, or rely on the scheduled task from a previous setup.
 4. Confirm the tool returns `ready: true`; increase `wait_ready_ms` for slow logons.
 5. Use normal guest-agent RPCs for setup.
-6. Use `vm_ui_snapshot` for the model's observation loop, then `vm_ui_find`,
-   `vm_ui_click`, and `vm_ui_type` for targeted interaction.
+6. Use `vm_ui_snapshot` for the model's observation loop, then `vm_ui_wait_for`,
+   `vm_ui_find`, `vm_ui_click`, and `vm_ui_type` for targeted interaction.
 7. Use screenshots plus UIA element data as the feedback loop.
 
 ## Current Limits

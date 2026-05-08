@@ -165,6 +165,62 @@ describe("VM UI MCP tools", () => {
     expect(JSON.parse(result.content[0].text ?? "{}").elements).toHaveLength(1);
   });
 
+  it("waits for UI elements and marks absent elements as MCP errors", async () => {
+    const client = makeClient({
+      uiFind: vi
+        .fn()
+        .mockResolvedValueOnce([
+          {
+            name: "Start",
+            automationId: "StartButton",
+            controlType: "Button",
+            className: "Button",
+            isEnabled: true,
+            isVisible: true,
+            x: 0,
+            y: 0,
+            width: 48,
+            height: 48,
+            value: "",
+          },
+        ])
+        .mockResolvedValueOnce([]),
+    } as Partial<GuestAgentClient>);
+    const { tools } = toolsFor(client);
+
+    const found = await tools.get("vm_ui_wait_for")!.handler({
+      name: "Win11_test",
+      selector: "[name='Start']",
+      window_title: "Shell",
+      find_timeout_ms: 3_000,
+      timeout_ms: 10_000,
+    });
+    const missing = await tools.get("vm_ui_wait_for")!.handler({
+      name: "Win11_test",
+      selector: "[name='Missing']",
+    });
+
+    expect(client.uiFind).toHaveBeenNthCalledWith(1, "[name='Start']", {
+      windowTitle: "Shell",
+      findTimeoutMs: 3_000,
+      timeoutMs: 10_000,
+    });
+    expect(JSON.parse(found.content[0].text ?? "{}")).toMatchObject({
+      vm: "Win11_test",
+      selector: "[name='Start']",
+      found: true,
+      count: 1,
+      error: "",
+    });
+    expect(found.isError).toBe(false);
+    expect(JSON.parse(missing.content[0].text ?? "{}")).toMatchObject({
+      found: false,
+      count: 0,
+      error: "UI element not found: [name='Missing']",
+    });
+    expect(missing.isError).toBe(true);
+  });
+
   it("marks failed click and type operations as MCP errors", async () => {
     const client = makeClient({
       uiClick: vi.fn().mockResolvedValue({ success: false, error: "not found" }),
