@@ -51,6 +51,49 @@ impl UiAutomationEngine {
         }
     }
 
+    fn execute(self, method: &str, params: &Value) -> anyhow::Result<Value> {
+        match method {
+            "ui.health" => Ok(self.health()),
+            "ui.find" => self.find(params),
+            "ui.click" => self.click(params),
+            "ui.type" => self.type_text(params),
+            "ui.key" => self.key(params),
+            "ui.screenshot" => self.screenshot(params),
+            other => Err(anyhow!("unknown UI sidecar method '{other}'")),
+        }
+    }
+
+    fn health(self) -> Value {
+        json!({
+            "engine": self.name(),
+            "pid": std::process::id(),
+            "uptime_ms": START_TIME
+                .get()
+                .map(|started| started.elapsed().as_millis() as u64)
+                .unwrap_or(0),
+        })
+    }
+
+    fn find(self, params: &Value) -> anyhow::Result<Value> {
+        powershell_ui_find(self, params)
+    }
+
+    fn click(self, params: &Value) -> anyhow::Result<Value> {
+        powershell_ui_click(self, params)
+    }
+
+    fn type_text(self, params: &Value) -> anyhow::Result<Value> {
+        powershell_ui_type(self, params)
+    }
+
+    fn key(self, params: &Value) -> anyhow::Result<Value> {
+        powershell_ui_key(self, params)
+    }
+
+    fn screenshot(self, params: &Value) -> anyhow::Result<Value> {
+        powershell_ui_screenshot(self, params)
+    }
+
     #[cfg(not(target_os = "windows"))]
     fn run_script_json(self, _script: &str) -> anyhow::Result<Value> {
         Err(anyhow!(
@@ -178,15 +221,7 @@ fn call_blocking(addr: &str, method: &str, params: Value) -> anyhow::Result<Valu
 }
 
 fn handle_request(req: SidecarRequest) -> SidecarResponse {
-    let result = match req.method.as_str() {
-        "ui.health" => Ok(sidecar_health()),
-        "ui.find" => ps_ui_find(&req.params),
-        "ui.click" => ps_ui_click(&req.params),
-        "ui.type" => ps_ui_type(&req.params),
-        "ui.key" => ps_ui_key(&req.params),
-        "ui.screenshot" => ps_ui_screenshot(&req.params),
-        other => Err(anyhow!("unknown UI sidecar method '{other}'")),
-    };
+    let result = UiAutomationEngine::selected().execute(&req.method, &req.params);
     match result {
         Ok(value) => SidecarResponse {
             id: req.id,
@@ -204,29 +239,11 @@ fn handle_request(req: SidecarRequest) -> SidecarResponse {
 }
 
 fn sidecar_health() -> Value {
-    let engine = UiAutomationEngine::selected();
-    json!({
-        "engine": engine.name(),
-        "pid": std::process::id(),
-        "uptime_ms": START_TIME
-            .get()
-            .map(|started| started.elapsed().as_millis() as u64)
-            .unwrap_or(0),
-    })
+    UiAutomationEngine::selected().health()
 }
 
 fn engine_name_for_env(value: Option<&str>) -> &'static str {
     UiAutomationEngine::from_env(value).name()
-}
-
-#[cfg(not(target_os = "windows"))]
-fn run_powershell_json(script: &str) -> anyhow::Result<Value> {
-    UiAutomationEngine::selected().run_script_json(script)
-}
-
-#[cfg(target_os = "windows")]
-fn run_powershell_json(script: &str) -> anyhow::Result<Value> {
-    UiAutomationEngine::selected().run_script_json(script)
 }
 
 #[cfg(target_os = "windows")]
@@ -436,7 +453,7 @@ function Find-SignalmanElement {{
     )
 }
 
-fn ps_ui_find(params: &Value) -> anyhow::Result<Value> {
+fn powershell_ui_find(engine: UiAutomationEngine, params: &Value) -> anyhow::Result<Value> {
     let selector = ps_string(params, "selector");
     let window_title = ps_string(params, "window_title");
     let timeout_ms = params
@@ -470,10 +487,10 @@ foreach ($e in $all) {{
 "#,
         common_uia_script(&selector, &window_title, timeout_ms)
     );
-    run_powershell_json(&script)
+    engine.run_script_json(&script)
 }
 
-fn ps_ui_click(params: &Value) -> anyhow::Result<Value> {
+fn powershell_ui_click(engine: UiAutomationEngine, params: &Value) -> anyhow::Result<Value> {
     let selector = ps_string(params, "selector");
     let window_title = ps_string(params, "window_title");
     let click_type = ps_string(params, "click_type");
@@ -512,10 +529,10 @@ $x = [int]($r.X + ($r.Width / 2)); $y = [int]($r.Y + ($r.Height / 2))
         down = down,
         up = up,
     );
-    run_powershell_json(&script)
+    engine.run_script_json(&script)
 }
 
-fn ps_ui_type(params: &Value) -> anyhow::Result<Value> {
+fn powershell_ui_type(engine: UiAutomationEngine, params: &Value) -> anyhow::Result<Value> {
     let selector = ps_string(params, "selector");
     let window_title = ps_string(params, "window_title");
     let text = ps_string(params, "text");
@@ -565,10 +582,10 @@ if ({clear_first}) {{ [System.Windows.Forms.SendKeys]::SendWait('^a') }}
         clear_first = clear_first,
         escaped_text = escaped_text
     );
-    run_powershell_json(&script)
+    engine.run_script_json(&script)
 }
 
-fn ps_ui_key(params: &Value) -> anyhow::Result<Value> {
+fn powershell_ui_key(engine: UiAutomationEngine, params: &Value) -> anyhow::Result<Value> {
     let selector = ps_string(params, "selector");
     let window_title = ps_string(params, "window_title");
     let keys = ps_string(params, "keys");
@@ -614,10 +631,10 @@ if (-not [string]::IsNullOrWhiteSpace($selector)) {{
         repeat = repeat,
         keys = keys
     );
-    run_powershell_json(&script)
+    engine.run_script_json(&script)
 }
 
-fn ps_ui_screenshot(params: &Value) -> anyhow::Result<Value> {
+fn powershell_ui_screenshot(engine: UiAutomationEngine, params: &Value) -> anyhow::Result<Value> {
     let format = ps_string(params, "format");
     let format = if format.eq_ignore_ascii_case("jpeg") {
         "Jpeg"
@@ -646,7 +663,7 @@ $graphics.Dispose(); $bmp.Dispose(); $ms.Dispose()
         format = format,
         lower = format.to_ascii_lowercase()
     );
-    run_powershell_json(&script)
+    engine.run_script_json(&script)
 }
 
 #[cfg(test)]
@@ -685,8 +702,27 @@ mod tests {
 
     #[test]
     fn ui_key_requires_keys() {
-        let err = ps_ui_key(&json!({ "keys": "" })).unwrap_err();
+        let err = powershell_ui_key(
+            UiAutomationEngine::PowershellProcess,
+            &json!({ "keys": "" }),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("keys is required"));
+    }
+
+    #[test]
+    fn selected_engine_dispatches_known_methods_and_rejects_unknown_methods() {
+        let health = UiAutomationEngine::PowershellProcess
+            .execute("ui.health", &Value::Null)
+            .unwrap();
+        assert_eq!(
+            health.get("engine").and_then(Value::as_str),
+            Some(POWERSHELL_PROCESS_ENGINE)
+        );
+        let err = UiAutomationEngine::PowershellProcess
+            .execute("ui.nope", &Value::Null)
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown UI sidecar method"));
     }
 
     #[test]
