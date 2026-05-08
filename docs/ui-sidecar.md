@@ -72,7 +72,9 @@ The first implementation is intentionally narrow. It uses Windows UI Automation 
 
 `vm_ui_health` reports the active engine (`powershell-process` or
 `powershell-helper`) through the same health surface the future native helper
-will use.
+will use. The sidecar dispatches requests through an engine boundary so a native
+UI Automation backend can replace the PowerShell script runner without changing
+the loopback, guest-agent, MCP, or workflow contracts.
 
 `vm_ui_find`, `vm_ui_wait_for`, and `vm_ui_snapshot` return normalized element
 descriptors for LLM-enabled tests. Each descriptor includes a deterministic
