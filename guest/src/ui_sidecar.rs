@@ -214,6 +214,8 @@ struct UiClickParams {
     window_title: String,
     #[serde(default)]
     click_type: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -226,6 +228,8 @@ struct UiTypeParams {
     window_title: String,
     #[serde(default)]
     clear_first: bool,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -238,6 +242,8 @@ struct UiKeyParams {
     window_title: String,
     #[serde(default)]
     repeat: Option<u64>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -939,7 +945,11 @@ fn native_ui_find(params: &UiFindParams) -> anyhow::Result<UiFindResult> {
 
 #[cfg(target_os = "windows")]
 fn native_ui_click(params: &UiClickParams) -> anyhow::Result<UiActionResult> {
-    let element = native_first_element(&params.selector, &params.window_title)?;
+    let element = native_first_element(
+        &params.selector,
+        &params.window_title,
+        ui_action_timeout_ms(params.timeout_ms),
+    )?;
     let x = element.x + element.width / 2;
     let y = element.y + element.height / 2;
     native_click_at(x, y, &params.click_type)?;
@@ -952,7 +962,11 @@ fn native_ui_click(params: &UiClickParams) -> anyhow::Result<UiActionResult> {
 #[cfg(target_os = "windows")]
 fn native_ui_type(params: &UiTypeParams) -> anyhow::Result<UiActionResult> {
     if !params.selector.trim().is_empty() {
-        let element = native_first_element(&params.selector, &params.window_title)?;
+        let element = native_first_element(
+            &params.selector,
+            &params.window_title,
+            ui_action_timeout_ms(params.timeout_ms),
+        )?;
         native_click_at(
             element.x + element.width / 2,
             element.y + element.height / 2,
@@ -975,7 +989,11 @@ fn native_ui_key(params: &UiKeyParams) -> anyhow::Result<UiActionResult> {
         return Err(anyhow!("keys is required"));
     }
     if !params.selector.trim().is_empty() {
-        let element = native_first_element(&params.selector, &params.window_title)?;
+        let element = native_first_element(
+            &params.selector,
+            &params.window_title,
+            ui_action_timeout_ms(params.timeout_ms),
+        )?;
         native_click_at(
             element.x + element.width / 2,
             element.y + element.height / 2,
@@ -990,17 +1008,25 @@ fn native_ui_key(params: &UiKeyParams) -> anyhow::Result<UiActionResult> {
 }
 
 #[cfg(target_os = "windows")]
-fn native_first_element(selector: &str, window_title: &str) -> anyhow::Result<UiElementResult> {
+fn native_first_element(
+    selector: &str,
+    window_title: &str,
+    timeout_ms: u64,
+) -> anyhow::Result<UiElementResult> {
     let result = native_ui_find(&UiFindParams {
         selector: selector.to_string(),
         window_title: window_title.to_string(),
-        timeout_ms: Some(5_000),
+        timeout_ms: Some(timeout_ms),
     })?;
     result
         .elements
         .into_iter()
         .find(|element| element.is_visible && element.width > 0 && element.height > 0)
         .ok_or_else(|| anyhow!("element not found: {selector}"))
+}
+
+fn ui_action_timeout_ms(value: Option<u64>) -> u64 {
+    value.unwrap_or(5_000)
 }
 
 #[cfg(target_os = "windows")]
@@ -1651,6 +1677,7 @@ fn powershell_ui_click(
 ) -> anyhow::Result<UiActionResult> {
     let selector = ps_quote_value(&params.selector);
     let window_title = ps_quote_value(&params.window_title);
+    let timeout_ms = ui_action_timeout_ms(params.timeout_ms);
     let click_type = ps_quote_value(&params.click_type);
     let (down, up) = if click_type == "right" {
         ("0x0008", "0x0010")
@@ -1682,7 +1709,7 @@ $x = [int]($r.X + ($r.Width / 2)); $y = [int]($r.Y + ($r.Height / 2))
 }}
 [pscustomobject]@{{ success = $true; error = '' }} | ConvertTo-Json -Compress
 "#,
-        common_uia_script(&selector, &window_title, 5_000),
+        common_uia_script(&selector, &window_title, timeout_ms),
         count = count,
         down = down,
         up = up,
@@ -1696,6 +1723,7 @@ fn powershell_ui_type(
 ) -> anyhow::Result<UiActionResult> {
     let selector = ps_quote_value(&params.selector);
     let window_title = ps_quote_value(&params.window_title);
+    let timeout_ms = ui_action_timeout_ms(params.timeout_ms);
     let text = ps_quote_value(&params.text);
     let clear_first = if params.clear_first {
         "$true"
@@ -1739,7 +1767,7 @@ if ({clear_first}) {{ [System.Windows.Forms.SendKeys]::SendWait('^a') }}
 [System.Windows.Forms.SendKeys]::SendWait('{escaped_text}')
 [pscustomobject]@{{ success = $true; error = '' }} | ConvertTo-Json -Compress
 "#,
-        common_uia_script(&selector, &window_title, 5_000),
+        common_uia_script(&selector, &window_title, timeout_ms),
         clear_first = clear_first,
         escaped_text = escaped_text
     );
@@ -1752,6 +1780,7 @@ fn powershell_ui_key(
 ) -> anyhow::Result<UiActionResult> {
     let selector = ps_quote_value(&params.selector);
     let window_title = ps_quote_value(&params.window_title);
+    let timeout_ms = ui_action_timeout_ms(params.timeout_ms);
     let keys = ps_quote_value(&params.keys);
     let repeat = params.repeat.unwrap_or(1).clamp(1, 100);
     if keys.trim().is_empty() {
@@ -1787,7 +1816,7 @@ if (-not [string]::IsNullOrWhiteSpace($selector)) {{
 }}
 [pscustomobject]@{{ success = $true; error = '' }} | ConvertTo-Json -Compress
 "#,
-        common_uia_script(&selector, &window_title, 5_000),
+        common_uia_script(&selector, &window_title, timeout_ms),
         repeat = repeat,
         keys = keys
     );
@@ -1878,6 +1907,12 @@ mod tests {
     }
 
     #[test]
+    fn ui_action_timeout_defaults_to_legacy_element_wait() {
+        assert_eq!(ui_action_timeout_ms(None), 5_000);
+        assert_eq!(ui_action_timeout_ms(Some(15_000)), 15_000);
+    }
+
+    #[test]
     fn typed_params_default_optional_fields() {
         let params: UiFindParams = parse_params("ui.find", &json!({ "selector": "Save" })).unwrap();
         assert_eq!(params.selector, "Save");
@@ -1891,10 +1926,25 @@ mod tests {
         .unwrap();
         assert_eq!(params.timeout_ms, Some(1234));
 
-        let params: UiKeyParams =
-            parse_params("ui.key", &json!({ "keys": "{ENTER}", "repeat": 3 })).unwrap();
+        let params: UiKeyParams = parse_params(
+            "ui.key",
+            &json!({ "keys": "{ENTER}", "repeat": 3, "timeout_ms": 4321 }),
+        )
+        .unwrap();
         assert_eq!(params.keys, "{ENTER}");
         assert_eq!(params.repeat, Some(3));
+        assert_eq!(params.timeout_ms, Some(4321));
+
+        let params: UiClickParams = parse_params(
+            "ui.click",
+            &json!({ "selector": "[name='Save']", "timeout_ms": 9876 }),
+        )
+        .unwrap();
+        assert_eq!(params.timeout_ms, Some(9876));
+
+        let params: UiTypeParams =
+            parse_params("ui.type", &json!({ "text": "hello", "timeout_ms": 6789 })).unwrap();
+        assert_eq!(params.timeout_ms, Some(6789));
     }
 
     #[test]
