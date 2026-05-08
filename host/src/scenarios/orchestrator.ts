@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { HypervisorBackend, VMHandle } from "../hypervisors/interface.js";
 import { GuestAgentClient, type CommandResult } from "../guest/client.js";
+import { describeUiElements } from "../guest/ui-elements.js";
 import type { SignalmanConfig } from "../config.js";
 import type { DockerClient, ComposeConfig } from "../docker/client.js";
 import {
@@ -2173,9 +2174,10 @@ export class ScenarioOrchestrator {
           timeoutMs: params.timeout_ms as number | undefined,
         });
         const elements = find.elements;
+        const descriptors = describeUiElements(elements);
         // Return a structured result so `json_field` assertions can
         // query e.g. `count` or `elements[0].is_enabled`.
-        return JSON.stringify({ count: elements.length, duration_ms: find.durationMs, elements });
+        return JSON.stringify({ count: elements.length, duration_ms: find.durationMs, elements: descriptors });
       }
 
       case "ui_wait_for": {
@@ -2189,6 +2191,7 @@ export class ScenarioOrchestrator {
           timeoutMs: params.timeout_ms as number | undefined,
         });
         const elements = find.elements;
+        const descriptors = describeUiElements(elements);
         const found = elements.length > 0;
         if (!found) {
           throw new Error(`UI element not found: ${selector}`);
@@ -2197,7 +2200,7 @@ export class ScenarioOrchestrator {
           found,
           count: elements.length,
           duration_ms: find.durationMs,
-          elements,
+          elements: descriptors,
         });
       }
 
@@ -2264,6 +2267,7 @@ export class ScenarioOrchestrator {
           }),
         ]);
         const elements = find.elements;
+        const descriptors = describeUiElements(elements);
         let savedPath: string | undefined;
         if (typeof params.output === "string" && params.output.length > 0) {
           const fs = await import("node:fs");
@@ -2279,7 +2283,7 @@ export class ScenarioOrchestrator {
           screenshot_duration_ms: screenshot.durationMs,
           find_duration_ms: find.durationMs,
           element_count: elements.length,
-          elements: elements.slice(0, maxElements),
+          elements: descriptors.slice(0, maxElements),
           truncated: elements.length > maxElements,
           saved_path: savedPath ?? null,
         });
