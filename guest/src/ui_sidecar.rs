@@ -26,6 +26,48 @@ static START_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock
 #[cfg(target_os = "windows")]
 static POWERSHELL_HELPER: OnceLock<Mutex<Option<PowershellHelper>>> = OnceLock::new();
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiAutomationEngine {
+    PowershellProcess,
+    PowershellHelper,
+}
+
+impl UiAutomationEngine {
+    fn selected() -> Self {
+        Self::from_env(std::env::var("SIGNALMAN_UI_ENGINE").ok().as_deref())
+    }
+
+    fn from_env(value: Option<&str>) -> Self {
+        match value.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+            "helper" | POWERSHELL_HELPER_ENGINE => Self::PowershellHelper,
+            _ => Self::PowershellProcess,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::PowershellProcess => POWERSHELL_PROCESS_ENGINE,
+            Self::PowershellHelper => POWERSHELL_HELPER_ENGINE,
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn run_script_json(self, _script: &str) -> anyhow::Result<Value> {
+        Err(anyhow!(
+            "UI sidecar automation engine '{}' is only supported on Windows",
+            self.name()
+        ))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn run_script_json(self, script: &str) -> anyhow::Result<Value> {
+        match self {
+            Self::PowershellProcess => run_powershell_process_json(script),
+            Self::PowershellHelper => run_powershell_helper_json(script),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct SidecarRequest {
     id: u64,
@@ -162,8 +204,9 @@ fn handle_request(req: SidecarRequest) -> SidecarResponse {
 }
 
 fn sidecar_health() -> Value {
+    let engine = UiAutomationEngine::selected();
     json!({
-        "engine": selected_engine_name(),
+        "engine": engine.name(),
         "pid": std::process::id(),
         "uptime_ms": START_TIME
             .get()
@@ -172,30 +215,18 @@ fn sidecar_health() -> Value {
     })
 }
 
-fn selected_engine_name() -> &'static str {
-    engine_name_for_env(std::env::var("SIGNALMAN_UI_ENGINE").ok().as_deref())
-}
-
 fn engine_name_for_env(value: Option<&str>) -> &'static str {
-    match value.unwrap_or("").trim().to_ascii_lowercase().as_str() {
-        "helper" | POWERSHELL_HELPER_ENGINE => POWERSHELL_HELPER_ENGINE,
-        _ => POWERSHELL_PROCESS_ENGINE,
-    }
+    UiAutomationEngine::from_env(value).name()
 }
 
 #[cfg(not(target_os = "windows"))]
-fn run_powershell_json(_script: &str) -> anyhow::Result<Value> {
-    Err(anyhow!(
-        "UI sidecar automation is only supported on Windows"
-    ))
+fn run_powershell_json(script: &str) -> anyhow::Result<Value> {
+    UiAutomationEngine::selected().run_script_json(script)
 }
 
 #[cfg(target_os = "windows")]
 fn run_powershell_json(script: &str) -> anyhow::Result<Value> {
-    if selected_engine_name() == POWERSHELL_HELPER_ENGINE {
-        return run_powershell_helper_json(script);
-    }
-    run_powershell_process_json(script)
+    UiAutomationEngine::selected().run_script_json(script)
 }
 
 #[cfg(target_os = "windows")]
@@ -372,7 +403,10 @@ function Match-SignalmanElement($e, $selector) {{
       'name' {{ return $e.Current.Name -eq $v }}
       'automationId' {{ return $e.Current.AutomationId -eq $v }}
       'className' {{ return $e.Current.ClassName -eq $v }}
-      'controlType' {{ return $e.Current.ControlType.ProgrammaticName -eq $v }}
+      'controlType' {{
+        $controlType = if ($v -like 'ControlType.*') {{ $v }} else {{ "ControlType.$v" }}
+        return $e.Current.ControlType.ProgrammaticName -eq $controlType
+      }}
     }}
   }}
   return ($e.Current.Name -like "*$selector*") -or ($e.Current.AutomationId -eq $selector)
@@ -657,6 +691,14 @@ mod tests {
 
     #[test]
     fn engine_selection_defaults_to_process_and_accepts_helper_aliases() {
+        assert_eq!(
+            UiAutomationEngine::from_env(None),
+            UiAutomationEngine::PowershellProcess
+        );
+        assert_eq!(
+            UiAutomationEngine::from_env(Some("helper")),
+            UiAutomationEngine::PowershellHelper
+        );
         assert_eq!(engine_name_for_env(None), POWERSHELL_PROCESS_ENGINE);
         assert_eq!(engine_name_for_env(Some("")), POWERSHELL_PROCESS_ENGINE);
         assert_eq!(
@@ -671,6 +713,13 @@ mod tests {
             engine_name_for_env(Some("unknown")),
             POWERSHELL_PROCESS_ENGINE
         );
+    }
+
+    #[test]
+    fn control_type_selectors_accept_short_and_programmatic_names() {
+        let script = common_uia_script("[controlType='Button']", "", 2_000);
+        assert!(script.contains("\"ControlType.$v\""));
+        assert!(script.contains("ProgrammaticName -eq $controlType"));
     }
 
     #[test]
