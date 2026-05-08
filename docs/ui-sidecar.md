@@ -72,3 +72,10 @@ The first implementation is intentionally narrow. It uses Windows UI Automation 
 `vm_ui_health` reports the active engine (`powershell-process` or
 `powershell-helper`) through the same health surface the future native helper
 will use.
+
+`vm_ui_find`, `vm_ui_wait_for`, and `vm_ui_snapshot` return normalized element
+descriptors for LLM-enabled tests. Each descriptor includes a deterministic
+`element_id`, a reusable selector, normalized `bounds` with center coordinates,
+state flags, and the raw UI Automation payload. The `element_id` is stable for a
+single snapshot/find result and is meant for logs and assertions; actions still
+take selectors so a future native backend can keep the same workflow contract.

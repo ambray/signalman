@@ -129,7 +129,16 @@ describe("VM UI MCP tools", () => {
       screenshot_duration_ms: 11,
       find_duration_ms: 22,
       element_count: 2,
-      elements: [expect.objectContaining({ name: "Start" })],
+      elements: [
+        expect.objectContaining({
+          element_id: expect.stringMatching(/^ui-001-[0-9a-f]{8}$/),
+          selector: "[automationId='StartButton']",
+          name: "Start",
+          automation_id: "StartButton",
+          control_type: "Button",
+          bounds: expect.objectContaining({ center_x: 24, center_y: 24 }),
+        }),
+      ],
       truncated: true,
     });
   });
@@ -207,7 +216,13 @@ describe("VM UI MCP tools", () => {
     });
     expect(JSON.parse(result.content[0].text ?? "{}")).toMatchObject({
       duration_ms: 12,
-      elements: [expect.objectContaining({ name: "Start" })],
+      elements: [
+        expect.objectContaining({
+          element_id: expect.stringMatching(/^ui-001-[0-9a-f]{8}$/),
+          selector: "[automationId='StartButton']",
+          name: "Start",
+        }),
+      ],
     });
   });
 

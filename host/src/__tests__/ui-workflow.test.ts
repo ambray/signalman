@@ -136,7 +136,17 @@ describe("workflow UI tool blocks", () => {
       clearFirst: true,
       timeoutMs: undefined,
     });
-    expect(JSON.parse(found)).toMatchObject({ count: 1, duration_ms: 12 });
+    expect(JSON.parse(found)).toMatchObject({
+      count: 1,
+      duration_ms: 12,
+      elements: [
+        expect.objectContaining({
+          element_id: expect.stringMatching(/^ui-001-[0-9a-f]{8}$/),
+          selector: "[automationId='StartButton']",
+          name: "Start",
+        }),
+      ],
+    });
     expect(JSON.parse(clicked)).toEqual({ success: true, error: "", duration_ms: 13 });
     expect(JSON.parse(typed)).toEqual({ success: true, error: "", duration_ms: 15 });
   });
@@ -330,7 +340,14 @@ describe("workflow UI tool blocks", () => {
       screenshot_duration_ms: 11,
       find_duration_ms: 31,
       element_count: 2,
-      elements: [expect.objectContaining({ name: "Start" })],
+      elements: [
+        expect.objectContaining({
+          element_id: expect.stringMatching(/^ui-001-[0-9a-f]{8}$/),
+          selector: "[automationId='StartButton']",
+          name: "Start",
+          bounds: expect.objectContaining({ center_x: 24, center_y: 24 }),
+        }),
+      ],
       truncated: true,
       saved_path: path.resolve("output/live-ui-sidecar-smoke/snapshot.png"),
     });

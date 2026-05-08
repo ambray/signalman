@@ -9,6 +9,7 @@
 import type { ToolDefinition, ToolResult } from "./types.js";
 import type { GuestAgentClient } from "../guest/client.js";
 import { ensureUiSidecar } from "../guest/ui-sidecar.js";
+import { describeUiElements } from "../guest/ui-elements.js";
 import { sanitizeTimeout, sanitizeVmName } from "../sanitize.js";
 
 function sanitizeRepeat(repeat: number | undefined): number {
@@ -171,6 +172,7 @@ export function createVmUiTools(
           }),
         ]);
         const elements = find.elements;
+        const descriptors = describeUiElements(elements);
         return {
           content: [
             {
@@ -189,7 +191,7 @@ export function createVmUiTools(
                   screenshot_duration_ms: screenshot.durationMs,
                   find_duration_ms: find.durationMs,
                   element_count: elements.length,
-                  elements: elements.slice(0, maxElements),
+                  elements: descriptors.slice(0, maxElements),
                   truncated: elements.length > maxElements,
                 },
                 null,
@@ -275,8 +277,9 @@ export function createVmUiTools(
           timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
         });
         const elements = find.elements;
+        const descriptors = describeUiElements(elements);
         return {
-          content: [{ type: "text", text: JSON.stringify({ elements, duration_ms: find.durationMs }, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify({ elements: descriptors, duration_ms: find.durationMs }, null, 2) }],
         };
       },
     },
@@ -308,6 +311,7 @@ export function createVmUiTools(
           timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
         });
         const elements = find.elements;
+        const descriptors = describeUiElements(elements);
         const found = elements.length > 0;
         return {
           content: [
@@ -320,7 +324,7 @@ export function createVmUiTools(
                   found,
                   count: elements.length,
                   duration_ms: find.durationMs,
-                  elements,
+                  elements: descriptors,
                   error: found ? "" : `UI element not found: ${selector}`,
                 },
                 null,
