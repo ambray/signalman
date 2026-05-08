@@ -35,7 +35,7 @@ const recoveryProperties = {
   },
   recover_engine: {
     type: "string",
-    enum: ["powershell-process", "powershell-helper"],
+    enum: ["powershell-process", "powershell-helper", "native"],
     description: "Optional engine to use when recovery restarts the sidecar.",
   },
   recover_wait_ready_ms: {
@@ -79,7 +79,7 @@ export function createVmUiTools(
           },
           engine: {
             type: "string",
-            enum: ["powershell-process", "powershell-helper"],
+            enum: ["powershell-process", "powershell-helper", "native"],
             description: "Automation engine for the sidecar, default powershell-process",
           },
           task_name: {

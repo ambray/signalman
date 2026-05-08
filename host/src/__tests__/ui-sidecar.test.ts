@@ -25,11 +25,20 @@ describe("UI sidecar scheduling", () => {
     expect(script).not.toContain("Password");
   });
 
+  it("allows the native sidecar engine", () => {
+    const script = buildEnsureUiSidecarScript({
+      username: "test",
+      engine: "native",
+    });
+
+    expect(script).toContain("$engine = 'native'");
+  });
+
   it("rejects unknown sidecar engines", () => {
     expect(() =>
       buildEnsureUiSidecarScript({
         username: "test",
-        engine: "native",
+        engine: "wat",
       }),
     ).toThrow("engine");
   });

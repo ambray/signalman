@@ -61,10 +61,14 @@ function validateTaskName(taskName: string): string {
 
 function validateEngine(engine: string): string {
   const normalized = engine.trim().toLowerCase();
-  if (normalized === "powershell-process" || normalized === "powershell-helper") {
+  if (
+    normalized === "powershell-process" ||
+    normalized === "powershell-helper" ||
+    normalized === "native"
+  ) {
     return normalized;
   }
-  throw new Error("UI sidecar engine must be powershell-process or powershell-helper");
+  throw new Error("UI sidecar engine must be powershell-process, powershell-helper, or native");
 }
 
 function validateWaitReadyMs(waitReadyMs: number | undefined, runNow: boolean): number {

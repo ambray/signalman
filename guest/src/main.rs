@@ -51,7 +51,7 @@ struct Cli {
     #[arg(long, default_value = DEFAULT_UI_SIDECAR_BIND, env = "SIGNALMAN_UI_SIDECAR_BIND")]
     ui_sidecar_bind: String,
 
-    /// UI sidecar automation engine: powershell-process or powershell-helper.
+    /// UI sidecar automation engine: powershell-process, powershell-helper, or native.
     #[arg(long, default_value = DEFAULT_UI_ENGINE, env = "SIGNALMAN_UI_ENGINE")]
     ui_engine: String,
 
