@@ -1098,29 +1098,42 @@ fn native_send_unicode_unit(unit: u16) -> anyhow::Result<()> {
 #[cfg(target_os = "windows")]
 fn native_send_key_sequence(keys: &str, repeat: u64) -> anyhow::Result<()> {
     for _ in 0..repeat {
-        for (key, ctrl) in parse_native_key_sequence(keys)? {
-            native_send_virtual_key(key, ctrl)?;
+        for stroke in parse_native_key_sequence(keys)? {
+            native_send_virtual_key(stroke)?;
         }
     }
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
-fn native_send_virtual_key(vk: u16, ctrl: bool) -> anyhow::Result<()> {
+fn native_send_virtual_key(stroke: NativeKeyStroke) -> anyhow::Result<()> {
     use std::mem::size_of;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
-        VK_CONTROL,
+        VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT,
     };
 
     let mut inputs = Vec::new();
-    if ctrl {
-        inputs.push(keyboard_input(VK_CONTROL, Default::default()));
+    let mut modifiers = Vec::new();
+    if stroke.modifiers.ctrl {
+        modifiers.push(VK_CONTROL);
     }
-    inputs.push(keyboard_input(VIRTUAL_KEY(vk), Default::default()));
-    inputs.push(keyboard_input(VIRTUAL_KEY(vk), KEYEVENTF_KEYUP));
-    if ctrl {
-        inputs.push(keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP));
+    if stroke.modifiers.shift {
+        modifiers.push(VK_SHIFT);
+    }
+    if stroke.modifiers.alt {
+        modifiers.push(VK_MENU);
+    }
+    if stroke.modifiers.win {
+        modifiers.push(VK_LWIN);
+    }
+    for modifier in &modifiers {
+        inputs.push(keyboard_input(*modifier, Default::default()));
+    }
+    inputs.push(keyboard_input(VIRTUAL_KEY(stroke.vk), Default::default()));
+    inputs.push(keyboard_input(VIRTUAL_KEY(stroke.vk), KEYEVENTF_KEYUP));
+    for modifier in modifiers.iter().rev() {
+        inputs.push(keyboard_input(*modifier, KEYEVENTF_KEYUP));
     }
     let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
     if sent != inputs.len() as u32 {
@@ -1146,7 +1159,23 @@ fn native_send_virtual_key(vk: u16, ctrl: bool) -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn parse_native_key_sequence(keys: &str) -> anyhow::Result<Vec<(u16, bool)>> {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct NativeKeyModifiers {
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    win: bool,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeKeyStroke {
+    vk: u16,
+    modifiers: NativeKeyModifiers,
+}
+
+#[cfg(target_os = "windows")]
+fn parse_native_key_sequence(keys: &str) -> anyhow::Result<Vec<NativeKeyStroke>> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         VK_BACK, VK_ESCAPE, VK_RETURN, VK_SPACE, VK_TAB,
     };
@@ -1157,9 +1186,22 @@ fn parse_native_key_sequence(keys: &str) -> anyhow::Result<Vec<(u16, bool)>> {
     }
 
     let mut strokes = Vec::new();
+    let mut modifiers = NativeKeyModifiers::default();
     let mut chars = trimmed.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
+            '^' => {
+                modifiers.ctrl = true;
+            }
+            '+' => {
+                modifiers.shift = true;
+            }
+            '%' => {
+                modifiers.alt = true;
+            }
+            '#' => {
+                modifiers.win = true;
+            }
             '{' => {
                 let mut token = String::new();
                 loop {
@@ -1172,33 +1214,57 @@ fn parse_native_key_sequence(keys: &str) -> anyhow::Result<Vec<(u16, bool)>> {
                 let Some(vk) = native_special_key(&token) else {
                     return Err(anyhow!("unsupported native key sequence: {keys}"));
                 };
-                strokes.push((vk, false));
+                strokes.push(NativeKeyStroke { vk, modifiers });
+                modifiers = NativeKeyModifiers::default();
             }
-            '^' => {
-                let Some(chord) = chars.next() else {
-                    return Err(anyhow!("unsupported native key sequence: {keys}"));
-                };
-                if !chord.is_ascii_alphabetic() {
-                    return Err(anyhow!("unsupported native key sequence: {keys}"));
-                }
-                strokes.push((chord.to_ascii_uppercase() as u16, true));
+            '~' => {
+                strokes.push(NativeKeyStroke {
+                    vk: VK_RETURN.0,
+                    modifiers,
+                });
+                modifiers = NativeKeyModifiers::default();
             }
-            '~' => strokes.push((VK_RETURN.0, false)),
-            ' ' => strokes.push((VK_SPACE.0, false)),
+            ' ' => {
+                strokes.push(NativeKeyStroke {
+                    vk: VK_SPACE.0,
+                    modifiers,
+                });
+                modifiers = NativeKeyModifiers::default();
+            }
             single if single.is_ascii_alphanumeric() => {
-                strokes.push((single.to_ascii_uppercase() as u16, false));
+                strokes.push(NativeKeyStroke {
+                    vk: single.to_ascii_uppercase() as u16,
+                    modifiers,
+                });
+                modifiers = NativeKeyModifiers::default();
             }
             _ => return Err(anyhow!("unsupported native key sequence: {keys}")),
         }
     }
+    if modifiers != NativeKeyModifiers::default() {
+        return Err(anyhow!("unsupported native key sequence: {keys}"));
+    }
 
     fn native_special_key(token: &str) -> Option<u16> {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_LEFT, VK_LWIN, VK_RIGHT, VK_RWIN, VK_UP,
+        };
+
         match token.trim().to_ascii_uppercase().as_str() {
             "ESC" | "ESCAPE" => Some(VK_ESCAPE.0),
             "ENTER" => Some(VK_RETURN.0),
             "TAB" => Some(VK_TAB.0),
             "BACKSPACE" | "BS" => Some(VK_BACK.0),
             "SPACE" => Some(VK_SPACE.0),
+            "DELETE" | "DEL" => Some(VK_DELETE.0),
+            "HOME" => Some(VK_HOME.0),
+            "END" => Some(VK_END.0),
+            "LEFT" => Some(VK_LEFT.0),
+            "RIGHT" => Some(VK_RIGHT.0),
+            "UP" => Some(VK_UP.0),
+            "DOWN" => Some(VK_DOWN.0),
+            "WIN" | "LWIN" => Some(VK_LWIN.0),
+            "RWIN" => Some(VK_RWIN.0),
             _ => None,
         }
     }
@@ -1923,32 +1989,104 @@ mod tests {
     #[test]
     fn native_key_parser_handles_smoke_sequences() {
         use windows::Win32::UI::Input::KeyboardAndMouse::{
-            VK_BACK, VK_ESCAPE, VK_RETURN, VK_SPACE, VK_TAB,
+            VK_BACK, VK_DELETE, VK_ESCAPE, VK_LWIN, VK_RETURN, VK_SPACE, VK_TAB,
         };
 
         assert_eq!(
             parse_native_key_sequence("{ESC}").unwrap(),
-            vec![(VK_ESCAPE.0, false)]
+            vec![NativeKeyStroke {
+                vk: VK_ESCAPE.0,
+                modifiers: NativeKeyModifiers::default()
+            }]
         );
         assert_eq!(
             parse_native_key_sequence("{TAB}{TAB}{ENTER}").unwrap(),
-            vec![(VK_TAB.0, false), (VK_TAB.0, false), (VK_RETURN.0, false)]
+            vec![
+                NativeKeyStroke {
+                    vk: VK_TAB.0,
+                    modifiers: NativeKeyModifiers::default()
+                },
+                NativeKeyStroke {
+                    vk: VK_TAB.0,
+                    modifiers: NativeKeyModifiers::default()
+                },
+                NativeKeyStroke {
+                    vk: VK_RETURN.0,
+                    modifiers: NativeKeyModifiers::default()
+                },
+            ]
         );
         assert_eq!(
             parse_native_key_sequence("^a{BACKSPACE}").unwrap(),
-            vec![('A' as u16, true), (VK_BACK.0, false)]
+            vec![
+                NativeKeyStroke {
+                    vk: 'A' as u16,
+                    modifiers: NativeKeyModifiers {
+                        ctrl: true,
+                        ..Default::default()
+                    }
+                },
+                NativeKeyStroke {
+                    vk: VK_BACK.0,
+                    modifiers: NativeKeyModifiers::default()
+                },
+            ]
         );
         assert_eq!(
             parse_native_key_sequence("a1{SPACE}").unwrap(),
             vec![
-                ('A' as u16, false),
-                ('1' as u16, false),
-                (VK_SPACE.0, false)
+                NativeKeyStroke {
+                    vk: 'A' as u16,
+                    modifiers: NativeKeyModifiers::default()
+                },
+                NativeKeyStroke {
+                    vk: '1' as u16,
+                    modifiers: NativeKeyModifiers::default()
+                },
+                NativeKeyStroke {
+                    vk: VK_SPACE.0,
+                    modifiers: NativeKeyModifiers::default()
+                },
+            ]
+        );
+        assert_eq!(
+            parse_native_key_sequence("^+{ESC}%{TAB}#r{LWIN}{DELETE}").unwrap(),
+            vec![
+                NativeKeyStroke {
+                    vk: VK_ESCAPE.0,
+                    modifiers: NativeKeyModifiers {
+                        ctrl: true,
+                        shift: true,
+                        ..Default::default()
+                    }
+                },
+                NativeKeyStroke {
+                    vk: VK_TAB.0,
+                    modifiers: NativeKeyModifiers {
+                        alt: true,
+                        ..Default::default()
+                    }
+                },
+                NativeKeyStroke {
+                    vk: 'R' as u16,
+                    modifiers: NativeKeyModifiers {
+                        win: true,
+                        ..Default::default()
+                    }
+                },
+                NativeKeyStroke {
+                    vk: VK_LWIN.0,
+                    modifiers: NativeKeyModifiers::default()
+                },
+                NativeKeyStroke {
+                    vk: VK_DELETE.0,
+                    modifiers: NativeKeyModifiers::default()
+                },
             ]
         );
         assert!(parse_native_key_sequence("{NOPE}").is_err());
         assert!(parse_native_key_sequence("{ENTER").is_err());
-        assert!(parse_native_key_sequence("^1").is_err());
+        assert!(parse_native_key_sequence("^").is_err());
         assert!(parse_native_key_sequence("!").is_err());
     }
 
