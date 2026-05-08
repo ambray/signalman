@@ -79,3 +79,9 @@ descriptors for LLM-enabled tests. Each descriptor includes a deterministic
 state flags, and the raw UI Automation payload. The `element_id` is stable for a
 single snapshot/find result and is meant for logs and assertions; actions still
 take selectors so a future native backend can keep the same workflow contract.
+
+For longer LLM-driven runs, UI MCP tools accept `recover_username`,
+`recover_engine`, and `recover_wait_ready_ms`. When `recover_username` is set and
+an action cannot reach the sidecar, the host re-runs the sidecar scheduled-task
+setup once and retries the UI call. Workflow tool blocks expose the same behavior
+as `sidecar_username`, `sidecar_engine`, and `sidecar_wait_ready_ms`.

@@ -39,6 +39,23 @@ function makeBackend(): HypervisorBackend {
 
 function makeClient(overrides: Partial<GuestAgentClient> = {}): GuestAgentClient {
   return {
+    runCommand: vi.fn().mockResolvedValue({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        taskName: "SignalmanUiSidecar",
+        username: "test",
+        bind: "127.0.0.1:50151",
+        engine: "powershell-helper",
+        executable: "C:\\Program Files\\Signalman\\signalman-guest.exe",
+        created: false,
+        runNow: true,
+        state: "Running",
+        ready: true,
+        waitReadyMs: 5_000,
+      }),
+      stderr: "",
+      durationMs: 10,
+    }),
     uiScreenshot: vi.fn().mockResolvedValue({
       imageData: Buffer.from("fake-png"),
       format: "png",
@@ -177,6 +194,37 @@ describe("workflow UI tool blocks", () => {
     await expect(
       orchestrator.executeToolBlock("ui_key", { vm: "endpoint-1" }, vmMap),
     ).rejects.toThrow("ui_key missing 'keys'");
+  });
+
+  it("recovers an unreachable sidecar for workflow UI blocks when configured", async () => {
+    const client = makeClient({
+      uiClick: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("connect UI sidecar at 127.0.0.1:50151"))
+        .mockResolvedValueOnce({ success: true, error: "", durationMs: 51 }),
+    } as Partial<GuestAgentClient>);
+    const { orchestrator, vmMap } = makeOrchestrator(client);
+
+    const clicked = await orchestrator.executeToolBlock(
+      "ui_click",
+      {
+        vm: "endpoint-1",
+        selector: "[name='Start']",
+        sidecar_username: "test",
+        sidecar_engine: "powershell-helper",
+        sidecar_wait_ready_ms: 7_000,
+        timeout_ms: 8_000,
+      },
+      vmMap,
+    );
+
+    expect(client.runCommand).toHaveBeenCalledWith(
+      "powershell.exe",
+      expect.arrayContaining(["-EncodedCommand", expect.any(String)]),
+      { timeoutMs: 8_000, runAs: "SYSTEM", maxRetries: 1 },
+    );
+    expect(client.uiClick).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(clicked)).toEqual({ success: true, error: "", duration_ms: 51 });
   });
 
   it("waits for UI elements and fails workflow blocks when absent", async () => {

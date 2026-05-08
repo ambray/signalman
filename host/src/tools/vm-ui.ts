@@ -8,8 +8,10 @@
 
 import type { ToolDefinition, ToolResult } from "./types.js";
 import type { GuestAgentClient } from "../guest/client.js";
+import type { UiSidecarRecoveryOptions } from "../guest/ui-recovery.js";
 import { ensureUiSidecar } from "../guest/ui-sidecar.js";
 import { describeUiElements } from "../guest/ui-elements.js";
+import { withUiSidecarRecovery } from "../guest/ui-recovery.js";
 import { sanitizeTimeout, sanitizeVmName } from "../sanitize.js";
 
 function sanitizeRepeat(repeat: number | undefined): number {
@@ -23,6 +25,36 @@ function uiActionJson(vm: string, result: { success: boolean; error: string; dur
     success: result.success,
     error: result.error,
     duration_ms: result.durationMs ?? 0,
+  };
+}
+
+const recoveryProperties = {
+  recover_username: {
+    type: "string",
+    description: "Optional interactive desktop user. When set, retry once after restarting the sidecar if it is unreachable.",
+  },
+  recover_engine: {
+    type: "string",
+    enum: ["powershell-process", "powershell-helper"],
+    description: "Optional engine to use when recovery restarts the sidecar.",
+  },
+  recover_wait_ready_ms: {
+    type: "number",
+    description: "How long recovery waits for the sidecar loopback port.",
+  },
+} as const;
+
+function recoveryOptions(params: Record<string, unknown>): UiSidecarRecoveryOptions | undefined {
+  const username = params.recover_username as string | undefined;
+  if (!username) return undefined;
+  return {
+    username,
+    engine: params.recover_engine as string | undefined,
+    waitReadyMs:
+      params.recover_wait_ready_ms == null
+        ? undefined
+        : sanitizeTimeout(params.recover_wait_ready_ms as number | undefined, 300_000),
+    timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
   };
 }
 
@@ -142,6 +174,7 @@ export function createVmUiTools(
             type: "number",
             description: "Maximum number of UI elements to include in the JSON metadata",
           },
+          ...recoveryProperties,
           find_timeout_ms: { type: "number", description: "Element inventory timeout" },
           timeout_ms: { type: "number", description: "RPC timeout" },
         },
@@ -159,18 +192,23 @@ export function createVmUiTools(
         const windowTitle = (params.window_title as string | undefined) ?? "";
         const format = (params.format as string | undefined) ?? "png";
         const client = await getClient(name);
-        const [screenshot, find] = await Promise.all([
-          client.uiScreenshot({
-            windowTitle,
-            format,
-            timeoutMs,
-          }),
-          client.uiFindDetailed("", {
-            windowTitle,
-            findTimeoutMs,
-            timeoutMs,
-          }),
-        ]);
+        const [screenshot, find] = await withUiSidecarRecovery(
+          client,
+          recoveryOptions(params),
+          () =>
+            Promise.all([
+              client.uiScreenshot({
+                windowTitle,
+                format,
+                timeoutMs,
+              }),
+              client.uiFindDetailed("", {
+                windowTitle,
+                findTimeoutMs,
+                timeoutMs,
+              }),
+            ]),
+        );
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
         return {
@@ -211,6 +249,7 @@ export function createVmUiTools(
           name: { type: "string", description: "VM name" },
           window_title: { type: "string", description: "Optional window title" },
           format: { type: "string", enum: ["png", "jpeg"], description: "Image format" },
+          ...recoveryProperties,
           timeout_ms: { type: "number", description: "Timeout in milliseconds" },
         },
         required: ["name"],
@@ -220,11 +259,13 @@ export function createVmUiTools(
         const name = sanitizeVmName(params.name as string);
         const timeoutMs = sanitizeTimeout(params.timeout_ms as number | undefined);
         const client = await getClient(name);
-        const screenshot = await client.uiScreenshot({
-          windowTitle: (params.window_title as string | undefined) ?? "",
-          format: (params.format as string | undefined) ?? "png",
-          timeoutMs,
-        });
+        const screenshot = await withUiSidecarRecovery(client, recoveryOptions(params), () =>
+          client.uiScreenshot({
+            windowTitle: (params.window_title as string | undefined) ?? "",
+            format: (params.format as string | undefined) ?? "png",
+            timeoutMs,
+          }),
+        );
         return {
           content: [
             {
@@ -262,6 +303,7 @@ export function createVmUiTools(
             description: "UIA selector, e.g. [name='Save'] or [automationId='btn1']",
           },
           window_title: { type: "string", description: "Optional window title" },
+          ...recoveryProperties,
           find_timeout_ms: { type: "number", description: "Element wait timeout" },
           timeout_ms: { type: "number", description: "RPC timeout" },
         },
@@ -271,11 +313,13 @@ export function createVmUiTools(
       handler: async (params): Promise<ToolResult> => {
         const name = sanitizeVmName(params.name as string);
         const client = await getClient(name);
-        const find = await client.uiFindDetailed(params.selector as string, {
-          windowTitle: (params.window_title as string | undefined) ?? "",
-          findTimeoutMs: sanitizeTimeout(params.find_timeout_ms as number | undefined, 30_000),
-          timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
-        });
+        const find = await withUiSidecarRecovery(client, recoveryOptions(params), () =>
+          client.uiFindDetailed(params.selector as string, {
+            windowTitle: (params.window_title as string | undefined) ?? "",
+            findTimeoutMs: sanitizeTimeout(params.find_timeout_ms as number | undefined, 30_000),
+            timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
+          }),
+        );
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
         return {
@@ -295,6 +339,7 @@ export function createVmUiTools(
             description: "UIA selector, e.g. [name='Save'] or [automationId='btn1']",
           },
           window_title: { type: "string", description: "Optional window title" },
+          ...recoveryProperties,
           find_timeout_ms: { type: "number", description: "Element wait timeout" },
           timeout_ms: { type: "number", description: "RPC timeout" },
         },
@@ -305,11 +350,13 @@ export function createVmUiTools(
         const name = sanitizeVmName(params.name as string);
         const selector = params.selector as string;
         const client = await getClient(name);
-        const find = await client.uiFindDetailed(selector, {
-          windowTitle: (params.window_title as string | undefined) ?? "",
-          findTimeoutMs: sanitizeTimeout(params.find_timeout_ms as number | undefined, 30_000),
-          timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
-        });
+        const find = await withUiSidecarRecovery(client, recoveryOptions(params), () =>
+          client.uiFindDetailed(selector, {
+            windowTitle: (params.window_title as string | undefined) ?? "",
+            findTimeoutMs: sanitizeTimeout(params.find_timeout_ms as number | undefined, 30_000),
+            timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
+          }),
+        );
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
         const found = elements.length > 0;
@@ -349,6 +396,7 @@ export function createVmUiTools(
           },
           window_title: { type: "string", description: "Optional window title" },
           click_type: { type: "string", enum: ["left", "right", "double"] },
+          ...recoveryProperties,
           timeout_ms: { type: "number", description: "Timeout in milliseconds" },
         },
         required: ["name", "selector"],
@@ -357,11 +405,13 @@ export function createVmUiTools(
       handler: async (params): Promise<ToolResult> => {
         const name = sanitizeVmName(params.name as string);
         const client = await getClient(name);
-        const result = await client.uiClick(params.selector as string, {
-          windowTitle: (params.window_title as string | undefined) ?? "",
-          clickType: (params.click_type as "left" | "right" | "double" | undefined) ?? "left",
-          timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
-        });
+        const result = await withUiSidecarRecovery(client, recoveryOptions(params), () =>
+          client.uiClick(params.selector as string, {
+            windowTitle: (params.window_title as string | undefined) ?? "",
+            clickType: (params.click_type as "left" | "right" | "double" | undefined) ?? "left",
+            timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
+          }),
+        );
         return {
           content: [{ type: "text", text: JSON.stringify(uiActionJson(name, result), null, 2) }],
           isError: !result.success,
@@ -385,6 +435,7 @@ export function createVmUiTools(
           },
           window_title: { type: "string", description: "Optional window title" },
           repeat: { type: "number", description: "Repeat count, default 1" },
+          ...recoveryProperties,
           timeout_ms: { type: "number", description: "RPC timeout" },
         },
         required: ["name", "keys"],
@@ -393,12 +444,14 @@ export function createVmUiTools(
       handler: async (params): Promise<ToolResult> => {
         const name = sanitizeVmName(params.name as string);
         const client = await getClient(name);
-        const result = await client.uiKey(params.keys as string, {
-          selector: params.selector as string | undefined,
-          windowTitle: params.window_title as string | undefined,
-          repeat: sanitizeRepeat(params.repeat as number | undefined),
-          timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
-        });
+        const result = await withUiSidecarRecovery(client, recoveryOptions(params), () =>
+          client.uiKey(params.keys as string, {
+            selector: params.selector as string | undefined,
+            windowTitle: params.window_title as string | undefined,
+            repeat: sanitizeRepeat(params.repeat as number | undefined),
+            timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
+          }),
+        );
         return {
           content: [
             {
@@ -421,6 +474,7 @@ export function createVmUiTools(
           selector: { type: "string", description: "Optional target UIA selector" },
           window_title: { type: "string", description: "Optional window title" },
           clear_first: { type: "boolean", description: "Select existing text before typing" },
+          ...recoveryProperties,
           timeout_ms: { type: "number", description: "Timeout in milliseconds" },
         },
         required: ["name", "text"],
@@ -429,12 +483,14 @@ export function createVmUiTools(
       handler: async (params): Promise<ToolResult> => {
         const name = sanitizeVmName(params.name as string);
         const client = await getClient(name);
-        const result = await client.uiType(params.text as string, {
-          selector: (params.selector as string | undefined) ?? "",
-          windowTitle: (params.window_title as string | undefined) ?? "",
-          clearFirst: (params.clear_first as boolean | undefined) ?? false,
-          timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
-        });
+        const result = await withUiSidecarRecovery(client, recoveryOptions(params), () =>
+          client.uiType(params.text as string, {
+            selector: (params.selector as string | undefined) ?? "",
+            windowTitle: (params.window_title as string | undefined) ?? "",
+            clearFirst: (params.clear_first as boolean | undefined) ?? false,
+            timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
+          }),
+        );
         return {
           content: [{ type: "text", text: JSON.stringify(uiActionJson(name, result), null, 2) }],
           isError: !result.success,

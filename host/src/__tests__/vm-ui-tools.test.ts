@@ -345,6 +345,37 @@ describe("VM UI MCP tools", () => {
     expect(type.isError).toBe(true);
   });
 
+  it("recovers an unreachable sidecar for MCP UI actions when recovery options are provided", async () => {
+    const client = makeClient({
+      uiClick: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("connect UI sidecar at 127.0.0.1:50151"))
+        .mockResolvedValueOnce({ success: true, error: "", durationMs: 51 }),
+    } as Partial<GuestAgentClient>);
+    const { tools } = toolsFor(client);
+
+    const result = await tools.get("vm_ui_click")!.handler({
+      name: "Win11_test",
+      selector: "[name='Start']",
+      recover_username: "test",
+      recover_engine: "powershell-helper",
+      recover_wait_ready_ms: 7_000,
+      timeout_ms: 8_000,
+    });
+
+    expect(client.runCommand).toHaveBeenCalledWith(
+      "powershell.exe",
+      expect.arrayContaining(["-EncodedCommand", expect.any(String)]),
+      { timeoutMs: 8_000, runAs: "SYSTEM", maxRetries: 1 },
+    );
+    expect(client.uiClick).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(result.content[0].text ?? "{}")).toMatchObject({
+      vm: "Win11_test",
+      success: true,
+      duration_ms: 51,
+    });
+  });
+
   it("ensures the user-session sidecar through a SYSTEM guest command", async () => {
     const client = makeClient();
     const { tools } = toolsFor(client);
