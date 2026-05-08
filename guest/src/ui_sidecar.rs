@@ -13,6 +13,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{anyhow, Context};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -54,11 +55,11 @@ impl UiAutomationEngine {
     fn execute(self, method: &str, params: &Value) -> anyhow::Result<Value> {
         match method {
             "ui.health" => Ok(self.health()),
-            "ui.find" => self.find(params),
-            "ui.click" => self.click(params),
-            "ui.type" => self.type_text(params),
-            "ui.key" => self.key(params),
-            "ui.screenshot" => self.screenshot(params),
+            "ui.find" => self.find(parse_params(method, params)?),
+            "ui.click" => self.click(parse_params(method, params)?),
+            "ui.type" => self.type_text(parse_params(method, params)?),
+            "ui.key" => self.key(parse_params(method, params)?),
+            "ui.screenshot" => self.screenshot(parse_params(method, params)?),
             other => Err(anyhow!("unknown UI sidecar method '{other}'")),
         }
     }
@@ -74,24 +75,24 @@ impl UiAutomationEngine {
         })
     }
 
-    fn find(self, params: &Value) -> anyhow::Result<Value> {
-        powershell_ui_find(self, params)
+    fn find(self, params: UiFindParams) -> anyhow::Result<Value> {
+        powershell_ui_find(self, &params)
     }
 
-    fn click(self, params: &Value) -> anyhow::Result<Value> {
-        powershell_ui_click(self, params)
+    fn click(self, params: UiClickParams) -> anyhow::Result<Value> {
+        powershell_ui_click(self, &params)
     }
 
-    fn type_text(self, params: &Value) -> anyhow::Result<Value> {
-        powershell_ui_type(self, params)
+    fn type_text(self, params: UiTypeParams) -> anyhow::Result<Value> {
+        powershell_ui_type(self, &params)
     }
 
-    fn key(self, params: &Value) -> anyhow::Result<Value> {
-        powershell_ui_key(self, params)
+    fn key(self, params: UiKeyParams) -> anyhow::Result<Value> {
+        powershell_ui_key(self, &params)
     }
 
-    fn screenshot(self, params: &Value) -> anyhow::Result<Value> {
-        powershell_ui_screenshot(self, params)
+    fn screenshot(self, params: UiScreenshotParams) -> anyhow::Result<Value> {
+        powershell_ui_screenshot(self, &params)
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -127,6 +128,58 @@ struct SidecarResponse {
     result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct UiFindParams {
+    #[serde(default)]
+    selector: String,
+    #[serde(default)]
+    window_title: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct UiClickParams {
+    #[serde(default)]
+    selector: String,
+    #[serde(default)]
+    window_title: String,
+    #[serde(default)]
+    click_type: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct UiTypeParams {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    selector: String,
+    #[serde(default)]
+    window_title: String,
+    #[serde(default)]
+    clear_first: bool,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct UiKeyParams {
+    #[serde(default)]
+    keys: String,
+    #[serde(default)]
+    selector: String,
+    #[serde(default)]
+    window_title: String,
+    #[serde(default)]
+    repeat: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct UiScreenshotParams {
+    #[serde(default)]
+    window_title: String,
+    #[serde(default)]
+    format: String,
 }
 
 #[cfg(target_os = "windows")]
@@ -244,6 +297,14 @@ fn sidecar_health() -> Value {
 
 fn engine_name_for_env(value: Option<&str>) -> &'static str {
     UiAutomationEngine::from_env(value).name()
+}
+
+fn parse_params<T>(method: &str, params: &Value) -> anyhow::Result<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(params.clone())
+        .with_context(|| format!("invalid parameters for UI sidecar method '{method}'"))
 }
 
 #[cfg(target_os = "windows")]
@@ -393,16 +454,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 "#
 }
 
-fn ps_string(value: &Value, key: &str) -> String {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .replace('\'', "''")
-}
-
-fn ps_bool(value: &Value, key: &str) -> bool {
-    value.get(key).and_then(Value::as_bool).unwrap_or(false)
+fn ps_quote_value(value: &str) -> String {
+    value.replace('\'', "''")
 }
 
 fn common_uia_script(selector: &str, window_title: &str, timeout_ms: u64) -> String {
@@ -453,13 +506,10 @@ function Find-SignalmanElement {{
     )
 }
 
-fn powershell_ui_find(engine: UiAutomationEngine, params: &Value) -> anyhow::Result<Value> {
-    let selector = ps_string(params, "selector");
-    let window_title = ps_string(params, "window_title");
-    let timeout_ms = params
-        .get("timeout_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(2_000);
+fn powershell_ui_find(engine: UiAutomationEngine, params: &UiFindParams) -> anyhow::Result<Value> {
+    let selector = ps_quote_value(&params.selector);
+    let window_title = ps_quote_value(&params.window_title);
+    let timeout_ms = params.timeout_ms.unwrap_or(2_000);
     let script = format!(
         r#"{}
 $root = Get-SignalmanRoot
@@ -490,10 +540,13 @@ foreach ($e in $all) {{
     engine.run_script_json(&script)
 }
 
-fn powershell_ui_click(engine: UiAutomationEngine, params: &Value) -> anyhow::Result<Value> {
-    let selector = ps_string(params, "selector");
-    let window_title = ps_string(params, "window_title");
-    let click_type = ps_string(params, "click_type");
+fn powershell_ui_click(
+    engine: UiAutomationEngine,
+    params: &UiClickParams,
+) -> anyhow::Result<Value> {
+    let selector = ps_quote_value(&params.selector);
+    let window_title = ps_quote_value(&params.window_title);
+    let click_type = ps_quote_value(&params.click_type);
     let (down, up) = if click_type == "right" {
         ("0x0008", "0x0010")
     } else {
@@ -532,11 +585,11 @@ $x = [int]($r.X + ($r.Width / 2)); $y = [int]($r.Y + ($r.Height / 2))
     engine.run_script_json(&script)
 }
 
-fn powershell_ui_type(engine: UiAutomationEngine, params: &Value) -> anyhow::Result<Value> {
-    let selector = ps_string(params, "selector");
-    let window_title = ps_string(params, "window_title");
-    let text = ps_string(params, "text");
-    let clear_first = if ps_bool(params, "clear_first") {
+fn powershell_ui_type(engine: UiAutomationEngine, params: &UiTypeParams) -> anyhow::Result<Value> {
+    let selector = ps_quote_value(&params.selector);
+    let window_title = ps_quote_value(&params.window_title);
+    let text = ps_quote_value(&params.text);
+    let clear_first = if params.clear_first {
         "$true"
     } else {
         "$false"
@@ -585,15 +638,11 @@ if ({clear_first}) {{ [System.Windows.Forms.SendKeys]::SendWait('^a') }}
     engine.run_script_json(&script)
 }
 
-fn powershell_ui_key(engine: UiAutomationEngine, params: &Value) -> anyhow::Result<Value> {
-    let selector = ps_string(params, "selector");
-    let window_title = ps_string(params, "window_title");
-    let keys = ps_string(params, "keys");
-    let repeat = params
-        .get("repeat")
-        .and_then(Value::as_u64)
-        .unwrap_or(1)
-        .clamp(1, 100);
+fn powershell_ui_key(engine: UiAutomationEngine, params: &UiKeyParams) -> anyhow::Result<Value> {
+    let selector = ps_quote_value(&params.selector);
+    let window_title = ps_quote_value(&params.window_title);
+    let keys = ps_quote_value(&params.keys);
+    let repeat = params.repeat.unwrap_or(1).clamp(1, 100);
     if keys.trim().is_empty() {
         return Err(anyhow!("keys is required"));
     }
@@ -634,8 +683,12 @@ if (-not [string]::IsNullOrWhiteSpace($selector)) {{
     engine.run_script_json(&script)
 }
 
-fn powershell_ui_screenshot(engine: UiAutomationEngine, params: &Value) -> anyhow::Result<Value> {
-    let format = ps_string(params, "format");
+fn powershell_ui_screenshot(
+    engine: UiAutomationEngine,
+    params: &UiScreenshotParams,
+) -> anyhow::Result<Value> {
+    let _window_title = ps_quote_value(&params.window_title);
+    let format = ps_quote_value(&params.format);
     let format = if format.eq_ignore_ascii_case("jpeg") {
         "Jpeg"
     } else {
@@ -704,10 +757,34 @@ mod tests {
     fn ui_key_requires_keys() {
         let err = powershell_ui_key(
             UiAutomationEngine::PowershellProcess,
-            &json!({ "keys": "" }),
+            &UiKeyParams {
+                keys: String::new(),
+                ..Default::default()
+            },
         )
         .unwrap_err();
         assert!(err.to_string().contains("keys is required"));
+    }
+
+    #[test]
+    fn typed_params_default_optional_fields() {
+        let params: UiFindParams = parse_params("ui.find", &json!({ "selector": "Save" })).unwrap();
+        assert_eq!(params.selector, "Save");
+        assert_eq!(params.window_title, "");
+        assert_eq!(params.timeout_ms, None);
+
+        let params: UiKeyParams =
+            parse_params("ui.key", &json!({ "keys": "{ENTER}", "repeat": 3 })).unwrap();
+        assert_eq!(params.keys, "{ENTER}");
+        assert_eq!(params.repeat, Some(3));
+    }
+
+    #[test]
+    fn typed_params_reject_wrong_field_types() {
+        let err = parse_params::<UiKeyParams>("ui.key", &json!({ "keys": 9 })).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("invalid parameters for UI sidecar method 'ui.key'"));
     }
 
     #[test]
