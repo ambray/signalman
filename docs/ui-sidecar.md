@@ -10,13 +10,18 @@ signalman-guest.exe --ui-sidecar --ui-sidecar-bind 127.0.0.1:50151
 
 The service-facing guest agent proxies UI RPCs to this loopback sidecar. The sidecar address defaults to `127.0.0.1:50151`; override it for the service process with `SIGNALMAN_UI_SIDECAR_ADDR` and for the sidecar process with `SIGNALMAN_UI_SIDECAR_BIND`.
 
-The default automation engine is `powershell-process`, which launches a fresh
-STA PowerShell process for each UI action. For lower-latency local validation,
-set `SIGNALMAN_UI_ENGINE=powershell-helper` on the sidecar process. That keeps a
-single STA PowerShell helper alive and sends action scripts over stdin/stdout.
-`SIGNALMAN_UI_ENGINE=native` is reserved for the in-process Windows UI
-Automation backend; it currently reports health, captures screenshots natively,
-and returns an explicit not-implemented error for UI Automation actions.
+The default automation engine remains `powershell-process`, which launches a
+fresh STA PowerShell process for each UI action. For lower-latency local
+validation, set `SIGNALMAN_UI_ENGINE=powershell-helper` on the sidecar process.
+That keeps a single STA PowerShell helper alive and sends action scripts over
+stdin/stdout.
+
+For production-style Windows UI validation, set `SIGNALMAN_UI_ENGINE=native`.
+The native engine runs in-process inside the sidecar and currently supports
+health, screenshot, find, click, type, and key operations without per-action
+PowerShell startup. It uses Windows UI Automation for element discovery,
+GDI-based screen capture for screenshots, and `SendInput` for mouse and keyboard
+input.
 
 ## MCP Tools
 
@@ -71,13 +76,28 @@ This gives LLM-enabled tests a practical path for desktop workflows:
 
 ## Current Limits
 
-The first implementation is intentionally narrow. It uses Windows UI Automation and SendKeys through a PowerShell STA process per action. `vm_ui_key` accepts Windows SendKeys syntax such as `{ENTER}`, `{ESC}`, `{TAB}`, and `^a`. That is fine for smoke tests and product flows, but more complex test runs should eventually move the automation engine into native Rust or a long-lived Windows helper so we avoid per-action PowerShell startup cost and get richer eventing.
+The native implementation is intentionally narrow but now covers the common
+LLM-test interaction loop: observe with `vm_ui_snapshot`, locate controls with
+`vm_ui_find` / `vm_ui_wait_for`, then use targeted `vm_ui_click`, `vm_ui_type`,
+and `vm_ui_key` calls. Prefer explicit selectors for typing and keyboard input;
+untargeted input still goes to whatever window currently owns focus.
+
+`vm_ui_key` accepts the cross-engine subset Signalman uses in smoke and product
+flows today: `{ENTER}`, `{ESC}` / `{ESCAPE}`, `{TAB}`, `{BACKSPACE}` / `{BS}`,
+`~`, single characters, and one-letter Ctrl chords such as `^a`. The PowerShell
+engines still accept broader Windows SendKeys syntax, but scenarios intended to
+run on the native engine should stay within the documented subset.
+
+More complex desktop workflows still need richer eventing and eventually a
+first-class browser/UI observation loop. Native UI Automation is the preferred
+path for Windows desktop workflows; the PowerShell engines remain useful
+fallbacks and compatibility probes.
 
 `vm_ui_health` reports the active engine (`powershell-process`,
 `powershell-helper`, or `native`) through the same health surface every backend
-uses. The sidecar dispatches requests through an engine boundary so the native
-UI Automation backend can replace the PowerShell script runner without changing
-the loopback, guest-agent, MCP, or workflow contracts.
+uses. The sidecar dispatches requests through an engine boundary, so workflows
+can choose PowerShell process, PowerShell helper, or native automation without
+changing the loopback, guest-agent, MCP, or workflow contracts.
 
 `vm_ui_find`, `vm_ui_wait_for`, and `vm_ui_snapshot` return normalized element
 descriptors for LLM-enabled tests. Each descriptor includes a deterministic
