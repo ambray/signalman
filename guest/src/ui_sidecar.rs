@@ -1108,38 +1108,63 @@ fn native_send_virtual_key(vk: u16, ctrl: bool) -> anyhow::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn parse_native_key_sequence(keys: &str) -> anyhow::Result<Vec<(u16, bool)>> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_ESCAPE, VK_RETURN, VK_TAB};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        VK_BACK, VK_ESCAPE, VK_RETURN, VK_SPACE, VK_TAB,
+    };
 
     let trimmed = keys.trim();
-    if trimmed.eq_ignore_ascii_case("{ESC}") || trimmed.eq_ignore_ascii_case("{ESCAPE}") {
-        return Ok(vec![(VK_ESCAPE.0, false)]);
+    if trimmed.is_empty() {
+        return Err(anyhow!("unsupported native key sequence: {keys}"));
     }
-    if trimmed.eq_ignore_ascii_case("{ENTER}") || trimmed.eq_ignore_ascii_case("~") {
-        return Ok(vec![(VK_RETURN.0, false)]);
-    }
-    if trimmed.eq_ignore_ascii_case("{TAB}") {
-        return Ok(vec![(VK_TAB.0, false)]);
-    }
-    if trimmed.eq_ignore_ascii_case("{BACKSPACE}") || trimmed.eq_ignore_ascii_case("{BS}") {
-        return Ok(vec![(VK_BACK.0, false)]);
-    }
-    if let Some(chord) = trimmed.strip_prefix('^') {
-        let mut chars = chord.chars();
-        let Some(ch) = chars.next() else {
-            return Err(anyhow!("unsupported native key sequence: {keys}"));
-        };
-        if chars.next().is_some() || !ch.is_ascii_alphabetic() {
-            return Err(anyhow!("unsupported native key sequence: {keys}"));
+
+    let mut strokes = Vec::new();
+    let mut chars = trimmed.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '{' => {
+                let mut token = String::new();
+                loop {
+                    match chars.next() {
+                        Some('}') => break,
+                        Some(token_ch) => token.push(token_ch),
+                        None => return Err(anyhow!("unsupported native key sequence: {keys}")),
+                    }
+                }
+                let Some(vk) = native_special_key(&token) else {
+                    return Err(anyhow!("unsupported native key sequence: {keys}"));
+                };
+                strokes.push((vk, false));
+            }
+            '^' => {
+                let Some(chord) = chars.next() else {
+                    return Err(anyhow!("unsupported native key sequence: {keys}"));
+                };
+                if !chord.is_ascii_alphabetic() {
+                    return Err(anyhow!("unsupported native key sequence: {keys}"));
+                }
+                strokes.push((chord.to_ascii_uppercase() as u16, true));
+            }
+            '~' => strokes.push((VK_RETURN.0, false)),
+            ' ' => strokes.push((VK_SPACE.0, false)),
+            single if single.is_ascii_alphanumeric() => {
+                strokes.push((single.to_ascii_uppercase() as u16, false));
+            }
+            _ => return Err(anyhow!("unsupported native key sequence: {keys}")),
         }
-        return Ok(vec![(ch.to_ascii_uppercase() as u16, true)]);
     }
-    if trimmed.chars().count() == 1 {
-        return Ok(vec![(
-            trimmed.chars().next().unwrap().to_ascii_uppercase() as u16,
-            false,
-        )]);
+
+    fn native_special_key(token: &str) -> Option<u16> {
+        match token.trim().to_ascii_uppercase().as_str() {
+            "ESC" | "ESCAPE" => Some(VK_ESCAPE.0),
+            "ENTER" => Some(VK_RETURN.0),
+            "TAB" => Some(VK_TAB.0),
+            "BACKSPACE" | "BS" => Some(VK_BACK.0),
+            "SPACE" => Some(VK_SPACE.0),
+            _ => None,
+        }
     }
-    Err(anyhow!("unsupported native key sequence: {keys}"))
+
+    Ok(strokes)
 }
 
 #[cfg(target_os = "windows")]
@@ -1838,18 +1863,34 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn native_key_parser_handles_smoke_sequences() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            VK_BACK, VK_ESCAPE, VK_RETURN, VK_SPACE, VK_TAB,
+        };
+
         assert_eq!(
             parse_native_key_sequence("{ESC}").unwrap(),
-            vec![(
-                windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE.0,
-                false
-            )]
+            vec![(VK_ESCAPE.0, false)]
         );
         assert_eq!(
-            parse_native_key_sequence("^a").unwrap(),
-            vec![('A' as u16, true)]
+            parse_native_key_sequence("{TAB}{TAB}{ENTER}").unwrap(),
+            vec![(VK_TAB.0, false), (VK_TAB.0, false), (VK_RETURN.0, false)]
+        );
+        assert_eq!(
+            parse_native_key_sequence("^a{BACKSPACE}").unwrap(),
+            vec![('A' as u16, true), (VK_BACK.0, false)]
+        );
+        assert_eq!(
+            parse_native_key_sequence("a1{SPACE}").unwrap(),
+            vec![
+                ('A' as u16, false),
+                ('1' as u16, false),
+                (VK_SPACE.0, false)
+            ]
         );
         assert!(parse_native_key_sequence("{NOPE}").is_err());
+        assert!(parse_native_key_sequence("{ENTER").is_err());
+        assert!(parse_native_key_sequence("^1").is_err());
+        assert!(parse_native_key_sequence("!").is_err());
     }
 
     #[test]
