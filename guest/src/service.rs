@@ -90,6 +90,24 @@ const DENIED_COMMANDS: &[&str] = &[
     ":(){:|:&};:",
 ];
 
+impl From<ui_sidecar::UiElementResult> for UiElement {
+    fn from(element: ui_sidecar::UiElementResult) -> Self {
+        Self {
+            name: element.name,
+            automation_id: element.automation_id,
+            control_type: element.control_type,
+            class_name: element.class_name,
+            is_enabled: element.is_enabled,
+            is_visible: element.is_visible,
+            x: element.x,
+            y: element.y,
+            width: element.width,
+            height: element.height,
+            value: element.value,
+        }
+    }
+}
+
 /// Validate that a package ID contains only safe characters.
 /// Allows alphanumeric, dots, hyphens, underscores, and forward slashes
 /// (for scoped packages like `@scope/name`).
@@ -933,7 +951,7 @@ impl GuestAgent for GuestAgentService {
     ) -> Result<Response<UiActionResponse>, Status> {
         let req = request.into_inner();
         let started = Instant::now();
-        let value = ui_sidecar::call(
+        let result: ui_sidecar::UiActionResult = ui_sidecar::call_typed(
             "ui.click",
             json!({
                 "selector": req.selector,
@@ -944,15 +962,8 @@ impl GuestAgent for GuestAgentService {
         .await
         .map_err(|e| Status::failed_precondition(format!("UI sidecar click failed: {e}")))?;
         Ok(Response::new(UiActionResponse {
-            success: value
-                .get("success")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true),
-            error: value
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            success: result.success,
+            error: result.error,
             duration_ms: started.elapsed().as_millis() as u64,
         }))
     }
@@ -963,7 +974,7 @@ impl GuestAgent for GuestAgentService {
     ) -> Result<Response<UiActionResponse>, Status> {
         let req = request.into_inner();
         let started = Instant::now();
-        let value = ui_sidecar::call(
+        let result: ui_sidecar::UiActionResult = ui_sidecar::call_typed(
             "ui.type",
             json!({
                 "text": req.text,
@@ -975,15 +986,8 @@ impl GuestAgent for GuestAgentService {
         .await
         .map_err(|e| Status::failed_precondition(format!("UI sidecar type failed: {e}")))?;
         Ok(Response::new(UiActionResponse {
-            success: value
-                .get("success")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true),
-            error: value
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            success: result.success,
+            error: result.error,
             duration_ms: started.elapsed().as_millis() as u64,
         }))
     }
@@ -994,7 +998,7 @@ impl GuestAgent for GuestAgentService {
     ) -> Result<Response<UiActionResponse>, Status> {
         let req = request.into_inner();
         let started = Instant::now();
-        let value = ui_sidecar::call(
+        let result: ui_sidecar::UiActionResult = ui_sidecar::call_typed(
             "ui.key",
             json!({
                 "keys": req.keys,
@@ -1006,15 +1010,8 @@ impl GuestAgent for GuestAgentService {
         .await
         .map_err(|e| Status::failed_precondition(format!("UI sidecar key failed: {e}")))?;
         Ok(Response::new(UiActionResponse {
-            success: value
-                .get("success")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true),
-            error: value
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+            success: result.success,
+            error: result.error,
             duration_ms: started.elapsed().as_millis() as u64,
         }))
     }
@@ -1025,7 +1022,7 @@ impl GuestAgent for GuestAgentService {
     ) -> Result<Response<UiFindResponse>, Status> {
         let req = request.into_inner();
         let started = Instant::now();
-        let value = ui_sidecar::call(
+        let result: ui_sidecar::UiFindResult = ui_sidecar::call_typed(
             "ui.find",
             json!({
                 "selector": req.selector,
@@ -1035,54 +1032,7 @@ impl GuestAgent for GuestAgentService {
         )
         .await
         .map_err(|e| Status::failed_precondition(format!("UI sidecar find failed: {e}")))?;
-        let elements = value
-            .get("elements")
-            .and_then(|v| v.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|item| UiElement {
-                        name: item
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        automation_id: item
-                            .get("automation_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        control_type: item
-                            .get("control_type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        class_name: item
-                            .get("class_name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        is_enabled: item
-                            .get("is_enabled")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false),
-                        is_visible: item
-                            .get("is_visible")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false),
-                        x: item.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                        y: item.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                        width: item.get("width").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                        height: item.get("height").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                        value: item
-                            .get("value")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let elements = result.elements.into_iter().map(UiElement::from).collect();
         Ok(Response::new(UiFindResponse {
             elements,
             duration_ms: started.elapsed().as_millis() as u64,
@@ -1095,7 +1045,7 @@ impl GuestAgent for GuestAgentService {
     ) -> Result<Response<UiScreenshotResponse>, Status> {
         let req = request.into_inner();
         let started = Instant::now();
-        let value = ui_sidecar::call(
+        let result: ui_sidecar::UiScreenshotResult = ui_sidecar::call_typed(
             "ui.screenshot",
             json!({
                 "window_title": req.window_title,
@@ -1104,21 +1054,13 @@ impl GuestAgent for GuestAgentService {
         )
         .await
         .map_err(|e| Status::failed_precondition(format!("UI sidecar screenshot failed: {e}")))?;
-        let encoded = value
-            .get("image_data_base64")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Status::internal("UI sidecar screenshot omitted image_data_base64"))?;
-        let image_data = decode_base64(encoded)
+        let image_data = decode_base64(&result.image_data_base64)
             .map_err(|e| Status::internal(format!("decode UI screenshot: {e}")))?;
         Ok(Response::new(UiScreenshotResponse {
             image_data,
-            format: value
-                .get("format")
-                .and_then(|v| v.as_str())
-                .unwrap_or("png")
-                .to_string(),
-            width: value.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            height: value.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            format: result.format,
+            width: result.width,
+            height: result.height,
             duration_ms: started.elapsed().as_millis() as u64,
         }))
     }
@@ -1130,16 +1072,12 @@ impl GuestAgent for GuestAgentService {
         _request: Request<UiHealthRequest>,
     ) -> Result<Response<UiHealthResponse>, Status> {
         let started = Instant::now();
-        match ui_sidecar::call("ui.health", json!({})).await {
-            Ok(value) => Ok(Response::new(UiHealthResponse {
+        match ui_sidecar::call_typed::<ui_sidecar::UiHealthResult>("ui.health", json!({})).await {
+            Ok(result) => Ok(Response::new(UiHealthResponse {
                 sidecar_reachable: true,
-                engine: value
-                    .get("engine")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                pid: value.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                uptime_ms: value.get("uptime_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+                engine: result.engine,
+                pid: result.pid,
+                uptime_ms: result.uptime_ms,
                 error: String::new(),
                 duration_ms: started.elapsed().as_millis() as u64,
             })),
