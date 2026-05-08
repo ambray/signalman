@@ -63,6 +63,14 @@ function makeClient(overrides: Partial<GuestAgentClient> = {}): GuestAgentClient
     uiClick: vi.fn().mockResolvedValue({ success: true, error: "", durationMs: 13 }),
     uiKey: vi.fn().mockResolvedValue({ success: true, error: "", durationMs: 14 }),
     uiType: vi.fn().mockResolvedValue({ success: true, error: "", durationMs: 15 }),
+    uiHealth: vi.fn().mockResolvedValue({
+      sidecarReachable: true,
+      engine: "powershell-helper",
+      pid: 123,
+      uptimeMs: 456,
+      error: "",
+      durationMs: 16,
+    }),
     ...overrides,
   } as unknown as GuestAgentClient;
 }
@@ -232,6 +240,27 @@ describe("workflow UI tool blocks", () => {
     await expect(
       orchestrator.executeToolBlock("ui_find", { vm: "endpoint-1" }, vmMap),
     ).rejects.toThrow("ui_find missing 'selector'");
+  });
+
+  it("returns UI sidecar health metadata for workflow assertions", async () => {
+    const client = makeClient();
+    const { orchestrator, vmMap } = makeOrchestrator(client);
+
+    const health = await orchestrator.executeToolBlock(
+      "ui_health",
+      { vm: "endpoint-1", timeout_ms: 5_000 },
+      vmMap,
+    );
+
+    expect(client.uiHealth).toHaveBeenCalledWith(5_000);
+    expect(JSON.parse(health)).toEqual({
+      sidecar_reachable: true,
+      engine: "powershell-helper",
+      pid: 123,
+      uptime_ms: 456,
+      error: "",
+      duration_ms: 16,
+    });
   });
 
   it("returns combined UI snapshot metadata for workflow assertions", async () => {

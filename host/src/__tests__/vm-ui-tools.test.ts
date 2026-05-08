@@ -11,6 +11,7 @@ function makeClient(overrides: Partial<GuestAgentClient> = {}): GuestAgentClient
         taskName: "SignalmanUiSidecar",
         username: "test",
         bind: "127.0.0.1:50151",
+        engine: "powershell-helper",
         executable: "C:\\Program Files\\Signalman\\Guest\\signalman-guest.exe",
         created: true,
         runNow: true,
@@ -336,6 +337,7 @@ describe("VM UI MCP tools", () => {
     const result = await tools.get("vm_ui_ensure_sidecar")!.handler({
       name: "Win11_test",
       username: "test",
+      engine: "powershell-helper",
       timeout_ms: 15_000,
       wait_ready_ms: 12_000,
     });
@@ -349,11 +351,13 @@ describe("VM UI MCP tools", () => {
       vm: "Win11_test",
       taskName: "SignalmanUiSidecar",
       username: "test",
+      engine: "powershell-helper",
       state: "Running",
       ready: true,
     });
     const args = (client.runCommand as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1] as string[];
     const decoded = Buffer.from(args.at(-1) ?? "", "base64").toString("utf16le");
     expect(decoded).toContain("$waitReadyMs = 12000");
+    expect(decoded).toContain("$engine = 'powershell-helper'");
   });
 });

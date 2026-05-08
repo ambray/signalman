@@ -9,18 +9,29 @@ describe("UI sidecar scheduling", () => {
     const script = buildEnsureUiSidecarScript({
       username: "test",
       bind: "127.0.0.1:50151",
+      engine: "powershell-helper",
       taskName: "SignalmanUiSidecar",
       runNow: true,
     });
 
     expect(script).toContain("$username = 'test'");
+    expect(script).toContain("$engine = 'powershell-helper'");
     expect(script).toContain("New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive");
     expect(script).toContain("-RunLevel Limited");
-    expect(script).toContain("--ui-sidecar --ui-sidecar-bind $bind");
+    expect(script).toContain("--ui-sidecar --ui-sidecar-bind $bind --ui-engine $engine");
     expect(script).toContain("Start-ScheduledTask -TaskName $taskName");
     expect(script).toContain("Wait-SignalmanSidecarReady -Bind $bind");
     expect(script).toContain("$waitReadyMs = 5000");
     expect(script).not.toContain("Password");
+  });
+
+  it("rejects unknown sidecar engines", () => {
+    expect(() =>
+      buildEnsureUiSidecarScript({
+        username: "test",
+        engine: "native",
+      }),
+    ).toThrow("engine");
   });
 
   it("rejects non-loopback sidecar binds", () => {
@@ -39,6 +50,7 @@ describe("UI sidecar scheduling", () => {
         taskName: "SignalmanUiSidecar",
         username: "test",
         bind: "127.0.0.1:50151",
+        engine: "powershell-process",
         executable: "C:\\Program Files\\Signalman\\Guest\\signalman-guest.exe",
         created: true,
         runNow: true,
@@ -68,6 +80,7 @@ describe("UI sidecar scheduling", () => {
     expect(decoded).toContain("SignalmanGuest");
     expect(decoded).toContain("Test-SignalmanSidecarPort");
     expect(decoded).toContain("$waitReadyMs = 5000");
+    expect(decoded).toContain("--ui-sidecar --ui-sidecar-bind $bind --ui-engine $engine");
   });
 
   it("allows readiness waiting to be disabled", () => {

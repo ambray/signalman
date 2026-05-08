@@ -3,6 +3,7 @@ import type { GuestAgentClient } from "./client.js";
 export interface EnsureUiSidecarOptions {
   username: string;
   bind?: string;
+  engine?: string;
   taskName?: string;
   runNow?: boolean;
   waitReadyMs?: number;
@@ -13,6 +14,7 @@ export interface EnsureUiSidecarResult {
   taskName: string;
   username: string;
   bind: string;
+  engine: string;
   executable: string;
   created: boolean;
   runNow: boolean;
@@ -57,6 +59,14 @@ function validateTaskName(taskName: string): string {
   return trimmed;
 }
 
+function validateEngine(engine: string): string {
+  const normalized = engine.trim().toLowerCase();
+  if (normalized === "powershell-process" || normalized === "powershell-helper") {
+    return normalized;
+  }
+  throw new Error("UI sidecar engine must be powershell-process or powershell-helper");
+}
+
 function validateWaitReadyMs(waitReadyMs: number | undefined, runNow: boolean): number {
   const value = waitReadyMs ?? (runNow ? 5_000 : 0);
   if (!Number.isFinite(value) || value < 0 || value > 300_000) {
@@ -68,6 +78,7 @@ function validateWaitReadyMs(waitReadyMs: number | undefined, runNow: boolean): 
 export function buildEnsureUiSidecarScript(options: EnsureUiSidecarOptions): string {
   const username = validateUsername(options.username);
   const bind = validateBind(options.bind ?? "127.0.0.1:50151");
+  const engine = validateEngine(options.engine ?? "powershell-process");
   const taskName = validateTaskName(options.taskName ?? "SignalmanUiSidecar");
   const runNow = options.runNow ?? true;
   const waitReadyMs = validateWaitReadyMs(options.waitReadyMs, runNow);
@@ -76,6 +87,7 @@ export function buildEnsureUiSidecarScript(options: EnsureUiSidecarOptions): str
 $ErrorActionPreference = 'Stop'
 $username = '${psSingle(username)}'
 $bind = '${psSingle(bind)}'
+$engine = '${psSingle(engine)}'
 $taskName = '${psSingle(taskName)}'
 $runNow = ${runNow ? "$true" : "$false"}
 $waitReadyMs = ${waitReadyMs}
@@ -133,7 +145,7 @@ function Wait-SignalmanSidecarReady {
 
 $exe = Resolve-SignalmanGuestExe
 $existed = [bool](Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)
-$action = New-ScheduledTaskAction -Execute $exe -Argument "--ui-sidecar --ui-sidecar-bind $bind"
+$action = New-ScheduledTaskAction -Execute $exe -Argument "--ui-sidecar --ui-sidecar-bind $bind --ui-engine $engine"
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $username
 $principal = New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
@@ -150,6 +162,7 @@ $ready = Wait-SignalmanSidecarReady -Bind $bind -TimeoutMs $waitReadyMs
   taskName = $taskName
   username = $username
   bind = $bind
+  engine = $engine
   executable = $exe
   created = -not $existed
   runNow = [bool]$runNow

@@ -2228,6 +2228,20 @@ export class ScenarioOrchestrator {
         });
       }
 
+      case "ui_health": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const result = await client.uiHealth(params.timeout_ms as number | undefined);
+        return JSON.stringify({
+          sidecar_reachable: result.sidecarReachable,
+          engine: result.engine,
+          pid: result.pid,
+          uptime_ms: result.uptimeMs,
+          error: result.error,
+          duration_ms: result.durationMs,
+        });
+      }
+
       case "ui_snapshot": {
         const client = this.guestClients.get(vmName);
         if (!client) throw new Error(`No guest client for VM '${vmName}'`);
