@@ -49,9 +49,17 @@ assertions:
     severity: critical
     description: "The UI sidecar should be able to type into the interactive session"
 
-  - id: snapshot-captured
+  - id: key-sent
     type: json_field
     source: step-6
+    field: success
+    expected: true
+    severity: critical
+    description: "The UI sidecar should be able to send keyboard input to the interactive session"
+
+  - id: snapshot-captured
+    type: json_field
+    source: step-7
     field: bytes
     comparison: gt
     expected: 0
@@ -60,7 +68,7 @@ assertions:
 
   - id: snapshot-elements-found
     type: json_field
-    source: step-6
+    source: step-7
     field: element_count
     comparison: gt
     expected: 0

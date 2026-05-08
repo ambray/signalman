@@ -47,6 +47,13 @@ ui_type:
 ```
 
 ```tool
+ui_key:
+  vm: Win11_test
+  keys: "{ESC}"
+  timeout_ms: 15000
+```
+
+```tool
 ui_snapshot:
   vm: Win11_test
   format: png
