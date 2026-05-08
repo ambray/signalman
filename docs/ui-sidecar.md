@@ -96,13 +96,15 @@ value is included in the normalized element descriptor. This lets scenarios
 assert the text of edit controls directly instead of relying only on screenshots
 or neighboring result labels.
 
-`vm_ui_key` accepts the cross-engine subset Signalman uses in smoke and product
+`vm_ui_key` accepts the portable subset Signalman uses in smoke and product
 flows today: `{ENTER}`, `{ESC}` / `{ESCAPE}`, `{TAB}`, `{BACKSPACE}` / `{BS}`,
-`{SPACE}`, `~`, alphanumeric key sequences, and one-letter Ctrl chords such as
-`^a`. Native key sequences can combine tokens, for example
-`{TAB}{TAB}{ENTER}` or `^a{BACKSPACE}`. The PowerShell engines still accept
-broader Windows SendKeys syntax, but scenarios intended to run on the native
-engine should stay within the documented subset.
+`{SPACE}`, `~`, alphanumeric key sequences, and modifier prefixes `^` for Ctrl,
+`+` for Shift, and `%` for Alt. The native engine also supports `{DELETE}` /
+`{DEL}`, `{HOME}`, `{END}`, arrow keys, `{WIN}` / `{LWIN}` / `{RWIN}`, and `#`
+as a Win-key modifier. Native key sequences can combine tokens, for example
+`{TAB}{TAB}{ENTER}`, `^a{BACKSPACE}`, `^+{ESC}`, or `#r`. The PowerShell engines
+still accept broader Windows SendKeys syntax, but scenarios intended to run on
+the native engine should stay within the documented subset.
 
 More complex desktop workflows still need richer eventing and eventually a
 first-class browser/UI observation loop. Native UI Automation is the preferred
