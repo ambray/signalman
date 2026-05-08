@@ -3,6 +3,12 @@
 Validate that the guest agent can reach the interactive user-session sidecar and drive the Windows desktop through the normal scenario workflow surface.
 
 ```tool
+ui_health:
+  vm: Win11_test
+  timeout_ms: 15000
+```
+
+```tool
 ui_screenshot:
   vm: Win11_test
   format: png
@@ -13,15 +19,7 @@ ui_screenshot:
 ```tool
 ui_wait_for:
   vm: Win11_test
-  selector: "[name='Start']"
-  find_timeout_ms: 15000
-  timeout_ms: 20000
-```
-
-```tool
-ui_find:
-  vm: Win11_test
-  selector: "[name='Start']"
+  selector: "[automationId='SearchButton']"
   find_timeout_ms: 15000
   timeout_ms: 20000
 ```
@@ -29,9 +27,17 @@ ui_find:
 ```tool
 ui_click:
   vm: Win11_test
-  selector: "[name='Start']"
+  selector: "[automationId='SearchButton']"
   click_type: left
   timeout_ms: 15000
+```
+
+```tool
+ui_wait_for:
+  vm: Win11_test
+  selector: "[automationId='SearchTextBox']"
+  find_timeout_ms: 15000
+  timeout_ms: 20000
 ```
 
 ```tool
@@ -42,15 +48,23 @@ wait:
 ```tool
 ui_type:
   vm: Win11_test
-  text: "signalman ui smoke"
+  selector: "[automationId='SearchTextBox']"
+  text: "signalman native smoke"
+  clear_first: true
   timeout_ms: 15000
 ```
 
 ```tool
-ui_key:
+wait:
+  duration_ms: 1000
+```
+
+```tool
+ui_find:
   vm: Win11_test
-  keys: "{ESC}"
-  timeout_ms: 15000
+  selector: "signalman native smoke"
+  find_timeout_ms: 15000
+  timeout_ms: 20000
 ```
 
 ```tool
@@ -61,4 +75,12 @@ ui_snapshot:
   max_elements: 25
   find_timeout_ms: 15000
   timeout_ms: 20000
+```
+
+```tool
+ui_key:
+  vm: Win11_test
+  selector: "[automationId='SearchTextBox']"
+  keys: "{ESC}"
+  timeout_ms: 15000
 ```
