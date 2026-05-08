@@ -215,6 +215,56 @@ export function createVmUiTools(
       },
     },
     {
+      name: "vm_ui_wait_for",
+      description: "Wait for a UI Automation element and mark the tool result as an error if it is absent",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+          selector: {
+            type: "string",
+            description: "UIA selector, e.g. [name='Save'] or [automationId='btn1']",
+          },
+          window_title: { type: "string", description: "Optional window title" },
+          find_timeout_ms: { type: "number", description: "Element wait timeout" },
+          timeout_ms: { type: "number", description: "RPC timeout" },
+        },
+        required: ["name", "selector"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const name = sanitizeVmName(params.name as string);
+        const selector = params.selector as string;
+        const client = await getClient(name);
+        const elements = await client.uiFind(selector, {
+          windowTitle: (params.window_title as string | undefined) ?? "",
+          findTimeoutMs: sanitizeTimeout(params.find_timeout_ms as number | undefined, 30_000),
+          timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
+        });
+        const found = elements.length > 0;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  vm: name,
+                  selector,
+                  found,
+                  count: elements.length,
+                  elements,
+                  error: found ? "" : `UI element not found: ${selector}`,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+          isError: !found,
+        };
+      },
+    },
+    {
       name: "vm_ui_click",
       description: "Click a UI Automation element in the VM's interactive user session",
       inputSchema: {

@@ -16,9 +16,17 @@ assertions:
     severity: high
     description: "The screenshot workflow output should identify the image format"
 
-  - id: start-button-found
+  - id: start-button-ready
     type: json_field
     source: step-1
+    field: found
+    expected: true
+    severity: critical
+    description: "The Windows Start button should appear before interaction begins"
+
+  - id: start-button-found
+    type: json_field
+    source: step-2
     field: count
     comparison: gte
     expected: 1
@@ -27,7 +35,7 @@ assertions:
 
   - id: start-button-clicked
     type: json_field
-    source: step-2
+    source: step-3
     field: success
     expected: true
     severity: critical
@@ -35,7 +43,7 @@ assertions:
 
   - id: text-typed
     type: json_field
-    source: step-4
+    source: step-5
     field: success
     expected: true
     severity: critical
@@ -43,7 +51,7 @@ assertions:
 
   - id: snapshot-captured
     type: json_field
-    source: step-5
+    source: step-6
     field: bytes
     comparison: gt
     expected: 0
@@ -52,7 +60,7 @@ assertions:
 
   - id: snapshot-elements-found
     type: json_field
-    source: step-5
+    source: step-6
     field: element_count
     comparison: gt
     expected: 0

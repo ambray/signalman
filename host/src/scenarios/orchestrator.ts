@@ -2155,6 +2155,23 @@ export class ScenarioOrchestrator {
         return JSON.stringify({ count: elements.length, elements });
       }
 
+      case "ui_wait_for": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const selector = params.selector as string;
+        if (!selector) throw new Error(`ui_wait_for missing 'selector'`);
+        const elements = await client.uiFind(selector, {
+          windowTitle: params.window_title as string | undefined,
+          findTimeoutMs: params.find_timeout_ms as number | undefined,
+          timeoutMs: params.timeout_ms as number | undefined,
+        });
+        const found = elements.length > 0;
+        if (!found) {
+          throw new Error(`UI element not found: ${selector}`);
+        }
+        return JSON.stringify({ found, count: elements.length, elements });
+      }
+
       case "ui_screenshot": {
         const client = this.guestClients.get(vmName);
         if (!client) throw new Error(`No guest client for VM '${vmName}'`);

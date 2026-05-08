@@ -128,6 +128,42 @@ describe("workflow UI tool blocks", () => {
     expect(JSON.parse(typed)).toEqual({ success: true, error: "" });
   });
 
+  it("waits for UI elements and fails workflow blocks when absent", async () => {
+    const client = makeClient({
+      uiFind: vi.fn().mockResolvedValueOnce([
+        {
+          name: "Start",
+          automationId: "StartButton",
+          controlType: "Button",
+          className: "Button",
+          isEnabled: true,
+          isVisible: true,
+          x: 0,
+          y: 0,
+          width: 48,
+          height: 48,
+          value: "",
+        },
+      ]).mockResolvedValueOnce([]),
+    } as Partial<GuestAgentClient>);
+    const { orchestrator, vmMap } = makeOrchestrator(client);
+
+    const found = await orchestrator.executeToolBlock(
+      "ui_wait_for",
+      { vm: "endpoint-1", selector: "[name='Start']", find_timeout_ms: 2_000 },
+      vmMap,
+    );
+
+    expect(JSON.parse(found)).toMatchObject({ found: true, count: 1 });
+    await expect(
+      orchestrator.executeToolBlock(
+        "ui_wait_for",
+        { vm: "endpoint-1", selector: "[name='Missing']" },
+        vmMap,
+      ),
+    ).rejects.toThrow("UI element not found: [name='Missing']");
+  });
+
   it("returns screenshot metadata and rejects missing UI selectors", async () => {
     const client = makeClient();
     const { orchestrator, vmMap } = makeOrchestrator(client);
