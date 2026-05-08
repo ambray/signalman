@@ -163,8 +163,8 @@ impl UiAutomationBackend for NativeUiBackend {
         NATIVE_ENGINE
     }
 
-    fn find(&self, _params: &UiFindParams) -> anyhow::Result<UiFindResult> {
-        Err(self.not_implemented())
+    fn find(&self, params: &UiFindParams) -> anyhow::Result<UiFindResult> {
+        native_ui_find(params)
     }
 
     fn click(&self, _params: &UiClickParams) -> anyhow::Result<UiActionResult> {
@@ -529,6 +529,13 @@ fn native_ui_screenshot(_params: &UiScreenshotParams) -> anyhow::Result<UiScreen
     ))
 }
 
+#[cfg(not(target_os = "windows"))]
+fn native_ui_find(_params: &UiFindParams) -> anyhow::Result<UiFindResult> {
+    Err(anyhow!(
+        "native UI Automation find is only supported on Windows"
+    ))
+}
+
 #[cfg(target_os = "windows")]
 fn native_ui_screenshot(params: &UiScreenshotParams) -> anyhow::Result<UiScreenshotResult> {
     use image::{DynamicImage, ImageBuffer, Rgba};
@@ -642,6 +649,241 @@ fn native_ui_screenshot(params: &UiScreenshotParams) -> anyhow::Result<UiScreens
 }
 
 #[cfg(target_os = "windows")]
+fn native_ui_find(params: &UiFindParams) -> anyhow::Result<UiFindResult> {
+    use windows::core::{BSTR, VARIANT};
+    use windows::Win32::Foundation::{BOOL, RECT, RPC_E_CHANGED_MODE};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
+        TreeScope_Children, TreeScope_Descendants, UIA_AutomationIdPropertyId,
+        UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId, UIA_ClassNamePropertyId,
+        UIA_ComboBoxControlTypeId, UIA_ControlTypePropertyId, UIA_CustomControlTypeId,
+        UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_GroupControlTypeId,
+        UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId, UIA_ListControlTypeId,
+        UIA_ListItemControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
+        UIA_NamePropertyId, UIA_PaneControlTypeId, UIA_RadioButtonControlTypeId,
+        UIA_TabControlTypeId, UIA_TabItemControlTypeId, UIA_TextControlTypeId,
+        UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_WindowControlTypeId,
+    };
+
+    struct ComGuard {
+        should_uninitialize: bool,
+    }
+
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            if self.should_uninitialize {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    fn native_uia_root(
+        automation: &IUIAutomation,
+        window_title: &str,
+    ) -> anyhow::Result<IUIAutomationElement> {
+        let root =
+            unsafe { automation.GetRootElement() }.context("native UI Automation root element")?;
+        if window_title.trim().is_empty() {
+            return Ok(root);
+        }
+        let title = VARIANT::from(BSTR::from(window_title));
+        let condition = unsafe { automation.CreatePropertyCondition(UIA_NamePropertyId, &title) }
+            .context("native UI Automation window-title condition")?;
+        match unsafe { root.FindFirst(TreeScope_Children, &condition) } {
+            Ok(window) => Ok(window),
+            Err(_) => Ok(root),
+        }
+    }
+
+    fn native_uia_condition(
+        automation: &IUIAutomation,
+        selector: &NativeSelector,
+    ) -> anyhow::Result<IUIAutomationCondition> {
+        if let NativeSelector::Property { key, value } = selector {
+            let condition = match key.as_str() {
+                "name" => {
+                    let variant = VARIANT::from(BSTR::from(value.as_str()));
+                    unsafe { automation.CreatePropertyCondition(UIA_NamePropertyId, &variant) }
+                }
+                "automationId" => {
+                    let variant = VARIANT::from(BSTR::from(value.as_str()));
+                    unsafe {
+                        automation.CreatePropertyCondition(UIA_AutomationIdPropertyId, &variant)
+                    }
+                }
+                "className" => {
+                    let variant = VARIANT::from(BSTR::from(value.as_str()));
+                    unsafe { automation.CreatePropertyCondition(UIA_ClassNamePropertyId, &variant) }
+                }
+                "controlType" => native_control_type_id(value).map_or_else(
+                    || unsafe { automation.CreateTrueCondition() },
+                    |control_type| {
+                        let variant = VARIANT::from(control_type.0);
+                        unsafe {
+                            automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &variant)
+                        }
+                    },
+                ),
+                _ => unsafe { automation.CreateTrueCondition() },
+            };
+            return condition.context("native UI Automation selector condition");
+        }
+        unsafe { automation.CreateTrueCondition() }.context("native UI Automation true condition")
+    }
+
+    fn native_uia_element_result(element: &IUIAutomationElement) -> UiElementResult {
+        let name = unsafe { element.CurrentName() }
+            .map(bstr_to_string)
+            .unwrap_or_default();
+        let automation_id = unsafe { element.CurrentAutomationId() }
+            .map(bstr_to_string)
+            .unwrap_or_default();
+        let class_name = unsafe { element.CurrentClassName() }
+            .map(bstr_to_string)
+            .unwrap_or_default();
+        let control_type = unsafe { element.CurrentControlType() }
+            .map(native_control_type_name)
+            .unwrap_or_else(|_| String::new());
+        let rect = unsafe { element.CurrentBoundingRectangle() }.unwrap_or_default();
+        let is_enabled = unsafe { element.CurrentIsEnabled() }
+            .map(bool_from_win32)
+            .unwrap_or(false);
+        let is_offscreen = unsafe { element.CurrentIsOffscreen() }
+            .map(bool_from_win32)
+            .unwrap_or(true);
+        let (x, y, width, height) = rect_to_bounds(rect);
+        UiElementResult {
+            name,
+            automation_id,
+            control_type,
+            class_name,
+            is_enabled,
+            is_visible: !is_offscreen && width > 0 && height > 0,
+            x,
+            y,
+            width,
+            height,
+            value: String::new(),
+        }
+    }
+
+    fn bstr_to_string(value: BSTR) -> String {
+        value.to_string()
+    }
+
+    fn bool_from_win32(value: BOOL) -> bool {
+        value.as_bool()
+    }
+
+    fn rect_to_bounds(rect: RECT) -> (i32, i32, i32, i32) {
+        let width = rect.right.saturating_sub(rect.left).max(0);
+        let height = rect.bottom.saturating_sub(rect.top).max(0);
+        (rect.left, rect.top, width, height)
+    }
+
+    fn native_control_type_id(
+        value: &str,
+    ) -> Option<windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID> {
+        let normalized = value
+            .trim()
+            .trim_start_matches("ControlType.")
+            .to_ascii_lowercase();
+        Some(match normalized.as_str() {
+            "button" => UIA_ButtonControlTypeId,
+            "checkbox" => UIA_CheckBoxControlTypeId,
+            "combobox" => UIA_ComboBoxControlTypeId,
+            "custom" => UIA_CustomControlTypeId,
+            "document" => UIA_DocumentControlTypeId,
+            "edit" => UIA_EditControlTypeId,
+            "group" => UIA_GroupControlTypeId,
+            "hyperlink" => UIA_HyperlinkControlTypeId,
+            "image" => UIA_ImageControlTypeId,
+            "list" => UIA_ListControlTypeId,
+            "listitem" => UIA_ListItemControlTypeId,
+            "menu" => UIA_MenuControlTypeId,
+            "menuitem" => UIA_MenuItemControlTypeId,
+            "pane" => UIA_PaneControlTypeId,
+            "radiobutton" => UIA_RadioButtonControlTypeId,
+            "tab" => UIA_TabControlTypeId,
+            "tabitem" => UIA_TabItemControlTypeId,
+            "text" => UIA_TextControlTypeId,
+            "tree" => UIA_TreeControlTypeId,
+            "treeitem" => UIA_TreeItemControlTypeId,
+            "window" => UIA_WindowControlTypeId,
+            _ => return None,
+        })
+    }
+
+    fn native_control_type_name(
+        value: windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID,
+    ) -> String {
+        let name = match value.0 {
+            id if id == UIA_ButtonControlTypeId.0 => "Button",
+            id if id == UIA_CheckBoxControlTypeId.0 => "CheckBox",
+            id if id == UIA_ComboBoxControlTypeId.0 => "ComboBox",
+            id if id == UIA_CustomControlTypeId.0 => "Custom",
+            id if id == UIA_DocumentControlTypeId.0 => "Document",
+            id if id == UIA_EditControlTypeId.0 => "Edit",
+            id if id == UIA_GroupControlTypeId.0 => "Group",
+            id if id == UIA_HyperlinkControlTypeId.0 => "Hyperlink",
+            id if id == UIA_ImageControlTypeId.0 => "Image",
+            id if id == UIA_ListControlTypeId.0 => "List",
+            id if id == UIA_ListItemControlTypeId.0 => "ListItem",
+            id if id == UIA_MenuControlTypeId.0 => "Menu",
+            id if id == UIA_MenuItemControlTypeId.0 => "MenuItem",
+            id if id == UIA_PaneControlTypeId.0 => "Pane",
+            id if id == UIA_RadioButtonControlTypeId.0 => "RadioButton",
+            id if id == UIA_TabControlTypeId.0 => "Tab",
+            id if id == UIA_TabItemControlTypeId.0 => "TabItem",
+            id if id == UIA_TextControlTypeId.0 => "Text",
+            id if id == UIA_TreeControlTypeId.0 => "Tree",
+            id if id == UIA_TreeItemControlTypeId.0 => "TreeItem",
+            id if id == UIA_WindowControlTypeId.0 => "Window",
+            _ => return format!("ControlType.{}", value.0),
+        };
+        format!("ControlType.{name}")
+    }
+
+    let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let _com = if hr.is_ok() {
+        ComGuard {
+            should_uninitialize: true,
+        }
+    } else if hr == RPC_E_CHANGED_MODE {
+        ComGuard {
+            should_uninitialize: false,
+        }
+    } else {
+        return Err(windows::core::Error::from(hr))
+            .context("initialize COM for native UI Automation");
+    };
+
+    let selector = NativeSelector::parse(&params.selector);
+    let automation: IUIAutomation =
+        unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
+            .context("create native UI Automation client")?;
+    let root = native_uia_root(&automation, &params.window_title)?;
+    let condition = native_uia_condition(&automation, &selector)?;
+    let elements = unsafe { root.FindAll(TreeScope_Descendants, &condition) }
+        .context("native UI Automation FindAll")?;
+    let count = unsafe { elements.Length() }.context("native UI Automation element count")?;
+    let mut results = Vec::new();
+    for index in 0..count {
+        let element = unsafe { elements.GetElement(index) }
+            .with_context(|| format!("native UI Automation element at index {index}"))?;
+        let element_result = native_uia_element_result(&element);
+        if selector.matches(&element_result) {
+            results.push(element_result);
+        }
+    }
+    Ok(UiFindResult { elements: results })
+}
+
+#[cfg(target_os = "windows")]
 struct ScreenDcGuard {
     hwnd: windows::Win32::Foundation::HWND,
     hdc: windows::Win32::Graphics::Gdi::HDC,
@@ -695,6 +937,54 @@ impl Drop for SelectedObjectGuard {
     fn drop(&mut self) {
         unsafe {
             let _ = windows::Win32::Graphics::Gdi::SelectObject(self.hdc, self.previous);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NativeSelector {
+    Any,
+    Property { key: String, value: String },
+    Text(String),
+}
+
+impl NativeSelector {
+    fn parse(selector: &str) -> Self {
+        let trimmed = selector.trim();
+        if trimmed.is_empty() {
+            return Self::Any;
+        }
+        if let Some(inner) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            if let Some((key, quoted)) = inner.split_once('=') {
+                if matches!(key, "name" | "automationId" | "className" | "controlType")
+                    && quoted.starts_with('\'')
+                    && quoted.ends_with('\'')
+                    && quoted.len() >= 2
+                {
+                    return Self::Property {
+                        key: key.to_string(),
+                        value: quoted[1..quoted.len() - 1].to_string(),
+                    };
+                }
+            }
+        }
+        Self::Text(trimmed.to_string())
+    }
+
+    fn matches(&self, element: &UiElementResult) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Property { key, value } => match key.as_str() {
+                "name" => element.name == *value,
+                "automationId" => element.automation_id == *value,
+                "className" => element.class_name == *value,
+                "controlType" => {
+                    let normalized = value.trim().trim_start_matches("ControlType.");
+                    element.control_type == format!("ControlType.{normalized}")
+                }
+                _ => false,
+            },
+            Self::Text(value) => element.name.contains(value) || element.automation_id == *value,
         }
     }
 }
@@ -1260,11 +1550,37 @@ mod tests {
         assert_eq!(health.engine, NATIVE_ENGINE);
 
         let err = UiAutomationEngine::Native
-            .execute("ui.find", &json!({ "selector": "Save" }))
+            .execute("ui.click", &json!({ "selector": "Save" }))
             .unwrap_err();
         assert!(err
             .to_string()
             .contains("native UI Automation backend is not implemented yet"));
+    }
+
+    #[test]
+    fn native_selector_matches_supported_selector_shapes() {
+        let element = UiElementResult {
+            name: "Start".to_string(),
+            automation_id: "StartButton".to_string(),
+            control_type: "ControlType.Button".to_string(),
+            class_name: "ToggleButton".to_string(),
+            is_enabled: true,
+            is_visible: true,
+            x: 0,
+            y: 0,
+            width: 48,
+            height: 48,
+            value: String::new(),
+        };
+
+        assert!(NativeSelector::parse("").matches(&element));
+        assert!(NativeSelector::parse("[name='Start']").matches(&element));
+        assert!(NativeSelector::parse("[automationId='StartButton']").matches(&element));
+        assert!(NativeSelector::parse("[className='ToggleButton']").matches(&element));
+        assert!(NativeSelector::parse("[controlType='Button']").matches(&element));
+        assert!(NativeSelector::parse("[controlType='ControlType.Button']").matches(&element));
+        assert!(NativeSelector::parse("Sta").matches(&element));
+        assert!(!NativeSelector::parse("[name='Search']").matches(&element));
     }
 
     #[test]
