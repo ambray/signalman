@@ -863,6 +863,26 @@ fn native_ui_find(params: &UiFindParams) -> anyhow::Result<UiFindResult> {
         format!("ControlType.{name}")
     }
 
+    fn native_uia_collect(
+        root: &IUIAutomationElement,
+        condition: &IUIAutomationCondition,
+        selector: &NativeSelector,
+    ) -> anyhow::Result<Vec<UiElementResult>> {
+        let elements = unsafe { root.FindAll(TreeScope_Descendants, condition) }
+            .context("native UI Automation FindAll")?;
+        let count = unsafe { elements.Length() }.context("native UI Automation element count")?;
+        let mut results = Vec::new();
+        for index in 0..count {
+            let element = unsafe { elements.GetElement(index) }
+                .with_context(|| format!("native UI Automation element at index {index}"))?;
+            let element_result = native_uia_element_result(&element);
+            if selector.matches(&element_result) {
+                results.push(element_result);
+            }
+        }
+        Ok(results)
+    }
+
     let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     let _com = if hr.is_ok() {
         ComGuard {
@@ -883,19 +903,26 @@ fn native_ui_find(params: &UiFindParams) -> anyhow::Result<UiFindResult> {
             .context("create native UI Automation client")?;
     let root = native_uia_root(&automation, &params.window_title)?;
     let condition = native_uia_condition(&automation, &selector)?;
-    let elements = unsafe { root.FindAll(TreeScope_Descendants, &condition) }
-        .context("native UI Automation FindAll")?;
-    let count = unsafe { elements.Length() }.context("native UI Automation element count")?;
-    let mut results = Vec::new();
-    for index in 0..count {
-        let element = unsafe { elements.GetElement(index) }
-            .with_context(|| format!("native UI Automation element at index {index}"))?;
-        let element_result = native_uia_element_result(&element);
-        if selector.matches(&element_result) {
-            results.push(element_result);
+
+    let timeout_ms = params.timeout_ms.unwrap_or(2_000);
+    let deadline = std::time::Instant::now()
+        .checked_add(std::time::Duration::from_millis(timeout_ms))
+        .unwrap_or_else(std::time::Instant::now);
+    loop {
+        let results = native_uia_collect(&root, &condition, &selector)?;
+        if !results.is_empty() || params.selector.trim().is_empty() {
+            return Ok(UiFindResult { elements: results });
         }
+        if timeout_ms == 0 {
+            return Ok(UiFindResult { elements: results });
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Ok(UiFindResult { elements: results });
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(100)));
     }
-    Ok(UiFindResult { elements: results })
 }
 
 #[cfg(target_os = "windows")]
@@ -1767,6 +1794,13 @@ mod tests {
         assert_eq!(params.selector, "Save");
         assert_eq!(params.window_title, "");
         assert_eq!(params.timeout_ms, None);
+
+        let params: UiFindParams = parse_params(
+            "ui.find",
+            &json!({ "selector": "Save", "timeout_ms": 1234 }),
+        )
+        .unwrap();
+        assert_eq!(params.timeout_ms, Some(1234));
 
         let params: UiKeyParams =
             parse_params("ui.key", &json!({ "keys": "{ENTER}", "repeat": 3 })).unwrap();
