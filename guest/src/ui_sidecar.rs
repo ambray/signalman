@@ -54,44 +54,44 @@ impl UiAutomationEngine {
 
     fn execute(self, method: &str, params: &Value) -> anyhow::Result<Value> {
         match method {
-            "ui.health" => Ok(self.health()),
-            "ui.find" => self.find(parse_params(method, params)?),
-            "ui.click" => self.click(parse_params(method, params)?),
-            "ui.type" => self.type_text(parse_params(method, params)?),
-            "ui.key" => self.key(parse_params(method, params)?),
-            "ui.screenshot" => self.screenshot(parse_params(method, params)?),
+            "ui.health" => to_value(self.health(), method),
+            "ui.find" => to_value(self.find(parse_params(method, params)?)?, method),
+            "ui.click" => to_value(self.click(parse_params(method, params)?)?, method),
+            "ui.type" => to_value(self.type_text(parse_params(method, params)?)?, method),
+            "ui.key" => to_value(self.key(parse_params(method, params)?)?, method),
+            "ui.screenshot" => to_value(self.screenshot(parse_params(method, params)?)?, method),
             other => Err(anyhow!("unknown UI sidecar method '{other}'")),
         }
     }
 
-    fn health(self) -> Value {
-        json!({
-            "engine": self.name(),
-            "pid": std::process::id(),
-            "uptime_ms": START_TIME
+    fn health(self) -> UiHealthResult {
+        UiHealthResult {
+            engine: self.name().to_string(),
+            pid: std::process::id(),
+            uptime_ms: START_TIME
                 .get()
                 .map(|started| started.elapsed().as_millis() as u64)
                 .unwrap_or(0),
-        })
+        }
     }
 
-    fn find(self, params: UiFindParams) -> anyhow::Result<Value> {
+    fn find(self, params: UiFindParams) -> anyhow::Result<UiFindResult> {
         powershell_ui_find(self, &params)
     }
 
-    fn click(self, params: UiClickParams) -> anyhow::Result<Value> {
+    fn click(self, params: UiClickParams) -> anyhow::Result<UiActionResult> {
         powershell_ui_click(self, &params)
     }
 
-    fn type_text(self, params: UiTypeParams) -> anyhow::Result<Value> {
+    fn type_text(self, params: UiTypeParams) -> anyhow::Result<UiActionResult> {
         powershell_ui_type(self, &params)
     }
 
-    fn key(self, params: UiKeyParams) -> anyhow::Result<Value> {
+    fn key(self, params: UiKeyParams) -> anyhow::Result<UiActionResult> {
         powershell_ui_key(self, &params)
     }
 
-    fn screenshot(self, params: UiScreenshotParams) -> anyhow::Result<Value> {
+    fn screenshot(self, params: UiScreenshotParams) -> anyhow::Result<UiScreenshotResult> {
         powershell_ui_screenshot(self, &params)
     }
 
@@ -182,6 +182,64 @@ struct UiScreenshotParams {
     format: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct UiHealthResult {
+    pub(crate) engine: String,
+    pub(crate) pid: u32,
+    pub(crate) uptime_ms: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct UiActionResult {
+    #[serde(default = "default_true")]
+    pub(crate) success: bool,
+    #[serde(default)]
+    pub(crate) error: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct UiFindResult {
+    #[serde(default)]
+    pub(crate) elements: Vec<UiElementResult>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct UiElementResult {
+    #[serde(default)]
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) automation_id: String,
+    #[serde(default)]
+    pub(crate) control_type: String,
+    #[serde(default)]
+    pub(crate) class_name: String,
+    #[serde(default)]
+    pub(crate) is_enabled: bool,
+    #[serde(default)]
+    pub(crate) is_visible: bool,
+    #[serde(default)]
+    pub(crate) x: i32,
+    #[serde(default)]
+    pub(crate) y: i32,
+    #[serde(default)]
+    pub(crate) width: i32,
+    #[serde(default)]
+    pub(crate) height: i32,
+    #[serde(default)]
+    pub(crate) value: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct UiScreenshotResult {
+    pub(crate) image_data_base64: String,
+    #[serde(default = "default_screenshot_format")]
+    pub(crate) format: String,
+    #[serde(default)]
+    pub(crate) width: u32,
+    #[serde(default)]
+    pub(crate) height: u32,
+}
+
 #[cfg(target_os = "windows")]
 #[derive(Debug, Deserialize)]
 struct HelperResponse {
@@ -221,6 +279,14 @@ pub async fn call(method: &str, params: Value) -> anyhow::Result<Value> {
     task::spawn_blocking(move || call_blocking(&addr, &method, params))
         .await
         .context("UI sidecar proxy task panicked")?
+}
+
+pub async fn call_typed<T>(method: &str, params: Value) -> anyhow::Result<T>
+where
+    T: DeserializeOwned,
+{
+    let value = call(method, params).await?;
+    parse_response(method, value)
 }
 
 fn handle_connection(mut stream: std::net::TcpStream) -> anyhow::Result<()> {
@@ -292,7 +358,8 @@ fn handle_request(req: SidecarRequest) -> SidecarResponse {
 }
 
 fn sidecar_health() -> Value {
-    UiAutomationEngine::selected().health()
+    serde_json::to_value(UiAutomationEngine::selected().health())
+        .expect("UI health result serializes")
 }
 
 fn engine_name_for_env(value: Option<&str>) -> &'static str {
@@ -305,6 +372,30 @@ where
 {
     serde_json::from_value(params.clone())
         .with_context(|| format!("invalid parameters for UI sidecar method '{method}'"))
+}
+
+fn parse_response<T>(method: &str, value: Value) -> anyhow::Result<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(value)
+        .with_context(|| format!("invalid response from UI sidecar method '{method}'"))
+}
+
+fn to_value<T>(value: T, method: &str) -> anyhow::Result<Value>
+where
+    T: Serialize,
+{
+    serde_json::to_value(value)
+        .with_context(|| format!("serialize response for UI sidecar method '{method}'"))
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_screenshot_format() -> String {
+    "png".to_string()
 }
 
 #[cfg(target_os = "windows")]
@@ -506,7 +597,10 @@ function Find-SignalmanElement {{
     )
 }
 
-fn powershell_ui_find(engine: UiAutomationEngine, params: &UiFindParams) -> anyhow::Result<Value> {
+fn powershell_ui_find(
+    engine: UiAutomationEngine,
+    params: &UiFindParams,
+) -> anyhow::Result<UiFindResult> {
     let selector = ps_quote_value(&params.selector);
     let window_title = ps_quote_value(&params.window_title);
     let timeout_ms = params.timeout_ms.unwrap_or(2_000);
@@ -537,13 +631,13 @@ foreach ($e in $all) {{
 "#,
         common_uia_script(&selector, &window_title, timeout_ms)
     );
-    engine.run_script_json(&script)
+    parse_response("ui.find", engine.run_script_json(&script)?)
 }
 
 fn powershell_ui_click(
     engine: UiAutomationEngine,
     params: &UiClickParams,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<UiActionResult> {
     let selector = ps_quote_value(&params.selector);
     let window_title = ps_quote_value(&params.window_title);
     let click_type = ps_quote_value(&params.click_type);
@@ -582,10 +676,13 @@ $x = [int]($r.X + ($r.Width / 2)); $y = [int]($r.Y + ($r.Height / 2))
         down = down,
         up = up,
     );
-    engine.run_script_json(&script)
+    parse_response("ui.click", engine.run_script_json(&script)?)
 }
 
-fn powershell_ui_type(engine: UiAutomationEngine, params: &UiTypeParams) -> anyhow::Result<Value> {
+fn powershell_ui_type(
+    engine: UiAutomationEngine,
+    params: &UiTypeParams,
+) -> anyhow::Result<UiActionResult> {
     let selector = ps_quote_value(&params.selector);
     let window_title = ps_quote_value(&params.window_title);
     let text = ps_quote_value(&params.text);
@@ -635,10 +732,13 @@ if ({clear_first}) {{ [System.Windows.Forms.SendKeys]::SendWait('^a') }}
         clear_first = clear_first,
         escaped_text = escaped_text
     );
-    engine.run_script_json(&script)
+    parse_response("ui.type", engine.run_script_json(&script)?)
 }
 
-fn powershell_ui_key(engine: UiAutomationEngine, params: &UiKeyParams) -> anyhow::Result<Value> {
+fn powershell_ui_key(
+    engine: UiAutomationEngine,
+    params: &UiKeyParams,
+) -> anyhow::Result<UiActionResult> {
     let selector = ps_quote_value(&params.selector);
     let window_title = ps_quote_value(&params.window_title);
     let keys = ps_quote_value(&params.keys);
@@ -680,13 +780,13 @@ if (-not [string]::IsNullOrWhiteSpace($selector)) {{
         repeat = repeat,
         keys = keys
     );
-    engine.run_script_json(&script)
+    parse_response("ui.key", engine.run_script_json(&script)?)
 }
 
 fn powershell_ui_screenshot(
     engine: UiAutomationEngine,
     params: &UiScreenshotParams,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<UiScreenshotResult> {
     let _window_title = ps_quote_value(&params.window_title);
     let format = ps_quote_value(&params.format);
     let format = if format.eq_ignore_ascii_case("jpeg") {
@@ -716,7 +816,7 @@ $graphics.Dispose(); $bmp.Dispose(); $ms.Dispose()
         format = format,
         lower = format.to_ascii_lowercase()
     );
-    engine.run_script_json(&script)
+    parse_response("ui.screenshot", engine.run_script_json(&script)?)
 }
 
 #[cfg(test)]
@@ -785,6 +885,32 @@ mod tests {
         assert!(err
             .to_string()
             .contains("invalid parameters for UI sidecar method 'ui.key'"));
+    }
+
+    #[test]
+    fn typed_responses_default_optional_fields() {
+        let result: UiActionResult = parse_response("ui.click", json!({})).unwrap();
+        assert!(result.success);
+        assert_eq!(result.error, "");
+
+        let result: UiFindResult = parse_response(
+            "ui.find",
+            json!({
+                "elements": [{
+                    "name": "Save",
+                    "automation_id": "save-button",
+                    "control_type": "ControlType.Button",
+                    "x": 10,
+                    "y": 20,
+                    "width": 100,
+                    "height": 30
+                }]
+            }),
+        )
+        .unwrap();
+        assert_eq!(result.elements.len(), 1);
+        assert_eq!(result.elements[0].name, "Save");
+        assert_eq!(result.elements[0].value, "");
     }
 
     #[test]
