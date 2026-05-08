@@ -827,6 +827,10 @@ impl PowershellHelper {
 fn powershell_helper_loop() -> &'static str {
     r#"
 $ErrorActionPreference = 'Stop'
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[Console]::InputEncoding = $utf8NoBom
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -885,6 +889,18 @@ function Get-SignalmanRoot {{
   }}
   return $root
 }}
+function Convert-SignalmanInt {{
+  param($Value)
+  try {{
+    $d = [double]$Value
+    if ([double]::IsNaN($d) -or [double]::IsInfinity($d)) {{ return 0 }}
+    if ($d -gt [int]::MaxValue) {{ return [int]::MaxValue }}
+    if ($d -lt [int]::MinValue) {{ return [int]::MinValue }}
+    return [int][Math]::Round($d)
+  }} catch {{
+    return 0
+  }}
+}}
 function Find-SignalmanElement {{
   do {{
     $root = Get-SignalmanRoot
@@ -913,17 +929,21 @@ $items = @()
 foreach ($e in $all) {{
   if (Match-SignalmanElement $e $selector) {{
     $r = $e.Current.BoundingRectangle
+    $x = Convert-SignalmanInt $r.X
+    $y = Convert-SignalmanInt $r.Y
+    $width = Convert-SignalmanInt $r.Width
+    $height = Convert-SignalmanInt $r.Height
     $items += [pscustomobject]@{{
       name = [string]$e.Current.Name
       automation_id = [string]$e.Current.AutomationId
       control_type = [string]$e.Current.ControlType.ProgrammaticName
       class_name = [string]$e.Current.ClassName
       is_enabled = [bool]$e.Current.IsEnabled
-      is_visible = -not $r.IsEmpty
-      x = [int]$r.X
-      y = [int]$r.Y
-      width = [int]$r.Width
-      height = [int]$r.Height
+      is_visible = (-not $r.IsEmpty) -and ($width -gt 0) -and ($height -gt 0)
+      x = $x
+      y = $y
+      width = $width
+      height = $height
       value = ''
     }}
   }}
@@ -1310,11 +1330,14 @@ mod tests {
         let script = common_uia_script("[controlType='Button']", "", 2_000);
         assert!(script.contains("\"ControlType.$v\""));
         assert!(script.contains("ProgrammaticName -eq $controlType"));
+        assert!(script.contains("[double]::IsInfinity($d)"));
     }
 
     #[test]
     fn helper_loop_decodes_json_string_results() {
-        assert!(powershell_helper_loop().contains("$result = $result | ConvertFrom-Json"));
+        let script = powershell_helper_loop();
+        assert!(script.contains("$result = $result | ConvertFrom-Json"));
+        assert!(script.contains("[Console]::OutputEncoding = $utf8NoBom"));
     }
 
     #[test]

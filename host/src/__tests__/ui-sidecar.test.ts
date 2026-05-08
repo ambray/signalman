@@ -19,6 +19,8 @@ describe("UI sidecar scheduling", () => {
     expect(script).toContain("New-ScheduledTaskPrincipal -UserId $username -LogonType Interactive");
     expect(script).toContain("-RunLevel Limited");
     expect(script).toContain("--ui-sidecar --ui-sidecar-bind $bind --ui-engine $engine");
+    expect(script).toContain("Stop-ScheduledTask -TaskName $taskName");
+    expect(script).toContain("CommandLine -like '*--ui-sidecar*'");
     expect(script).toContain("Start-ScheduledTask -TaskName $taskName");
     expect(script).toContain("Wait-SignalmanSidecarReady -Bind $bind");
     expect(script).toContain("$waitReadyMs = 5000");
