@@ -82,6 +82,10 @@ LLM-test interaction loop: observe with `vm_ui_snapshot`, locate controls with
 and `vm_ui_key` calls. Prefer explicit selectors for typing and keyboard input;
 untargeted input still goes to whatever window currently owns focus.
 
+Native `vm_ui_find` honors the element wait timeout by polling UI Automation
+until a matching element appears or the timeout expires. Empty-selector
+inventory calls return immediately so snapshots stay cheap.
+
 `vm_ui_key` accepts the cross-engine subset Signalman uses in smoke and product
 flows today: `{ENTER}`, `{ESC}` / `{ESCAPE}`, `{TAB}`, `{BACKSPACE}` / `{BS}`,
 `{SPACE}`, `~`, alphanumeric key sequences, and one-letter Ctrl chords such as
