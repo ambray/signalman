@@ -17,6 +17,8 @@ The host registers these MCP tools when guest-agent access is available:
 - `vm_ui_ensure_sidecar`: create or update the scheduled task that launches
   the sidecar in a named user's interactive session, then wait for the
   loopback sidecar port and report `ready`.
+- `vm_ui_health`: report whether the sidecar is reachable, which automation
+  engine it is using, its PID, and its uptime.
 - `vm_ui_snapshot`: capture a screenshot and a bounded UI Automation element
   inventory in one response for LLM observation loops.
 - `vm_ui_screenshot`: capture a PNG or JPEG screenshot from the interactive session.
@@ -61,3 +63,7 @@ This gives LLM-enabled tests a practical path for desktop workflows:
 ## Current Limits
 
 The first implementation is intentionally narrow. It uses Windows UI Automation and SendKeys through a PowerShell STA process per action. `vm_ui_key` accepts Windows SendKeys syntax such as `{ENTER}`, `{ESC}`, `{TAB}`, and `^a`. That is fine for smoke tests and product flows, but more complex test runs should eventually move the automation engine into native Rust or a long-lived Windows helper so we avoid per-action PowerShell startup cost and get richer eventing.
+
+`vm_ui_health` currently reports `engine: "powershell-process"` for that
+baseline path. Keep that value stable until a native or long-lived helper is
+available, then expose the new engine name through the same health surface.

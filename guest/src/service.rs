@@ -1125,6 +1125,35 @@ impl GuestAgent for GuestAgentService {
 
     // ── Browser Automation (unimplemented) ──────────────────────
 
+    async fn ui_health(
+        &self,
+        _request: Request<UiHealthRequest>,
+    ) -> Result<Response<UiHealthResponse>, Status> {
+        let started = Instant::now();
+        match ui_sidecar::call("ui.health", json!({})).await {
+            Ok(value) => Ok(Response::new(UiHealthResponse {
+                sidecar_reachable: true,
+                engine: value
+                    .get("engine")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                pid: value.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                uptime_ms: value.get("uptime_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+                error: String::new(),
+                duration_ms: started.elapsed().as_millis() as u64,
+            })),
+            Err(err) => Ok(Response::new(UiHealthResponse {
+                sidecar_reachable: false,
+                engine: String::new(),
+                pid: 0,
+                uptime_ms: 0,
+                error: err.to_string(),
+                duration_ms: started.elapsed().as_millis() as u64,
+            })),
+        }
+    }
+
     async fn browser_navigate(
         &self,
         _request: Request<BrowserNavigateRequest>,

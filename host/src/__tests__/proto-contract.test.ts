@@ -109,6 +109,21 @@ describe("proto/guest.proto v1 freeze invariants", () => {
     expect(extractMessageBlock(source, "UIScreenshotResponse")).toMatch(
       /uint64\s+duration_ms\s*=\s*5\b/,
     );
+    expect(extractMessageBlock(source, "UIHealthResponse")).toMatch(
+      /uint64\s+duration_ms\s*=\s*6\b/,
+    );
+  });
+
+  it("GuestAgent exposes UI sidecar health diagnostics", () => {
+    expect(source).toMatch(
+      /rpc\s+UIHealth\s*\(\s*UIHealthRequest\s*\)\s+returns\s*\(\s*UIHealthResponse\s*\)/,
+    );
+    const block = extractMessageBlock(source, "UIHealthResponse");
+    expect(block).toMatch(/bool\s+sidecar_reachable\s*=\s*1\b/);
+    expect(block).toMatch(/string\s+engine\s*=\s*2\b/);
+    expect(block).toMatch(/uint32\s+pid\s*=\s*3\b/);
+    expect(block).toMatch(/uint64\s+uptime_ms\s*=\s*4\b/);
+    expect(block).toMatch(/string\s+error\s*=\s*5\b/);
   });
 
   it("WindowsProcessDetails carries the four expected fields", () => {

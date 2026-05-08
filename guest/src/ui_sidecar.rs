@@ -12,12 +12,14 @@ use std::process::Command;
 
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::task;
 use tracing::{info, warn};
 
 const DEFAULT_CONNECT_ADDR: &str = "127.0.0.1:50151";
+const POWERSHELL_PROCESS_ENGINE: &str = "powershell-process";
+static START_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
 #[derive(Debug, Deserialize, Serialize)]
 struct SidecarRequest {
@@ -38,6 +40,7 @@ struct SidecarResponse {
 }
 
 pub async fn run(addr: SocketAddr) -> anyhow::Result<()> {
+    START_TIME.get_or_init(std::time::Instant::now);
     let listener = TcpListener::bind(addr).await?;
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -119,6 +122,7 @@ fn call_blocking(addr: &str, method: &str, params: Value) -> anyhow::Result<Valu
 
 fn handle_request(req: SidecarRequest) -> SidecarResponse {
     let result = match req.method.as_str() {
+        "ui.health" => Ok(sidecar_health()),
         "ui.find" => ps_ui_find(&req.params),
         "ui.click" => ps_ui_click(&req.params),
         "ui.type" => ps_ui_type(&req.params),
@@ -140,6 +144,17 @@ fn handle_request(req: SidecarRequest) -> SidecarResponse {
             error: Some(err.to_string()),
         },
     }
+}
+
+fn sidecar_health() -> Value {
+    json!({
+        "engine": POWERSHELL_PROCESS_ENGINE,
+        "pid": std::process::id(),
+        "uptime_ms": START_TIME
+            .get()
+            .map(|started| started.elapsed().as_millis() as u64)
+            .unwrap_or(0),
+    })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -474,5 +489,20 @@ mod tests {
     fn ui_key_requires_keys() {
         let err = ps_ui_key(&json!({ "keys": "" })).unwrap_err();
         assert!(err.to_string().contains("keys is required"));
+    }
+
+    #[test]
+    fn health_reports_engine_and_process() {
+        START_TIME.get_or_init(std::time::Instant::now);
+        let value = sidecar_health();
+        assert_eq!(
+            value.get("engine").and_then(Value::as_str),
+            Some(POWERSHELL_PROCESS_ENGINE)
+        );
+        assert_eq!(
+            value.get("pid").and_then(Value::as_u64),
+            Some(std::process::id() as u64)
+        );
+        assert!(value.get("uptime_ms").and_then(Value::as_u64).is_some());
     }
 }

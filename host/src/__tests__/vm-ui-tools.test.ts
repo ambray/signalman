@@ -44,6 +44,14 @@ function makeClient(overrides: Partial<GuestAgentClient> = {}): GuestAgentClient
     uiClick: vi.fn().mockResolvedValue({ success: true, error: "", durationMs: 13 }),
     uiKey: vi.fn().mockResolvedValue({ success: true, error: "", durationMs: 14 }),
     uiType: vi.fn().mockResolvedValue({ success: true, error: "", durationMs: 15 }),
+    uiHealth: vi.fn().mockResolvedValue({
+      sidecarReachable: true,
+      engine: "powershell-process",
+      pid: 123,
+      uptimeMs: 456,
+      error: "",
+      durationMs: 16,
+    }),
     ...overrides,
   } as unknown as GuestAgentClient;
 }
@@ -123,6 +131,29 @@ describe("VM UI MCP tools", () => {
       elements: [expect.objectContaining({ name: "Start" })],
       truncated: true,
     });
+  });
+
+  it("reports UI sidecar health and engine diagnostics", async () => {
+    const client = makeClient();
+    const { getClient, tools } = toolsFor(client);
+
+    const result = await tools.get("vm_ui_health")!.handler({
+      name: "Win11_test",
+      timeout_ms: 7_000,
+    });
+
+    expect(getClient).toHaveBeenCalledWith("Win11_test");
+    expect(client.uiHealth).toHaveBeenCalledWith(7_000);
+    expect(JSON.parse(result.content[0].text ?? "{}")).toEqual({
+      vm: "Win11_test",
+      sidecar_reachable: true,
+      engine: "powershell-process",
+      pid: 123,
+      uptime_ms: 456,
+      error: "",
+      duration_ms: 16,
+    });
+    expect(result.isError).toBe(false);
   });
 
   it("captures screenshots as MCP image content plus metadata", async () => {
