@@ -673,15 +673,16 @@ fn native_ui_find(params: &UiFindParams) -> anyhow::Result<UiFindResult> {
     };
     use windows::Win32::UI::Accessibility::{
         CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
-        TreeScope_Children, TreeScope_Descendants, UIA_AutomationIdPropertyId,
-        UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId, UIA_ClassNamePropertyId,
-        UIA_ComboBoxControlTypeId, UIA_ControlTypePropertyId, UIA_CustomControlTypeId,
-        UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_GroupControlTypeId,
-        UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId, UIA_ListControlTypeId,
-        UIA_ListItemControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
-        UIA_NamePropertyId, UIA_PaneControlTypeId, UIA_RadioButtonControlTypeId,
-        UIA_TabControlTypeId, UIA_TabItemControlTypeId, UIA_TextControlTypeId,
-        UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_WindowControlTypeId,
+        IUIAutomationValuePattern, TreeScope_Children, TreeScope_Descendants,
+        UIA_AutomationIdPropertyId, UIA_ButtonControlTypeId, UIA_CheckBoxControlTypeId,
+        UIA_ClassNamePropertyId, UIA_ComboBoxControlTypeId, UIA_ControlTypePropertyId,
+        UIA_CustomControlTypeId, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+        UIA_GroupControlTypeId, UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId,
+        UIA_ListControlTypeId, UIA_ListItemControlTypeId, UIA_MenuControlTypeId,
+        UIA_MenuItemControlTypeId, UIA_NamePropertyId, UIA_PaneControlTypeId,
+        UIA_RadioButtonControlTypeId, UIA_TabControlTypeId, UIA_TabItemControlTypeId,
+        UIA_TextControlTypeId, UIA_TreeControlTypeId, UIA_TreeItemControlTypeId,
+        UIA_ValuePatternId, UIA_WindowControlTypeId,
     };
 
     struct ComGuard {
@@ -771,6 +772,7 @@ fn native_ui_find(params: &UiFindParams) -> anyhow::Result<UiFindResult> {
             .map(bool_from_win32)
             .unwrap_or(true);
         let (x, y, width, height) = rect_to_bounds(rect);
+        let value = native_uia_current_value(element);
         UiElementResult {
             name,
             automation_id,
@@ -782,7 +784,17 @@ fn native_ui_find(params: &UiFindParams) -> anyhow::Result<UiFindResult> {
             y,
             width,
             height,
-            value: String::new(),
+            value,
+        }
+    }
+
+    fn native_uia_current_value(element: &IUIAutomationElement) -> String {
+        unsafe {
+            element
+                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                .and_then(|pattern| pattern.CurrentValue())
+                .map(bstr_to_string)
+                .unwrap_or_default()
         }
     }
 

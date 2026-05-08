@@ -16,11 +16,11 @@ schema, idempotency contract, `docs/bootstrap.md`) and the first
 interactive user-session UI sidecar (`signalman-guest --ui-sidecar`) with
 MCP tools for screenshots, UIA snapshot/find/wait, click, keyboard input,
 and type. The native sidecar engine now covers screenshot, find, click, type,
-and key operations and is covered by the live `Win11_test`
-`live-ui-sidecar-smoke` scenario. Versions in every manifest read `0.1.0` and
-need to bump to `0.1.1` together with a tag push to ship — the release workflow
-validates the manifest version matches the tag before publishing. The four
-GitHub repo secrets
+key operations, wait timeouts, and UIA Value-pattern descriptors. It is covered
+by the live `Win11_test` `live-ui-sidecar-smoke` scenario. Versions in every
+manifest read `0.1.0` and need to bump to `0.1.1` together with a tag push to
+ship — the release workflow validates the manifest version matches the tag
+before publishing. The four GitHub repo secrets
 (`WINDOWS_CERT_BASE64`, `WINDOWS_CERT_PASSWORD`, `NPM_TOKEN`,
 `CARGO_REGISTRY_TOKEN`) are the only operator setup remaining; without
 them the workflow still produces but does not publish artifacts.
@@ -48,16 +48,16 @@ bump the four version pins, `git tag v0.1.1 && git push origin v0.1.1`.
 ## Latest commits (top 10)
 
 ```
+b89f9c7 Expose native UI element values
+90c134c Honor native UI find timeouts
+5627bb5 Support native UI key sequences
+593602b Update native UI sidecar docs
 3f04b66 Tighten live UI sidecar scenario
 f9617a8 Add native UI input backend
 88efa17 Add native UI find backend
 cd032cc Stabilize live UI sidecar smoke
 cae3e9b Allow native UI sidecar provisioning
 1c29463 Implement native UI screenshot backend
-fff7fda Add native UI backend selection stub
-648df54 Add UI automation backend boundary
-c7f71f8 Type UI sidecar response handling
-3e96ef5 Type UI sidecar action parameters
 ```
 
 ## Audit closure (security findings)
@@ -279,12 +279,14 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   `vm_ui_snapshot`, `vm_ui_screenshot`, `vm_ui_find`, `vm_ui_wait_for`,
   `vm_ui_click`, `vm_ui_key`, and `vm_ui_type`.
   The native Windows UI Automation engine is now implemented for screenshot,
-  find, click, type, and key (`1c29463`, `88efa17`, `f9617a8`). Live
+  find, click, type, and key (`1c29463`, `88efa17`, `f9617a8`). Follow-up
+  native hardening added multi-token key sequences (`5627bb5`), find timeout
+  polling (`90c134c`), and Value-pattern element descriptors (`b89f9c7`). Live
   `Win11_test` smoke coverage now exercises native health, screenshot,
-  wait/find, targeted click, targeted type, typed-text observation, key, and
-  snapshot (`3f04b66`). Follow-up work should add richer native key syntax,
-  event-driven UI wait semantics, and a first-class browser/LLM observation
-  loop.
+  wait/find, targeted click, targeted type, direct edit-control value
+  observation, indexed typed-text observation, key, and snapshot. Follow-up
+  work should add broader native key syntax, event-driven UI wait semantics,
+  and a first-class browser/LLM observation loop.
 
 - **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
   calls into `.signalman/recordings/`. The agent-first DevOps

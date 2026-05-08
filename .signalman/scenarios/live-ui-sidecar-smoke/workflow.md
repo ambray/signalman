@@ -62,6 +62,14 @@ wait:
 ```tool
 ui_find:
   vm: Win11_test
+  selector: "[automationId='SearchTextBox']"
+  find_timeout_ms: 15000
+  timeout_ms: 20000
+```
+
+```tool
+ui_find:
+  vm: Win11_test
   selector: "signalman native smoke"
   find_timeout_ms: 15000
   timeout_ms: 20000
