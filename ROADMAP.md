@@ -1182,14 +1182,15 @@ Removed from main roadmap; revisit only with concrete evidence of need.
   only when implemented. Sharpens v0.1.0 positioning to **Windows
   kernel-driver / ETW / WFP / silo CI for security products** — the niche
   the kernel-debug + ETW tooling actually serves today.
-- **UI / Browser / Verify guest RPCs** ([proto/guest.proto:25-39](proto/guest.proto:25)
-  — `UIClick`, `UIType`, `UIScreenshot`, `UIFind`, `BrowserNavigate`,
-  `BrowserClick`, `BrowserScreenshot`, `VerifyRestriction`) **stay as
-  proto placeholders** returning `Status::unimplemented`
-  ([guest/src/service.rs:565-641](guest/src/service.rs:565)). v0.1.0
-  documents them as not-yet-built; scenarios should not depend on them.
-  Implementation deferred until a real consumer needs them; keeping the
-  proto slot reserved avoids a breaking proto change later.
+- **Browser / Verify guest RPCs** ([proto/guest.proto](proto/guest.proto)
+  — `BrowserNavigate`, `BrowserClick`, `BrowserScreenshot`,
+  `VerifyRestriction`) stay deferred
+  until a real consumer needs them. Windows UIA RPCs have graduated from
+  placeholders: `UIClick`, `UIType`, `UIKey`, `UIFind`, and `UIScreenshot`
+  proxy to the interactive user-session sidecar and are covered by the
+  `live-ui-sidecar-smoke` scenario. The remaining UI follow-up is
+  implementation quality: replacing per-action PowerShell startup with a
+  native long-lived helper.
 - **`template:` field is decorative for v0.1.0.** Orchestrator never
   calls `resolveTemplate`; scenarios silently rely on a hand-built VM
   matching `vms[].name` literally and a hand-named checkpoint. Documented

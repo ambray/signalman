@@ -14,7 +14,8 @@ the onboarding gap (`signalman vm provision` / `vm fetch-template` /
 `vm install-bundle` / `vm cleanup`, `signalman init`, software-bundle
 schema, idempotency contract, `docs/bootstrap.md`) and the first
 interactive user-session UI sidecar (`signalman-guest --ui-sidecar`) with
-MCP tools for screenshots, UIA find, click, and type. Versions in every
+MCP tools for screenshots, UIA snapshot/find/wait, click, keyboard input,
+and type. Versions in every
 manifest read `0.1.0` and need to bump to `0.1.1` together with a tag
 push to ship — the release workflow validates the manifest version
 matches the tag before publishing. The four GitHub repo secrets
@@ -275,8 +276,9 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   `UIScreenshot`, and keyboard actions to it over loopback; host MCP exposes
   `vm_ui_snapshot`, `vm_ui_screenshot`, `vm_ui_find`, `vm_ui_wait_for`,
   `vm_ui_click`, `vm_ui_key`, and `vm_ui_type`.
-  Follow-up work should replace per-action PowerShell startup with a
-  native long-lived helper and add live VM smoke coverage.
+  Live `Win11_test` smoke coverage now exercises screenshot, wait/find,
+  click, type, key, and snapshot. Follow-up work should replace per-action
+  PowerShell startup with a native long-lived helper.
 
 - **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
   calls into `.signalman/recordings/`. The agent-first DevOps
