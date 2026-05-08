@@ -67,6 +67,14 @@ assertions:
   - id: typed-text-observed
     type: json_field
     source: step-8
+    field: elements[0].value
+    expected: "signalman native smoke"
+    severity: critical
+    description: "The selected edit control should report the typed value through UI Automation"
+
+  - id: typed-query-indexed
+    type: json_field
+    source: step-9
     field: count
     comparison: gte
     expected: 1
@@ -75,7 +83,7 @@ assertions:
 
   - id: snapshot-captured
     type: json_field
-    source: step-9
+    source: step-10
     field: bytes
     comparison: gt
     expected: 0
@@ -84,7 +92,7 @@ assertions:
 
   - id: snapshot-elements-found
     type: json_field
-    source: step-9
+    source: step-10
     field: element_count
     comparison: gt
     expected: 0
@@ -93,7 +101,7 @@ assertions:
 
   - id: key-sent
     type: json_field
-    source: step-10
+    source: step-11
     field: success
     expected: true
     severity: critical

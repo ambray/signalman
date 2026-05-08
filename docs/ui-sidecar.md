@@ -86,6 +86,11 @@ Native `vm_ui_find` honors the element wait timeout by polling UI Automation
 until a matching element appears or the timeout expires. Empty-selector
 inventory calls return immediately so snapshots stay cheap.
 
+When a native UI Automation element supports the Value pattern, its current
+value is included in the normalized element descriptor. This lets scenarios
+assert the text of edit controls directly instead of relying only on screenshots
+or neighboring result labels.
+
 `vm_ui_key` accepts the cross-engine subset Signalman uses in smoke and product
 flows today: `{ENTER}`, `{ESC}` / `{ESCAPE}`, `{TAB}`, `{BACKSPACE}` / `{BS}`,
 `{SPACE}`, `~`, alphanumeric key sequences, and one-letter Ctrl chords such as
