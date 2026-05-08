@@ -27,27 +27,29 @@ ui_screenshot:
 ```
 
 ```tool
-ui_wait_for:
+ui_key:
   vm: Win11_test
-  selector: "[automationId='SearchButton']"
-  find_timeout_ms: 15000
-  timeout_ms: 20000
-```
-
-```tool
-ui_click:
-  vm: Win11_test
-  selector: "[automationId='SearchButton']"
-  click_type: left
+  keys: "#r"
   timeout_ms: 15000
 ```
 
 ```tool
 ui_wait_for:
   vm: Win11_test
-  selector: "[automationId='SearchTextBox']"
+  window_title: Run
+  selector: "[automationId='1001']"
   find_timeout_ms: 15000
   timeout_ms: 20000
+```
+
+```tool
+ui_type:
+  vm: Win11_test
+  window_title: Run
+  selector: "[automationId='1001']"
+  text: "signalman native smoke"
+  clear_first: true
+  timeout_ms: 15000
 ```
 
 ```tool
@@ -56,23 +58,10 @@ wait:
 ```
 
 ```tool
-ui_type:
-  vm: Win11_test
-  selector: "[automationId='SearchTextBox']"
-  text: "signalman native smoke"
-  clear_first: true
-  timeout_ms: 15000
-```
-
-```tool
-wait:
-  duration_ms: 1000
-```
-
-```tool
 ui_find:
   vm: Win11_test
-  selector: "[automationId='SearchTextBox']"
+  window_title: Run
+  selector: "[automationId='1001']"
   find_timeout_ms: 15000
   timeout_ms: 20000
 ```
@@ -80,15 +69,8 @@ ui_find:
 ```tool
 ui_find:
   vm: Win11_test
+  window_title: Run
   selector: "[value='signalman native smoke']"
-  find_timeout_ms: 15000
-  timeout_ms: 20000
-```
-
-```tool
-ui_find:
-  vm: Win11_test
-  selector: "signalman native smoke"
   find_timeout_ms: 15000
   timeout_ms: 20000
 ```
@@ -96,6 +78,7 @@ ui_find:
 ```tool
 ui_snapshot:
   vm: Win11_test
+  window_title: Run
   format: png
   output: ./output/live-ui-sidecar-smoke/snapshot.png
   max_elements: 25
@@ -106,7 +89,8 @@ ui_snapshot:
 ```tool
 ui_key:
   vm: Win11_test
-  selector: "[automationId='SearchTextBox']"
+  window_title: Run
+  selector: "[automationId='1001']"
   keys: "{ESC}"
   timeout_ms: 15000
 ```

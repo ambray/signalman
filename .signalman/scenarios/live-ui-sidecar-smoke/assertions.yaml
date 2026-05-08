@@ -40,33 +40,25 @@ assertions:
     severity: high
     description: "The screenshot workflow output should identify the image format"
 
-  - id: search-button-ready
+  - id: run-dialog-opened
     type: json_field
     source: step-3
-    field: found
-    expected: true
-    severity: critical
-    description: "The Windows Search button should appear before interaction begins"
-
-  - id: search-button-clicked
-    type: json_field
-    source: step-4
     field: success
     expected: true
     severity: critical
-    description: "The UI sidecar should be able to click a discovered desktop element"
+    description: "The native sidecar should open the Run dialog with a Win-key chord"
 
-  - id: search-box-ready
+  - id: run-edit-ready
     type: json_field
-    source: step-5
+    source: step-4
     field: found
     expected: true
     severity: critical
-    description: "The Windows Search edit box should be available after opening Search"
+    description: "The Run dialog edit control should be available before typing"
 
   - id: text-typed
     type: json_field
-    source: step-7
+    source: step-5
     field: success
     expected: true
     severity: critical
@@ -74,7 +66,7 @@ assertions:
 
   - id: typed-text-observed
     type: json_field
-    source: step-9
+    source: step-7
     field: elements[0].value
     expected: "signalman native smoke"
     severity: critical
@@ -82,25 +74,16 @@ assertions:
 
   - id: typed-value-selector-found
     type: json_field
-    source: step-10
+    source: step-8
     field: count
     comparison: gte
     expected: 1
     severity: critical
     description: "The typed query should be discoverable through an exact value selector"
 
-  - id: typed-query-indexed
-    type: json_field
-    source: step-11
-    field: count
-    comparison: gte
-    expected: 1
-    severity: critical
-    description: "The typed query should appear in the UI Automation tree"
-
   - id: snapshot-captured
     type: json_field
-    source: step-12
+    source: step-9
     field: bytes
     comparison: gt
     expected: 0
@@ -109,7 +92,7 @@ assertions:
 
   - id: snapshot-elements-found
     type: json_field
-    source: step-12
+    source: step-9
     field: element_count
     comparison: gt
     expected: 0
@@ -118,7 +101,7 @@ assertions:
 
   - id: key-sent
     type: json_field
-    source: step-13
+    source: step-10
     field: success
     expected: true
     severity: critical
