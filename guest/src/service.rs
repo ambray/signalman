@@ -984,6 +984,35 @@ impl GuestAgent for GuestAgentService {
         }))
     }
 
+    async fn ui_key(
+        &self,
+        request: Request<UiKeyRequest>,
+    ) -> Result<Response<UiActionResponse>, Status> {
+        let req = request.into_inner();
+        let value = ui_sidecar::call(
+            "ui.key",
+            json!({
+                "keys": req.keys,
+                "selector": req.selector,
+                "window_title": req.window_title,
+                "repeat": req.repeat,
+            }),
+        )
+        .await
+        .map_err(|e| Status::failed_precondition(format!("UI sidecar key failed: {e}")))?;
+        Ok(Response::new(UiActionResponse {
+            success: value
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            error: value
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        }))
+    }
+
     async fn ui_find(
         &self,
         request: Request<UiFindRequest>,
@@ -2075,6 +2104,9 @@ mod tests {
         assert_eq!(r.unwrap_err().code(), tonic::Code::FailedPrecondition);
 
         let r = svc.ui_type(Request::new(UiTypeRequest::default())).await;
+        assert_eq!(r.unwrap_err().code(), tonic::Code::FailedPrecondition);
+
+        let r = svc.ui_key(Request::new(UiKeyRequest::default())).await;
         assert_eq!(r.unwrap_err().code(), tonic::Code::FailedPrecondition);
 
         let r = svc.ui_find(Request::new(UiFindRequest::default())).await;

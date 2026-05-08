@@ -1234,6 +1234,30 @@ export class GuestAgentClient {
     );
   }
 
+  async uiKey(
+    keys: string,
+    options: {
+      selector?: string;
+      windowTitle?: string;
+      repeat?: number;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<{ success: boolean; error: string }> {
+    const deadline = options.timeoutMs ?? this.options.defaultTimeoutMs;
+    return withRetry(
+      () =>
+        unaryCall(this.client, "uIKey", {
+          keys,
+          selector: options.selector ?? "",
+          windowTitle: options.windowTitle ?? "",
+          repeat: options.repeat ?? 1,
+        }, deadline, this.options.authToken),
+      this.options.maxRetries,
+      this.options.initialRetryDelayMs,
+      this.options.maxRetryDelayMs,
+    );
+  }
+
   async uiFind(
     selector: string,
     options: {

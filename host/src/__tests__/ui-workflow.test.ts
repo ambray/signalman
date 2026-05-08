@@ -57,6 +57,7 @@ function makeClient(overrides: Partial<GuestAgentClient> = {}): GuestAgentClient
       },
     ]),
     uiClick: vi.fn().mockResolvedValue({ success: true, error: "" }),
+    uiKey: vi.fn().mockResolvedValue({ success: true, error: "" }),
     uiType: vi.fn().mockResolvedValue({ success: true, error: "" }),
     ...overrides,
   } as unknown as GuestAgentClient;
@@ -126,6 +127,34 @@ describe("workflow UI tool blocks", () => {
     expect(JSON.parse(found)).toMatchObject({ count: 1 });
     expect(JSON.parse(clicked)).toEqual({ success: true, error: "" });
     expect(JSON.parse(typed)).toEqual({ success: true, error: "" });
+  });
+
+  it("sends keyboard input through UI workflow tool blocks", async () => {
+    const client = makeClient();
+    const { orchestrator, vmMap } = makeOrchestrator(client);
+
+    const keyed = await orchestrator.executeToolBlock(
+      "ui_key",
+      {
+        vm: "endpoint-1",
+        keys: "{ESC}",
+        selector: "[name='Start']",
+        repeat: 2,
+        timeout_ms: 5_000,
+      },
+      vmMap,
+    );
+
+    expect(client.uiKey).toHaveBeenCalledWith("{ESC}", {
+      selector: "[name='Start']",
+      windowTitle: undefined,
+      repeat: 2,
+      timeoutMs: 5_000,
+    });
+    expect(JSON.parse(keyed)).toEqual({ success: true, error: "" });
+    await expect(
+      orchestrator.executeToolBlock("ui_key", { vm: "endpoint-1" }, vmMap),
+    ).rejects.toThrow("ui_key missing 'keys'");
   });
 
   it("waits for UI elements and fails workflow blocks when absent", async () => {

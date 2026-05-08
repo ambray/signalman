@@ -122,6 +122,7 @@ fn handle_request(req: SidecarRequest) -> SidecarResponse {
         "ui.find" => ps_ui_find(&req.params),
         "ui.click" => ps_ui_click(&req.params),
         "ui.type" => ps_ui_type(&req.params),
+        "ui.key" => ps_ui_key(&req.params),
         "ui.screenshot" => ps_ui_screenshot(&req.params),
         other => Err(anyhow!("unknown UI sidecar method '{other}'")),
     };
@@ -356,6 +357,53 @@ if ({clear_first}) {{ [System.Windows.Forms.SendKeys]::SendWait('^a') }}
     run_powershell_json(&script)
 }
 
+fn ps_ui_key(params: &Value) -> anyhow::Result<Value> {
+    let selector = ps_string(params, "selector");
+    let window_title = ps_string(params, "window_title");
+    let keys = ps_string(params, "keys");
+    let repeat = params
+        .get("repeat")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .clamp(1, 100);
+    if keys.trim().is_empty() {
+        return Err(anyhow!("keys is required"));
+    }
+    let script = format!(
+        r#"{}
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class SignalmanKeyFocus {{
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+}}
+"@
+if (-not [string]::IsNullOrWhiteSpace($selector)) {{
+  $e = Find-SignalmanElement
+  if (-not $e) {{ throw "element not found: $selector" }}
+  try {{ $e.SetFocus() }} catch {{ }}
+  $r = $e.Current.BoundingRectangle
+  $x = [int]($r.X + ($r.Width / 2)); $y = [int]($r.Y + ($r.Height / 2))
+  [SignalmanKeyFocus]::SetCursorPos($x, $y) | Out-Null
+  [SignalmanKeyFocus]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+  [SignalmanKeyFocus]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 80
+}}
+1..{repeat} | ForEach-Object {{
+  [System.Windows.Forms.SendKeys]::SendWait('{keys}')
+  Start-Sleep -Milliseconds 40
+}}
+[pscustomobject]@{{ success = $true; error = '' }} | ConvertTo-Json -Compress
+"#,
+        common_uia_script(&selector, &window_title, 5_000),
+        repeat = repeat,
+        keys = keys
+    );
+    run_powershell_json(&script)
+}
+
 fn ps_ui_screenshot(params: &Value) -> anyhow::Result<Value> {
     let format = ps_string(params, "format");
     let format = if format.eq_ignore_ascii_case("jpeg") {
@@ -420,5 +468,11 @@ mod tests {
             .error
             .unwrap()
             .contains("unknown UI sidecar method"));
+    }
+
+    #[test]
+    fn ui_key_requires_keys() {
+        let err = ps_ui_key(&json!({ "keys": "" })).unwrap_err();
+        assert!(err.to_string().contains("keys is required"));
     }
 }

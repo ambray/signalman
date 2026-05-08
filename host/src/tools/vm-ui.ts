@@ -11,6 +11,11 @@ import type { GuestAgentClient } from "../guest/client.js";
 import { ensureUiSidecar } from "../guest/ui-sidecar.js";
 import { sanitizeTimeout, sanitizeVmName } from "../sanitize.js";
 
+function sanitizeRepeat(repeat: number | undefined): number {
+  if (repeat == null || Number.isNaN(repeat)) return 1;
+  return Math.max(1, Math.min(Math.floor(repeat), 100));
+}
+
 export function createVmUiTools(
   getClient: (vmName: string) => Promise<GuestAgentClient>,
 ): ToolDefinition[] {
@@ -292,6 +297,48 @@ export function createVmUiTools(
         });
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          isError: !result.success,
+        };
+      },
+    },
+    {
+      name: "vm_ui_key",
+      description: "Send a keyboard chord or special key sequence to the VM's interactive user session",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+          keys: {
+            type: "string",
+            description: "Windows SendKeys syntax, e.g. {ENTER}, {ESC}, {TAB}, ^a",
+          },
+          selector: {
+            type: "string",
+            description: "Optional UIA selector to focus before sending keys",
+          },
+          window_title: { type: "string", description: "Optional window title" },
+          repeat: { type: "number", description: "Repeat count, default 1" },
+          timeout_ms: { type: "number", description: "RPC timeout" },
+        },
+        required: ["name", "keys"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const name = sanitizeVmName(params.name as string);
+        const client = await getClient(name);
+        const result = await client.uiKey(params.keys as string, {
+          selector: params.selector as string | undefined,
+          windowTitle: params.window_title as string | undefined,
+          repeat: sanitizeRepeat(params.repeat as number | undefined),
+          timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ vm: name, ...result }, null, 2),
+            },
+          ],
           isError: !result.success,
         };
       },

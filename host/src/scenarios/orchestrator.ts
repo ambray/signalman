@@ -2124,6 +2124,20 @@ export class ScenarioOrchestrator {
         return JSON.stringify(result);
       }
 
+      case "ui_key": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const keys = params.keys as string;
+        if (!keys) throw new Error(`ui_key missing 'keys'`);
+        const result = await client.uiKey(keys, {
+          selector: params.selector as string | undefined,
+          windowTitle: params.window_title as string | undefined,
+          repeat: params.repeat as number | undefined,
+          timeoutMs: params.timeout_ms as number | undefined,
+        });
+        return JSON.stringify(result);
+      }
+
       case "ui_type": {
         const client = this.guestClients.get(vmName);
         if (!client) throw new Error(`No guest client for VM '${vmName}'`);

@@ -197,12 +197,15 @@ describe("GuestAgentClient", () => {
           ],
         });
       });
-      this.uIClick = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
-        cb(null, { success: true, error: "" });
-      });
-      this.uIType = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
-        cb(null, { success: true, error: "" });
-      });
+        this.uIClick = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+          cb(null, { success: true, error: "" });
+        });
+        this.uIKey = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+          cb(null, { success: true, error: "" });
+        });
+        this.uIType = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+          cb(null, { success: true, error: "" });
+        });
       this.close = vi.fn();
     });
 
@@ -331,6 +334,10 @@ describe("GuestAgentClient", () => {
     });
     await expect(client.uiFind("[name='Save']")).resolves.toHaveLength(1);
     await expect(client.uiClick("[name='Save']")).resolves.toEqual({
+      success: true,
+      error: "",
+    });
+    await expect(client.uiKey("{ENTER}", { selector: "[name='Save']" })).resolves.toEqual({
       success: true,
       error: "",
     });

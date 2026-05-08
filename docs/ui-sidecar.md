@@ -23,6 +23,7 @@ The host registers these MCP tools when guest-agent access is available:
 - `vm_ui_find`: find UI Automation elements by selector.
 - `vm_ui_wait_for`: wait for an element and fail the tool call when it is absent.
 - `vm_ui_click`: click a UI Automation element.
+- `vm_ui_key`: send a Windows SendKeys chord or special-key sequence.
 - `vm_ui_type`: type text into the active session, optionally targeting an element first.
 
 Selectors currently support these exact forms:
@@ -48,9 +49,10 @@ This gives LLM-enabled tests a practical path for desktop workflows:
 4. Confirm the tool returns `ready: true`; increase `wait_ready_ms` for slow logons.
 5. Use normal guest-agent RPCs for setup.
 6. Use `vm_ui_snapshot` for the model's observation loop, then `vm_ui_wait_for`,
-   `vm_ui_find`, `vm_ui_click`, and `vm_ui_type` for targeted interaction.
+   `vm_ui_find`, `vm_ui_click`, `vm_ui_key`, and `vm_ui_type` for targeted
+   interaction.
 7. Use screenshots plus UIA element data as the feedback loop.
 
 ## Current Limits
 
-The first implementation is intentionally narrow. It uses Windows UI Automation and SendKeys through a PowerShell STA process per action. That is fine for smoke tests and product flows, but more complex test runs should eventually move the automation engine into native Rust or a long-lived Windows helper so we avoid per-action PowerShell startup cost and get richer eventing.
+The first implementation is intentionally narrow. It uses Windows UI Automation and SendKeys through a PowerShell STA process per action. `vm_ui_key` accepts Windows SendKeys syntax such as `{ENTER}`, `{ESC}`, `{TAB}`, and `^a`. That is fine for smoke tests and product flows, but more complex test runs should eventually move the automation engine into native Rust or a long-lived Windows helper so we avoid per-action PowerShell startup cost and get richer eventing.
