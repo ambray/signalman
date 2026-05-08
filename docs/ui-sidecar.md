@@ -14,6 +14,9 @@ The default automation engine is `powershell-process`, which launches a fresh
 STA PowerShell process for each UI action. For lower-latency local validation,
 set `SIGNALMAN_UI_ENGINE=powershell-helper` on the sidecar process. That keeps a
 single STA PowerShell helper alive and sends action scripts over stdin/stdout.
+`SIGNALMAN_UI_ENGINE=native` is reserved for the in-process Windows UI
+Automation backend; it currently reports health and returns an explicit
+not-implemented error for actions.
 
 ## MCP Tools
 
@@ -70,9 +73,9 @@ This gives LLM-enabled tests a practical path for desktop workflows:
 
 The first implementation is intentionally narrow. It uses Windows UI Automation and SendKeys through a PowerShell STA process per action. `vm_ui_key` accepts Windows SendKeys syntax such as `{ENTER}`, `{ESC}`, `{TAB}`, and `^a`. That is fine for smoke tests and product flows, but more complex test runs should eventually move the automation engine into native Rust or a long-lived Windows helper so we avoid per-action PowerShell startup cost and get richer eventing.
 
-`vm_ui_health` reports the active engine (`powershell-process` or
-`powershell-helper`) through the same health surface the future native helper
-will use. The sidecar dispatches requests through an engine boundary so a native
+`vm_ui_health` reports the active engine (`powershell-process`,
+`powershell-helper`, or `native`) through the same health surface every backend
+uses. The sidecar dispatches requests through an engine boundary so the native
 UI Automation backend can replace the PowerShell script runner without changing
 the loopback, guest-agent, MCP, or workflow contracts.
 

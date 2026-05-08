@@ -23,6 +23,7 @@ use tracing::{info, warn};
 const DEFAULT_CONNECT_ADDR: &str = "127.0.0.1:50151";
 const POWERSHELL_PROCESS_ENGINE: &str = "powershell-process";
 const POWERSHELL_HELPER_ENGINE: &str = "powershell-helper";
+const NATIVE_ENGINE: &str = "native";
 static START_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 #[cfg(target_os = "windows")]
 static POWERSHELL_HELPER: OnceLock<Mutex<Option<PowershellHelper>>> = OnceLock::new();
@@ -31,6 +32,7 @@ static POWERSHELL_HELPER: OnceLock<Mutex<Option<PowershellHelper>>> = OnceLock::
 enum UiAutomationEngine {
     PowershellProcess,
     PowershellHelper,
+    Native,
 }
 
 impl UiAutomationEngine {
@@ -41,6 +43,7 @@ impl UiAutomationEngine {
     fn from_env(value: Option<&str>) -> Self {
         match value.unwrap_or("").trim().to_ascii_lowercase().as_str() {
             "helper" | POWERSHELL_HELPER_ENGINE => Self::PowershellHelper,
+            "native" | "uia" | "windows-uia" => Self::Native,
             _ => Self::PowershellProcess,
         }
     }
@@ -49,15 +52,29 @@ impl UiAutomationEngine {
         match self {
             Self::PowershellProcess => POWERSHELL_PROCESS_ENGINE,
             Self::PowershellHelper => POWERSHELL_HELPER_ENGINE,
+            Self::Native => NATIVE_ENGINE,
         }
     }
 
-    fn backend(self) -> PowershellUiBackend {
-        PowershellUiBackend { engine: self }
+    fn execute(self, method: &str, params: &Value) -> anyhow::Result<Value> {
+        match self {
+            Self::PowershellProcess | Self::PowershellHelper => {
+                execute_backend(&PowershellUiBackend { engine: self }, method, params)
+            }
+            Self::Native => execute_backend(&NativeUiBackend, method, params),
+        }
     }
 
-    fn execute(self, method: &str, params: &Value) -> anyhow::Result<Value> {
-        execute_backend(&self.backend(), method, params)
+    #[cfg(test)]
+    fn backend(self) -> PowershellUiBackend {
+        match self {
+            Self::PowershellProcess | Self::PowershellHelper => {
+                PowershellUiBackend { engine: self }
+            }
+            Self::Native => PowershellUiBackend {
+                engine: Self::PowershellProcess,
+            },
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -73,6 +90,9 @@ impl UiAutomationEngine {
         match self {
             Self::PowershellProcess => run_powershell_process_json(script),
             Self::PowershellHelper => run_powershell_helper_json(script),
+            Self::Native => Err(anyhow!(
+                "native UI Automation backend does not use PowerShell scripts"
+            )),
         }
     }
 }
@@ -126,6 +146,41 @@ impl UiAutomationBackend for PowershellUiBackend {
 
     fn screenshot(&self, params: &UiScreenshotParams) -> anyhow::Result<UiScreenshotResult> {
         powershell_ui_screenshot(self.engine, params)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeUiBackend;
+
+impl NativeUiBackend {
+    fn not_implemented(&self) -> anyhow::Error {
+        anyhow!("native UI Automation backend is not implemented yet")
+    }
+}
+
+impl UiAutomationBackend for NativeUiBackend {
+    fn engine_name(&self) -> &'static str {
+        NATIVE_ENGINE
+    }
+
+    fn find(&self, _params: &UiFindParams) -> anyhow::Result<UiFindResult> {
+        Err(self.not_implemented())
+    }
+
+    fn click(&self, _params: &UiClickParams) -> anyhow::Result<UiActionResult> {
+        Err(self.not_implemented())
+    }
+
+    fn type_text(&self, _params: &UiTypeParams) -> anyhow::Result<UiActionResult> {
+        Err(self.not_implemented())
+    }
+
+    fn key(&self, _params: &UiKeyParams) -> anyhow::Result<UiActionResult> {
+        Err(self.not_implemented())
+    }
+
+    fn screenshot(&self, _params: &UiScreenshotParams) -> anyhow::Result<UiScreenshotResult> {
+        Err(self.not_implemented())
     }
 }
 
@@ -375,8 +430,14 @@ fn handle_request(req: SidecarRequest) -> SidecarResponse {
 }
 
 fn sidecar_health() -> Value {
-    serde_json::to_value(UiAutomationEngine::selected().backend().health())
-        .expect("UI health result serializes")
+    let engine = UiAutomationEngine::selected();
+    let result = match engine {
+        UiAutomationEngine::PowershellProcess | UiAutomationEngine::PowershellHelper => {
+            PowershellUiBackend { engine }.health()
+        }
+        UiAutomationEngine::Native => NativeUiBackend.health(),
+    };
+    serde_json::to_value(result).expect("UI health result serializes")
 }
 
 fn engine_name_for_env(value: Option<&str>) -> &'static str {
@@ -953,6 +1014,29 @@ mod tests {
         let health = backend.health();
         assert_eq!(health.engine, POWERSHELL_HELPER_ENGINE);
         assert_eq!(health.pid, std::process::id());
+    }
+
+    #[test]
+    fn native_engine_is_selectable_and_reports_not_implemented_actions() {
+        assert_eq!(
+            UiAutomationEngine::from_env(Some("native")),
+            UiAutomationEngine::Native
+        );
+        assert_eq!(
+            UiAutomationEngine::from_env(Some("uia")),
+            UiAutomationEngine::Native
+        );
+        assert_eq!(engine_name_for_env(Some("windows-uia")), NATIVE_ENGINE);
+
+        let health = NativeUiBackend.health();
+        assert_eq!(health.engine, NATIVE_ENGINE);
+
+        let err = UiAutomationEngine::Native
+            .execute("ui.find", &json!({ "selector": "Save" }))
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("native UI Automation backend is not implemented yet"));
     }
 
     #[test]
