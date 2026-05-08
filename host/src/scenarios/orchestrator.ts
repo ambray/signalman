@@ -11,6 +11,7 @@ import * as path from "node:path";
 import type { HypervisorBackend, VMHandle } from "../hypervisors/interface.js";
 import { GuestAgentClient, type CommandResult } from "../guest/client.js";
 import { describeUiElements } from "../guest/ui-elements.js";
+import { ensureUiSidecar } from "../guest/ui-sidecar.js";
 import { withUiSidecarRecovery, type UiSidecarRecoveryOptions } from "../guest/ui-recovery.js";
 import type { SignalmanConfig } from "../config.js";
 import type { DockerClient, ComposeConfig } from "../docker/client.js";
@@ -2131,6 +2132,32 @@ export class ScenarioOrchestrator {
       // Each case returns a JSON-stringified result so spec authors can
       // pipe it into the standard `json_field` / `stdout_contains`
       // assertions.
+
+      case "ui_ensure_sidecar": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const username = params.username as string;
+        if (!username) throw new Error(`ui_ensure_sidecar missing 'username'`);
+        const result = await ensureUiSidecar(client, {
+          username,
+          bind: params.bind as string | undefined,
+          engine: params.engine as string | undefined,
+          runNow: params.run_now as boolean | undefined,
+          waitReadyMs: params.wait_ready_ms as number | undefined,
+          timeoutMs: params.timeout_ms as number | undefined,
+        });
+        return JSON.stringify({
+          task_name: result.taskName,
+          username: result.username,
+          bind: result.bind,
+          engine: result.engine,
+          created: result.created,
+          run_now: result.runNow,
+          state: result.state,
+          ready: result.ready,
+          wait_ready_ms: result.waitReadyMs,
+        });
+      }
 
       case "ui_click": {
         const client = this.guestClients.get(vmName);

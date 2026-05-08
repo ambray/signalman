@@ -1279,8 +1279,10 @@ impl NativeSelector {
         }
         if let Some(inner) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
             if let Some((key, quoted)) = inner.split_once('=') {
-                if matches!(key, "name" | "automationId" | "className" | "controlType")
-                    && quoted.starts_with('\'')
+                if matches!(
+                    key,
+                    "name" | "automationId" | "className" | "controlType" | "value"
+                ) && quoted.starts_with('\'')
                     && quoted.ends_with('\'')
                     && quoted.len() >= 2
                 {
@@ -1305,6 +1307,7 @@ impl NativeSelector {
                     let normalized = value.trim().trim_start_matches("ControlType.");
                     element.control_type == format!("ControlType.{normalized}")
                 }
+                "value" => element.value == *value,
                 _ => false,
             },
             Self::Text(value) => element.name.contains(value) || element.automation_id == *value,
@@ -1474,14 +1477,22 @@ Add-Type -AssemblyName UIAutomationClient
 $selector = '{selector}'
 $windowTitle = '{window_title}'
 $deadline = [DateTime]::UtcNow.AddMilliseconds({timeout_ms})
+function Get-SignalmanElementValue($e) {{
+  try {{
+    $pattern = $e.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+    if ($pattern) {{ return [string]$pattern.Current.Value }}
+  }} catch {{}}
+  return ''
+}}
 function Match-SignalmanElement($e, $selector) {{
   if ([string]::IsNullOrWhiteSpace($selector)) {{ return $true }}
-  if ($selector -match "^\[(name|automationId|className|controlType)='([^']*)'\]$") {{
+  if ($selector -match "^\[(name|automationId|className|controlType|value)='([^']*)'\]$") {{
     $k = $matches[1]; $v = $matches[2]
     switch ($k) {{
       'name' {{ return $e.Current.Name -eq $v }}
       'automationId' {{ return $e.Current.AutomationId -eq $v }}
       'className' {{ return $e.Current.ClassName -eq $v }}
+      'value' {{ return (Get-SignalmanElementValue $e) -eq $v }}
       'controlType' {{
         $controlType = if ($v -like 'ControlType.*') {{ $v }} else {{ "ControlType.$v" }}
         return $e.Current.ControlType.ProgrammaticName -eq $controlType
@@ -1557,7 +1568,7 @@ foreach ($e in $all) {{
       y = $y
       width = $width
       height = $height
-      value = ''
+      value = Get-SignalmanElementValue $e
     }}
   }}
 }}
@@ -1893,7 +1904,7 @@ mod tests {
             y: 0,
             width: 48,
             height: 48,
-            value: String::new(),
+            value: "signalman native smoke".to_string(),
         };
 
         assert!(NativeSelector::parse("").matches(&element));
@@ -1902,8 +1913,10 @@ mod tests {
         assert!(NativeSelector::parse("[className='ToggleButton']").matches(&element));
         assert!(NativeSelector::parse("[controlType='Button']").matches(&element));
         assert!(NativeSelector::parse("[controlType='ControlType.Button']").matches(&element));
+        assert!(NativeSelector::parse("[value='signalman native smoke']").matches(&element));
         assert!(NativeSelector::parse("Sta").matches(&element));
         assert!(!NativeSelector::parse("[name='Search']").matches(&element));
+        assert!(!NativeSelector::parse("[value='other']").matches(&element));
     }
 
     #[cfg(target_os = "windows")]
@@ -2003,6 +2016,8 @@ mod tests {
         assert!(script.contains("\"ControlType.$v\""));
         assert!(script.contains("ProgrammaticName -eq $controlType"));
         assert!(script.contains("[double]::IsInfinity($d)"));
+        assert!(script.contains("controlType|value"));
+        assert!(script.contains("ValuePattern"));
     }
 
     #[test]

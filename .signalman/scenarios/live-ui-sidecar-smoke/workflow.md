@@ -3,6 +3,16 @@
 Validate that the guest agent can reach the interactive user-session sidecar and drive the Windows desktop through the normal scenario workflow surface.
 
 ```tool
+ui_ensure_sidecar:
+  vm: Win11_test
+  username: test
+  engine: native
+  run_now: true
+  wait_ready_ms: 15000
+  timeout_ms: 30000
+```
+
+```tool
 ui_health:
   vm: Win11_test
   timeout_ms: 15000
@@ -63,6 +73,14 @@ wait:
 ui_find:
   vm: Win11_test
   selector: "[automationId='SearchTextBox']"
+  find_timeout_ms: 15000
+  timeout_ms: 20000
+```
+
+```tool
+ui_find:
+  vm: Win11_test
+  selector: "[value='signalman native smoke']"
   find_timeout_ms: 15000
   timeout_ms: 20000
 ```
