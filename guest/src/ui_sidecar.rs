@@ -152,12 +152,6 @@ impl UiAutomationBackend for PowershellUiBackend {
 #[derive(Debug, Clone, Copy)]
 struct NativeUiBackend;
 
-impl NativeUiBackend {
-    fn not_implemented(&self) -> anyhow::Error {
-        anyhow!("native UI Automation backend is not implemented yet")
-    }
-}
-
 impl UiAutomationBackend for NativeUiBackend {
     fn engine_name(&self) -> &'static str {
         NATIVE_ENGINE
@@ -167,16 +161,16 @@ impl UiAutomationBackend for NativeUiBackend {
         native_ui_find(params)
     }
 
-    fn click(&self, _params: &UiClickParams) -> anyhow::Result<UiActionResult> {
-        Err(self.not_implemented())
+    fn click(&self, params: &UiClickParams) -> anyhow::Result<UiActionResult> {
+        native_ui_click(params)
     }
 
-    fn type_text(&self, _params: &UiTypeParams) -> anyhow::Result<UiActionResult> {
-        Err(self.not_implemented())
+    fn type_text(&self, params: &UiTypeParams) -> anyhow::Result<UiActionResult> {
+        native_ui_type(params)
     }
 
-    fn key(&self, _params: &UiKeyParams) -> anyhow::Result<UiActionResult> {
-        Err(self.not_implemented())
+    fn key(&self, params: &UiKeyParams) -> anyhow::Result<UiActionResult> {
+        native_ui_key(params)
     }
 
     fn screenshot(&self, params: &UiScreenshotParams) -> anyhow::Result<UiScreenshotResult> {
@@ -536,6 +530,27 @@ fn native_ui_find(_params: &UiFindParams) -> anyhow::Result<UiFindResult> {
     ))
 }
 
+#[cfg(not(target_os = "windows"))]
+fn native_ui_click(_params: &UiClickParams) -> anyhow::Result<UiActionResult> {
+    Err(anyhow!(
+        "native UI Automation click is only supported on Windows"
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_ui_type(_params: &UiTypeParams) -> anyhow::Result<UiActionResult> {
+    Err(anyhow!(
+        "native UI Automation type is only supported on Windows"
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_ui_key(_params: &UiKeyParams) -> anyhow::Result<UiActionResult> {
+    Err(anyhow!(
+        "native UI Automation key is only supported on Windows"
+    ))
+}
+
 #[cfg(target_os = "windows")]
 fn native_ui_screenshot(params: &UiScreenshotParams) -> anyhow::Result<UiScreenshotResult> {
     use image::{DynamicImage, ImageBuffer, Rgba};
@@ -881,6 +896,250 @@ fn native_ui_find(params: &UiFindParams) -> anyhow::Result<UiFindResult> {
         }
     }
     Ok(UiFindResult { elements: results })
+}
+
+#[cfg(target_os = "windows")]
+fn native_ui_click(params: &UiClickParams) -> anyhow::Result<UiActionResult> {
+    let element = native_first_element(&params.selector, &params.window_title)?;
+    let x = element.x + element.width / 2;
+    let y = element.y + element.height / 2;
+    native_click_at(x, y, &params.click_type)?;
+    Ok(UiActionResult {
+        success: true,
+        error: String::new(),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn native_ui_type(params: &UiTypeParams) -> anyhow::Result<UiActionResult> {
+    if !params.selector.trim().is_empty() {
+        let element = native_first_element(&params.selector, &params.window_title)?;
+        native_click_at(
+            element.x + element.width / 2,
+            element.y + element.height / 2,
+            "left",
+        )?;
+    }
+    if params.clear_first {
+        native_send_key_sequence("^a", 1)?;
+    }
+    native_send_unicode_text(&params.text)?;
+    Ok(UiActionResult {
+        success: true,
+        error: String::new(),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn native_ui_key(params: &UiKeyParams) -> anyhow::Result<UiActionResult> {
+    if params.keys.trim().is_empty() {
+        return Err(anyhow!("keys is required"));
+    }
+    if !params.selector.trim().is_empty() {
+        let element = native_first_element(&params.selector, &params.window_title)?;
+        native_click_at(
+            element.x + element.width / 2,
+            element.y + element.height / 2,
+            "left",
+        )?;
+    }
+    native_send_key_sequence(&params.keys, params.repeat.unwrap_or(1).clamp(1, 100))?;
+    Ok(UiActionResult {
+        success: true,
+        error: String::new(),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn native_first_element(selector: &str, window_title: &str) -> anyhow::Result<UiElementResult> {
+    let result = native_ui_find(&UiFindParams {
+        selector: selector.to_string(),
+        window_title: window_title.to_string(),
+        timeout_ms: Some(5_000),
+    })?;
+    result
+        .elements
+        .into_iter()
+        .find(|element| element.is_visible && element.width > 0 && element.height > 0)
+        .ok_or_else(|| anyhow!("element not found: {selector}"))
+}
+
+#[cfg(target_os = "windows")]
+fn native_click_at(x: i32, y: i32, click_type: &str) -> anyhow::Result<()> {
+    use std::mem::size_of;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+        MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+
+    unsafe { SetCursorPos(x, y) }.context("native UI click SetCursorPos failed")?;
+    let (down, up, count) = match click_type.trim().to_ascii_lowercase().as_str() {
+        "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 1),
+        "double" => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 2),
+        _ => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 1),
+    };
+    for _ in 0..count {
+        let inputs = [
+            INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dwFlags: down,
+                        ..Default::default()
+                    },
+                },
+            },
+            INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dwFlags: up,
+                        ..Default::default()
+                    },
+                },
+            },
+        ];
+        let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
+        if sent != inputs.len() as u32 {
+            return Err(anyhow!("native UI click SendInput sent {sent} events"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn native_send_unicode_text(text: &str) -> anyhow::Result<()> {
+    for unit in text.encode_utf16() {
+        native_send_unicode_unit(unit)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn native_send_unicode_unit(unit: u16) -> anyhow::Result<()> {
+    use std::mem::size_of;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
+        VIRTUAL_KEY,
+    };
+
+    let inputs = [
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0),
+                    wScan: unit,
+                    dwFlags: KEYEVENTF_UNICODE,
+                    ..Default::default()
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0),
+                    wScan: unit,
+                    dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                    ..Default::default()
+                },
+            },
+        },
+    ];
+    let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
+    if sent != inputs.len() as u32 {
+        return Err(anyhow!("native UI type SendInput sent {sent} events"));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn native_send_key_sequence(keys: &str, repeat: u64) -> anyhow::Result<()> {
+    for _ in 0..repeat {
+        for (key, ctrl) in parse_native_key_sequence(keys)? {
+            native_send_virtual_key(key, ctrl)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn native_send_virtual_key(vk: u16, ctrl: bool) -> anyhow::Result<()> {
+    use std::mem::size_of;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+        VK_CONTROL,
+    };
+
+    let mut inputs = Vec::new();
+    if ctrl {
+        inputs.push(keyboard_input(VK_CONTROL, Default::default()));
+    }
+    inputs.push(keyboard_input(VIRTUAL_KEY(vk), Default::default()));
+    inputs.push(keyboard_input(VIRTUAL_KEY(vk), KEYEVENTF_KEYUP));
+    if ctrl {
+        inputs.push(keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP));
+    }
+    let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
+    if sent != inputs.len() as u32 {
+        return Err(anyhow!("native UI key SendInput sent {sent} events"));
+    }
+
+    fn keyboard_input(
+        vk: VIRTUAL_KEY,
+        flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
+    ) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    dwFlags: flags,
+                    ..Default::default()
+                },
+            },
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn parse_native_key_sequence(keys: &str) -> anyhow::Result<Vec<(u16, bool)>> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_ESCAPE, VK_RETURN, VK_TAB};
+
+    let trimmed = keys.trim();
+    if trimmed.eq_ignore_ascii_case("{ESC}") || trimmed.eq_ignore_ascii_case("{ESCAPE}") {
+        return Ok(vec![(VK_ESCAPE.0, false)]);
+    }
+    if trimmed.eq_ignore_ascii_case("{ENTER}") || trimmed.eq_ignore_ascii_case("~") {
+        return Ok(vec![(VK_RETURN.0, false)]);
+    }
+    if trimmed.eq_ignore_ascii_case("{TAB}") {
+        return Ok(vec![(VK_TAB.0, false)]);
+    }
+    if trimmed.eq_ignore_ascii_case("{BACKSPACE}") || trimmed.eq_ignore_ascii_case("{BS}") {
+        return Ok(vec![(VK_BACK.0, false)]);
+    }
+    if let Some(chord) = trimmed.strip_prefix('^') {
+        let mut chars = chord.chars();
+        let Some(ch) = chars.next() else {
+            return Err(anyhow!("unsupported native key sequence: {keys}"));
+        };
+        if chars.next().is_some() || !ch.is_ascii_alphabetic() {
+            return Err(anyhow!("unsupported native key sequence: {keys}"));
+        }
+        return Ok(vec![(ch.to_ascii_uppercase() as u16, true)]);
+    }
+    if trimmed.chars().count() == 1 {
+        return Ok(vec![(
+            trimmed.chars().next().unwrap().to_ascii_uppercase() as u16,
+            false,
+        )]);
+    }
+    Err(anyhow!("unsupported native key sequence: {keys}"))
 }
 
 #[cfg(target_os = "windows")]
@@ -1535,7 +1794,7 @@ mod tests {
     }
 
     #[test]
-    fn native_engine_is_selectable_and_reports_not_implemented_actions() {
+    fn native_engine_is_selectable() {
         assert_eq!(
             UiAutomationEngine::from_env(Some("native")),
             UiAutomationEngine::Native
@@ -1548,13 +1807,6 @@ mod tests {
 
         let health = NativeUiBackend.health();
         assert_eq!(health.engine, NATIVE_ENGINE);
-
-        let err = UiAutomationEngine::Native
-            .execute("ui.click", &json!({ "selector": "Save" }))
-            .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("native UI Automation backend is not implemented yet"));
     }
 
     #[test]
@@ -1581,6 +1833,23 @@ mod tests {
         assert!(NativeSelector::parse("[controlType='ControlType.Button']").matches(&element));
         assert!(NativeSelector::parse("Sta").matches(&element));
         assert!(!NativeSelector::parse("[name='Search']").matches(&element));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn native_key_parser_handles_smoke_sequences() {
+        assert_eq!(
+            parse_native_key_sequence("{ESC}").unwrap(),
+            vec![(
+                windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE.0,
+                false
+            )]
+        );
+        assert_eq!(
+            parse_native_key_sequence("^a").unwrap(),
+            vec![('A' as u16, true)]
+        );
+        assert!(parse_native_key_sequence("{NOPE}").is_err());
     }
 
     #[test]
