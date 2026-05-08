@@ -11,6 +11,7 @@ import * as path from "node:path";
 import type { HypervisorBackend, VMHandle } from "../hypervisors/interface.js";
 import { GuestAgentClient, type CommandResult } from "../guest/client.js";
 import { describeUiElements } from "../guest/ui-elements.js";
+import { withUiSidecarRecovery, type UiSidecarRecoveryOptions } from "../guest/ui-recovery.js";
 import type { SignalmanConfig } from "../config.js";
 import type { DockerClient, ComposeConfig } from "../docker/client.js";
 import {
@@ -101,6 +102,17 @@ function uiActionWorkflowResult(result: { success: boolean; error: string; durat
     success: result.success,
     error: result.error,
     duration_ms: result.durationMs ?? 0,
+  };
+}
+
+function uiRecoveryOptions(params: Record<string, unknown>): UiSidecarRecoveryOptions | undefined {
+  const username = params.sidecar_username as string | undefined;
+  if (!username) return undefined;
+  return {
+    username,
+    engine: params.sidecar_engine as string | undefined,
+    waitReadyMs: params.sidecar_wait_ready_ms as number | undefined,
+    timeoutMs: params.timeout_ms as number | undefined,
   };
 }
 
@@ -2125,11 +2137,13 @@ export class ScenarioOrchestrator {
         if (!client) throw new Error(`No guest client for VM '${vmName}'`);
         const selector = params.selector as string;
         if (!selector) throw new Error(`ui_click missing 'selector'`);
-        const result = await client.uiClick(selector, {
-          windowTitle: params.window_title as string | undefined,
-          clickType: params.click_type as "left" | "right" | "double" | undefined,
-          timeoutMs: params.timeout_ms as number | undefined,
-        });
+        const result = await withUiSidecarRecovery(client, uiRecoveryOptions(params), () =>
+          client.uiClick(selector, {
+            windowTitle: params.window_title as string | undefined,
+            clickType: params.click_type as "left" | "right" | "double" | undefined,
+            timeoutMs: params.timeout_ms as number | undefined,
+          }),
+        );
         return JSON.stringify(uiActionWorkflowResult(result));
       }
 
@@ -2138,12 +2152,14 @@ export class ScenarioOrchestrator {
         if (!client) throw new Error(`No guest client for VM '${vmName}'`);
         const keys = params.keys as string;
         if (!keys) throw new Error(`ui_key missing 'keys'`);
-        const result = await client.uiKey(keys, {
-          selector: params.selector as string | undefined,
-          windowTitle: params.window_title as string | undefined,
-          repeat: params.repeat as number | undefined,
-          timeoutMs: params.timeout_ms as number | undefined,
-        });
+        const result = await withUiSidecarRecovery(client, uiRecoveryOptions(params), () =>
+          client.uiKey(keys, {
+            selector: params.selector as string | undefined,
+            windowTitle: params.window_title as string | undefined,
+            repeat: params.repeat as number | undefined,
+            timeoutMs: params.timeout_ms as number | undefined,
+          }),
+        );
         return JSON.stringify(uiActionWorkflowResult(result));
       }
 
@@ -2154,12 +2170,14 @@ export class ScenarioOrchestrator {
         if (text === undefined || text === null) {
           throw new Error(`ui_type missing 'text'`);
         }
-        const result = await client.uiType(text, {
-          selector: params.selector as string | undefined,
-          windowTitle: params.window_title as string | undefined,
-          clearFirst: params.clear_first as boolean | undefined,
-          timeoutMs: params.timeout_ms as number | undefined,
-        });
+        const result = await withUiSidecarRecovery(client, uiRecoveryOptions(params), () =>
+          client.uiType(text, {
+            selector: params.selector as string | undefined,
+            windowTitle: params.window_title as string | undefined,
+            clearFirst: params.clear_first as boolean | undefined,
+            timeoutMs: params.timeout_ms as number | undefined,
+          }),
+        );
         return JSON.stringify(uiActionWorkflowResult(result));
       }
 
@@ -2168,11 +2186,13 @@ export class ScenarioOrchestrator {
         if (!client) throw new Error(`No guest client for VM '${vmName}'`);
         const selector = params.selector as string;
         if (!selector) throw new Error(`ui_find missing 'selector'`);
-        const find = await client.uiFindDetailed(selector, {
-          windowTitle: params.window_title as string | undefined,
-          findTimeoutMs: params.find_timeout_ms as number | undefined,
-          timeoutMs: params.timeout_ms as number | undefined,
-        });
+        const find = await withUiSidecarRecovery(client, uiRecoveryOptions(params), () =>
+          client.uiFindDetailed(selector, {
+            windowTitle: params.window_title as string | undefined,
+            findTimeoutMs: params.find_timeout_ms as number | undefined,
+            timeoutMs: params.timeout_ms as number | undefined,
+          }),
+        );
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
         // Return a structured result so `json_field` assertions can
@@ -2185,11 +2205,13 @@ export class ScenarioOrchestrator {
         if (!client) throw new Error(`No guest client for VM '${vmName}'`);
         const selector = params.selector as string;
         if (!selector) throw new Error(`ui_wait_for missing 'selector'`);
-        const find = await client.uiFindDetailed(selector, {
-          windowTitle: params.window_title as string | undefined,
-          findTimeoutMs: params.find_timeout_ms as number | undefined,
-          timeoutMs: params.timeout_ms as number | undefined,
-        });
+        const find = await withUiSidecarRecovery(client, uiRecoveryOptions(params), () =>
+          client.uiFindDetailed(selector, {
+            windowTitle: params.window_title as string | undefined,
+            findTimeoutMs: params.find_timeout_ms as number | undefined,
+            timeoutMs: params.timeout_ms as number | undefined,
+          }),
+        );
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
         const found = elements.length > 0;
@@ -2208,11 +2230,13 @@ export class ScenarioOrchestrator {
         const client = this.guestClients.get(vmName);
         if (!client) throw new Error(`No guest client for VM '${vmName}'`);
         const format = (params.format as string) ?? "png";
-        const screenshot = await client.uiScreenshot({
-          windowTitle: params.window_title as string | undefined,
-          format,
-          timeoutMs: params.timeout_ms as number | undefined,
-        });
+        const screenshot = await withUiSidecarRecovery(client, uiRecoveryOptions(params), () =>
+          client.uiScreenshot({
+            windowTitle: params.window_title as string | undefined,
+            format,
+            timeoutMs: params.timeout_ms as number | undefined,
+          }),
+        );
         // Optional persistence to disk for visual debugging — when
         // `output` is set, write the bytes there. Either way return
         // size metadata so assertions can sanity-check the capture.
@@ -2254,18 +2278,23 @@ export class ScenarioOrchestrator {
           1,
           Math.min(Math.floor((params.max_elements as number | undefined) ?? 50), 200),
         );
-        const [screenshot, find] = await Promise.all([
-          client.uiScreenshot({
-            windowTitle: params.window_title as string | undefined,
-            format,
-            timeoutMs,
-          }),
-          client.uiFindDetailed("", {
-            windowTitle: params.window_title as string | undefined,
-            findTimeoutMs: params.find_timeout_ms as number | undefined,
-            timeoutMs,
-          }),
-        ]);
+        const [screenshot, find] = await withUiSidecarRecovery(
+          client,
+          uiRecoveryOptions(params),
+          () =>
+            Promise.all([
+              client.uiScreenshot({
+                windowTitle: params.window_title as string | undefined,
+                format,
+                timeoutMs,
+              }),
+              client.uiFindDetailed("", {
+                windowTitle: params.window_title as string | undefined,
+                findTimeoutMs: params.find_timeout_ms as number | undefined,
+                timeoutMs,
+              }),
+            ]),
+        );
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
         let savedPath: string | undefined;
