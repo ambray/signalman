@@ -932,6 +932,7 @@ impl GuestAgent for GuestAgentService {
         request: Request<UiClickRequest>,
     ) -> Result<Response<UiActionResponse>, Status> {
         let req = request.into_inner();
+        let started = Instant::now();
         let value = ui_sidecar::call(
             "ui.click",
             json!({
@@ -952,6 +953,7 @@ impl GuestAgent for GuestAgentService {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            duration_ms: started.elapsed().as_millis() as u64,
         }))
     }
 
@@ -960,6 +962,7 @@ impl GuestAgent for GuestAgentService {
         request: Request<UiTypeRequest>,
     ) -> Result<Response<UiActionResponse>, Status> {
         let req = request.into_inner();
+        let started = Instant::now();
         let value = ui_sidecar::call(
             "ui.type",
             json!({
@@ -981,6 +984,7 @@ impl GuestAgent for GuestAgentService {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            duration_ms: started.elapsed().as_millis() as u64,
         }))
     }
 
@@ -989,6 +993,7 @@ impl GuestAgent for GuestAgentService {
         request: Request<UiKeyRequest>,
     ) -> Result<Response<UiActionResponse>, Status> {
         let req = request.into_inner();
+        let started = Instant::now();
         let value = ui_sidecar::call(
             "ui.key",
             json!({
@@ -1010,6 +1015,7 @@ impl GuestAgent for GuestAgentService {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            duration_ms: started.elapsed().as_millis() as u64,
         }))
     }
 
@@ -1018,6 +1024,7 @@ impl GuestAgent for GuestAgentService {
         request: Request<UiFindRequest>,
     ) -> Result<Response<UiFindResponse>, Status> {
         let req = request.into_inner();
+        let started = Instant::now();
         let value = ui_sidecar::call(
             "ui.find",
             json!({
@@ -1076,7 +1083,10 @@ impl GuestAgent for GuestAgentService {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(Response::new(UiFindResponse { elements }))
+        Ok(Response::new(UiFindResponse {
+            elements,
+            duration_ms: started.elapsed().as_millis() as u64,
+        }))
     }
 
     async fn ui_screenshot(
@@ -1084,6 +1094,7 @@ impl GuestAgent for GuestAgentService {
         request: Request<UiScreenshotRequest>,
     ) -> Result<Response<UiScreenshotResponse>, Status> {
         let req = request.into_inner();
+        let started = Instant::now();
         let value = ui_sidecar::call(
             "ui.screenshot",
             json!({
@@ -1108,6 +1119,7 @@ impl GuestAgent for GuestAgentService {
                 .to_string(),
             width: value.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
             height: value.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            duration_ms: started.elapsed().as_millis() as u64,
         }))
     }
 

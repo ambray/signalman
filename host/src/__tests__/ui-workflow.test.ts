@@ -44,21 +44,25 @@ function makeClient(overrides: Partial<GuestAgentClient> = {}): GuestAgentClient
       format: "png",
       width: 640,
       height: 480,
+      durationMs: 11,
     }),
     screenshot: vi.fn().mockResolvedValue(Buffer.from("fake-png")),
-    uiFind: vi.fn().mockResolvedValue([
-      {
-        name: "Start",
-        automationId: "StartButton",
-        controlType: "Button",
-        boundingBox: { x: 0, y: 0, width: 48, height: 48 },
-        isEnabled: true,
-        isVisible: true,
-      },
-    ]),
-    uiClick: vi.fn().mockResolvedValue({ success: true, error: "" }),
-    uiKey: vi.fn().mockResolvedValue({ success: true, error: "" }),
-    uiType: vi.fn().mockResolvedValue({ success: true, error: "" }),
+    uiFindDetailed: vi.fn().mockResolvedValue({
+      durationMs: 12,
+      elements: [
+        {
+          name: "Start",
+          automationId: "StartButton",
+          controlType: "Button",
+          boundingBox: { x: 0, y: 0, width: 48, height: 48 },
+          isEnabled: true,
+          isVisible: true,
+        },
+      ],
+    }),
+    uiClick: vi.fn().mockResolvedValue({ success: true, error: "", durationMs: 13 }),
+    uiKey: vi.fn().mockResolvedValue({ success: true, error: "", durationMs: 14 }),
+    uiType: vi.fn().mockResolvedValue({ success: true, error: "", durationMs: 15 }),
     ...overrides,
   } as unknown as GuestAgentClient;
 }
@@ -108,7 +112,7 @@ describe("workflow UI tool blocks", () => {
       vmMap,
     );
 
-    expect(client.uiFind).toHaveBeenCalledWith("[name='Start']", {
+    expect(client.uiFindDetailed).toHaveBeenCalledWith("[name='Start']", {
       windowTitle: undefined,
       findTimeoutMs: 2_000,
       timeoutMs: undefined,
@@ -124,9 +128,9 @@ describe("workflow UI tool blocks", () => {
       clearFirst: true,
       timeoutMs: undefined,
     });
-    expect(JSON.parse(found)).toMatchObject({ count: 1 });
-    expect(JSON.parse(clicked)).toEqual({ success: true, error: "" });
-    expect(JSON.parse(typed)).toEqual({ success: true, error: "" });
+    expect(JSON.parse(found)).toMatchObject({ count: 1, duration_ms: 12 });
+    expect(JSON.parse(clicked)).toEqual({ success: true, error: "", duration_ms: 13 });
+    expect(JSON.parse(typed)).toEqual({ success: true, error: "", duration_ms: 15 });
   });
 
   it("sends keyboard input through UI workflow tool blocks", async () => {
@@ -151,7 +155,7 @@ describe("workflow UI tool blocks", () => {
       repeat: 2,
       timeoutMs: 5_000,
     });
-    expect(JSON.parse(keyed)).toEqual({ success: true, error: "" });
+    expect(JSON.parse(keyed)).toEqual({ success: true, error: "", duration_ms: 14 });
     await expect(
       orchestrator.executeToolBlock("ui_key", { vm: "endpoint-1" }, vmMap),
     ).rejects.toThrow("ui_key missing 'keys'");
@@ -159,21 +163,24 @@ describe("workflow UI tool blocks", () => {
 
   it("waits for UI elements and fails workflow blocks when absent", async () => {
     const client = makeClient({
-      uiFind: vi.fn().mockResolvedValueOnce([
-        {
-          name: "Start",
-          automationId: "StartButton",
-          controlType: "Button",
-          className: "Button",
-          isEnabled: true,
-          isVisible: true,
-          x: 0,
-          y: 0,
-          width: 48,
-          height: 48,
-          value: "",
-        },
-      ]).mockResolvedValueOnce([]),
+      uiFindDetailed: vi.fn().mockResolvedValueOnce({
+        durationMs: 21,
+        elements: [
+          {
+            name: "Start",
+            automationId: "StartButton",
+            controlType: "Button",
+            className: "Button",
+            isEnabled: true,
+            isVisible: true,
+            x: 0,
+            y: 0,
+            width: 48,
+            height: 48,
+            value: "",
+          },
+        ],
+      }).mockResolvedValueOnce({ durationMs: 22, elements: [] }),
     } as Partial<GuestAgentClient>);
     const { orchestrator, vmMap } = makeOrchestrator(client);
 
@@ -183,7 +190,7 @@ describe("workflow UI tool blocks", () => {
       vmMap,
     );
 
-    expect(JSON.parse(found)).toMatchObject({ found: true, count: 1 });
+    expect(JSON.parse(found)).toMatchObject({ found: true, count: 1, duration_ms: 21 });
     await expect(
       orchestrator.executeToolBlock(
         "ui_wait_for",
@@ -208,10 +215,15 @@ describe("workflow UI tool blocks", () => {
       vmMap,
     );
 
-    expect(client.screenshot).toHaveBeenCalledWith(undefined, "png", 5_000);
+    expect(client.uiScreenshot).toHaveBeenCalledWith({
+      windowTitle: undefined,
+      format: "png",
+      timeoutMs: 5_000,
+    });
     expect(JSON.parse(screenshot)).toMatchObject({
       format: "png",
       bytes: Buffer.from("fake-png").byteLength,
+      duration_ms: 11,
       saved_path: path.resolve("output/live-ui-sidecar-smoke/desktop.png"),
     });
     await expect(
@@ -224,34 +236,37 @@ describe("workflow UI tool blocks", () => {
 
   it("returns combined UI snapshot metadata for workflow assertions", async () => {
     const client = makeClient({
-      uiFind: vi.fn().mockResolvedValue([
-        {
-          name: "Start",
-          automationId: "StartButton",
-          controlType: "Button",
-          className: "Button",
-          isEnabled: true,
-          isVisible: true,
-          x: 0,
-          y: 0,
-          width: 48,
-          height: 48,
-          value: "",
-        },
-        {
-          name: "Search",
-          automationId: "SearchBox",
-          controlType: "Edit",
-          className: "TextBox",
-          isEnabled: true,
-          isVisible: true,
-          x: 50,
-          y: 0,
-          width: 300,
-          height: 48,
-          value: "",
-        },
-      ]),
+      uiFindDetailed: vi.fn().mockResolvedValue({
+        durationMs: 31,
+        elements: [
+          {
+            name: "Start",
+            automationId: "StartButton",
+            controlType: "Button",
+            className: "Button",
+            isEnabled: true,
+            isVisible: true,
+            x: 0,
+            y: 0,
+            width: 48,
+            height: 48,
+            value: "",
+          },
+          {
+            name: "Search",
+            automationId: "SearchBox",
+            controlType: "Edit",
+            className: "TextBox",
+            isEnabled: true,
+            isVisible: true,
+            x: 50,
+            y: 0,
+            width: 300,
+            height: 48,
+            value: "",
+          },
+        ],
+      }),
     } as Partial<GuestAgentClient>);
     const { orchestrator, vmMap } = makeOrchestrator(client);
 
@@ -273,7 +288,7 @@ describe("workflow UI tool blocks", () => {
       format: "png",
       timeoutMs: 5_000,
     });
-    expect(client.uiFind).toHaveBeenCalledWith("", {
+    expect(client.uiFindDetailed).toHaveBeenCalledWith("", {
       windowTitle: undefined,
       findTimeoutMs: 2_000,
       timeoutMs: 5_000,
@@ -283,6 +298,8 @@ describe("workflow UI tool blocks", () => {
       width: 640,
       height: 480,
       bytes: Buffer.from("fake-png").byteLength,
+      screenshot_duration_ms: 11,
+      find_duration_ms: 31,
       element_count: 2,
       elements: [expect.objectContaining({ name: "Start" })],
       truncated: true,

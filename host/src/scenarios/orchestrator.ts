@@ -95,6 +95,14 @@ function resolveWorkflowScreenshotPath(
   return path.resolve(config.scenarios.screenshotDir, output);
 }
 
+function uiActionWorkflowResult(result: { success: boolean; error: string; durationMs?: number }) {
+  return {
+    success: result.success,
+    error: result.error,
+    duration_ms: result.durationMs ?? 0,
+  };
+}
+
 /**
  * Local helper so the class body can stay synchronous when wiring a
  * kernel-debug session. Importing BreakLog at the top is cheap (no
@@ -2121,7 +2129,7 @@ export class ScenarioOrchestrator {
           clickType: params.click_type as "left" | "right" | "double" | undefined,
           timeoutMs: params.timeout_ms as number | undefined,
         });
-        return JSON.stringify(result);
+        return JSON.stringify(uiActionWorkflowResult(result));
       }
 
       case "ui_key": {
@@ -2135,7 +2143,7 @@ export class ScenarioOrchestrator {
           repeat: params.repeat as number | undefined,
           timeoutMs: params.timeout_ms as number | undefined,
         });
-        return JSON.stringify(result);
+        return JSON.stringify(uiActionWorkflowResult(result));
       }
 
       case "ui_type": {
@@ -2151,7 +2159,7 @@ export class ScenarioOrchestrator {
           clearFirst: params.clear_first as boolean | undefined,
           timeoutMs: params.timeout_ms as number | undefined,
         });
-        return JSON.stringify(result);
+        return JSON.stringify(uiActionWorkflowResult(result));
       }
 
       case "ui_find": {
@@ -2159,14 +2167,15 @@ export class ScenarioOrchestrator {
         if (!client) throw new Error(`No guest client for VM '${vmName}'`);
         const selector = params.selector as string;
         if (!selector) throw new Error(`ui_find missing 'selector'`);
-        const elements = await client.uiFind(selector, {
+        const find = await client.uiFindDetailed(selector, {
           windowTitle: params.window_title as string | undefined,
           findTimeoutMs: params.find_timeout_ms as number | undefined,
           timeoutMs: params.timeout_ms as number | undefined,
         });
+        const elements = find.elements;
         // Return a structured result so `json_field` assertions can
         // query e.g. `count` or `elements[0].is_enabled`.
-        return JSON.stringify({ count: elements.length, elements });
+        return JSON.stringify({ count: elements.length, duration_ms: find.durationMs, elements });
       }
 
       case "ui_wait_for": {
@@ -2174,27 +2183,33 @@ export class ScenarioOrchestrator {
         if (!client) throw new Error(`No guest client for VM '${vmName}'`);
         const selector = params.selector as string;
         if (!selector) throw new Error(`ui_wait_for missing 'selector'`);
-        const elements = await client.uiFind(selector, {
+        const find = await client.uiFindDetailed(selector, {
           windowTitle: params.window_title as string | undefined,
           findTimeoutMs: params.find_timeout_ms as number | undefined,
           timeoutMs: params.timeout_ms as number | undefined,
         });
+        const elements = find.elements;
         const found = elements.length > 0;
         if (!found) {
           throw new Error(`UI element not found: ${selector}`);
         }
-        return JSON.stringify({ found, count: elements.length, elements });
+        return JSON.stringify({
+          found,
+          count: elements.length,
+          duration_ms: find.durationMs,
+          elements,
+        });
       }
 
       case "ui_screenshot": {
         const client = this.guestClients.get(vmName);
         if (!client) throw new Error(`No guest client for VM '${vmName}'`);
         const format = (params.format as string) ?? "png";
-        const buffer = await client.screenshot(
-          params.window_title as string | undefined,
+        const screenshot = await client.uiScreenshot({
+          windowTitle: params.window_title as string | undefined,
           format,
-          params.timeout_ms as number | undefined,
-        );
+          timeoutMs: params.timeout_ms as number | undefined,
+        });
         // Optional persistence to disk for visual debugging — when
         // `output` is set, write the bytes there. Either way return
         // size metadata so assertions can sanity-check the capture.
@@ -2203,11 +2218,12 @@ export class ScenarioOrchestrator {
           const fs = await import("node:fs");
           savedPath = resolveWorkflowScreenshotPath(params.output, this.config);
           fs.mkdirSync(path.dirname(savedPath), { recursive: true });
-          fs.writeFileSync(savedPath, buffer);
+          fs.writeFileSync(savedPath, screenshot.imageData);
         }
         return JSON.stringify({
-          format,
-          bytes: buffer.length,
+          format: screenshot.format,
+          bytes: screenshot.imageData.length,
+          duration_ms: screenshot.durationMs,
           saved_path: savedPath ?? null,
         });
       }
@@ -2221,18 +2237,19 @@ export class ScenarioOrchestrator {
           1,
           Math.min(Math.floor((params.max_elements as number | undefined) ?? 50), 200),
         );
-        const [screenshot, elements] = await Promise.all([
+        const [screenshot, find] = await Promise.all([
           client.uiScreenshot({
             windowTitle: params.window_title as string | undefined,
             format,
             timeoutMs,
           }),
-          client.uiFind("", {
+          client.uiFindDetailed("", {
             windowTitle: params.window_title as string | undefined,
             findTimeoutMs: params.find_timeout_ms as number | undefined,
             timeoutMs,
           }),
         ]);
+        const elements = find.elements;
         let savedPath: string | undefined;
         if (typeof params.output === "string" && params.output.length > 0) {
           const fs = await import("node:fs");
@@ -2245,6 +2262,8 @@ export class ScenarioOrchestrator {
           width: screenshot.width,
           height: screenshot.height,
           bytes: screenshot.imageData.length,
+          screenshot_duration_ms: screenshot.durationMs,
+          find_duration_ms: find.durationMs,
           element_count: elements.length,
           elements: elements.slice(0, maxElements),
           truncated: elements.length > maxElements,

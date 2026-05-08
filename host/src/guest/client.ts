@@ -271,6 +271,18 @@ export interface UiScreenshot {
   format: string;
   width: number;
   height: number;
+  durationMs: number;
+}
+
+export interface UiActionResult {
+  success: boolean;
+  error: string;
+  durationMs: number;
+}
+
+export interface UiFindResult {
+  elements: UiElement[];
+  durationMs: number;
 }
 
 // ── Proto Loading (lazy) ──────────────────────────────────────────
@@ -1171,11 +1183,23 @@ export class GuestAgentClient {
       () =>
         unaryCall<
           { windowTitle: string; format: string },
-          { imageData: Buffer; format: string; width: number; height: number }
-        >(this.client, "uIScreenshot", {
-          windowTitle: options.windowTitle ?? "",
-          format: options.format ?? "png",
-        }, deadline, this.options.authToken),
+          {
+            imageData: Buffer;
+            format: string;
+            width: number;
+            height: number;
+            durationMs?: number;
+          }
+        >(
+          this.client,
+          "uIScreenshot",
+          {
+            windowTitle: options.windowTitle ?? "",
+            format: options.format ?? "png",
+          },
+          deadline,
+          this.options.authToken,
+        ),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
       this.options.maxRetryDelayMs,
@@ -1185,6 +1209,7 @@ export class GuestAgentClient {
       format: response.format,
       width: response.width,
       height: response.height,
+      durationMs: response.durationMs ?? 0,
     };
   }
 
@@ -1195,19 +1220,30 @@ export class GuestAgentClient {
       clickType?: "left" | "right" | "double";
       timeoutMs?: number;
     } = {},
-  ): Promise<{ success: boolean; error: string }> {
+  ): Promise<UiActionResult> {
     const deadline = options.timeoutMs ?? this.options.defaultTimeoutMs;
-    return withRetry(
+    const response = await withRetry(
       () =>
-        unaryCall(this.client, "uIClick", {
-          selector,
-          windowTitle: options.windowTitle ?? "",
-          clickType: options.clickType ?? "left",
-        }, deadline, this.options.authToken),
+        unaryCall<unknown, { success: boolean; error: string; durationMs?: number }>(
+          this.client,
+          "uIClick",
+          {
+            selector,
+            windowTitle: options.windowTitle ?? "",
+            clickType: options.clickType ?? "left",
+          },
+          deadline,
+          this.options.authToken,
+        ),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
       this.options.maxRetryDelayMs,
     );
+    return {
+      success: response.success,
+      error: response.error,
+      durationMs: response.durationMs ?? 0,
+    };
   }
 
   async uiType(
@@ -1218,20 +1254,31 @@ export class GuestAgentClient {
       clearFirst?: boolean;
       timeoutMs?: number;
     } = {},
-  ): Promise<{ success: boolean; error: string }> {
+  ): Promise<UiActionResult> {
     const deadline = options.timeoutMs ?? this.options.defaultTimeoutMs;
-    return withRetry(
+    const response = await withRetry(
       () =>
-        unaryCall(this.client, "uIType", {
-          text,
-          selector: options.selector ?? "",
-          windowTitle: options.windowTitle ?? "",
-          clearFirst: options.clearFirst ?? false,
-        }, deadline, this.options.authToken),
+        unaryCall<unknown, { success: boolean; error: string; durationMs?: number }>(
+          this.client,
+          "uIType",
+          {
+            text,
+            selector: options.selector ?? "",
+            windowTitle: options.windowTitle ?? "",
+            clearFirst: options.clearFirst ?? false,
+          },
+          deadline,
+          this.options.authToken,
+        ),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
       this.options.maxRetryDelayMs,
     );
+    return {
+      success: response.success,
+      error: response.error,
+      durationMs: response.durationMs ?? 0,
+    };
   }
 
   async uiKey(
@@ -1242,20 +1289,66 @@ export class GuestAgentClient {
       repeat?: number;
       timeoutMs?: number;
     } = {},
-  ): Promise<{ success: boolean; error: string }> {
+  ): Promise<UiActionResult> {
     const deadline = options.timeoutMs ?? this.options.defaultTimeoutMs;
-    return withRetry(
+    const response = await withRetry(
       () =>
-        unaryCall(this.client, "uIKey", {
-          keys,
-          selector: options.selector ?? "",
-          windowTitle: options.windowTitle ?? "",
-          repeat: options.repeat ?? 1,
-        }, deadline, this.options.authToken),
+        unaryCall<unknown, { success: boolean; error: string; durationMs?: number }>(
+          this.client,
+          "uIKey",
+          {
+            keys,
+            selector: options.selector ?? "",
+            windowTitle: options.windowTitle ?? "",
+            repeat: options.repeat ?? 1,
+          },
+          deadline,
+          this.options.authToken,
+        ),
       this.options.maxRetries,
       this.options.initialRetryDelayMs,
       this.options.maxRetryDelayMs,
     );
+    return {
+      success: response.success,
+      error: response.error,
+      durationMs: response.durationMs ?? 0,
+    };
+  }
+
+  async uiFindDetailed(
+    selector: string,
+    options: {
+      windowTitle?: string;
+      findTimeoutMs?: number;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<UiFindResult> {
+    const deadline = options.timeoutMs ?? this.options.defaultTimeoutMs;
+    const response = await withRetry(
+      () =>
+        unaryCall<
+          { selector: string; windowTitle: string; timeoutMs: number },
+          { elements: UiElement[]; durationMs?: number }
+        >(
+          this.client,
+          "uIFind",
+          {
+            selector,
+            windowTitle: options.windowTitle ?? "",
+            timeoutMs: options.findTimeoutMs ?? 5_000,
+          },
+          deadline,
+          this.options.authToken,
+        ),
+      this.options.maxRetries,
+      this.options.initialRetryDelayMs,
+      this.options.maxRetryDelayMs,
+    );
+    return {
+      elements: response.elements ?? [],
+      durationMs: response.durationMs ?? 0,
+    };
   }
 
   async uiFind(
@@ -1266,22 +1359,7 @@ export class GuestAgentClient {
       timeoutMs?: number;
     } = {},
   ): Promise<UiElement[]> {
-    const deadline = options.timeoutMs ?? this.options.defaultTimeoutMs;
-    const response = await withRetry(
-      () =>
-        unaryCall<
-          { selector: string; windowTitle: string; timeoutMs: number },
-          { elements: UiElement[] }
-        >(this.client, "uIFind", {
-          selector,
-          windowTitle: options.windowTitle ?? "",
-          timeoutMs: options.findTimeoutMs ?? 5_000,
-        }, deadline, this.options.authToken),
-      this.options.maxRetries,
-      this.options.initialRetryDelayMs,
-      this.options.maxRetryDelayMs,
-    );
-    return response.elements ?? [];
+    return (await this.uiFindDetailed(selector, options)).elements;
   }
 
 }

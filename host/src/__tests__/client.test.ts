@@ -176,10 +176,12 @@ describe("GuestAgentClient", () => {
           format: "png",
           width: 10,
           height: 20,
+          durationMs: 11,
         });
       });
       this.uIFind = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
         cb(null, {
+          durationMs: 12,
           elements: [
             {
               name: "Save",
@@ -197,15 +199,21 @@ describe("GuestAgentClient", () => {
           ],
         });
       });
-        this.uIClick = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
-          cb(null, { success: true, error: "" });
-        });
-        this.uIKey = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
-          cb(null, { success: true, error: "" });
-        });
-        this.uIType = vi.fn((_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
-          cb(null, { success: true, error: "" });
-        });
+      this.uIClick = vi.fn(
+        (_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+          cb(null, { success: true, error: "", durationMs: 13 });
+        },
+      );
+      this.uIKey = vi.fn(
+        (_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+          cb(null, { success: true, error: "", durationMs: 14 });
+        },
+      );
+      this.uIType = vi.fn(
+        (_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+          cb(null, { success: true, error: "", durationMs: 15 });
+        },
+      );
       this.close = vi.fn();
     });
 
@@ -331,19 +339,27 @@ describe("GuestAgentClient", () => {
       format: "png",
       width: 10,
       height: 20,
+      durationMs: 11,
     });
     await expect(client.uiFind("[name='Save']")).resolves.toHaveLength(1);
+    await expect(client.uiFindDetailed("[name='Save']")).resolves.toMatchObject({
+      durationMs: 12,
+      elements: [expect.objectContaining({ name: "Save" })],
+    });
     await expect(client.uiClick("[name='Save']")).resolves.toEqual({
       success: true,
       error: "",
+      durationMs: 13,
     });
     await expect(client.uiKey("{ENTER}", { selector: "[name='Save']" })).resolves.toEqual({
       success: true,
       error: "",
+      durationMs: 14,
     });
     await expect(client.uiType("hello", { selector: "[automationId='input']" })).resolves.toEqual({
       success: true,
       error: "",
+      durationMs: 15,
     });
   });
 });

@@ -26,20 +26,24 @@ function makeClient(overrides: Partial<GuestAgentClient> = {}): GuestAgentClient
       format: "png",
       width: 800,
       height: 600,
+      durationMs: 11,
     }),
-    uiFind: vi.fn().mockResolvedValue([
-      {
-        name: "Start",
-        automationId: "StartButton",
-        controlType: "Button",
-        boundingBox: { x: 0, y: 0, width: 48, height: 48 },
-        isEnabled: true,
-        isVisible: true,
-      },
-    ]),
-    uiClick: vi.fn().mockResolvedValue({ success: true, error: "" }),
-    uiKey: vi.fn().mockResolvedValue({ success: true, error: "" }),
-    uiType: vi.fn().mockResolvedValue({ success: true, error: "" }),
+    uiFindDetailed: vi.fn().mockResolvedValue({
+      durationMs: 12,
+      elements: [
+        {
+          name: "Start",
+          automationId: "StartButton",
+          controlType: "Button",
+          boundingBox: { x: 0, y: 0, width: 48, height: 48 },
+          isEnabled: true,
+          isVisible: true,
+        },
+      ],
+    }),
+    uiClick: vi.fn().mockResolvedValue({ success: true, error: "", durationMs: 13 }),
+    uiKey: vi.fn().mockResolvedValue({ success: true, error: "", durationMs: 14 }),
+    uiType: vi.fn().mockResolvedValue({ success: true, error: "", durationMs: 15 }),
     ...overrides,
   } as unknown as GuestAgentClient;
 }
@@ -53,34 +57,37 @@ function toolsFor(client: GuestAgentClient) {
 describe("VM UI MCP tools", () => {
   it("captures a combined screenshot and UI element snapshot", async () => {
     const client = makeClient({
-      uiFind: vi.fn().mockResolvedValue([
-        {
-          name: "Start",
-          automationId: "StartButton",
-          controlType: "Button",
-          className: "Button",
-          isEnabled: true,
-          isVisible: true,
-          x: 0,
-          y: 0,
-          width: 48,
-          height: 48,
-          value: "",
-        },
-        {
-          name: "Search",
-          automationId: "SearchBox",
-          controlType: "Edit",
-          className: "TextBox",
-          isEnabled: true,
-          isVisible: true,
-          x: 50,
-          y: 0,
-          width: 300,
-          height: 48,
-          value: "",
-        },
-      ]),
+      uiFindDetailed: vi.fn().mockResolvedValue({
+        durationMs: 22,
+        elements: [
+          {
+            name: "Start",
+            automationId: "StartButton",
+            controlType: "Button",
+            className: "Button",
+            isEnabled: true,
+            isVisible: true,
+            x: 0,
+            y: 0,
+            width: 48,
+            height: 48,
+            value: "",
+          },
+          {
+            name: "Search",
+            automationId: "SearchBox",
+            controlType: "Edit",
+            className: "TextBox",
+            isEnabled: true,
+            isVisible: true,
+            x: 50,
+            y: 0,
+            width: 300,
+            height: 48,
+            value: "",
+          },
+        ],
+      }),
     } as Partial<GuestAgentClient>);
     const { tools } = toolsFor(client);
 
@@ -98,7 +105,7 @@ describe("VM UI MCP tools", () => {
       format: "png",
       timeoutMs: 12_000,
     });
-    expect(client.uiFind).toHaveBeenCalledWith("", {
+    expect(client.uiFindDetailed).toHaveBeenCalledWith("", {
       windowTitle: "Shell",
       findTimeoutMs: 2_000,
       timeoutMs: 12_000,
@@ -110,6 +117,8 @@ describe("VM UI MCP tools", () => {
     });
     expect(JSON.parse(result.content[1].text ?? "{}")).toMatchObject({
       vm: "Win11_test",
+      screenshot_duration_ms: 11,
+      find_duration_ms: 22,
       element_count: 2,
       elements: [expect.objectContaining({ name: "Start" })],
       truncated: true,
@@ -143,6 +152,7 @@ describe("VM UI MCP tools", () => {
       format: "png",
       width: 800,
       height: 600,
+      duration_ms: 11,
     });
   });
 
@@ -158,34 +168,40 @@ describe("VM UI MCP tools", () => {
       timeout_ms: 10_000,
     });
 
-    expect(client.uiFind).toHaveBeenCalledWith("[name='Start']", {
+    expect(client.uiFindDetailed).toHaveBeenCalledWith("[name='Start']", {
       windowTitle: "Shell",
       findTimeoutMs: 3_000,
       timeoutMs: 10_000,
     });
-    expect(JSON.parse(result.content[0].text ?? "{}").elements).toHaveLength(1);
+    expect(JSON.parse(result.content[0].text ?? "{}")).toMatchObject({
+      duration_ms: 12,
+      elements: [expect.objectContaining({ name: "Start" })],
+    });
   });
 
   it("waits for UI elements and marks absent elements as MCP errors", async () => {
     const client = makeClient({
-      uiFind: vi
+      uiFindDetailed: vi
         .fn()
-        .mockResolvedValueOnce([
-          {
-            name: "Start",
-            automationId: "StartButton",
-            controlType: "Button",
-            className: "Button",
-            isEnabled: true,
-            isVisible: true,
-            x: 0,
-            y: 0,
-            width: 48,
-            height: 48,
-            value: "",
-          },
-        ])
-        .mockResolvedValueOnce([]),
+        .mockResolvedValueOnce({
+          durationMs: 31,
+          elements: [
+            {
+              name: "Start",
+              automationId: "StartButton",
+              controlType: "Button",
+              className: "Button",
+              isEnabled: true,
+              isVisible: true,
+              x: 0,
+              y: 0,
+              width: 48,
+              height: 48,
+              value: "",
+            },
+          ],
+        })
+        .mockResolvedValueOnce({ durationMs: 32, elements: [] }),
     } as Partial<GuestAgentClient>);
     const { tools } = toolsFor(client);
 
@@ -201,7 +217,7 @@ describe("VM UI MCP tools", () => {
       selector: "[name='Missing']",
     });
 
-    expect(client.uiFind).toHaveBeenNthCalledWith(1, "[name='Start']", {
+    expect(client.uiFindDetailed).toHaveBeenNthCalledWith(1, "[name='Start']", {
       windowTitle: "Shell",
       findTimeoutMs: 3_000,
       timeoutMs: 10_000,
@@ -211,12 +227,14 @@ describe("VM UI MCP tools", () => {
       selector: "[name='Start']",
       found: true,
       count: 1,
+      duration_ms: 31,
       error: "",
     });
     expect(found.isError).toBe(false);
     expect(JSON.parse(missing.content[0].text ?? "{}")).toMatchObject({
       found: false,
       count: 0,
+      duration_ms: 32,
       error: "UI element not found: [name='Missing']",
     });
     expect(missing.isError).toBe(true);
@@ -224,9 +242,9 @@ describe("VM UI MCP tools", () => {
 
   it("marks failed click and type operations as MCP errors", async () => {
     const client = makeClient({
-      uiClick: vi.fn().mockResolvedValue({ success: false, error: "not found" }),
-      uiKey: vi.fn().mockResolvedValue({ success: false, error: "bad key" }),
-      uiType: vi.fn().mockResolvedValue({ success: false, error: "not focused" }),
+      uiClick: vi.fn().mockResolvedValue({ success: false, error: "not found", durationMs: 41 }),
+      uiKey: vi.fn().mockResolvedValue({ success: false, error: "bad key", durationMs: 42 }),
+      uiType: vi.fn().mockResolvedValue({ success: false, error: "not focused", durationMs: 43 }),
     } as Partial<GuestAgentClient>);
     const { tools } = toolsFor(client);
 
@@ -267,7 +285,16 @@ describe("VM UI MCP tools", () => {
     });
     expect(click.isError).toBe(true);
     expect(key.isError).toBe(true);
-    expect(JSON.parse(key.content[0].text ?? "{}").error).toBe("bad key");
+    expect(JSON.parse(click.content[0].text ?? "{}")).toMatchObject({
+      vm: "Win11_test",
+      error: "not found",
+      duration_ms: 41,
+    });
+    expect(JSON.parse(key.content[0].text ?? "{}")).toMatchObject({
+      vm: "Win11_test",
+      error: "bad key",
+      duration_ms: 42,
+    });
     expect(type.isError).toBe(true);
   });
 

@@ -16,6 +16,15 @@ function sanitizeRepeat(repeat: number | undefined): number {
   return Math.max(1, Math.min(Math.floor(repeat), 100));
 }
 
+function uiActionJson(vm: string, result: { success: boolean; error: string; durationMs?: number }) {
+  return {
+    vm,
+    success: result.success,
+    error: result.error,
+    duration_ms: result.durationMs ?? 0,
+  };
+}
+
 export function createVmUiTools(
   getClient: (vmName: string) => Promise<GuestAgentClient>,
 ): ToolDefinition[] {
@@ -102,18 +111,19 @@ export function createVmUiTools(
         const windowTitle = (params.window_title as string | undefined) ?? "";
         const format = (params.format as string | undefined) ?? "png";
         const client = await getClient(name);
-        const [screenshot, elements] = await Promise.all([
+        const [screenshot, find] = await Promise.all([
           client.uiScreenshot({
             windowTitle,
             format,
             timeoutMs,
           }),
-          client.uiFind("", {
+          client.uiFindDetailed("", {
             windowTitle,
             findTimeoutMs,
             timeoutMs,
           }),
         ]);
+        const elements = find.elements;
         return {
           content: [
             {
@@ -129,6 +139,8 @@ export function createVmUiTools(
                   format: screenshot.format,
                   width: screenshot.width,
                   height: screenshot.height,
+                  screenshot_duration_ms: screenshot.durationMs,
+                  find_duration_ms: find.durationMs,
                   element_count: elements.length,
                   elements: elements.slice(0, maxElements),
                   truncated: elements.length > maxElements,
@@ -179,6 +191,7 @@ export function createVmUiTools(
                   format: screenshot.format,
                   width: screenshot.width,
                   height: screenshot.height,
+                  duration_ms: screenshot.durationMs,
                 },
                 null,
                 2,
@@ -209,13 +222,14 @@ export function createVmUiTools(
       handler: async (params): Promise<ToolResult> => {
         const name = sanitizeVmName(params.name as string);
         const client = await getClient(name);
-        const elements = await client.uiFind(params.selector as string, {
+        const find = await client.uiFindDetailed(params.selector as string, {
           windowTitle: (params.window_title as string | undefined) ?? "",
           findTimeoutMs: sanitizeTimeout(params.find_timeout_ms as number | undefined, 30_000),
           timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
         });
+        const elements = find.elements;
         return {
-          content: [{ type: "text", text: JSON.stringify({ elements }, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify({ elements, duration_ms: find.durationMs }, null, 2) }],
         };
       },
     },
@@ -241,11 +255,12 @@ export function createVmUiTools(
         const name = sanitizeVmName(params.name as string);
         const selector = params.selector as string;
         const client = await getClient(name);
-        const elements = await client.uiFind(selector, {
+        const find = await client.uiFindDetailed(selector, {
           windowTitle: (params.window_title as string | undefined) ?? "",
           findTimeoutMs: sanitizeTimeout(params.find_timeout_ms as number | undefined, 30_000),
           timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
         });
+        const elements = find.elements;
         const found = elements.length > 0;
         return {
           content: [
@@ -257,6 +272,7 @@ export function createVmUiTools(
                   selector,
                   found,
                   count: elements.length,
+                  duration_ms: find.durationMs,
                   elements,
                   error: found ? "" : `UI element not found: ${selector}`,
                 },
@@ -296,7 +312,7 @@ export function createVmUiTools(
           timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
         });
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(uiActionJson(name, result), null, 2) }],
           isError: !result.success,
         };
       },
@@ -336,7 +352,7 @@ export function createVmUiTools(
           content: [
             {
               type: "text",
-              text: JSON.stringify({ vm: name, ...result }, null, 2),
+              text: JSON.stringify(uiActionJson(name, result), null, 2),
             },
           ],
           isError: !result.success,
@@ -369,7 +385,7 @@ export function createVmUiTools(
           timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
         });
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(uiActionJson(name, result), null, 2) }],
           isError: !result.success,
         };
       },
