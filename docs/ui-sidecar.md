@@ -84,9 +84,11 @@ untargeted input still goes to whatever window currently owns focus.
 
 `vm_ui_key` accepts the cross-engine subset Signalman uses in smoke and product
 flows today: `{ENTER}`, `{ESC}` / `{ESCAPE}`, `{TAB}`, `{BACKSPACE}` / `{BS}`,
-`~`, single characters, and one-letter Ctrl chords such as `^a`. The PowerShell
-engines still accept broader Windows SendKeys syntax, but scenarios intended to
-run on the native engine should stay within the documented subset.
+`{SPACE}`, `~`, alphanumeric key sequences, and one-letter Ctrl chords such as
+`^a`. Native key sequences can combine tokens, for example
+`{TAB}{TAB}{ENTER}` or `^a{BACKSPACE}`. The PowerShell engines still accept
+broader Windows SendKeys syntax, but scenarios intended to run on the native
+engine should stay within the documented subset.
 
 More complex desktop workflows still need richer eventing and eventually a
 first-class browser/UI observation loop. Native UI Automation is the preferred
