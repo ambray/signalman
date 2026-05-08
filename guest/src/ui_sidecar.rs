@@ -52,47 +52,12 @@ impl UiAutomationEngine {
         }
     }
 
+    fn backend(self) -> PowershellUiBackend {
+        PowershellUiBackend { engine: self }
+    }
+
     fn execute(self, method: &str, params: &Value) -> anyhow::Result<Value> {
-        match method {
-            "ui.health" => to_value(self.health(), method),
-            "ui.find" => to_value(self.find(parse_params(method, params)?)?, method),
-            "ui.click" => to_value(self.click(parse_params(method, params)?)?, method),
-            "ui.type" => to_value(self.type_text(parse_params(method, params)?)?, method),
-            "ui.key" => to_value(self.key(parse_params(method, params)?)?, method),
-            "ui.screenshot" => to_value(self.screenshot(parse_params(method, params)?)?, method),
-            other => Err(anyhow!("unknown UI sidecar method '{other}'")),
-        }
-    }
-
-    fn health(self) -> UiHealthResult {
-        UiHealthResult {
-            engine: self.name().to_string(),
-            pid: std::process::id(),
-            uptime_ms: START_TIME
-                .get()
-                .map(|started| started.elapsed().as_millis() as u64)
-                .unwrap_or(0),
-        }
-    }
-
-    fn find(self, params: UiFindParams) -> anyhow::Result<UiFindResult> {
-        powershell_ui_find(self, &params)
-    }
-
-    fn click(self, params: UiClickParams) -> anyhow::Result<UiActionResult> {
-        powershell_ui_click(self, &params)
-    }
-
-    fn type_text(self, params: UiTypeParams) -> anyhow::Result<UiActionResult> {
-        powershell_ui_type(self, &params)
-    }
-
-    fn key(self, params: UiKeyParams) -> anyhow::Result<UiActionResult> {
-        powershell_ui_key(self, &params)
-    }
-
-    fn screenshot(self, params: UiScreenshotParams) -> anyhow::Result<UiScreenshotResult> {
-        powershell_ui_screenshot(self, &params)
+        execute_backend(&self.backend(), method, params)
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -109,6 +74,58 @@ impl UiAutomationEngine {
             Self::PowershellProcess => run_powershell_process_json(script),
             Self::PowershellHelper => run_powershell_helper_json(script),
         }
+    }
+}
+
+trait UiAutomationBackend {
+    fn engine_name(&self) -> &'static str;
+
+    fn health(&self) -> UiHealthResult {
+        UiHealthResult {
+            engine: self.engine_name().to_string(),
+            pid: std::process::id(),
+            uptime_ms: START_TIME
+                .get()
+                .map(|started| started.elapsed().as_millis() as u64)
+                .unwrap_or(0),
+        }
+    }
+
+    fn find(&self, params: &UiFindParams) -> anyhow::Result<UiFindResult>;
+    fn click(&self, params: &UiClickParams) -> anyhow::Result<UiActionResult>;
+    fn type_text(&self, params: &UiTypeParams) -> anyhow::Result<UiActionResult>;
+    fn key(&self, params: &UiKeyParams) -> anyhow::Result<UiActionResult>;
+    fn screenshot(&self, params: &UiScreenshotParams) -> anyhow::Result<UiScreenshotResult>;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PowershellUiBackend {
+    engine: UiAutomationEngine,
+}
+
+impl UiAutomationBackend for PowershellUiBackend {
+    fn engine_name(&self) -> &'static str {
+        self.engine.name()
+    }
+
+    fn find(&self, params: &UiFindParams) -> anyhow::Result<UiFindResult> {
+        powershell_ui_find(self.engine, params)
+    }
+
+    fn click(&self, params: &UiClickParams) -> anyhow::Result<UiActionResult> {
+        powershell_ui_click(self.engine, params)
+    }
+
+    fn type_text(&self, params: &UiTypeParams) -> anyhow::Result<UiActionResult> {
+        powershell_ui_type(self.engine, params)
+    }
+
+    fn key(&self, params: &UiKeyParams) -> anyhow::Result<UiActionResult> {
+        powershell_ui_key(self.engine, params)
+    }
+
+    fn screenshot(&self, params: &UiScreenshotParams) -> anyhow::Result<UiScreenshotResult> {
+        powershell_ui_screenshot(self.engine, params)
     }
 }
 
@@ -358,7 +375,7 @@ fn handle_request(req: SidecarRequest) -> SidecarResponse {
 }
 
 fn sidecar_health() -> Value {
-    serde_json::to_value(UiAutomationEngine::selected().health())
+    serde_json::to_value(UiAutomationEngine::selected().backend().health())
         .expect("UI health result serializes")
 }
 
@@ -372,6 +389,21 @@ where
 {
     serde_json::from_value(params.clone())
         .with_context(|| format!("invalid parameters for UI sidecar method '{method}'"))
+}
+
+fn execute_backend<B>(backend: &B, method: &str, params: &Value) -> anyhow::Result<Value>
+where
+    B: UiAutomationBackend,
+{
+    match method {
+        "ui.health" => to_value(backend.health(), method),
+        "ui.find" => to_value(backend.find(&parse_params(method, params)?)?, method),
+        "ui.click" => to_value(backend.click(&parse_params(method, params)?)?, method),
+        "ui.type" => to_value(backend.type_text(&parse_params(method, params)?)?, method),
+        "ui.key" => to_value(backend.key(&parse_params(method, params)?)?, method),
+        "ui.screenshot" => to_value(backend.screenshot(&parse_params(method, params)?)?, method),
+        other => Err(anyhow!("unknown UI sidecar method '{other}'")),
+    }
 }
 
 fn parse_response<T>(method: &str, value: Value) -> anyhow::Result<T>
@@ -911,6 +943,16 @@ mod tests {
         assert_eq!(result.elements.len(), 1);
         assert_eq!(result.elements[0].name, "Save");
         assert_eq!(result.elements[0].value, "");
+    }
+
+    #[test]
+    fn powershell_backend_reports_selected_engine_name() {
+        let backend = UiAutomationEngine::PowershellHelper.backend();
+        assert_eq!(backend.engine_name(), POWERSHELL_HELPER_ENGINE);
+
+        let health = backend.health();
+        assert_eq!(health.engine, POWERSHELL_HELPER_ENGINE);
+        assert_eq!(health.pid, std::process::id());
     }
 
     #[test]
