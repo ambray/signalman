@@ -41,6 +41,9 @@ The host registers these MCP tools when guest-agent access is available:
 - `vm_ui_key`: send a Windows SendKeys chord or special-key sequence.
 - `vm_ui_type`: type text into the active session, optionally targeting an element first.
 
+Scenario workflows use the same operation names without the `vm_` prefix,
+including `ui_ensure_sidecar` for self-contained live smokes.
+
 UI tool responses include per-RPC timing metadata. Single operations report
 `duration_ms`; snapshots split that into `screenshot_duration_ms` and
 `find_duration_ms` so LLM-enabled tests can distinguish slow capture from slow
@@ -54,9 +57,11 @@ Selectors currently support these exact forms:
 [className='Button']
 [controlType='Button']
 [controlType='ControlType.Button']
+[value='typed text']
 ```
 
 Plain selector text falls back to fuzzy name matching or exact automation id matching.
+`[value='...']` matches exact current Value-pattern text for controls that expose it.
 
 ## Deployment Pattern
 

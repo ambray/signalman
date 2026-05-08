@@ -1,7 +1,15 @@
 assertions:
-  - id: sidecar-reachable
+  - id: sidecar-ensured
     type: json_field
     source: step-0
+    field: ready
+    expected: true
+    severity: critical
+    description: "The scenario should start or confirm the native user-session UI sidecar"
+
+  - id: sidecar-reachable
+    type: json_field
+    source: step-1
     field: sidecar_reachable
     expected: true
     severity: critical
@@ -9,7 +17,7 @@ assertions:
 
   - id: native-engine-active
     type: json_field
-    source: step-0
+    source: step-1
     field: engine
     expected: native
     severity: critical
@@ -17,7 +25,7 @@ assertions:
 
   - id: screenshot-captured
     type: json_field
-    source: step-1
+    source: step-2
     field: bytes
     comparison: gt
     expected: 0
@@ -26,7 +34,7 @@ assertions:
 
   - id: screenshot-format
     type: json_field
-    source: step-1
+    source: step-2
     field: format
     expected: png
     severity: high
@@ -34,7 +42,7 @@ assertions:
 
   - id: search-button-ready
     type: json_field
-    source: step-2
+    source: step-3
     field: found
     expected: true
     severity: critical
@@ -42,7 +50,7 @@ assertions:
 
   - id: search-button-clicked
     type: json_field
-    source: step-3
+    source: step-4
     field: success
     expected: true
     severity: critical
@@ -50,7 +58,7 @@ assertions:
 
   - id: search-box-ready
     type: json_field
-    source: step-4
+    source: step-5
     field: found
     expected: true
     severity: critical
@@ -58,7 +66,7 @@ assertions:
 
   - id: text-typed
     type: json_field
-    source: step-6
+    source: step-7
     field: success
     expected: true
     severity: critical
@@ -66,15 +74,24 @@ assertions:
 
   - id: typed-text-observed
     type: json_field
-    source: step-8
+    source: step-9
     field: elements[0].value
     expected: "signalman native smoke"
     severity: critical
     description: "The selected edit control should report the typed value through UI Automation"
 
+  - id: typed-value-selector-found
+    type: json_field
+    source: step-10
+    field: count
+    comparison: gte
+    expected: 1
+    severity: critical
+    description: "The typed query should be discoverable through an exact value selector"
+
   - id: typed-query-indexed
     type: json_field
-    source: step-9
+    source: step-11
     field: count
     comparison: gte
     expected: 1
@@ -83,7 +100,7 @@ assertions:
 
   - id: snapshot-captured
     type: json_field
-    source: step-10
+    source: step-12
     field: bytes
     comparison: gt
     expected: 0
@@ -92,7 +109,7 @@ assertions:
 
   - id: snapshot-elements-found
     type: json_field
-    source: step-10
+    source: step-12
     field: element_count
     comparison: gt
     expected: 0
@@ -101,7 +118,7 @@ assertions:
 
   - id: key-sent
     type: json_field
-    source: step-11
+    source: step-13
     field: success
     expected: true
     severity: critical

@@ -117,6 +117,40 @@ function makeOrchestrator(client: GuestAgentClient) {
 }
 
 describe("workflow UI tool blocks", () => {
+  it("ensures the user-session UI sidecar from workflow tool blocks", async () => {
+    const client = makeClient();
+    const { orchestrator, vmMap } = makeOrchestrator(client);
+
+    const ensured = await orchestrator.executeToolBlock(
+      "ui_ensure_sidecar",
+      {
+        vm: "endpoint-1",
+        username: "test",
+        engine: "native",
+        run_now: true,
+        wait_ready_ms: 15_000,
+        timeout_ms: 30_000,
+      },
+      vmMap,
+    );
+
+    expect(client.runCommand).toHaveBeenCalledWith(
+      "powershell.exe",
+      expect.arrayContaining(["-EncodedCommand", expect.any(String)]),
+      { timeoutMs: 30_000, runAs: "SYSTEM", maxRetries: 1 },
+    );
+    expect(JSON.parse(ensured)).toMatchObject({
+      task_name: "SignalmanUiSidecar",
+      username: "test",
+      bind: "127.0.0.1:50151",
+      ready: true,
+      wait_ready_ms: 5_000,
+    });
+    await expect(
+      orchestrator.executeToolBlock("ui_ensure_sidecar", { vm: "endpoint-1" }, vmMap),
+    ).rejects.toThrow("ui_ensure_sidecar missing 'username'");
+  });
+
   it("routes ui_find, ui_click, and ui_type to the VM guest client", async () => {
     const client = makeClient();
     const { orchestrator, vmMap } = makeOrchestrator(client);
