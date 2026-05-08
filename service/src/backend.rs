@@ -905,12 +905,20 @@ fn credential_prelude(credentials: Option<&GuestCredentials>) -> BackendResult<S
     };
     validate_credential_field("username", &credentials.username)?;
     validate_credential_field("password", &credentials.password)?;
-    let username = escape_powershell_arg(&credentials.username);
+    let username = escape_powershell_arg(&normalize_guest_username(&credentials.username));
     let password = escape_powershell_arg(&credentials.password);
     Ok(format!(
         "$securePassword = ConvertTo-SecureString '{password}' -AsPlainText -Force; \
          $credential = [System.Management.Automation.PSCredential]::new('{username}', $securePassword);"
     ))
+}
+
+fn normalize_guest_username(username: &str) -> String {
+    if username.contains('\\') || username.contains('@') {
+        username.to_string()
+    } else {
+        format!(".\\{username}")
+    }
 }
 
 fn validate_credential_field(name: &str, value: &str) -> BackendResult<()> {
@@ -1202,7 +1210,22 @@ mod tests {
         let calls = runner.calls.lock().unwrap();
         assert!(calls[0].0.contains("ConvertTo-SecureString 'secret'"));
         assert!(calls[0].0.contains("PSCredential"));
+        assert!(calls[0].0.contains("PSCredential]::new('.\\test'"));
         assert!(calls[0].0.contains("-Credential $credential"));
+    }
+
+    #[test]
+    fn guest_credentials_qualify_bare_local_usernames() {
+        assert_eq!(normalize_guest_username("test"), ".\\test");
+        assert_eq!(normalize_guest_username(".\\test"), ".\\test");
+        assert_eq!(
+            normalize_guest_username("DESKTOP-TE50DOG\\test"),
+            "DESKTOP-TE50DOG\\test"
+        );
+        assert_eq!(
+            normalize_guest_username("test@example.local"),
+            "test@example.local"
+        );
     }
 
     #[tokio::test]
