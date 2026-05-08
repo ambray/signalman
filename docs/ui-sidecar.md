@@ -15,8 +15,8 @@ STA PowerShell process for each UI action. For lower-latency local validation,
 set `SIGNALMAN_UI_ENGINE=powershell-helper` on the sidecar process. That keeps a
 single STA PowerShell helper alive and sends action scripts over stdin/stdout.
 `SIGNALMAN_UI_ENGINE=native` is reserved for the in-process Windows UI
-Automation backend; it currently reports health and returns an explicit
-not-implemented error for actions.
+Automation backend; it currently reports health, captures screenshots natively,
+and returns an explicit not-implemented error for UI Automation actions.
 
 ## MCP Tools
 
