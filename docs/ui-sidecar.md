@@ -10,6 +10,11 @@ signalman-guest.exe --ui-sidecar --ui-sidecar-bind 127.0.0.1:50151
 
 The service-facing guest agent proxies UI RPCs to this loopback sidecar. The sidecar address defaults to `127.0.0.1:50151`; override it for the service process with `SIGNALMAN_UI_SIDECAR_ADDR` and for the sidecar process with `SIGNALMAN_UI_SIDECAR_BIND`.
 
+The default automation engine is `powershell-process`, which launches a fresh
+STA PowerShell process for each UI action. For lower-latency local validation,
+set `SIGNALMAN_UI_ENGINE=powershell-helper` on the sidecar process. That keeps a
+single STA PowerShell helper alive and sends action scripts over stdin/stdout.
+
 ## MCP Tools
 
 The host registers these MCP tools when guest-agent access is available:
@@ -64,6 +69,6 @@ This gives LLM-enabled tests a practical path for desktop workflows:
 
 The first implementation is intentionally narrow. It uses Windows UI Automation and SendKeys through a PowerShell STA process per action. `vm_ui_key` accepts Windows SendKeys syntax such as `{ENTER}`, `{ESC}`, `{TAB}`, and `^a`. That is fine for smoke tests and product flows, but more complex test runs should eventually move the automation engine into native Rust or a long-lived Windows helper so we avoid per-action PowerShell startup cost and get richer eventing.
 
-`vm_ui_health` currently reports `engine: "powershell-process"` for that
-baseline path. Keep that value stable until a native or long-lived helper is
-available, then expose the new engine name through the same health surface.
+`vm_ui_health` reports the active engine (`powershell-process` or
+`powershell-helper`) through the same health surface the future native helper
+will use.

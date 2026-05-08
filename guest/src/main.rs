@@ -36,6 +36,7 @@ pub mod verification;
 /// Default gRPC listen address (loopback only for security).
 const DEFAULT_BIND: &str = "127.0.0.1:50051";
 const DEFAULT_UI_SIDECAR_BIND: &str = "127.0.0.1:50151";
+const DEFAULT_UI_ENGINE: &str = "powershell-process";
 
 /// Signalman Guest Agent — gRPC service for VM process control and verification.
 #[derive(Parser, Debug)]
@@ -49,6 +50,10 @@ struct Cli {
     /// Bind address for `--ui-sidecar`.
     #[arg(long, default_value = DEFAULT_UI_SIDECAR_BIND, env = "SIGNALMAN_UI_SIDECAR_BIND")]
     ui_sidecar_bind: String,
+
+    /// UI sidecar automation engine: powershell-process or powershell-helper.
+    #[arg(long, default_value = DEFAULT_UI_ENGINE, env = "SIGNALMAN_UI_ENGINE")]
+    ui_engine: String,
 
     /// Bind address in `host:port` format.
     /// Defaults to 127.0.0.1:50051 (loopback only).
@@ -274,7 +279,8 @@ async fn main() -> anyhow::Result<()> {
 
     if cli.ui_sidecar {
         let addr: SocketAddr = cli.ui_sidecar_bind.parse()?;
-        info!(%addr, "Starting Signalman UI sidecar");
+        std::env::set_var("SIGNALMAN_UI_ENGINE", &cli.ui_engine);
+        info!(%addr, engine = %cli.ui_engine, "Starting Signalman UI sidecar");
         ui_sidecar::run(addr).await?;
         return Ok(());
     }

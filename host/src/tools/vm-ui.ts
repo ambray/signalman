@@ -44,6 +44,11 @@ export function createVmUiTools(
             type: "string",
             description: "Loopback bind address for the sidecar, default 127.0.0.1:50151",
           },
+          engine: {
+            type: "string",
+            enum: ["powershell-process", "powershell-helper"],
+            description: "Automation engine for the sidecar, default powershell-process",
+          },
           task_name: {
             type: "string",
             description: "Scheduled task name, default SignalmanUiSidecar",
@@ -71,6 +76,7 @@ export function createVmUiTools(
         const result = await ensureUiSidecar(client, {
           username: params.username as string,
           bind: (params.bind as string | undefined) ?? undefined,
+          engine: (params.engine as string | undefined) ?? undefined,
           taskName: (params.task_name as string | undefined) ?? undefined,
           runNow: (params.run_now as boolean | undefined) ?? true,
           waitReadyMs,
