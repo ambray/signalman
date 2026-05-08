@@ -90,6 +90,15 @@ describe("proto/guest.proto v1 freeze invariants", () => {
     );
   });
 
+  it("GuestAgent exposes the UI keyboard action contract", () => {
+    expect(source).toMatch(/rpc\s+UIKey\s*\(\s*UIKeyRequest\s*\)\s+returns\s*\(\s*UIActionResponse\s*\)/);
+    const block = extractMessageBlock(source, "UIKeyRequest");
+    expect(block).toMatch(/string\s+keys\s*=\s*1\b/);
+    expect(block).toMatch(/string\s+selector\s*=\s*2\b/);
+    expect(block).toMatch(/string\s+window_title\s*=\s*3\b/);
+    expect(block).toMatch(/uint32\s+repeat\s*=\s*4\b/);
+  });
+
   it("WindowsProcessDetails carries the four expected fields", () => {
     const block = extractMessageBlock(source, "WindowsProcessDetails");
     expect(block).toMatch(/bool\s+is_appcontainer\s*=\s*1\b/);

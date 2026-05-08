@@ -272,8 +272,9 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
 - **User-session UI sidecar** — First slice closed in `ba4e8ba`:
   `signalman-guest --ui-sidecar` runs in the interactive desktop session;
   the service-facing guest agent proxies `UIClick`, `UIType`, `UIFind`,
-  and `UIScreenshot` to it over loopback; host MCP exposes
-  `vm_ui_screenshot`, `vm_ui_find`, `vm_ui_click`, and `vm_ui_type`.
+  `UIScreenshot`, and keyboard actions to it over loopback; host MCP exposes
+  `vm_ui_snapshot`, `vm_ui_screenshot`, `vm_ui_find`, `vm_ui_wait_for`,
+  `vm_ui_click`, `vm_ui_key`, and `vm_ui_type`.
   Follow-up work should replace per-action PowerShell startup with a
   native long-lived helper and add live VM smoke coverage.
 

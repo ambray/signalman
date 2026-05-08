@@ -43,6 +43,7 @@ service GuestAgent {
   // ── UI Automation ───────────────────────────────────────────
   rpc UIClick(UIClickRequest) returns (UIActionResponse);
   rpc UIType(UITypeRequest) returns (UIActionResponse);
+  rpc UIKey(UIKeyRequest) returns (UIActionResponse);
   rpc UIFind(UIFindRequest) returns (UIFindResponse);
   rpc UIScreenshot(UIScreenshotRequest) returns (UIScreenshotResponse);
 
@@ -297,6 +298,13 @@ message UITypeRequest {
   string selector = 2;  // Optional: target element
   string window_title = 3;
   bool clear_first = 4;
+}
+
+message UIKeyRequest {
+  string keys = 1;  // SendKeys syntax: "{ENTER}", "{ESC}", "^{A}", etc.
+  string selector = 2;  // Optional: target element to focus first
+  string window_title = 3;
+  uint32 repeat = 4;  // Defaults to 1
 }
 
 message UIFindRequest {

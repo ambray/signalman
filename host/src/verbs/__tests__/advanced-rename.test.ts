@@ -30,9 +30,12 @@ describe("advanced namespace contract", () => {
       "vm_run_command",
       "vm_copy_file",
       "vm_ui_ensure_sidecar",
+      "vm_ui_snapshot",
       "vm_ui_screenshot",
       "vm_ui_find",
+      "vm_ui_wait_for",
       "vm_ui_click",
+      "vm_ui_key",
       "vm_ui_type",
     ]));
     // Docker tools register too.

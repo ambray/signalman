@@ -38,6 +38,7 @@ function makeClient(overrides: Partial<GuestAgentClient> = {}): GuestAgentClient
       },
     ]),
     uiClick: vi.fn().mockResolvedValue({ success: true, error: "" }),
+    uiKey: vi.fn().mockResolvedValue({ success: true, error: "" }),
     uiType: vi.fn().mockResolvedValue({ success: true, error: "" }),
     ...overrides,
   } as unknown as GuestAgentClient;
@@ -224,6 +225,7 @@ describe("VM UI MCP tools", () => {
   it("marks failed click and type operations as MCP errors", async () => {
     const client = makeClient({
       uiClick: vi.fn().mockResolvedValue({ success: false, error: "not found" }),
+      uiKey: vi.fn().mockResolvedValue({ success: false, error: "bad key" }),
       uiType: vi.fn().mockResolvedValue({ success: false, error: "not focused" }),
     } as Partial<GuestAgentClient>);
     const { tools } = toolsFor(client);
@@ -239,6 +241,12 @@ describe("VM UI MCP tools", () => {
       selector: "[automationId='Input']",
       clear_first: true,
     });
+    const key = await tools.get("vm_ui_key")!.handler({
+      name: "Win11_test",
+      keys: "{ESC}",
+      repeat: 2,
+      timeout_ms: 5_000,
+    });
 
     expect(client.uiClick).toHaveBeenCalledWith("[name='Missing']", {
       windowTitle: "",
@@ -251,7 +259,15 @@ describe("VM UI MCP tools", () => {
       clearFirst: true,
       timeoutMs: 30_000,
     });
+    expect(client.uiKey).toHaveBeenCalledWith("{ESC}", {
+      selector: undefined,
+      windowTitle: undefined,
+      repeat: 2,
+      timeoutMs: 5_000,
+    });
     expect(click.isError).toBe(true);
+    expect(key.isError).toBe(true);
+    expect(JSON.parse(key.content[0].text ?? "{}").error).toBe("bad key");
     expect(type.isError).toBe(true);
   });
 
