@@ -213,6 +213,28 @@ try {
     throw new Error(`failed to create guest directories: ${mkdir.stderr || mkdir.stdout}`);
   }
 
+  const stopExisting = await backend.executeCommand(
+    handle,
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-Command",
+      [
+        "$ErrorActionPreference = 'Continue'",
+        "Stop-Service -Name SignalmanGuest -Force -ErrorAction SilentlyContinue",
+        "schtasks.exe /End /TN SignalmanGuest 2>$null | Out-Null",
+        "schtasks.exe /Delete /TN SignalmanGuest /F 2>$null | Out-Null",
+        "Get-Process signalman-guest -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue",
+        "exit 0",
+      ].join("; "),
+    ],
+    60_000,
+  );
+  if (stopExisting.exitCode !== 0) {
+    throw new Error(`failed to stop existing guest agent before copy: ${stopExisting.stderr || stopExisting.stdout}`);
+  }
+  console.log(JSON.stringify({ step: "stopped-existing-guest" }));
+
   const files = [
     [path.join(repoRoot, "target/release/signalman-guest.exe"), "C:\\Program Files\\Signalman\\signalman-guest.exe"],
     [path.join(repoRoot, ".signalman/service-certs/ca.pem"), "C:\\ProgramData\\Signalman\\certs\\ca.pem"],

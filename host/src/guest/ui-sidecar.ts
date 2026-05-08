@@ -156,6 +156,11 @@ $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) 
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Signalman interactive user-session UI sidecar' -Force | Out-Null
 
 if ($runNow) {
+  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  Get-CimInstance Win32_Process -Filter "name = 'signalman-guest.exe'" |
+    Where-Object { $_.CommandLine -like '*--ui-sidecar*' } |
+    ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate | Out-Null }
+  Start-Sleep -Milliseconds 1000
   Start-ScheduledTask -TaskName $taskName
   Start-Sleep -Milliseconds 500
 }
