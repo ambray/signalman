@@ -129,13 +129,14 @@ changing the loopback, guest-agent, MCP, or workflow contracts.
 `vm_ui_find`, `vm_ui_wait_for`, and `vm_ui_snapshot` return normalized element
 descriptors for LLM-enabled tests. Each descriptor includes a deterministic
 `element_id`, a reusable selector, normalized `bounds` with center coordinates,
-state flags, conservative action hints (`click`, `type`, `key`), and the raw UI
-Automation payload. These responses also include an `action_targets` list: a
-compact menu of visible, enabled elements that have at least one action hint,
-with only the selector, name, type, value, actions, and bounds needed for the
-next interaction. The `element_id` is stable for a single snapshot/find result
-and is meant for logs and assertions; actions still take selectors so a future
-native backend can keep the same workflow contract.
+state flags, a browser-friendly `role`, a fallback `label`, conservative action
+hints (`click`, `type`, `key`), and the raw UI Automation payload. These
+responses also include an `action_targets` list: a compact menu of visible,
+enabled elements that have at least one action hint, with only the selector,
+name, role, label, type, value, actions, and bounds needed for the next
+interaction. The `element_id` is stable for a single snapshot/find result and is
+meant for logs and assertions; actions still take selectors so a future native
+backend can keep the same workflow contract.
 
 For longer LLM-driven runs, UI MCP tools accept `recover_username`,
 `recover_engine`, and `recover_wait_ready_ms`. When `recover_username` is set and

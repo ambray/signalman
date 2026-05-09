@@ -43,6 +43,8 @@ describe("UI element descriptors", () => {
       enabled: true,
       visible: true,
       value: "",
+      role: "button",
+      label: "Save",
       actions: ["click"],
       raw: elements[0],
     });
@@ -148,6 +150,56 @@ describe("UI element descriptors", () => {
     ]);
   });
 
+  it("adds browser-friendly roles and fallback labels", () => {
+    const descriptors = describeUiElements([
+      {
+        name: "Docs",
+        automationId: "",
+        controlType: "ControlType.Hyperlink",
+        className: "",
+        isEnabled: true,
+        isVisible: true,
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 24,
+        value: "",
+      },
+      {
+        name: "",
+        automationId: "",
+        controlType: "ControlType.Edit",
+        className: "TextBox",
+        isEnabled: true,
+        isVisible: true,
+        x: 0,
+        y: 30,
+        width: 120,
+        height: 24,
+        value: "query",
+      },
+      {
+        name: "",
+        automationId: "submit",
+        controlType: "ControlType.Button",
+        className: "Button",
+        isEnabled: true,
+        isVisible: true,
+        x: 0,
+        y: 60,
+        width: 80,
+        height: 24,
+        value: "",
+      },
+    ]);
+
+    expect(descriptors.map((element) => ({ role: element.role, label: element.label }))).toEqual([
+      { role: "link", label: "Docs" },
+      { role: "textbox", label: "query" },
+      { role: "button", label: "submit" },
+    ]);
+  });
+
   it("summarizes actionable elements for LLM observation loops", () => {
     const descriptors = describeUiElements([
       {
@@ -197,6 +249,8 @@ describe("UI element descriptors", () => {
         selector: "[automationId='SaveButton']",
         name: "Save",
         control_type: "Button",
+        role: "button",
+        label: "Save",
         value: "",
         actions: ["click"],
         bounds: descriptors[0].bounds,

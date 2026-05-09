@@ -20,6 +20,8 @@ export interface UiElementDescriptor {
   enabled: boolean;
   visible: boolean;
   value: string;
+  role: string;
+  label: string;
   actions: string[];
   raw: UiElement;
 }
@@ -29,6 +31,8 @@ export interface UiActionTarget {
   selector: string;
   name: string;
   control_type: string;
+  role: string;
+  label: string;
   value: string;
   actions: string[];
   bounds: UiBounds;
@@ -93,6 +97,44 @@ function boundsForElement(element: UiElement): UiBounds {
   };
 }
 
+function roleForControlType(controlType: string): string {
+  const normalized = controlType.toLowerCase();
+  const roles: Record<string, string> = {
+    button: "button",
+    checkbox: "checkbox",
+    combobox: "combobox",
+    document: "document",
+    edit: "textbox",
+    hyperlink: "link",
+    image: "img",
+    list: "list",
+    listitem: "listitem",
+    menu: "menu",
+    menuitem: "menuitem",
+    pane: "region",
+    radiobutton: "radio",
+    tab: "tablist",
+    tabitem: "tab",
+    text: "text",
+    tree: "tree",
+    treeitem: "treeitem",
+    window: "window",
+  };
+  return roles[normalized] ?? normalized;
+}
+
+function labelForElement(element: UiElement, controlType: string): string {
+  const name = element.name?.trim();
+  if (name) return name;
+  const value = element.value?.trim();
+  if (value) return value;
+  const automationId = element.automationId?.trim();
+  if (automationId) return automationId;
+  const className = element.className?.trim();
+  if (className) return className;
+  return roleForControlType(controlType) || controlType;
+}
+
 function actionsForElement(element: UiElement, controlType: string): string[] {
   const enabled = Boolean(element.isEnabled);
   const visible = Boolean(element.isVisible);
@@ -130,6 +172,8 @@ export function describeUiElements(elements: UiElement[]): UiElementDescriptor[]
     const bounds = boundsForElement(element);
     const selector = selectorForElement(element);
     const controlType = normalizeControlType(element.controlType);
+    const role = roleForControlType(controlType);
+    const label = labelForElement(element, controlType);
     const identity = [
       selector,
       element.name ?? "",
@@ -153,6 +197,8 @@ export function describeUiElements(elements: UiElement[]): UiElementDescriptor[]
       enabled: Boolean(element.isEnabled),
       visible: Boolean(element.isVisible),
       value: element.value ?? "",
+      role,
+      label,
       actions: actionsForElement(element, controlType),
       raw: element,
     };
@@ -172,6 +218,8 @@ export function describeUiActionTargets(
       selector: element.selector,
       name: element.name,
       control_type: element.control_type,
+      role: element.role,
+      label: element.label,
       value: element.value,
       actions: element.actions,
       bounds: element.bounds,
