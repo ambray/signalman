@@ -105,11 +105,13 @@ or neighboring result labels.
 flows today: `{ENTER}`, `{ESC}` / `{ESCAPE}`, `{TAB}`, `{BACKSPACE}` / `{BS}`,
 `{SPACE}`, `~`, alphanumeric key sequences, and modifier prefixes `^` for Ctrl,
 `+` for Shift, and `%` for Alt. The native engine also supports `{DELETE}` /
-`{DEL}`, `{HOME}`, `{END}`, arrow keys, `{WIN}` / `{LWIN}` / `{RWIN}`, and `#`
-as a Win-key modifier. Native key sequences can combine tokens, for example
-`{TAB}{TAB}{ENTER}`, `^a{BACKSPACE}`, `^+{ESC}`, or `#r`. The PowerShell engines
-still accept broader Windows SendKeys syntax, but scenarios intended to run on
-the native engine should stay within the documented subset.
+`{DEL}`, `{INSERT}` / `{INS}`, `{HOME}`, `{END}`, `{PAGEUP}` / `{PGUP}`,
+`{PAGEDOWN}` / `{PGDN}`, arrow keys, `{F1}` through `{F24}`, `{PRINTSCREEN}` /
+`{PRTSC}`, `{PAUSE}`, `{APPS}`, `{WIN}` / `{LWIN}` / `{RWIN}`, and `#` as a
+Win-key modifier. Native key sequences can combine tokens, for example
+`{TAB}{TAB}{ENTER}`, `^a{BACKSPACE}`, `^+{ESC}`, `+{F5}`, or `#r`. The
+PowerShell engines still accept broader Windows SendKeys syntax, but scenarios
+intended to run on the native engine should stay within the documented subset.
 
 More complex desktop workflows still need richer eventing and eventually a
 first-class browser/UI observation loop. Native UI Automation is the preferred

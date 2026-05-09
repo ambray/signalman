@@ -1381,19 +1381,34 @@ fn parse_native_key_sequence(keys: &str) -> anyhow::Result<Vec<NativeKeyStroke>>
             VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_LEFT, VK_LWIN, VK_RIGHT, VK_RWIN, VK_UP,
         };
 
-        match token.trim().to_ascii_uppercase().as_str() {
+        let normalized = token.trim().to_ascii_uppercase();
+        if let Some(rest) = normalized.strip_prefix('F') {
+            if let Ok(index) = rest.parse::<u16>() {
+                if (1..=24).contains(&index) {
+                    return Some(0x70 + index - 1);
+                }
+            }
+        }
+
+        match normalized.as_str() {
             "ESC" | "ESCAPE" => Some(VK_ESCAPE.0),
             "ENTER" => Some(VK_RETURN.0),
             "TAB" => Some(VK_TAB.0),
             "BACKSPACE" | "BS" => Some(VK_BACK.0),
             "SPACE" => Some(VK_SPACE.0),
             "DELETE" | "DEL" => Some(VK_DELETE.0),
+            "INSERT" | "INS" => Some(0x2D),
             "HOME" => Some(VK_HOME.0),
             "END" => Some(VK_END.0),
+            "PAGEUP" | "PGUP" | "PRIOR" => Some(0x21),
+            "PAGEDOWN" | "PGDN" | "NEXT" => Some(0x22),
             "LEFT" => Some(VK_LEFT.0),
             "RIGHT" => Some(VK_RIGHT.0),
             "UP" => Some(VK_UP.0),
             "DOWN" => Some(VK_DOWN.0),
+            "PRINTSCREEN" | "PRTSC" | "SNAPSHOT" => Some(0x2C),
+            "PAUSE" | "BREAK" => Some(0x13),
+            "APPS" | "APPLICATION" | "MENU" => Some(0x5D),
             "WIN" | "LWIN" => Some(VK_LWIN.0),
             "RWIN" => Some(VK_RWIN.0),
             _ => None,
@@ -2252,6 +2267,69 @@ mod tests {
         assert!(parse_native_key_sequence("{ENTER").is_err());
         assert!(parse_native_key_sequence("^").is_err());
         assert!(parse_native_key_sequence("!").is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn native_key_parser_handles_navigation_and_function_keys() {
+        assert_eq!(
+            parse_native_key_sequence("{F1}{F12}{F24}").unwrap(),
+            vec![
+                NativeKeyStroke {
+                    vk: 0x70,
+                    modifiers: NativeKeyModifiers::default()
+                },
+                NativeKeyStroke {
+                    vk: 0x7B,
+                    modifiers: NativeKeyModifiers::default()
+                },
+                NativeKeyStroke {
+                    vk: 0x87,
+                    modifiers: NativeKeyModifiers::default()
+                },
+            ]
+        );
+        assert_eq!(
+            parse_native_key_sequence("{PGUP}{PAGEDOWN}{INS}{PRTSC}{PAUSE}{APPS}").unwrap(),
+            vec![
+                NativeKeyStroke {
+                    vk: 0x21,
+                    modifiers: NativeKeyModifiers::default()
+                },
+                NativeKeyStroke {
+                    vk: 0x22,
+                    modifiers: NativeKeyModifiers::default()
+                },
+                NativeKeyStroke {
+                    vk: 0x2D,
+                    modifiers: NativeKeyModifiers::default()
+                },
+                NativeKeyStroke {
+                    vk: 0x2C,
+                    modifiers: NativeKeyModifiers::default()
+                },
+                NativeKeyStroke {
+                    vk: 0x13,
+                    modifiers: NativeKeyModifiers::default()
+                },
+                NativeKeyStroke {
+                    vk: 0x5D,
+                    modifiers: NativeKeyModifiers::default()
+                },
+            ]
+        );
+        assert_eq!(
+            parse_native_key_sequence("+{F5}").unwrap(),
+            vec![NativeKeyStroke {
+                vk: 0x74,
+                modifiers: NativeKeyModifiers {
+                    shift: true,
+                    ..Default::default()
+                }
+            }]
+        );
+        assert!(parse_native_key_sequence("{F0}").is_err());
+        assert!(parse_native_key_sequence("{F25}").is_err());
     }
 
     #[test]
