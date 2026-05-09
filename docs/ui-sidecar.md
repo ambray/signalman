@@ -40,9 +40,12 @@ The host registers these MCP tools when guest-agent access is available:
 - `vm_ui_click`: click a UI Automation element.
 - `vm_ui_key`: send a Windows SendKeys chord or special-key sequence.
 - `vm_ui_type`: type text into the active session, optionally targeting an element first.
+- `vm_ui_open_url`: open an `http://` or `https://` URL in the
+  interactive desktop through the Windows Run dialog.
 
 Scenario workflows use the same operation names without the `vm_` prefix,
-including `ui_ensure_sidecar` for self-contained live smokes.
+including `ui_ensure_sidecar` and `ui_open_url` for self-contained live
+smokes and browser launch flows.
 
 UI tool responses include per-RPC timing metadata. Single operations report
 `duration_ms`; snapshots split that into `screenshot_duration_ms` and
@@ -75,8 +78,8 @@ This gives LLM-enabled tests a practical path for desktop workflows:
 4. Confirm the tool returns `ready: true`; increase `wait_ready_ms` for slow logons.
 5. Use normal guest-agent RPCs for setup.
 6. Use `vm_ui_snapshot` for the model's observation loop, then `vm_ui_wait_for`,
-   `vm_ui_find`, `vm_ui_click`, `vm_ui_key`, and `vm_ui_type` for targeted
-   interaction.
+   `vm_ui_find`, `vm_ui_click`, `vm_ui_key`, `vm_ui_type`, and
+   `vm_ui_open_url` for targeted interaction and browser launch.
 7. Use screenshots plus UIA element data as the feedback loop.
 
 ## Current Limits
@@ -116,9 +119,16 @@ PowerShell engines still accept broader Windows SendKeys syntax, but scenarios
 intended to run on the native engine should stay within the documented subset.
 
 More complex desktop workflows still need richer eventing and eventually a
-first-class browser/UI observation loop. Native UI Automation is the preferred
-path for Windows desktop workflows; the PowerShell engines remain useful
-fallbacks and compatibility probes.
+first-class browser DOM/CDP observation loop. `vm_ui_open_url` is the current
+browser launch bridge: it validates the target as `http(s)`, opens the Windows
+Run dialog with `Win+R`, types the URL into the Run edit control, and presses
+Enter. It intentionally does not accept `file:`, `javascript:`, or shell-like
+targets, and rejects embedded URL credentials so secrets are not echoed in tool
+output; once the browser is open, tests should observe and interact through
+`vm_ui_snapshot`, `vm_ui_find`, `vm_ui_wait_for`, `vm_ui_click`,
+`vm_ui_type`, and `vm_ui_key`. Native UI Automation is the preferred path for
+Windows desktop workflows; the PowerShell engines remain useful fallbacks and
+compatibility probes.
 
 `vm_ui_health` reports the active engine (`powershell-process`,
 `powershell-helper`, or `native`) through the same health surface every backend

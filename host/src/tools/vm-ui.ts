@@ -8,6 +8,7 @@
 
 import type { ToolDefinition, ToolResult } from "./types.js";
 import type { GuestAgentClient } from "../guest/client.js";
+import { openUrlWithUi } from "../guest/ui-browser.js";
 import type { UiSidecarRecoveryOptions } from "../guest/ui-recovery.js";
 import { ensureUiSidecar } from "../guest/ui-sidecar.js";
 import { describeUiActionTargets, describeUiElements } from "../guest/ui-elements.js";
@@ -516,6 +517,41 @@ export function createVmUiTools(
         );
         return {
           content: [{ type: "text", text: JSON.stringify(uiActionJson(name, result), null, 2) }],
+          isError: !result.success,
+        };
+      },
+    },
+    {
+      name: "vm_ui_open_url",
+      description: "Open an http(s) URL in the VM's interactive user session through the Windows Run dialog",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+          url: { type: "string", description: "http:// or https:// URL to open" },
+          ...recoveryProperties,
+          find_timeout_ms: { type: "number", description: "Run dialog edit-field wait timeout" },
+          timeout_ms: { type: "number", description: "RPC timeout" },
+        },
+        required: ["name", "url"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const name = sanitizeVmName(params.name as string);
+        const client = await getClient(name);
+        const result = await withUiSidecarRecovery(client, recoveryOptions(params), () =>
+          openUrlWithUi(client, params.url, {
+            findTimeoutMs: sanitizeTimeout(params.find_timeout_ms as number | undefined, 5_000),
+            timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
+          }),
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ ...uiActionJson(name, result), url: result.url }, null, 2),
+            },
+          ],
           isError: !result.success,
         };
       },

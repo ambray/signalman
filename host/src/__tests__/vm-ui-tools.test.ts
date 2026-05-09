@@ -367,6 +367,69 @@ describe("VM UI MCP tools", () => {
     expect(type.isError).toBe(true);
   });
 
+  it("opens http URLs through the interactive Run dialog", async () => {
+    const client = makeClient();
+    const { tools } = toolsFor(client);
+
+    const result = await tools.get("vm_ui_open_url")!.handler({
+      name: "Win11_test",
+      url: "https://example.test",
+      find_timeout_ms: 3_000,
+      timeout_ms: 10_000,
+    });
+
+    expect(client.uiKey).toHaveBeenNthCalledWith(1, "#r", { timeoutMs: 10_000 });
+    expect(client.uiFindDetailed).toHaveBeenCalledWith("[automationId='1001']", {
+      windowTitle: "Run",
+      findTimeoutMs: 3_000,
+      timeoutMs: 10_000,
+    });
+    expect(client.uiType).toHaveBeenCalledWith("https://example.test/", {
+      selector: "[automationId='1001']",
+      windowTitle: "Run",
+      clearFirst: true,
+      timeoutMs: 10_000,
+    });
+    expect(client.uiKey).toHaveBeenNthCalledWith(2, "{ENTER}", {
+      windowTitle: "Run",
+      timeoutMs: 10_000,
+    });
+    expect(JSON.parse(result.content[0].text ?? "{}")).toEqual({
+      vm: "Win11_test",
+      success: true,
+      error: "",
+      duration_ms: 55,
+      url: "https://example.test/",
+    });
+    expect(result.isError).toBe(false);
+  });
+
+  it("rejects non-http browser URLs before typing into the VM", async () => {
+    const client = makeClient();
+    const { tools } = toolsFor(client);
+
+    await expect(
+      tools.get("vm_ui_open_url")!.handler({
+        name: "Win11_test",
+        url: "file:///C:/Windows/System32/calc.exe",
+      }),
+    ).rejects.toThrow("url must use http:// or https://");
+    expect(client.uiKey).not.toHaveBeenCalled();
+  });
+
+  it("rejects embedded browser URL credentials before typing into the VM", async () => {
+    const client = makeClient();
+    const { tools } = toolsFor(client);
+
+    await expect(
+      tools.get("vm_ui_open_url")!.handler({
+        name: "Win11_test",
+        url: "https://user:secret@example.test/",
+      }),
+    ).rejects.toThrow("url must not include embedded credentials");
+    expect(client.uiKey).not.toHaveBeenCalled();
+  });
+
   it("recovers an unreachable sidecar for MCP UI actions when recovery options are provided", async () => {
     const client = makeClient({
       uiClick: vi
