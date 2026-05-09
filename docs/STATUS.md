@@ -287,8 +287,9 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   observation, indexed typed-text observation, key, snapshot, and compact
   `action_targets` for LLM observation loops. Follow-up native key work added
   common navigation, function, print-screen, pause, and application-menu tokens.
-  Remaining work should add event-driven UI wait semantics and a first-class
-  browser observation loop.
+  Event-driven native UI waits now subscribe to UI Automation structure-change
+  events with a bounded fallback timeout. Remaining work should add a
+  first-class browser observation loop.
 
 - **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
   calls into `.signalman/recordings/`. The agent-first DevOps
