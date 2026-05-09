@@ -19,6 +19,18 @@ ui_health:
 ```
 
 ```tool
+ui_key:
+  vm: Win11_test
+  keys: "{ESC}"
+  timeout_ms: 15000
+```
+
+```tool
+wait:
+  duration_ms: 300
+```
+
+```tool
 ui_screenshot:
   vm: Win11_test
   format: png
@@ -87,10 +99,9 @@ ui_snapshot:
 ```
 
 ```tool
-ui_key:
+ui_click:
   vm: Win11_test
   window_title: Run
-  selector: "[automationId='1001']"
-  keys: "{ESC}"
+  selector: "[automationId='2']"
   timeout_ms: 15000
 ```

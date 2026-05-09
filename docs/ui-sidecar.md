@@ -91,6 +91,11 @@ Native `vm_ui_find` honors the element wait timeout by polling UI Automation
 until a matching element appears or the timeout expires. Empty-selector
 inventory calls return immediately so snapshots stay cheap.
 
+Native `vm_ui_click` treats default/left clicks as semantic UI actions first:
+when the target supports UI Automation's Invoke pattern, Signalman invokes the
+control directly and falls back to coordinate-based input if Invoke is not
+available. Right-click and double-click remain physical coordinate actions.
+
 When a native UI Automation element supports the Value pattern, its current
 value is included in the normalized element descriptor. This lets scenarios
 assert the text of edit controls directly instead of relying only on screenshots

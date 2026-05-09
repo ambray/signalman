@@ -944,12 +944,250 @@ fn native_ui_find(params: &UiFindParams) -> anyhow::Result<UiFindResult> {
 }
 
 #[cfg(target_os = "windows")]
+fn native_first_automation_element(
+    selector: &str,
+    window_title: &str,
+    timeout_ms: u64,
+) -> anyhow::Result<(
+    windows::Win32::UI::Accessibility::IUIAutomationElement,
+    UiElementResult,
+)> {
+    use windows::core::{BSTR, VARIANT};
+    use windows::Win32::Foundation::{BOOL, RECT, RPC_E_CHANGED_MODE};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationValuePattern,
+        TreeScope_Children, TreeScope_Descendants, UIA_ButtonControlTypeId,
+        UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId,
+        UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_GroupControlTypeId,
+        UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId, UIA_ListControlTypeId,
+        UIA_ListItemControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
+        UIA_NamePropertyId, UIA_PaneControlTypeId, UIA_RadioButtonControlTypeId,
+        UIA_TabControlTypeId, UIA_TabItemControlTypeId, UIA_TextControlTypeId,
+        UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId,
+        UIA_WindowControlTypeId,
+    };
+
+    struct ComGuard {
+        should_uninitialize: bool,
+    }
+
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            if self.should_uninitialize {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    fn bstr_to_string(value: BSTR) -> String {
+        value.to_string()
+    }
+
+    fn bool_from_win32(value: BOOL) -> bool {
+        value.as_bool()
+    }
+
+    fn rect_to_bounds(rect: RECT) -> (i32, i32, i32, i32) {
+        let width = rect.right.saturating_sub(rect.left).max(0);
+        let height = rect.bottom.saturating_sub(rect.top).max(0);
+        (rect.left, rect.top, width, height)
+    }
+
+    fn native_control_type_name(
+        value: windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID,
+    ) -> String {
+        let name = match value.0 {
+            id if id == UIA_ButtonControlTypeId.0 => "Button",
+            id if id == UIA_CheckBoxControlTypeId.0 => "CheckBox",
+            id if id == UIA_ComboBoxControlTypeId.0 => "ComboBox",
+            id if id == UIA_CustomControlTypeId.0 => "Custom",
+            id if id == UIA_DocumentControlTypeId.0 => "Document",
+            id if id == UIA_EditControlTypeId.0 => "Edit",
+            id if id == UIA_GroupControlTypeId.0 => "Group",
+            id if id == UIA_HyperlinkControlTypeId.0 => "Hyperlink",
+            id if id == UIA_ImageControlTypeId.0 => "Image",
+            id if id == UIA_ListControlTypeId.0 => "List",
+            id if id == UIA_ListItemControlTypeId.0 => "ListItem",
+            id if id == UIA_MenuControlTypeId.0 => "Menu",
+            id if id == UIA_MenuItemControlTypeId.0 => "MenuItem",
+            id if id == UIA_PaneControlTypeId.0 => "Pane",
+            id if id == UIA_RadioButtonControlTypeId.0 => "RadioButton",
+            id if id == UIA_TabControlTypeId.0 => "Tab",
+            id if id == UIA_TabItemControlTypeId.0 => "TabItem",
+            id if id == UIA_TextControlTypeId.0 => "Text",
+            id if id == UIA_TreeControlTypeId.0 => "Tree",
+            id if id == UIA_TreeItemControlTypeId.0 => "TreeItem",
+            id if id == UIA_WindowControlTypeId.0 => "Window",
+            _ => return format!("ControlType.{}", value.0),
+        };
+        format!("ControlType.{name}")
+    }
+
+    fn native_uia_current_value(element: &IUIAutomationElement) -> String {
+        unsafe {
+            element
+                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                .and_then(|pattern| pattern.CurrentValue())
+                .map(bstr_to_string)
+                .unwrap_or_default()
+        }
+    }
+
+    fn native_uia_element_result(element: &IUIAutomationElement) -> UiElementResult {
+        let name = unsafe { element.CurrentName() }
+            .map(bstr_to_string)
+            .unwrap_or_default();
+        let automation_id = unsafe { element.CurrentAutomationId() }
+            .map(bstr_to_string)
+            .unwrap_or_default();
+        let class_name = unsafe { element.CurrentClassName() }
+            .map(bstr_to_string)
+            .unwrap_or_default();
+        let control_type = unsafe { element.CurrentControlType() }
+            .map(native_control_type_name)
+            .unwrap_or_else(|_| String::new());
+        let rect = unsafe { element.CurrentBoundingRectangle() }.unwrap_or_default();
+        let is_enabled = unsafe { element.CurrentIsEnabled() }
+            .map(bool_from_win32)
+            .unwrap_or(false);
+        let is_offscreen = unsafe { element.CurrentIsOffscreen() }
+            .map(bool_from_win32)
+            .unwrap_or(true);
+        let (x, y, width, height) = rect_to_bounds(rect);
+        UiElementResult {
+            name,
+            automation_id,
+            control_type,
+            class_name,
+            is_enabled,
+            is_visible: !is_offscreen && width > 0 && height > 0,
+            x,
+            y,
+            width,
+            height,
+            value: native_uia_current_value(element),
+        }
+    }
+
+    fn native_uia_root(
+        automation: &IUIAutomation,
+        window_title: &str,
+    ) -> anyhow::Result<IUIAutomationElement> {
+        let root =
+            unsafe { automation.GetRootElement() }.context("native UI Automation root element")?;
+        if window_title.trim().is_empty() {
+            return Ok(root);
+        }
+        let title = VARIANT::from(BSTR::from(window_title));
+        let condition = unsafe { automation.CreatePropertyCondition(UIA_NamePropertyId, &title) }
+            .context("native UI Automation window-title condition")?;
+        match unsafe { root.FindFirst(TreeScope_Children, &condition) } {
+            Ok(window) => Ok(window),
+            Err(_) => Ok(root),
+        }
+    }
+
+    fn find_first_matching(
+        root: &IUIAutomationElement,
+        condition: &windows::Win32::UI::Accessibility::IUIAutomationCondition,
+        selector: &NativeSelector,
+    ) -> anyhow::Result<Option<(IUIAutomationElement, UiElementResult)>> {
+        let elements = unsafe { root.FindAll(TreeScope_Descendants, condition) }
+            .context("native UI Automation FindAll")?;
+        let count = unsafe { elements.Length() }.context("native UI Automation element count")?;
+        for index in 0..count {
+            let element = unsafe { elements.GetElement(index) }
+                .with_context(|| format!("native UI Automation element at index {index}"))?;
+            let element_result = native_uia_element_result(&element);
+            if selector.matches(&element_result) {
+                return Ok(Some((element, element_result)));
+            }
+        }
+        Ok(None)
+    }
+
+    let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let _com = if hr.is_ok() {
+        ComGuard {
+            should_uninitialize: true,
+        }
+    } else if hr == RPC_E_CHANGED_MODE {
+        ComGuard {
+            should_uninitialize: false,
+        }
+    } else {
+        return Err(windows::core::Error::from(hr))
+            .context("initialize COM for native UI Automation");
+    };
+
+    let selector = NativeSelector::parse(selector);
+    let automation: IUIAutomation =
+        unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
+            .context("create native UI Automation client")?;
+    let root = native_uia_root(&automation, window_title)?;
+    let condition = unsafe { automation.CreateTrueCondition() }
+        .context("native UI Automation true condition")?;
+    let deadline = std::time::Instant::now()
+        .checked_add(std::time::Duration::from_millis(timeout_ms))
+        .unwrap_or_else(std::time::Instant::now);
+
+    loop {
+        if let Some(element) = find_first_matching(&root, &condition, &selector)? {
+            return Ok(element);
+        }
+        if timeout_ms == 0 {
+            break;
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(100)));
+    }
+
+    Err(anyhow!("UI element not found: {selector:?}"))
+}
+
+#[cfg(target_os = "windows")]
+fn native_invoke_element(
+    element: &windows::Win32::UI::Accessibility::IUIAutomationElement,
+) -> anyhow::Result<()> {
+    use windows::Win32::UI::Accessibility::{IUIAutomationInvokePattern, UIA_InvokePatternId};
+
+    unsafe {
+        element
+            .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+            .context("native UI Automation Invoke pattern")?
+            .Invoke()
+            .context("native UI Automation Invoke")
+    }
+}
+
+fn native_click_type_uses_invoke(click_type: &str) -> bool {
+    matches!(click_type.trim().to_ascii_lowercase().as_str(), "" | "left")
+}
+
+#[cfg(target_os = "windows")]
 fn native_ui_click(params: &UiClickParams) -> anyhow::Result<UiActionResult> {
-    let element = native_first_element(
+    let (automation_element, element) = native_first_automation_element(
         &params.selector,
         &params.window_title,
         ui_action_timeout_ms(params.timeout_ms),
     )?;
+    if native_click_type_uses_invoke(&params.click_type)
+        && native_invoke_element(&automation_element).is_ok()
+    {
+        return Ok(UiActionResult {
+            success: true,
+            error: String::new(),
+        });
+    }
+
     let x = element.x + element.width / 2;
     let y = element.y + element.height / 2;
     native_click_at(x, y, &params.click_type)?;
@@ -1910,6 +2148,15 @@ mod tests {
     fn ui_action_timeout_defaults_to_legacy_element_wait() {
         assert_eq!(ui_action_timeout_ms(None), 5_000);
         assert_eq!(ui_action_timeout_ms(Some(15_000)), 15_000);
+    }
+
+    #[test]
+    fn native_click_invoke_is_limited_to_normal_left_clicks() {
+        assert!(native_click_type_uses_invoke(""));
+        assert!(native_click_type_uses_invoke("left"));
+        assert!(native_click_type_uses_invoke(" LEFT "));
+        assert!(!native_click_type_uses_invoke("right"));
+        assert!(!native_click_type_uses_invoke("double"));
     }
 
     #[test]
