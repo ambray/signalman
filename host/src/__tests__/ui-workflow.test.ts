@@ -237,6 +237,62 @@ describe("workflow UI tool blocks", () => {
     ).rejects.toThrow("ui_key missing 'keys'");
   });
 
+  it("opens http URLs through workflow UI tool blocks", async () => {
+    const client = makeClient();
+    const { orchestrator, vmMap } = makeOrchestrator(client);
+
+    const opened = await orchestrator.executeToolBlock(
+      "ui_open_url",
+      {
+        vm: "endpoint-1",
+        url: "http://example.test/path",
+        find_timeout_ms: 2_000,
+        timeout_ms: 5_000,
+      },
+      vmMap,
+    );
+
+    expect(client.uiKey).toHaveBeenNthCalledWith(1, "#r", { timeoutMs: 5_000 });
+    expect(client.uiFindDetailed).toHaveBeenCalledWith("[automationId='1001']", {
+      windowTitle: "Run",
+      findTimeoutMs: 2_000,
+      timeoutMs: 5_000,
+    });
+    expect(client.uiType).toHaveBeenCalledWith("http://example.test/path", {
+      selector: "[automationId='1001']",
+      windowTitle: "Run",
+      clearFirst: true,
+      timeoutMs: 5_000,
+    });
+    expect(client.uiKey).toHaveBeenNthCalledWith(2, "{ENTER}", {
+      windowTitle: "Run",
+      timeoutMs: 5_000,
+    });
+    expect(JSON.parse(opened)).toEqual({
+      success: true,
+      error: "",
+      duration_ms: 55,
+      url: "http://example.test/path",
+    });
+    await expect(
+      orchestrator.executeToolBlock("ui_open_url", { vm: "endpoint-1" }, vmMap),
+    ).rejects.toThrow("ui_open_url missing 'url'");
+  });
+
+  it("rejects non-http workflow URLs before sending UI input", async () => {
+    const client = makeClient();
+    const { orchestrator, vmMap } = makeOrchestrator(client);
+
+    await expect(
+      orchestrator.executeToolBlock(
+        "ui_open_url",
+        { vm: "endpoint-1", url: "javascript:alert(1)" },
+        vmMap,
+      ),
+    ).rejects.toThrow("url must use http:// or https://");
+    expect(client.uiKey).not.toHaveBeenCalled();
+  });
+
   it("recovers an unreachable sidecar for workflow UI blocks when configured", async () => {
     const client = makeClient({
       uiClick: vi

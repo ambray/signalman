@@ -15,8 +15,10 @@ the onboarding gap (`signalman vm provision` / `vm fetch-template` /
 schema, idempotency contract, `docs/bootstrap.md`) and the first
 interactive user-session UI sidecar (`signalman-guest --ui-sidecar`) with
 MCP tools for screenshots, UIA snapshot/find/wait, click, keyboard input,
-and type. The native sidecar engine now covers screenshot, find, click, type,
-key operations, wait timeouts, and UIA Value-pattern descriptors. It is covered
+and type, plus a `vm_ui_open_url` bridge for launching `http(s)` browser flows
+through the interactive desktop. The native sidecar engine now covers
+screenshot, find, click, type, key operations, wait timeouts, and UIA
+Value-pattern descriptors. It is covered
 by the live `Win11_test` `live-ui-sidecar-smoke` scenario. Versions in every
 manifest read `0.1.0` and need to bump to `0.1.1` together with a tag push to
 ship — the release workflow validates the manifest version matches the tag
@@ -48,16 +50,16 @@ bump the four version pins, `git tag v0.1.1 && git push origin v0.1.1`.
 ## Latest commits (top 10)
 
 ```
-b89f9c7 Expose native UI element values
-90c134c Honor native UI find timeouts
-5627bb5 Support native UI key sequences
-593602b Update native UI sidecar docs
-3f04b66 Tighten live UI sidecar scenario
-f9617a8 Add native UI input backend
-88efa17 Add native UI find backend
-cd032cc Stabilize live UI sidecar smoke
-cae3e9b Allow native UI sidecar provisioning
-1c29463 Implement native UI screenshot backend
+a350af8 Add UI observation roles and labels
+f1b5cea Use UIA events for native waits
+790790d Expand native UI key tokens
+ff5df3e Expose UI action targets
+6f733f7 Support array includes assertions
+b9c63db Add UI descriptor action hints
+1c2f56d Consolidate native UIA lookup helpers
+faf7d6c Prefer native UI invoke clicks
+f5261f4 Honor UI action timeouts
+5ddcda5 Expand native UI key modifiers
 ```
 
 ## Audit closure (security findings)
@@ -290,7 +292,9 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   Event-driven native UI waits now subscribe to UI Automation structure-change
   events with a bounded fallback timeout. Browser-friendly observation metadata
   now includes normalized roles and fallback labels on UI descriptors and action
-  targets. Remaining work should add browser-specific launch/navigation tools.
+  targets. Browser launch coverage now includes `vm_ui_open_url` / `ui_open_url`
+  for safely opening `http(s)` URLs through the interactive Windows Run dialog.
+  Full DOM/CDP browser control remains future work.
 
 - **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
   calls into `.signalman/recordings/`. The agent-first DevOps
