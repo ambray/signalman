@@ -109,14 +109,14 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
 |---|---|---|---|
 | Host (TypeScript / vitest) — `host/src/__tests__/` | 1048 | 46 | 2026-05-09 |
 | Host (TypeScript / vitest) — `host/src/verbs/__tests__/` | 46 | 5 | 2026-05-09 |
-| Guest (Rust / cargo) | 126 | 9 | 2026-05-09 |
+| Guest (Rust / cargo) | 128 | 9 | 2026-05-09 |
 | Service (Rust / cargo) | 110 | 8 (incl. 2 integration files) | 2026-05-09 |
 | Plugin (Rust / cargo) | 135 | 11 (incl. 2 integration files) | 2026-05-09 |
-| **Total** | **1465** test attributes / `it()` calls | **79** files | |
+| **Total** | **1467** test attributes / `it()` calls | **79** files | |
 
 > The ROADMAP headline "151 Rust + 769 TS = 920" predates the v0.1.1
 > P9 work and the user-session UI/browser milestones. `docs/testing.md`
-> now quotes 1094 TypeScript / 371 Rust source-level cases; vitest
+> now quotes 1094 TypeScript / 373 Rust source-level cases; vitest
 > expands parameterized blocks to 1148 run-time tests
 > in the current host coverage run.
 
@@ -319,9 +319,11 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   inventory, identifying the address bar in the scored `browser_targets`
   observation list, and closing the browser. Host-side wrappers and MCP tools
   now expose the reserved guest Browser* RPC contract as
-  `vm_browser_navigate`, `vm_browser_click`, and `vm_browser_screenshot`;
-  current guests still return UNIMPLEMENTED until the CDP sidecar runtime
-  lands.
+  `vm_browser_navigate`, `vm_browser_click`, and `vm_browser_screenshot`.
+  The guest service forwards those Browser* RPCs to the user-session sidecar;
+  until the CDP backend lands, navigate/click return a failed action with a
+  CDP-unavailable error and screenshots fail because the screenshot proto has
+  no error field.
 
 - **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
   calls into `.signalman/recordings/`. The agent-first DevOps

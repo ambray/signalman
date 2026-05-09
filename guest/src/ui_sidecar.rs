@@ -118,6 +118,24 @@ trait UiAutomationBackend {
     fn type_text(&self, params: &UiTypeParams) -> anyhow::Result<UiActionResult>;
     fn key(&self, params: &UiKeyParams) -> anyhow::Result<UiActionResult>;
     fn screenshot(&self, params: &UiScreenshotParams) -> anyhow::Result<UiScreenshotResult>;
+    fn browser_navigate(
+        &self,
+        params: &BrowserNavigateParams,
+    ) -> anyhow::Result<BrowserActionResult> {
+        let _ = params.timeout_ms;
+        Ok(browser_cdp_unavailable_action(&params.url))
+    }
+    fn browser_click(&self, params: &BrowserClickParams) -> anyhow::Result<BrowserActionResult> {
+        let _ = (&params.css_selector, params.timeout_ms);
+        Ok(browser_cdp_unavailable_action(""))
+    }
+    fn browser_screenshot(
+        &self,
+        params: &BrowserScreenshotParams,
+    ) -> anyhow::Result<BrowserScreenshotResult> {
+        let _ = (&params.format, params.full_page);
+        Err(anyhow!(BROWSER_CDP_UNAVAILABLE))
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -256,6 +274,30 @@ struct UiScreenshotParams {
     format: String,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct BrowserNavigateParams {
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct BrowserClickParams {
+    #[serde(default)]
+    css_selector: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct BrowserScreenshotParams {
+    #[serde(default)]
+    format: String,
+    #[serde(default)]
+    full_page: bool,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct UiHealthResult {
     pub(crate) engine: String,
@@ -305,6 +347,29 @@ pub(crate) struct UiElementResult {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct UiScreenshotResult {
+    pub(crate) image_data_base64: String,
+    #[serde(default = "default_screenshot_format")]
+    pub(crate) format: String,
+    #[serde(default)]
+    pub(crate) width: u32,
+    #[serde(default)]
+    pub(crate) height: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct BrowserActionResult {
+    #[serde(default)]
+    pub(crate) success: bool,
+    #[serde(default)]
+    pub(crate) error: String,
+    #[serde(default)]
+    pub(crate) page_title: String,
+    #[serde(default)]
+    pub(crate) page_url: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct BrowserScreenshotResult {
     pub(crate) image_data_base64: String,
     #[serde(default = "default_screenshot_format")]
     pub(crate) format: String,
@@ -431,6 +496,7 @@ fn handle_request(req: SidecarRequest) -> SidecarResponse {
     }
 }
 
+#[cfg(test)]
 fn sidecar_health() -> Value {
     let engine = UiAutomationEngine::selected();
     let result = match engine {
@@ -442,6 +508,7 @@ fn sidecar_health() -> Value {
     serde_json::to_value(result).expect("UI health result serializes")
 }
 
+#[cfg(test)]
 fn engine_name_for_env(value: Option<&str>) -> &'static str {
     UiAutomationEngine::from_env(value).name()
 }
@@ -465,6 +532,18 @@ where
         "ui.type" => to_value(backend.type_text(&parse_params(method, params)?)?, method),
         "ui.key" => to_value(backend.key(&parse_params(method, params)?)?, method),
         "ui.screenshot" => to_value(backend.screenshot(&parse_params(method, params)?)?, method),
+        "browser.navigate" => to_value(
+            backend.browser_navigate(&parse_params(method, params)?)?,
+            method,
+        ),
+        "browser.click" => to_value(
+            backend.browser_click(&parse_params(method, params)?)?,
+            method,
+        ),
+        "browser.screenshot" => to_value(
+            backend.browser_screenshot(&parse_params(method, params)?)?,
+            method,
+        ),
         other => Err(anyhow!("unknown UI sidecar method '{other}'")),
     }
 }
@@ -491,6 +570,18 @@ fn default_true() -> bool {
 
 fn default_screenshot_format() -> String {
     "png".to_string()
+}
+
+const BROWSER_CDP_UNAVAILABLE: &str =
+    "Browser DOM/CDP automation is not available yet; use UI Automation browser primitives for current Windows desktop flows";
+
+fn browser_cdp_unavailable_action(page_url: &str) -> BrowserActionResult {
+    BrowserActionResult {
+        success: false,
+        error: BROWSER_CDP_UNAVAILABLE.to_string(),
+        page_title: String::new(),
+        page_url: page_url.to_string(),
+    }
 }
 
 fn normalize_screenshot_format(value: &str) -> (&'static str, image::ImageFormat) {
@@ -993,7 +1084,9 @@ fn native_ui_find(params: &UiFindParams) -> anyhow::Result<UiFindResult> {
 }
 
 #[cfg(target_os = "windows")]
-#[windows::core::implement(windows::Win32::UI::Accessibility::IUIAutomationStructureChangedEventHandler)]
+#[windows::core::implement(
+    windows::Win32::UI::Accessibility::IUIAutomationStructureChangedEventHandler
+)]
 struct NativeStructureChangedHandler {
     tx: std::sync::mpsc::Sender<()>,
 }
@@ -1025,8 +1118,9 @@ struct NativeUiaEventWaiter<'a> {
 #[cfg(target_os = "windows")]
 impl NativeUiaEventWaiter<'_> {
     fn wait(&self, timeout: std::time::Duration) {
-        let bounded_timeout =
-            timeout.min(std::time::Duration::from_millis(NATIVE_UIA_EVENT_FALLBACK_POLL_MS));
+        let bounded_timeout = timeout.min(std::time::Duration::from_millis(
+            NATIVE_UIA_EVENT_FALLBACK_POLL_MS,
+        ));
         let _ = self.rx.recv_timeout(bounded_timeout);
         while self.rx.try_recv().is_ok() {}
     }
@@ -2173,6 +2267,13 @@ mod tests {
         assert!(err
             .to_string()
             .contains("invalid parameters for UI sidecar method 'ui.key'"));
+
+        let err =
+            parse_params::<BrowserClickParams>("browser.click", &json!({ "css_selector": 9 }))
+                .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("invalid parameters for UI sidecar method 'browser.click'"));
     }
 
     #[test]
@@ -2453,6 +2554,41 @@ mod tests {
             .execute("ui.nope", &Value::Null)
             .unwrap_err();
         assert!(err.to_string().contains("unknown UI sidecar method"));
+    }
+
+    #[test]
+    fn browser_contract_reports_cdp_unavailable_until_backend_lands() {
+        let navigate = UiAutomationEngine::PowershellProcess
+            .execute(
+                "browser.navigate",
+                &json!({ "url": "https://example.test/", "timeout_ms": 5000 }),
+            )
+            .unwrap();
+        let result: BrowserActionResult = parse_response("browser.navigate", navigate).unwrap();
+        assert!(!result.success);
+        assert_eq!(result.page_url, "https://example.test/");
+        assert!(result.error.contains("DOM/CDP automation is not available"));
+
+        let click = UiAutomationEngine::PowershellProcess
+            .execute(
+                "browser.click",
+                &json!({ "css_selector": "#continue", "timeout_ms": 5000 }),
+            )
+            .unwrap();
+        let result: BrowserActionResult = parse_response("browser.click", click).unwrap();
+        assert!(!result.success);
+        assert_eq!(result.page_url, "");
+        assert!(result.error.contains("DOM/CDP automation is not available"));
+
+        let err = UiAutomationEngine::PowershellProcess
+            .execute(
+                "browser.screenshot",
+                &json!({ "format": "png", "full_page": true }),
+            )
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("DOM/CDP automation is not available"));
     }
 
     #[test]

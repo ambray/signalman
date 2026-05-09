@@ -43,17 +43,16 @@ function toolErrorJson(vm: string, error: unknown) {
  * Browser DOM/CDP-facing guest tools.
  *
  * The guest proto already reserves Browser* RPCs for a future CDP backend.
- * These tools expose that contract to MCP clients today. Current guests return
- * UNIMPLEMENTED, which is deliberate: LLM workflows should see a crisp
- * capability boundary and keep using vm_ui_open_url / vm_ui_navigate_url until
- * the sidecar CDP runtime lands.
+ * These tools expose that contract to MCP clients today. Until the sidecar CDP
+ * runtime lands, guests report a crisp "CDP unavailable" failure boundary and
+ * workflows should keep using vm_ui_open_url / vm_ui_navigate_url.
  */
 export function createVmBrowserTools(getClient: GuestClientResolver): ToolDefinition[] {
   return [
     {
       name: "vm_browser_navigate",
       description:
-        "Navigate the active browser through the guest browser automation backend. Requires future CDP support; current guests may return UNIMPLEMENTED.",
+        "Navigate the active browser through the guest browser automation backend. Requires future CDP support; current guests report CDP unavailable.",
       inputSchema: {
         type: "object",
         properties: {
@@ -88,7 +87,7 @@ export function createVmBrowserTools(getClient: GuestClientResolver): ToolDefini
     {
       name: "vm_browser_click",
       description:
-        "Click a CSS selector through the guest browser automation backend. Requires future CDP support; current guests may return UNIMPLEMENTED.",
+        "Click a CSS selector through the guest browser automation backend. Requires future CDP support; current guests report CDP unavailable.",
       inputSchema: {
         type: "object",
         properties: {
@@ -123,7 +122,7 @@ export function createVmBrowserTools(getClient: GuestClientResolver): ToolDefini
     {
       name: "vm_browser_screenshot",
       description:
-        "Capture a browser screenshot through the guest browser automation backend. Requires future CDP support; current guests may return UNIMPLEMENTED.",
+        "Capture a browser screenshot through the guest browser automation backend. Requires future CDP support; current guests report CDP unavailable.",
       inputSchema: {
         type: "object",
         properties: {
