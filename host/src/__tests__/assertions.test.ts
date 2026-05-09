@@ -151,6 +151,12 @@ describe("compareValues", () => {
     expect(compareValues("hello", "world", "contains")).toBe(false);
   });
 
+  it("includes: array membership with exact value semantics", () => {
+    expect(compareValues(["click", "key"], "click", "includes")).toBe(true);
+    expect(compareValues(["type"], "click", "includes")).toBe(false);
+    expect(compareValues([{ id: "a" }], { id: "a" }, "includes")).toBe(true);
+  });
+
   it("defaults to eq for unknown comparison", () => {
     expect(compareValues(1, 1, "unknown_op")).toBe(true);
   });
@@ -278,6 +284,36 @@ describe("json_field assertions", () => {
       expected: "P2",
     });
     expect(result.passed).toBe(true);
+  });
+
+  it("evaluates array membership for UI action hints", async () => {
+    const ctx = makeCtx({
+      commandResults: new Map([
+        [
+          "ui-snapshot",
+          makeCmd(
+            JSON.stringify({
+              elements: [
+                { automation_id: "2", actions: ["click"] },
+                { automation_id: "1001", actions: ["type", "key"] },
+              ],
+            }),
+          ),
+        ],
+      ]),
+    });
+    const evaluator = new AssertionEvaluator(ctx);
+    const result = await evaluator.evaluate({
+      id: "ui-action-clickable",
+      type: "json_field",
+      source: "ui-snapshot",
+      field: "elements[?automation_id=='2'].actions",
+      comparison: "includes",
+      expected: "click",
+    });
+
+    expect(result.passed).toBe(true);
+    expect(result.actual).toEqual(["click"]);
   });
 
   it("evaluates filter path", async () => {

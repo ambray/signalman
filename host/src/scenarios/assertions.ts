@@ -237,9 +237,18 @@ export function compareValues(
       return toNumber(actual) <= toNumber(expected);
     case "contains":
       return String(actual).includes(String(expected));
+    case "includes":
+      return valueIncludes(actual, expected);
     default:
       return deepEqual(actual, expected);
   }
+}
+
+function valueIncludes(actual: unknown, expected: unknown): boolean {
+  if (Array.isArray(actual)) {
+    return actual.some((item) => deepEqual(item, expected));
+  }
+  return String(actual).includes(String(expected));
 }
 
 function toNumber(val: unknown): number {

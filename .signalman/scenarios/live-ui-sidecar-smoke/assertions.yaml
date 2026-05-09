@@ -107,6 +107,15 @@ assertions:
     severity: high
     description: "The UI snapshot should include visible UI Automation elements"
 
+  - id: cancel-action-hint
+    type: json_field
+    source: step-11
+    field: "elements[?automation_id=='2'].actions"
+    comparison: includes
+    expected: click
+    severity: high
+    description: "The UI snapshot should mark the Cancel button as clickable"
+
   - id: cancel-clicked
     type: json_field
     source: step-12
