@@ -190,6 +190,13 @@ describe("workflow UI tool blocks", () => {
     expect(JSON.parse(found)).toMatchObject({
       count: 1,
       duration_ms: 12,
+      action_target_count: 1,
+      action_targets: [
+        expect.objectContaining({
+          selector: "[automationId='StartButton']",
+          actions: ["click"],
+        }),
+      ],
       elements: [
         expect.objectContaining({
           element_id: expect.stringMatching(/^ui-001-[0-9a-f]{8}$/),
@@ -290,7 +297,18 @@ describe("workflow UI tool blocks", () => {
       vmMap,
     );
 
-    expect(JSON.parse(found)).toMatchObject({ found: true, count: 1, duration_ms: 21 });
+    expect(JSON.parse(found)).toMatchObject({
+      found: true,
+      count: 1,
+      duration_ms: 21,
+      action_target_count: 1,
+      action_targets: [
+        expect.objectContaining({
+          selector: "[automationId='StartButton']",
+          actions: ["click"],
+        }),
+      ],
+    });
     await expect(
       orchestrator.executeToolBlock(
         "ui_wait_for",
@@ -431,6 +449,14 @@ describe("workflow UI tool blocks", () => {
         }),
       ],
       truncated: true,
+      action_target_count: 2,
+      action_targets: [
+        expect.objectContaining({
+          selector: "[automationId='StartButton']",
+          actions: ["click"],
+        }),
+      ],
+      action_targets_truncated: true,
       saved_path: path.resolve("output/live-ui-sidecar-smoke/snapshot.png"),
     });
   });

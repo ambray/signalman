@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { HypervisorBackend, VMHandle } from "../hypervisors/interface.js";
 import { GuestAgentClient, type CommandResult } from "../guest/client.js";
-import { describeUiElements } from "../guest/ui-elements.js";
+import { describeUiActionTargets, describeUiElements } from "../guest/ui-elements.js";
 import { ensureUiSidecar } from "../guest/ui-sidecar.js";
 import { withUiSidecarRecovery, type UiSidecarRecoveryOptions } from "../guest/ui-recovery.js";
 import type { SignalmanConfig } from "../config.js";
@@ -2222,9 +2222,16 @@ export class ScenarioOrchestrator {
         );
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
+        const actionTargets = describeUiActionTargets(descriptors, 50);
         // Return a structured result so `json_field` assertions can
         // query e.g. `count` or `elements[0].is_enabled`.
-        return JSON.stringify({ count: elements.length, duration_ms: find.durationMs, elements: descriptors });
+        return JSON.stringify({
+          count: elements.length,
+          duration_ms: find.durationMs,
+          elements: descriptors,
+          action_target_count: actionTargets.length,
+          action_targets: actionTargets,
+        });
       }
 
       case "ui_wait_for": {
@@ -2241,6 +2248,7 @@ export class ScenarioOrchestrator {
         );
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
+        const actionTargets = describeUiActionTargets(descriptors, 50);
         const found = elements.length > 0;
         if (!found) {
           throw new Error(`UI element not found: ${selector}`);
@@ -2250,6 +2258,8 @@ export class ScenarioOrchestrator {
           count: elements.length,
           duration_ms: find.durationMs,
           elements: descriptors,
+          action_target_count: actionTargets.length,
+          action_targets: actionTargets,
         });
       }
 
@@ -2324,6 +2334,10 @@ export class ScenarioOrchestrator {
         );
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
+        const actionTargets = describeUiActionTargets(descriptors, maxElements);
+        const actionTargetCount = descriptors.filter(
+          (element) => element.actions.length > 0 && element.selector,
+        ).length;
         let savedPath: string | undefined;
         if (typeof params.output === "string" && params.output.length > 0) {
           const fs = await import("node:fs");
@@ -2341,6 +2355,9 @@ export class ScenarioOrchestrator {
           element_count: elements.length,
           elements: descriptors.slice(0, maxElements),
           truncated: elements.length > maxElements,
+          action_target_count: actionTargetCount,
+          action_targets: actionTargets,
+          action_targets_truncated: actionTargetCount > actionTargets.length,
           saved_path: savedPath ?? null,
         });
       }

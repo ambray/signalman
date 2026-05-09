@@ -10,7 +10,7 @@ import type { ToolDefinition, ToolResult } from "./types.js";
 import type { GuestAgentClient } from "../guest/client.js";
 import type { UiSidecarRecoveryOptions } from "../guest/ui-recovery.js";
 import { ensureUiSidecar } from "../guest/ui-sidecar.js";
-import { describeUiElements } from "../guest/ui-elements.js";
+import { describeUiActionTargets, describeUiElements } from "../guest/ui-elements.js";
 import { withUiSidecarRecovery } from "../guest/ui-recovery.js";
 import { sanitizeTimeout, sanitizeVmName } from "../sanitize.js";
 
@@ -211,6 +211,8 @@ export function createVmUiTools(
         );
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
+        const actionTargets = describeUiActionTargets(descriptors, maxElements);
+        const actionTargetCount = descriptors.filter((element) => element.actions.length > 0 && element.selector).length;
         return {
           content: [
             {
@@ -231,6 +233,9 @@ export function createVmUiTools(
                   element_count: elements.length,
                   elements: descriptors.slice(0, maxElements),
                   truncated: elements.length > maxElements,
+                  action_target_count: actionTargetCount,
+                  action_targets: actionTargets,
+                  action_targets_truncated: actionTargetCount > actionTargets.length,
                 },
                 null,
                 2,
@@ -322,8 +327,23 @@ export function createVmUiTools(
         );
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
+        const actionTargets = describeUiActionTargets(descriptors, 50);
         return {
-          content: [{ type: "text", text: JSON.stringify({ elements: descriptors, duration_ms: find.durationMs }, null, 2) }],
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  elements: descriptors,
+                  duration_ms: find.durationMs,
+                  action_target_count: actionTargets.length,
+                  action_targets: actionTargets,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
         };
       },
     },
@@ -359,6 +379,7 @@ export function createVmUiTools(
         );
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
+        const actionTargets = describeUiActionTargets(descriptors, 50);
         const found = elements.length > 0;
         return {
           content: [
@@ -372,6 +393,8 @@ export function createVmUiTools(
                   count: elements.length,
                   duration_ms: find.durationMs,
                   elements: descriptors,
+                  action_target_count: actionTargets.length,
+                  action_targets: actionTargets,
                   error: found ? "" : `UI element not found: ${selector}`,
                 },
                 null,
