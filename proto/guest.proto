@@ -51,6 +51,7 @@ service GuestAgent {
   // ── Browser Automation ──────────────────────────────────────
   rpc BrowserNavigate(BrowserNavigateRequest) returns (BrowserActionResponse);
   rpc BrowserClick(BrowserClickRequest) returns (BrowserActionResponse);
+  rpc BrowserEvaluate(BrowserEvaluateRequest) returns (BrowserEvaluateResponse);
   rpc BrowserScreenshot(BrowserScreenshotRequest) returns (BrowserScreenshotResponse);
 
   // ── Restriction Verification ────────────────────────────────
@@ -376,11 +377,24 @@ message BrowserClickRequest {
   uint32 timeout_ms = 2;
 }
 
+message BrowserEvaluateRequest {
+  string expression = 1;
+  uint32 timeout_ms = 2;
+}
+
 message BrowserActionResponse {
   bool success = 1;
   string error = 2;
   string page_title = 3;
   string page_url = 4;
+}
+
+message BrowserEvaluateResponse {
+  bool success = 1;
+  string error = 2;
+  string json_value = 3;
+  string page_title = 4;
+  string page_url = 5;
 }
 
 message BrowserScreenshotRequest {

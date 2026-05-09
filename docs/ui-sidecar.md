@@ -45,11 +45,12 @@ The host registers these MCP tools when guest-agent access is available:
 - `vm_ui_navigate_url`: navigate an already-open browser by focusing the
   address bar, typing an `http://` or `https://` URL, pressing Enter, and
   optionally verifying the address value through UI Automation.
-- `vm_browser_navigate`, `vm_browser_click`, `vm_browser_screenshot`: expose
-  the reserved guest Browser* RPC contract for DOM/CDP control. The guest
-  service routes these calls to the user-session sidecar. The native engine now
-  provides an initial loopback-only CDP backend for navigation, CSS-selector
-  click, and browser screenshots. PowerShell engines still return the stable
+- `vm_browser_navigate`, `vm_browser_click`, `vm_browser_evaluate`,
+  `vm_browser_screenshot`: expose the reserved guest Browser* RPC contract for
+  DOM/CDP control. The guest service routes these calls to the user-session
+  sidecar. The native engine now provides an initial loopback-only CDP backend
+  for navigation, CSS-selector click, JavaScript page-state evaluation, and
+  browser screenshots. PowerShell engines still return the stable
   CDP-unavailable response, and the native engine reports the same boundary
   when no local CDP target is reachable.
 
@@ -129,25 +130,29 @@ Win-key modifier. Native key sequences can combine tokens, for example
 PowerShell engines still accept broader Windows SendKeys syntax, but scenarios
 intended to run on the native engine should stay within the documented subset.
 
-More complex desktop workflows still need richer eventing and a fuller browser
-DOM/CDP observation loop. The guest proto reserves `BrowserNavigate`,
-`BrowserClick`, and `BrowserScreenshot`; the host exposes those as
-`vm_browser_navigate`, `vm_browser_click`, and `vm_browser_screenshot`, and the
-guest service forwards them to the user-session sidecar so CDP control runs in
-the logged-in desktop session. The native engine connects only to loopback CDP
-targets, auto-launches Microsoft Edge with `--remote-debugging-port` when
-needed, and uses an isolated temp profile. Configure the port with
-`SIGNALMAN_BROWSER_CDP_PORT`; set `SIGNALMAN_BROWSER_CDP_AUTOLAUNCH=false` to
-require a pre-existing debug target. PowerShell engines keep returning
-`success: false` with the CDP-unavailable error for navigate/click, while
-screenshots fail because the screenshot proto has no error field.
+More complex desktop workflows still need richer eventing, but the browser
+DOM/CDP observation loop now has command, click, evaluate, and screenshot
+primitives. The guest proto reserves `BrowserNavigate`, `BrowserClick`,
+`BrowserEvaluate`, and `BrowserScreenshot`; the host exposes those as
+`vm_browser_navigate`, `vm_browser_click`, `vm_browser_evaluate`, and
+`vm_browser_screenshot`, and the guest service forwards them to the
+user-session sidecar so CDP control runs in the logged-in desktop session.
+`BrowserEvaluate` returns a JSON-encoded value string plus page metadata so LLM
+tests can inspect DOM state without relying only on pixels. The native engine
+connects only to loopback CDP targets, auto-launches Microsoft Edge with
+`--remote-debugging-port` when needed, and uses an isolated temp profile.
+Configure the port with `SIGNALMAN_BROWSER_CDP_PORT`; set
+`SIGNALMAN_BROWSER_CDP_AUTOLAUNCH=false` to require a pre-existing debug target.
+PowerShell engines keep returning `success: false` with the CDP-unavailable
+error for navigate/click/evaluate, while screenshots fail because the screenshot
+proto has no error field.
 
 The live `scripts/live-browser-cdp-smoke.ps1` harness validates this path on
 `Win11_test`: it confirms the named checkpoint exists, starts a guest-local HTTP
 page, ensures the native sidecar, launches Edge with CDP through the interactive
-Run dialog, calls `BrowserNavigate`, `BrowserClick`, and `BrowserScreenshot`,
-writes a screenshot under `output/screenshots/`, and confirms the checkpoint is
-still present afterward.
+Run dialog, calls `BrowserNavigate`, `BrowserClick`, `BrowserEvaluate`, and
+`BrowserScreenshot`, writes a screenshot under `output/screenshots/`, and
+confirms the checkpoint is still present afterward.
 
 `vm_ui_open_url` is the current browser launch bridge: it validates the target
 as `http(s)`, opens the Windows Run dialog with `Win+R`, types the URL into the

@@ -4,10 +4,10 @@ Run a live Browser* CDP smoke test against a local Windows VM.
 
 .DESCRIPTION
 Starts a tiny HTTP server inside the guest, ensures the native UI sidecar,
-then validates browser_navigate, browser_click, and browser_screenshot against
-Microsoft Edge's loopback CDP endpoint. The script checks that the named
-checkpoint still exists before and after the run, but it does not restore,
-delete, or overwrite checkpoints.
+then validates browser_navigate, browser_click, browser_evaluate, and
+browser_screenshot against Microsoft Edge's loopback CDP endpoint. The script
+checks that the named checkpoint still exists before and after the run, but it
+does not restore, delete, or overwrite checkpoints.
 #>
 
 [CmdletBinding()]
@@ -268,6 +268,16 @@ exit 1
   console.log(JSON.stringify({ step: "browser-click", click }));
   if (!click.success || click.pageTitle !== "Clicked") {
     throw new Error(`browser click failed: ${JSON.stringify(click)}`);
+  }
+
+  const evaluation = await client.browserEvaluate(
+    "({ title: document.title, clicked: document.body.dataset.clicked === 'true', hash: location.hash })",
+    90_000,
+  );
+  console.log(JSON.stringify({ step: "browser-evaluate", evaluation }));
+  const evaluatedValue = JSON.parse(evaluation.jsonValue || "null");
+  if (!evaluation.success || evaluatedValue?.clicked !== true || evaluatedValue?.hash !== "#clicked") {
+    throw new Error(`browser evaluate failed: ${JSON.stringify(evaluation)}`);
   }
 
   const screenshot = await client.browserScreenshot({

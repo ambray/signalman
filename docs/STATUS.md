@@ -320,15 +320,18 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   inventory, identifying the address bar in the scored `browser_targets`
   observation list, and closing the browser. Host-side wrappers and MCP tools
   now expose the reserved guest Browser* RPC contract as
-  `vm_browser_navigate`, `vm_browser_click`, and `vm_browser_screenshot`.
+  `vm_browser_navigate`, `vm_browser_click`, `vm_browser_evaluate`, and
+  `vm_browser_screenshot`.
   The guest service forwards those Browser* RPCs to the user-session sidecar;
   the native sidecar engine now has an initial loopback-only CDP backend for
-  navigation, CSS-selector click, and browser screenshots. PowerShell engines
+  navigation, CSS-selector click, JavaScript page-state evaluation, and
+  browser screenshots. PowerShell engines
   still return the stable CDP-unavailable contract, and the native engine
   reports the same unavailable boundary when no local CDP target can be reached.
   The live `scripts/live-browser-cdp-smoke.ps1` check on `Win11_test` validates
   a guest-local HTTP page, interactive Edge CDP launch, Browser* navigation,
-  CSS click, browser screenshot, and preservation of the `base` checkpoint.
+  CSS click, DOM evaluation, browser screenshot, and preservation of the `base`
+  checkpoint.
 
 - **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
   calls into `.signalman/recordings/`. The agent-first DevOps

@@ -41,6 +41,7 @@ describe("advanced namespace contract", () => {
       "vm_ui_navigate_url",
       "vm_browser_navigate",
       "vm_browser_click",
+      "vm_browser_evaluate",
       "vm_browser_screenshot",
     ]));
     // Docker tools register too.

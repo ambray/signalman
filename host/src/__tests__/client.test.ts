@@ -244,6 +244,17 @@ describe("GuestAgentClient", () => {
           });
         },
       );
+      this.browserEvaluate = vi.fn(
+        (_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+          cb(null, {
+            success: true,
+            error: "",
+            jsonValue: "{\"clicked\":true}",
+            pageTitle: "Clicked",
+            pageUrl: "https://example.test/clicked",
+          });
+        },
+      );
       this.browserScreenshot = vi.fn(
         (_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
           cb(null, {
@@ -422,6 +433,13 @@ describe("GuestAgentClient", () => {
     await expect(client.browserClick("#continue", 5_000)).resolves.toEqual({
       success: true,
       error: "",
+      pageTitle: "Clicked",
+      pageUrl: "https://example.test/clicked",
+    });
+    await expect(client.browserEvaluate("document.body.dataset.clicked", 5_000)).resolves.toEqual({
+      success: true,
+      error: "",
+      jsonValue: "{\"clicked\":true}",
       pageTitle: "Clicked",
       pageUrl: "https://example.test/clicked",
     });
