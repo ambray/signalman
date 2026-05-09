@@ -1,0 +1,86 @@
+assertions:
+  - id: sidecar-ensured
+    type: json_field
+    source: step-0
+    field: ready
+    expected: true
+    severity: critical
+    description: "The browser smoke should start or confirm the native user-session UI sidecar"
+
+  - id: sidecar-reachable
+    type: json_field
+    source: step-1
+    field: sidecar_reachable
+    expected: true
+    severity: critical
+    description: "The user-session UI sidecar should be reachable before launching a browser"
+
+  - id: native-engine-active
+    type: json_field
+    source: step-1
+    field: engine
+    expected: native
+    severity: critical
+    description: "The browser smoke should exercise the native UI Automation engine"
+
+  - id: desktop-cleaned
+    type: json_field
+    source: step-2
+    field: success
+    expected: true
+    severity: high
+    description: "The smoke should clear transient desktop UI before launching the browser"
+
+  - id: browser-url-opened
+    type: json_field
+    source: step-4
+    field: success
+    expected: true
+    severity: critical
+    description: "The UI sidecar should open the browser URL through the Run dialog"
+
+  - id: browser-url-normalized
+    type: json_field
+    source: step-4
+    field: url
+    expected: "http://example.test/signalman-browser-smoke"
+    severity: high
+    description: "The open-url workflow should report the normalized target URL"
+
+  - id: browser-url-observed
+    type: json_field
+    source: step-6
+    field: count
+    comparison: gte
+    expected: 1
+    severity: critical
+    description: "The launched browser should expose the target URL through UI Automation"
+
+  - id: browser-snapshot-captured
+    type: json_field
+    source: step-7
+    field: bytes
+    comparison: gt
+    expected: 0
+    severity: critical
+    description: "The browser observation loop should capture non-empty screenshot bytes"
+
+  - id: browser-elements-found
+    type: json_field
+    source: step-7
+    field: element_count
+    comparison: gt
+    expected: 0
+    severity: high
+    description: "The browser observation loop should include visible UI Automation elements"
+
+  - id: browser-closed
+    type: json_field
+    source: step-8
+    field: success
+    expected: true
+    severity: high
+    description: "The smoke should close the launched browser window"
+
+pass_threshold: 1.0
+critical_must_pass: true

@@ -1,0 +1,23 @@
+name: "Live UI Browser Smoke"
+version: "1.0"
+tags: ["windows", "hyperv", "ui", "sidecar", "browser", "live", "smoke"]
+
+vms:
+  - name: Win11_test
+    template: win11-test
+    pre_started: true
+    guest_agent_port: 50051
+
+capabilities:
+  vms: ["Win11_test"]
+  host_paths:
+    write:
+      - ./output/live-ui-browser-smoke/browser.png
+
+setup: []
+
+teardown: []
+
+checkpoints:
+  before_test: false
+  on_failure: false

@@ -19,7 +19,8 @@ and type, plus a `vm_ui_open_url` bridge for launching `http(s)` browser flows
 through the interactive desktop. The native sidecar engine now covers
 screenshot, find, click, type, key operations, wait timeouts, and UIA
 Value-pattern descriptors. It is covered
-by the live `Win11_test` `live-ui-sidecar-smoke` scenario. Versions in every
+by the live `Win11_test` `live-ui-sidecar-smoke` and
+`live-ui-browser-smoke` scenarios. Versions in every
 manifest read `0.1.0` and need to bump to `0.1.1` together with a tag push to
 ship — the release workflow validates the manifest version matches the tag
 before publishing. The four GitHub repo secrets
@@ -294,7 +295,10 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   now includes normalized roles and fallback labels on UI descriptors and action
   targets. Browser launch coverage now includes `vm_ui_open_url` / `ui_open_url`
   for safely opening `http(s)` URLs through the interactive Windows Run dialog.
-  Full DOM/CDP browser control remains future work.
+  The live `Win11_test` `live-ui-browser-smoke` scenario validates that path by
+  opening Edge to an isolated `example.test` URL, observing the browser address
+  bar through UI Automation, capturing a screenshot and UIA inventory, and
+  closing the browser. Full DOM/CDP browser control remains future work.
 
 - **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
   calls into `.signalman/recordings/`. The agent-first DevOps
