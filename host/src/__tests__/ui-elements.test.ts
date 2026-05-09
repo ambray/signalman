@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { describeUiActionTargets, describeUiElements } from "../guest/ui-elements.js";
+import {
+  describeUiActionTargets,
+  describeUiBrowserTargets,
+  describeUiElements,
+} from "../guest/ui-elements.js";
 import type { UiElement } from "../guest/client.js";
 
 describe("UI element descriptors", () => {
@@ -257,5 +261,97 @@ describe("UI element descriptors", () => {
       },
     ]);
     expect(describeUiActionTargets(descriptors, 0)).toEqual([]);
+  });
+
+  it("discovers likely browser address targets from UIA descriptors", () => {
+    const descriptors = describeUiElements([
+      {
+        name: "Address and search bar",
+        automationId: "view_1021",
+        controlType: "ControlType.Edit",
+        className: "Chrome_WidgetWin_1",
+        isEnabled: true,
+        isVisible: true,
+        x: 120,
+        y: 50,
+        width: 720,
+        height: 36,
+        value: "example.test/path",
+      },
+      {
+        name: "Find on page",
+        automationId: "find-box",
+        controlType: "ControlType.Edit",
+        className: "TextBox",
+        isEnabled: true,
+        isVisible: true,
+        x: 0,
+        y: 100,
+        width: 200,
+        height: 24,
+        value: "",
+      },
+      {
+        name: "Disabled address bar",
+        automationId: "disabled-address",
+        controlType: "ControlType.Edit",
+        className: "TextBox",
+        isEnabled: false,
+        isVisible: true,
+        x: 0,
+        y: 130,
+        width: 800,
+        height: 24,
+        value: "example.test/disabled",
+      },
+    ]);
+
+    expect(describeUiBrowserTargets(descriptors)).toEqual([
+      {
+        element_id: descriptors[0].element_id,
+        selector: "[automationId='view_1021']",
+        edit_selector: "[automationId='view_1021']",
+        kind: "address_bar",
+        confidence: 1,
+        label: "Address and search bar",
+        value: "example.test/path",
+        actions: ["type", "key"],
+        bounds: descriptors[0].bounds,
+        reasons: [
+          "editable-textbox",
+          "address-label",
+          "edge-address-automation-id",
+          "url-like-value",
+          "wide-edit-control",
+        ],
+      },
+    ]);
+  });
+
+  it("discovers search boxes separately from address bars", () => {
+    const descriptors = describeUiElements([
+      {
+        name: "Search the web",
+        automationId: "search",
+        controlType: "ControlType.Edit",
+        className: "TextBox",
+        isEnabled: true,
+        isVisible: true,
+        x: 20,
+        y: 40,
+        width: 400,
+        height: 28,
+        value: "",
+      },
+    ]);
+
+    expect(describeUiBrowserTargets(descriptors)).toEqual([
+      expect.objectContaining({
+        selector: "[automationId='search']",
+        kind: "search_box",
+        confidence: 0.6,
+        reasons: ["editable-textbox", "search-label", "wide-edit-control"],
+      }),
+    ]);
   });
 });

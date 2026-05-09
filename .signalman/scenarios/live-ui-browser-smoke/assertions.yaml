@@ -108,6 +108,15 @@ assertions:
     severity: high
     description: "The browser snapshot should expose the address bar as a compact LLM action target"
 
+  - id: address-bar-browser-target
+    type: json_field
+    source: step-10
+    field: "browser_targets[?label=='Address and search bar'].kind"
+    comparison: includes
+    expected: address_bar
+    severity: high
+    description: "The browser snapshot should identify the address bar as a reusable browser target"
+
   - id: browser-closed
     type: json_field
     source: step-11

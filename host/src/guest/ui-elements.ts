@@ -38,6 +38,19 @@ export interface UiActionTarget {
   bounds: UiBounds;
 }
 
+export interface UiBrowserTarget {
+  element_id: string;
+  selector: string;
+  edit_selector: string;
+  kind: "address_bar" | "search_box";
+  confidence: number;
+  label: string;
+  value: string;
+  actions: string[];
+  bounds: UiBounds;
+  reasons: string[];
+}
+
 function stableHash(input: string): string {
   let hash = 0x811c9dc5;
   for (let i = 0; i < input.length; i += 1) {
@@ -223,5 +236,91 @@ export function describeUiActionTargets(
       value: element.value,
       actions: element.actions,
       bounds: element.bounds,
+    }));
+}
+
+function includesAny(value: string, terms: string[]): boolean {
+  const normalized = value.toLowerCase();
+  return terms.some((term) => normalized.includes(term));
+}
+
+function browserTargetScore(element: UiElementDescriptor): {
+  kind: UiBrowserTarget["kind"];
+  score: number;
+  reasons: string[];
+} {
+  if (!element.enabled || !element.visible || element.selector.length === 0) {
+    return { kind: "search_box", score: 0, reasons: [] };
+  }
+  if (!element.actions.includes("type")) {
+    return { kind: "search_box", score: 0, reasons: [] };
+  }
+
+  const text = [
+    element.name,
+    element.automation_id,
+    element.class_name,
+    element.label,
+    element.value,
+  ].join(" ");
+  const reasons: string[] = [];
+  let score = 0;
+
+  if (element.role === "textbox" || element.control_type.toLowerCase() === "edit") {
+    score += 20;
+    reasons.push("editable-textbox");
+  }
+  if (includesAny(text, ["address and search bar", "address bar", "omnibox"])) {
+    score += 55;
+    reasons.push("address-label");
+  }
+  if (includesAny(text, ["search or enter web address", "search the web", "search box"])) {
+    score += 30;
+    reasons.push("search-label");
+  }
+  if (/\bview_1021\b/i.test(element.automation_id)) {
+    score += 35;
+    reasons.push("edge-address-automation-id");
+  }
+  if (/^(https?:\/\/|[a-z0-9.-]+\.[a-z]{2,})(\/|$)/i.test(element.value.trim())) {
+    score += 35;
+    reasons.push("url-like-value");
+  }
+  if (element.bounds.width >= 250 && element.bounds.height >= 20) {
+    score += 10;
+    reasons.push("wide-edit-control");
+  }
+
+  const kind =
+    includesAny(text, ["address", "omnibox"]) || /^https?:\/\//i.test(element.value)
+      ? "address_bar"
+      : "search_box";
+  return { kind, score, reasons };
+}
+
+export function describeUiBrowserTargets(
+  descriptors: UiElementDescriptor[],
+  limit = 10,
+): UiBrowserTarget[] {
+  const boundedLimit = Math.max(0, Math.floor(limit));
+  return descriptors
+    .map((element) => {
+      const { kind, score, reasons } = browserTargetScore(element);
+      return { element, kind, score, reasons };
+    })
+    .filter(({ score }) => score >= 50)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, boundedLimit)
+    .map(({ element, kind, score, reasons }) => ({
+      element_id: element.element_id,
+      selector: element.selector,
+      edit_selector: element.selector,
+      kind,
+      confidence: Math.min(1, Number((score / 100).toFixed(2))),
+      label: element.label,
+      value: element.value,
+      actions: element.actions,
+      bounds: element.bounds,
+      reasons,
     }));
 }
