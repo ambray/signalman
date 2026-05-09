@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { describeUiElements } from "../guest/ui-elements.js";
+import { describeUiActionTargets, describeUiElements } from "../guest/ui-elements.js";
 import type { UiElement } from "../guest/client.js";
 
 describe("UI element descriptors", () => {
@@ -146,5 +146,62 @@ describe("UI element descriptors", () => {
       [],
       ["key"],
     ]);
+  });
+
+  it("summarizes actionable elements for LLM observation loops", () => {
+    const descriptors = describeUiElements([
+      {
+        name: "Save",
+        automationId: "SaveButton",
+        controlType: "ControlType.Button",
+        className: "Button",
+        isEnabled: true,
+        isVisible: true,
+        x: 10,
+        y: 20,
+        width: 80,
+        height: 24,
+        value: "",
+      },
+      {
+        name: "Disabled",
+        automationId: "DisabledButton",
+        controlType: "ControlType.Button",
+        className: "Button",
+        isEnabled: false,
+        isVisible: true,
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 24,
+        value: "",
+      },
+      {
+        name: "Static",
+        automationId: "",
+        controlType: "ControlType.Text",
+        className: "TextBlock",
+        isEnabled: true,
+        isVisible: true,
+        x: 0,
+        y: 40,
+        width: 80,
+        height: 24,
+        value: "",
+      },
+    ]);
+
+    expect(describeUiActionTargets(descriptors)).toEqual([
+      {
+        element_id: descriptors[0].element_id,
+        selector: "[automationId='SaveButton']",
+        name: "Save",
+        control_type: "Button",
+        value: "",
+        actions: ["click"],
+        bounds: descriptors[0].bounds,
+      },
+    ]);
+    expect(describeUiActionTargets(descriptors, 0)).toEqual([]);
   });
 });

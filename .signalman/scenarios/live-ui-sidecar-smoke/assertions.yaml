@@ -107,6 +107,15 @@ assertions:
     severity: high
     description: "The UI snapshot should include visible UI Automation elements"
 
+  - id: snapshot-action-targets-found
+    type: json_field
+    source: step-11
+    field: action_target_count
+    comparison: gt
+    expected: 0
+    severity: high
+    description: "The UI snapshot should expose compact actionable targets for LLM loops"
+
   - id: cancel-action-hint
     type: json_field
     source: step-11

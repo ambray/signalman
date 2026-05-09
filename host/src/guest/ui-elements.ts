@@ -24,6 +24,16 @@ export interface UiElementDescriptor {
   raw: UiElement;
 }
 
+export interface UiActionTarget {
+  element_id: string;
+  selector: string;
+  name: string;
+  control_type: string;
+  value: string;
+  actions: string[];
+  bounds: UiBounds;
+}
+
 function stableHash(input: string): string {
   let hash = 0x811c9dc5;
   for (let i = 0; i < input.length; i += 1) {
@@ -147,4 +157,23 @@ export function describeUiElements(elements: UiElement[]): UiElementDescriptor[]
       raw: element,
     };
   });
+}
+
+export function describeUiActionTargets(
+  descriptors: UiElementDescriptor[],
+  limit = 50,
+): UiActionTarget[] {
+  const boundedLimit = Math.max(0, Math.floor(limit));
+  return descriptors
+    .filter((element) => element.actions.length > 0 && element.selector.length > 0)
+    .slice(0, boundedLimit)
+    .map((element) => ({
+      element_id: element.element_id,
+      selector: element.selector,
+      name: element.name,
+      control_type: element.control_type,
+      value: element.value,
+      actions: element.actions,
+      bounds: element.bounds,
+    }));
 }
