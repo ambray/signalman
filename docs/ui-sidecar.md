@@ -162,9 +162,18 @@ hints (`click`, `type`, `key`), and the raw UI Automation payload. These
 responses also include an `action_targets` list: a compact menu of visible,
 enabled elements that have at least one action hint, with only the selector,
 name, role, label, type, value, actions, and bounds needed for the next
-interaction. The `element_id` is stable for a single snapshot/find result and is
-meant for logs and assertions; actions still take selectors so a future native
-backend can keep the same workflow contract.
+interaction.
+
+Snapshot/find responses also include `browser_targets`: a smaller, scored list
+of likely browser address or search boxes. Discovery is conservative: targets
+must be enabled, visible, typeable controls and gain confidence from
+address/search labels, URL-looking values, wide edit bounds, or known browser
+automation ids. Each target reports `kind`, `confidence`, `selector`,
+`edit_selector`, `value`, and `reasons`, so LLM-enabled workflows can pick a
+navigation target from observation data before calling `vm_ui_navigate_url`.
+The `element_id` is stable for a single snapshot/find result and is meant for
+logs and assertions; actions still take selectors so a future native backend can
+keep the same workflow contract.
 
 For longer LLM-driven runs, UI MCP tools accept `recover_username`,
 `recover_engine`, and `recover_wait_ready_ms`. When `recover_username` is set and

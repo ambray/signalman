@@ -11,7 +11,11 @@ import type { GuestAgentClient } from "../guest/client.js";
 import { navigateUrlWithUi, openUrlWithUi } from "../guest/ui-browser.js";
 import type { UiSidecarRecoveryOptions } from "../guest/ui-recovery.js";
 import { ensureUiSidecar } from "../guest/ui-sidecar.js";
-import { describeUiActionTargets, describeUiElements } from "../guest/ui-elements.js";
+import {
+  describeUiActionTargets,
+  describeUiBrowserTargets,
+  describeUiElements,
+} from "../guest/ui-elements.js";
 import { withUiSidecarRecovery } from "../guest/ui-recovery.js";
 import { sanitizeTimeout, sanitizeVmName } from "../sanitize.js";
 
@@ -214,6 +218,7 @@ export function createVmUiTools(
         const descriptors = describeUiElements(elements);
         const actionTargets = describeUiActionTargets(descriptors, maxElements);
         const actionTargetCount = descriptors.filter((element) => element.actions.length > 0 && element.selector).length;
+        const browserTargets = describeUiBrowserTargets(descriptors, 10);
         return {
           content: [
             {
@@ -237,6 +242,8 @@ export function createVmUiTools(
                   action_target_count: actionTargetCount,
                   action_targets: actionTargets,
                   action_targets_truncated: actionTargetCount > actionTargets.length,
+                  browser_target_count: browserTargets.length,
+                  browser_targets: browserTargets,
                 },
                 null,
                 2,
@@ -329,6 +336,7 @@ export function createVmUiTools(
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
         const actionTargets = describeUiActionTargets(descriptors, 50);
+        const browserTargets = describeUiBrowserTargets(descriptors, 10);
         return {
           content: [
             {
@@ -339,6 +347,8 @@ export function createVmUiTools(
                   duration_ms: find.durationMs,
                   action_target_count: actionTargets.length,
                   action_targets: actionTargets,
+                  browser_target_count: browserTargets.length,
+                  browser_targets: browserTargets,
                 },
                 null,
                 2,
@@ -381,6 +391,7 @@ export function createVmUiTools(
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
         const actionTargets = describeUiActionTargets(descriptors, 50);
+        const browserTargets = describeUiBrowserTargets(descriptors, 10);
         const found = elements.length > 0;
         return {
           content: [
@@ -396,6 +407,8 @@ export function createVmUiTools(
                   elements: descriptors,
                   action_target_count: actionTargets.length,
                   action_targets: actionTargets,
+                  browser_target_count: browserTargets.length,
+                  browser_targets: browserTargets,
                   error: found ? "" : `UI element not found: ${selector}`,
                 },
                 null,

@@ -11,7 +11,11 @@ import * as path from "node:path";
 import type { HypervisorBackend, VMHandle } from "../hypervisors/interface.js";
 import { GuestAgentClient, type CommandResult } from "../guest/client.js";
 import { navigateUrlWithUi, openUrlWithUi } from "../guest/ui-browser.js";
-import { describeUiActionTargets, describeUiElements } from "../guest/ui-elements.js";
+import {
+  describeUiActionTargets,
+  describeUiBrowserTargets,
+  describeUiElements,
+} from "../guest/ui-elements.js";
 import { ensureUiSidecar } from "../guest/ui-sidecar.js";
 import { withUiSidecarRecovery, type UiSidecarRecoveryOptions } from "../guest/ui-recovery.js";
 import type { SignalmanConfig } from "../config.js";
@@ -2265,6 +2269,7 @@ export class ScenarioOrchestrator {
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
         const actionTargets = describeUiActionTargets(descriptors, 50);
+        const browserTargets = describeUiBrowserTargets(descriptors, 10);
         // Return a structured result so `json_field` assertions can
         // query e.g. `count` or `elements[0].is_enabled`.
         return JSON.stringify({
@@ -2273,6 +2278,8 @@ export class ScenarioOrchestrator {
           elements: descriptors,
           action_target_count: actionTargets.length,
           action_targets: actionTargets,
+          browser_target_count: browserTargets.length,
+          browser_targets: browserTargets,
         });
       }
 
@@ -2291,6 +2298,7 @@ export class ScenarioOrchestrator {
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
         const actionTargets = describeUiActionTargets(descriptors, 50);
+        const browserTargets = describeUiBrowserTargets(descriptors, 10);
         const found = elements.length > 0;
         if (!found) {
           throw new Error(`UI element not found: ${selector}`);
@@ -2302,6 +2310,8 @@ export class ScenarioOrchestrator {
           elements: descriptors,
           action_target_count: actionTargets.length,
           action_targets: actionTargets,
+          browser_target_count: browserTargets.length,
+          browser_targets: browserTargets,
         });
       }
 
@@ -2377,6 +2387,7 @@ export class ScenarioOrchestrator {
         const elements = find.elements;
         const descriptors = describeUiElements(elements);
         const actionTargets = describeUiActionTargets(descriptors, maxElements);
+        const browserTargets = describeUiBrowserTargets(descriptors, 10);
         const actionTargetCount = descriptors.filter(
           (element) => element.actions.length > 0 && element.selector,
         ).length;
@@ -2400,6 +2411,8 @@ export class ScenarioOrchestrator {
           action_target_count: actionTargetCount,
           action_targets: actionTargets,
           action_targets_truncated: actionTargetCount > actionTargets.length,
+          browser_target_count: browserTargets.length,
+          browser_targets: browserTargets,
           saved_path: savedPath ?? null,
         });
       }
