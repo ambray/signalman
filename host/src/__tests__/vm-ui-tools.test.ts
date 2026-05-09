@@ -455,7 +455,11 @@ describe("VM UI MCP tools", () => {
       timeout_ms: 10_000,
     });
 
-    expect(client.uiClick).toHaveBeenCalledWith("[name='Address and search bar']", {
+    expect(client.uiFindDetailed).toHaveBeenNthCalledWith(1, "", {
+      findTimeoutMs: 3_000,
+      timeoutMs: 10_000,
+    });
+    expect(client.uiClick).toHaveBeenCalledWith("[automationId='view_1021']", {
       timeoutMs: 10_000,
     });
     expect(client.uiKey).toHaveBeenNthCalledWith(1, "^l", {
@@ -471,7 +475,7 @@ describe("VM UI MCP tools", () => {
       selector: "[automationId='view_1021']",
       timeoutMs: 10_000,
     });
-    expect(client.uiFindDetailed).toHaveBeenCalledWith("[value='example.test/next']", {
+    expect(client.uiFindDetailed).toHaveBeenNthCalledWith(2, "[value='example.test/next']", {
       findTimeoutMs: 3_000,
       timeoutMs: 10_000,
     });
@@ -479,11 +483,15 @@ describe("VM UI MCP tools", () => {
       vm: "Win11_test",
       success: true,
       error: "",
-      duration_ms: 77,
+      duration_ms: 98,
       url: "http://example.test/next",
       expected_value: "example.test/next",
       observed: true,
       observed_count: 1,
+      target_selector: "[automationId='view_1021']",
+      target_edit_selector: "[automationId='view_1021']",
+      target_kind: "address_bar",
+      target_confidence: 1,
     });
     expect(result.isError).toBe(false);
   });

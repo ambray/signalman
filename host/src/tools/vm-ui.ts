@@ -585,6 +585,10 @@ export function createVmUiTools(
             type: "string",
             description: "Selector for the address bar edit control used for typing",
           },
+          discover_target: {
+            type: "boolean",
+            description: "Discover the browser address/search target from UIA metadata before navigating; defaults on when selectors are omitted",
+          },
           expected_value: {
             type: "string",
             description: "Expected UI Automation value after navigation; defaults to the browser-displayed URL",
@@ -607,6 +611,7 @@ export function createVmUiTools(
           navigateUrlWithUi(client, params.url, {
             addressSelector: params.address_selector as string | undefined,
             addressEditSelector: params.address_edit_selector as string | undefined,
+            discoverTarget: params.discover_target as boolean | undefined,
             expectedValue: params.expected_value as string | undefined,
             verify: params.verify as boolean | undefined,
             findTimeoutMs: sanitizeTimeout(params.find_timeout_ms as number | undefined, 5_000),
@@ -624,6 +629,10 @@ export function createVmUiTools(
                   expected_value: result.expectedValue,
                   observed: result.observed,
                   observed_count: result.observedCount,
+                  target_selector: result.targetSelector,
+                  target_edit_selector: result.targetEditSelector,
+                  target_kind: result.targetKind,
+                  target_confidence: result.targetConfidence,
                 },
                 null,
                 2,

@@ -2239,6 +2239,7 @@ export class ScenarioOrchestrator {
           navigateUrlWithUi(client, url, {
             addressSelector: params.address_selector as string | undefined,
             addressEditSelector: params.address_edit_selector as string | undefined,
+            discoverTarget: params.discover_target as boolean | undefined,
             expectedValue: params.expected_value as string | undefined,
             verify: params.verify as boolean | undefined,
             findTimeoutMs: params.find_timeout_ms as number | undefined,
@@ -2251,6 +2252,10 @@ export class ScenarioOrchestrator {
           expected_value: result.expectedValue,
           observed: result.observed,
           observed_count: result.observedCount,
+          target_selector: result.targetSelector,
+          target_edit_selector: result.targetEditSelector,
+          target_kind: result.targetKind,
+          target_confidence: result.targetConfidence,
         });
       }
 
