@@ -5,7 +5,7 @@
 //! intended to be launched inside that user's session. The service-facing guest
 //! agent proxies UI RPCs to it over loopback.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
 #[cfg(target_os = "windows")]
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -195,6 +195,24 @@ impl UiAutomationBackend for NativeUiBackend {
 
     fn screenshot(&self, params: &UiScreenshotParams) -> anyhow::Result<UiScreenshotResult> {
         native_ui_screenshot(params)
+    }
+
+    fn browser_navigate(
+        &self,
+        params: &BrowserNavigateParams,
+    ) -> anyhow::Result<BrowserActionResult> {
+        browser_cdp_navigate(params)
+    }
+
+    fn browser_click(&self, params: &BrowserClickParams) -> anyhow::Result<BrowserActionResult> {
+        browser_cdp_click(params)
+    }
+
+    fn browser_screenshot(
+        &self,
+        params: &BrowserScreenshotParams,
+    ) -> anyhow::Result<BrowserScreenshotResult> {
+        browser_cdp_screenshot(params)
     }
 }
 
@@ -581,6 +599,545 @@ fn browser_cdp_unavailable_action(page_url: &str) -> BrowserActionResult {
         error: BROWSER_CDP_UNAVAILABLE.to_string(),
         page_title: String::new(),
         page_url: page_url.to_string(),
+    }
+}
+
+const DEFAULT_BROWSER_CDP_PORT: u16 = 9222;
+const BROWSER_CDP_CONNECT_TIMEOUT_MS: u64 = 1_000;
+const BROWSER_CDP_POLL_MS: u64 = 100;
+
+#[derive(Debug, Clone)]
+struct BrowserCdpConfig {
+    host: String,
+    port: u16,
+    auto_launch: bool,
+}
+
+impl BrowserCdpConfig {
+    fn from_env() -> Self {
+        let port = std::env::var("SIGNALMAN_BROWSER_CDP_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(DEFAULT_BROWSER_CDP_PORT);
+        let auto_launch = !matches!(
+            std::env::var("SIGNALMAN_BROWSER_CDP_AUTOLAUNCH")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "0" | "false" | "no" | "off"
+        );
+        Self {
+            host: "127.0.0.1".to_string(),
+            port,
+            auto_launch,
+        }
+    }
+
+    fn addr(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserCdpTarget {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    #[serde(rename = "type")]
+    target_type: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default, rename = "webSocketDebuggerUrl")]
+    websocket_debugger_url: String,
+}
+
+#[derive(Debug)]
+struct BrowserCdpClient {
+    stream: std::net::TcpStream,
+    next_id: u64,
+}
+
+fn browser_cdp_navigate(params: &BrowserNavigateParams) -> anyhow::Result<BrowserActionResult> {
+    if params.url.trim().is_empty() {
+        return Ok(BrowserActionResult {
+            success: false,
+            error: "url is required".to_string(),
+            page_title: String::new(),
+            page_url: String::new(),
+        });
+    }
+    let timeout = browser_timeout(params.timeout_ms);
+    let mut client = match BrowserCdpClient::connect(timeout) {
+        Ok(client) => client,
+        Err(err) => return Ok(browser_cdp_unavailable_action_with_reason(&params.url, err)),
+    };
+    let navigate = client.call(
+        "Page.navigate",
+        json!({
+            "url": params.url,
+        }),
+    )?;
+    if let Some(error) = navigate.get("error") {
+        return Ok(browser_cdp_failed_action(&error.to_string(), &params.url));
+    }
+    let _ = client.wait_for_ready(timeout);
+    client.page_metadata()
+}
+
+fn browser_cdp_click(params: &BrowserClickParams) -> anyhow::Result<BrowserActionResult> {
+    if params.css_selector.trim().is_empty() {
+        return Ok(BrowserActionResult {
+            success: false,
+            error: "css_selector is required".to_string(),
+            page_title: String::new(),
+            page_url: String::new(),
+        });
+    }
+    let timeout = browser_timeout(params.timeout_ms);
+    let mut client = match BrowserCdpClient::connect(timeout) {
+        Ok(client) => client,
+        Err(err) => return Ok(browser_cdp_unavailable_action_with_reason("", err)),
+    };
+    let script = format!(
+        r#"(function() {{
+const element = document.querySelector({});
+if (!element) {{
+  return {{ ok: false, error: "selector not found" }};
+}}
+element.click();
+return {{ ok: true, error: "" }};
+}})()"#,
+        serde_json::to_string(&params.css_selector)?
+    );
+    let result = client.runtime_evaluate(&script)?;
+    let value = result
+        .pointer("/result/result/value")
+        .cloned()
+        .unwrap_or(Value::Null);
+    if !value.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        let reason = value
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("browser click failed");
+        let metadata = client.page_metadata()?;
+        return Ok(browser_cdp_failed_action(reason, &metadata.page_url));
+    }
+    let _ = client.wait_for_ready(timeout);
+    client.page_metadata()
+}
+
+fn browser_cdp_screenshot(
+    params: &BrowserScreenshotParams,
+) -> anyhow::Result<BrowserScreenshotResult> {
+    let timeout = browser_timeout(None);
+    let mut client = BrowserCdpClient::connect(timeout)?;
+    let format = normalize_browser_screenshot_format(&params.format);
+    let screenshot = client.call(
+        "Page.captureScreenshot",
+        json!({
+            "format": format,
+            "captureBeyondViewport": params.full_page,
+            "fromSurface": true
+        }),
+    )?;
+    let image_data_base64 = screenshot
+        .pointer("/result/data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("CDP screenshot response missing image data"))?
+        .to_string();
+    let dimensions = client.viewport_dimensions().unwrap_or((0, 0));
+    Ok(BrowserScreenshotResult {
+        image_data_base64,
+        format: format.to_string(),
+        width: dimensions.0,
+        height: dimensions.1,
+    })
+}
+
+fn browser_timeout(timeout_ms: Option<u64>) -> std::time::Duration {
+    std::time::Duration::from_millis(timeout_ms.unwrap_or(5_000).max(100))
+}
+
+fn browser_cdp_unavailable_action_with_reason(
+    page_url: &str,
+    err: anyhow::Error,
+) -> BrowserActionResult {
+    BrowserActionResult {
+        success: false,
+        error: format!("{BROWSER_CDP_UNAVAILABLE}: {err}"),
+        page_title: String::new(),
+        page_url: page_url.to_string(),
+    }
+}
+
+fn browser_cdp_failed_action(error: &str, page_url: &str) -> BrowserActionResult {
+    BrowserActionResult {
+        success: false,
+        error: error.to_string(),
+        page_title: String::new(),
+        page_url: page_url.to_string(),
+    }
+}
+
+fn normalize_browser_screenshot_format(value: &str) -> &'static str {
+    if value.eq_ignore_ascii_case("jpeg") || value.eq_ignore_ascii_case("jpg") {
+        "jpeg"
+    } else {
+        "png"
+    }
+}
+
+impl BrowserCdpClient {
+    fn connect(timeout: std::time::Duration) -> anyhow::Result<Self> {
+        let config = BrowserCdpConfig::from_env();
+        let deadline = std::time::Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(std::time::Instant::now);
+        let mut last_error: Option<anyhow::Error> = None;
+        if config.auto_launch {
+            let _ = ensure_browser_debugger(&config);
+        }
+        while std::time::Instant::now() <= deadline {
+            match browser_cdp_target(&config) {
+                Ok(target) => return Self::connect_target(&target, timeout),
+                Err(err) => last_error = Some(err),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(BROWSER_CDP_POLL_MS));
+        }
+        Err(last_error.unwrap_or_else(|| anyhow!("CDP target was not available")))
+    }
+
+    fn connect_target(
+        target: &BrowserCdpTarget,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<Self> {
+        let ws = parse_loopback_ws_url(&target.websocket_debugger_url)?;
+        let addr = if ws.host == "localhost" {
+            format!("127.0.0.1:{}", ws.port)
+        } else {
+            format!("{}:{}", ws.host, ws.port)
+        };
+        let mut stream = std::net::TcpStream::connect_timeout(
+            &addr.parse()?,
+            timeout.min(std::time::Duration::from_millis(
+                BROWSER_CDP_CONNECT_TIMEOUT_MS,
+            )),
+        )
+        .with_context(|| format!("connect browser CDP target {}", target.id))?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        websocket_handshake(&mut stream, &ws)?;
+        let mut client = Self { stream, next_id: 1 };
+        let _ = client.call("Page.enable", json!({}));
+        let _ = client.call("Runtime.enable", json!({}));
+        Ok(client)
+    }
+
+    fn call(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let request = json!({
+            "id": id,
+            "method": method,
+            "params": params
+        });
+        websocket_write_text(&mut self.stream, &serde_json::to_string(&request)?)?;
+        loop {
+            let message = websocket_read_text(&mut self.stream)?;
+            let value: Value = serde_json::from_str(&message)
+                .with_context(|| format!("parse CDP response for {method}"))?;
+            if value.get("id").and_then(Value::as_u64) == Some(id) {
+                return Ok(value);
+            }
+        }
+    }
+
+    fn runtime_evaluate(&mut self, expression: &str) -> anyhow::Result<Value> {
+        self.call(
+            "Runtime.evaluate",
+            json!({
+                "expression": expression,
+                "returnByValue": true,
+                "awaitPromise": true
+            }),
+        )
+    }
+
+    fn page_metadata(&mut self) -> anyhow::Result<BrowserActionResult> {
+        let result = self.runtime_evaluate(
+            r#"(function() { return { title: document.title || "", url: location.href || "" }; })()"#,
+        )?;
+        let value = result
+            .pointer("/result/result/value")
+            .cloned()
+            .unwrap_or(Value::Null);
+        Ok(BrowserActionResult {
+            success: true,
+            error: String::new(),
+            page_title: value
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            page_url: value
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        })
+    }
+
+    fn wait_for_ready(&mut self, timeout: std::time::Duration) -> anyhow::Result<()> {
+        let deadline = std::time::Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(std::time::Instant::now);
+        while std::time::Instant::now() <= deadline {
+            let value = self.runtime_evaluate("document.readyState")?;
+            if value
+                .pointer("/result/result/value")
+                .and_then(Value::as_str)
+                == Some("complete")
+            {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(BROWSER_CDP_POLL_MS));
+        }
+        Ok(())
+    }
+
+    fn viewport_dimensions(&mut self) -> anyhow::Result<(u32, u32)> {
+        let result = self.runtime_evaluate(
+            r#"(function() { return { width: window.innerWidth || 0, height: window.innerHeight || 0 }; })()"#,
+        )?;
+        let value = result
+            .pointer("/result/result/value")
+            .cloned()
+            .unwrap_or(Value::Null);
+        Ok((
+            value.get("width").and_then(Value::as_u64).unwrap_or(0) as u32,
+            value.get("height").and_then(Value::as_u64).unwrap_or(0) as u32,
+        ))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct BrowserWsUrl {
+    host: String,
+    port: u16,
+    path: String,
+}
+
+fn parse_loopback_ws_url(value: &str) -> anyhow::Result<BrowserWsUrl> {
+    let rest = value
+        .strip_prefix("ws://")
+        .ok_or_else(|| anyhow!("CDP websocket URL must use ws://"))?;
+    let (authority, path) = rest
+        .split_once('/')
+        .ok_or_else(|| anyhow!("CDP websocket URL is missing a path"))?;
+    let (host, port) = authority
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("CDP websocket URL is missing a port"))?;
+    if host != "127.0.0.1" && host != "localhost" {
+        return Err(anyhow!("CDP websocket host must be loopback"));
+    }
+    Ok(BrowserWsUrl {
+        host: host.to_string(),
+        port: port.parse().context("parse CDP websocket port")?,
+        path: format!("/{path}"),
+    })
+}
+
+fn browser_cdp_target(config: &BrowserCdpConfig) -> anyhow::Result<BrowserCdpTarget> {
+    let body = http_request_localhost(config, "GET", "/json/list", "")?;
+    let targets: Vec<BrowserCdpTarget> =
+        serde_json::from_str(&body).context("parse CDP target list")?;
+    targets
+        .into_iter()
+        .find(|target| {
+            target.target_type == "page"
+                && !target.websocket_debugger_url.is_empty()
+                && !target.url.starts_with("devtools://")
+        })
+        .ok_or_else(|| anyhow!("no browser CDP page targets available"))
+}
+
+fn http_request_localhost(
+    config: &BrowserCdpConfig,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> anyhow::Result<String> {
+    let mut stream = std::net::TcpStream::connect(config.addr())
+        .with_context(|| format!("connect browser CDP HTTP endpoint {}", config.addr()))?;
+    let timeout = std::time::Duration::from_millis(BROWSER_CDP_CONNECT_TIMEOUT_MS);
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+        config.addr(),
+        body.len()
+    );
+    stream.write_all(request.as_bytes())?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    let (headers, response_body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| anyhow!("invalid browser CDP HTTP response"))?;
+    if !headers.starts_with("HTTP/1.1 2") && !headers.starts_with("HTTP/1.0 2") {
+        return Err(anyhow!(
+            "browser CDP HTTP request failed: {}",
+            headers.lines().next().unwrap_or("unknown status")
+        ));
+    }
+    Ok(response_body.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_browser_debugger(config: &BrowserCdpConfig) -> anyhow::Result<()> {
+    if http_request_localhost(config, "GET", "/json/version", "").is_ok() {
+        return Ok(());
+    }
+    let edge = browser_executable_path()
+        .ok_or_else(|| anyhow!("Microsoft Edge executable was not found"))?;
+    let user_data_dir = std::env::temp_dir().join("signalman-browser-cdp-profile");
+    let _ = std::fs::create_dir_all(&user_data_dir);
+    Command::new(edge)
+        .arg(format!("--remote-debugging-port={}", config.port))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg(format!("--user-data-dir={}", user_data_dir.display()))
+        .arg("about:blank")
+        .spawn()
+        .context("launch Microsoft Edge with CDP enabled")?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_browser_debugger(_config: &BrowserCdpConfig) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn browser_executable_path() -> Option<std::path::PathBuf> {
+    let candidates = [
+        std::env::var_os("ProgramFiles").map(|root| {
+            std::path::PathBuf::from(root)
+                .join("Microsoft")
+                .join("Edge")
+                .join("Application")
+                .join("msedge.exe")
+        }),
+        std::env::var_os("ProgramFiles(x86)").map(|root| {
+            std::path::PathBuf::from(root)
+                .join("Microsoft")
+                .join("Edge")
+                .join("Application")
+                .join("msedge.exe")
+        }),
+        Some(std::path::PathBuf::from("msedge.exe")),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|path| path == std::path::Path::new("msedge.exe") || path.exists())
+}
+
+fn websocket_handshake(stream: &mut std::net::TcpStream, ws: &BrowserWsUrl) -> anyhow::Result<()> {
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: c2lnbmFsbWFuLWNkcC0wMQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        ws.path, ws.host, ws.port
+    );
+    stream.write_all(request.as_bytes())?;
+    let mut response = Vec::new();
+    let mut byte = [0u8; 1];
+    while stream.read(&mut byte)? == 1 {
+        response.push(byte[0]);
+        if response.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&response);
+    if !text.starts_with("HTTP/1.1 101") && !text.starts_with("HTTP/1.0 101") {
+        return Err(anyhow!(
+            "browser CDP websocket handshake failed: {}",
+            text.lines().next().unwrap_or("unknown status")
+        ));
+    }
+    Ok(())
+}
+
+fn websocket_write_text(stream: &mut std::net::TcpStream, text: &str) -> anyhow::Result<()> {
+    let frame = websocket_client_text_frame(text.as_bytes(), websocket_mask());
+    stream.write_all(&frame)?;
+    Ok(())
+}
+
+fn websocket_mask() -> [u8; 4] {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ std::process::id() as u64;
+    (nanos as u32).to_be_bytes()
+}
+
+fn websocket_client_text_frame(payload: &[u8], mask: [u8; 4]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(payload.len() + 14);
+    frame.push(0x81);
+    if payload.len() < 126 {
+        frame.push(0x80 | payload.len() as u8);
+    } else if payload.len() <= u16::MAX as usize {
+        frame.push(0x80 | 126);
+        frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    } else {
+        frame.push(0x80 | 127);
+        frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    }
+    frame.extend_from_slice(&mask);
+    for (idx, byte) in payload.iter().enumerate() {
+        frame.push(byte ^ mask[idx % mask.len()]);
+    }
+    frame
+}
+
+fn websocket_read_text(stream: &mut std::net::TcpStream) -> anyhow::Result<String> {
+    loop {
+        let mut header = [0u8; 2];
+        stream.read_exact(&mut header)?;
+        let opcode = header[0] & 0x0f;
+        let masked = header[1] & 0x80 != 0;
+        let mut len = (header[1] & 0x7f) as u64;
+        if len == 126 {
+            let mut buf = [0u8; 2];
+            stream.read_exact(&mut buf)?;
+            len = u16::from_be_bytes(buf) as u64;
+        } else if len == 127 {
+            let mut buf = [0u8; 8];
+            stream.read_exact(&mut buf)?;
+            len = u64::from_be_bytes(buf);
+        }
+        let mask = if masked {
+            let mut mask = [0u8; 4];
+            stream.read_exact(&mut mask)?;
+            Some(mask)
+        } else {
+            None
+        };
+        let mut payload = vec![0u8; len as usize];
+        stream.read_exact(&mut payload)?;
+        if let Some(mask) = mask {
+            for (idx, byte) in payload.iter_mut().enumerate() {
+                *byte ^= mask[idx % mask.len()];
+            }
+        }
+        match opcode {
+            0x1 => return String::from_utf8(payload).context("decode CDP websocket text frame"),
+            0x8 => return Err(anyhow!("browser CDP websocket closed")),
+            0x9 => continue,
+            0xa => continue,
+            _ => continue,
+        }
     }
 }
 
@@ -2589,6 +3146,42 @@ mod tests {
         assert!(err
             .to_string()
             .contains("DOM/CDP automation is not available"));
+    }
+
+    #[test]
+    fn browser_cdp_ws_url_must_be_loopback() {
+        assert_eq!(
+            parse_loopback_ws_url("ws://127.0.0.1:9222/devtools/page/abc").unwrap(),
+            BrowserWsUrl {
+                host: "127.0.0.1".to_string(),
+                port: 9222,
+                path: "/devtools/page/abc".to_string(),
+            }
+        );
+        assert!(parse_loopback_ws_url("wss://127.0.0.1:9222/devtools/page/abc").is_err());
+        assert!(parse_loopback_ws_url("ws://192.0.2.10:9222/devtools/page/abc").is_err());
+    }
+
+    #[test]
+    fn browser_cdp_client_frames_are_masked_text() {
+        let frame = websocket_client_text_frame(b"hello", [1, 2, 3, 4]);
+        assert_eq!(frame[0], 0x81);
+        assert_eq!(frame[1], 0x80 | 5);
+        assert_eq!(&frame[2..6], &[1, 2, 3, 4]);
+        let decoded: Vec<u8> = frame[6..]
+            .iter()
+            .enumerate()
+            .map(|(idx, byte)| byte ^ [1, 2, 3, 4][idx % 4])
+            .collect();
+        assert_eq!(decoded, b"hello");
+    }
+
+    #[test]
+    fn browser_screenshot_format_defaults_to_png() {
+        assert_eq!(normalize_browser_screenshot_format(""), "png");
+        assert_eq!(normalize_browser_screenshot_format("png"), "png");
+        assert_eq!(normalize_browser_screenshot_format("JPG"), "jpeg");
+        assert_eq!(normalize_browser_screenshot_format("jpeg"), "jpeg");
     }
 
     #[test]

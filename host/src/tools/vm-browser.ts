@@ -42,17 +42,16 @@ function toolErrorJson(vm: string, error: unknown) {
 /**
  * Browser DOM/CDP-facing guest tools.
  *
- * The guest proto already reserves Browser* RPCs for a future CDP backend.
- * These tools expose that contract to MCP clients today. Until the sidecar CDP
- * runtime lands, guests report a crisp "CDP unavailable" failure boundary and
- * workflows should keep using vm_ui_open_url / vm_ui_navigate_url.
+ * These tools expose the guest Browser* RPC contract to MCP clients. Native
+ * Windows sidecars can drive loopback CDP targets; other sidecar engines report
+ * a crisp "CDP unavailable" failure boundary.
  */
 export function createVmBrowserTools(getClient: GuestClientResolver): ToolDefinition[] {
   return [
     {
       name: "vm_browser_navigate",
       description:
-        "Navigate the active browser through the guest browser automation backend. Requires future CDP support; current guests report CDP unavailable.",
+        "Navigate the active browser through the guest browser automation backend. Native sidecars use loopback CDP when available.",
       inputSchema: {
         type: "object",
         properties: {
@@ -87,7 +86,7 @@ export function createVmBrowserTools(getClient: GuestClientResolver): ToolDefini
     {
       name: "vm_browser_click",
       description:
-        "Click a CSS selector through the guest browser automation backend. Requires future CDP support; current guests report CDP unavailable.",
+        "Click a CSS selector through the guest browser automation backend. Native sidecars use loopback CDP when available.",
       inputSchema: {
         type: "object",
         properties: {
@@ -122,7 +121,7 @@ export function createVmBrowserTools(getClient: GuestClientResolver): ToolDefini
     {
       name: "vm_browser_screenshot",
       description:
-        "Capture a browser screenshot through the guest browser automation backend. Requires future CDP support; current guests report CDP unavailable.",
+        "Capture a browser screenshot through the guest browser automation backend. Native sidecars use loopback CDP when available.",
       inputSchema: {
         type: "object",
         properties: {
