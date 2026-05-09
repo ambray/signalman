@@ -46,9 +46,11 @@ The host registers these MCP tools when guest-agent access is available:
   address bar, typing an `http://` or `https://` URL, pressing Enter, and
   optionally verifying the address value through UI Automation.
 - `vm_browser_navigate`, `vm_browser_click`, `vm_browser_screenshot`: expose
-  the reserved guest Browser* RPC contract for future DOM/CDP control. Current
-  guests may return UNIMPLEMENTED; use the `vm_ui_*` browser primitives above
-  for working Windows desktop flows today.
+  the reserved guest Browser* RPC contract for future DOM/CDP control. The
+  guest service routes these calls to the user-session sidecar; until the CDP
+  backend lands, navigate/click return a failed action that says CDP is
+  unavailable, and screenshots fail the tool call. Use the `vm_ui_*` browser
+  primitives above for working Windows desktop flows today.
 
 Scenario workflows use the same operation names without the `vm_` prefix,
 including `ui_ensure_sidecar`, `ui_open_url`, and `ui_navigate_url` for
@@ -130,10 +132,11 @@ More complex desktop workflows still need richer eventing and eventually a
 first-class browser DOM/CDP observation loop. The guest proto already reserves
 `BrowserNavigate`, `BrowserClick`, and `BrowserScreenshot`; the host exposes
 those as `vm_browser_navigate`, `vm_browser_click`, and
-`vm_browser_screenshot` so agents see the intended browser contract. Current
-guests still return UNIMPLEMENTED for those calls until the CDP sidecar runtime
-lands, so production workflows should continue to use the UIA browser
-primitives below.
+`vm_browser_screenshot`, and the guest service forwards them to the user-session
+sidecar so future CDP control runs in the logged-in desktop session. Until that
+backend exists, navigate/click return `success: false` with a CDP-unavailable
+error, while screenshots fail because the screenshot proto has no error field.
+Production workflows should continue to use the UIA browser primitives below.
 
 `vm_ui_open_url` is the current browser launch bridge: it validates the target
 as `http(s)`, opens the Windows Run dialog with `Win+R`, types the URL into the

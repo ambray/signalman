@@ -2,8 +2,9 @@
 //!
 //! Implements the GuestAgent service defined in proto/guest.proto.
 //! Core RPCs (health, process control, command execution, verification) are
-//! fully implemented. UI automation, browser automation, and deep restriction
-//! inspection are stubbed as unimplemented for future sprints.
+//! implemented here. Interactive UI and browser-contract RPCs proxy to the
+//! user-session sidecar so service-session isolation does not block desktop
+//! automation; deep restriction inspection remains a future slot.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -1065,7 +1066,7 @@ impl GuestAgent for GuestAgentService {
         }))
     }
 
-    // ── Browser Automation (unimplemented) ──────────────────────
+    // ── Browser Automation ──────────────────────
 
     async fn ui_health(
         &self,
@@ -1094,29 +1095,74 @@ impl GuestAgent for GuestAgentService {
 
     async fn browser_navigate(
         &self,
-        _request: Request<BrowserNavigateRequest>,
+        request: Request<BrowserNavigateRequest>,
     ) -> Result<Response<BrowserActionResponse>, Status> {
-        Err(Status::unimplemented(
-            "Browser automation requires Chrome DevTools Protocol — not yet implemented",
-        ))
+        let req = request.into_inner();
+        let result: ui_sidecar::BrowserActionResult = ui_sidecar::call_typed(
+            "browser.navigate",
+            json!({
+                "url": req.url,
+                "timeout_ms": req.timeout_ms,
+            }),
+        )
+        .await
+        .map_err(|e| {
+            Status::failed_precondition(format!("Browser sidecar navigate failed: {e}"))
+        })?;
+        Ok(Response::new(BrowserActionResponse {
+            success: result.success,
+            error: result.error,
+            page_title: result.page_title,
+            page_url: result.page_url,
+        }))
     }
 
     async fn browser_click(
         &self,
-        _request: Request<BrowserClickRequest>,
+        request: Request<BrowserClickRequest>,
     ) -> Result<Response<BrowserActionResponse>, Status> {
-        Err(Status::unimplemented(
-            "Browser automation requires Chrome DevTools Protocol — not yet implemented",
-        ))
+        let req = request.into_inner();
+        let result: ui_sidecar::BrowserActionResult = ui_sidecar::call_typed(
+            "browser.click",
+            json!({
+                "css_selector": req.css_selector,
+                "timeout_ms": req.timeout_ms,
+            }),
+        )
+        .await
+        .map_err(|e| Status::failed_precondition(format!("Browser sidecar click failed: {e}")))?;
+        Ok(Response::new(BrowserActionResponse {
+            success: result.success,
+            error: result.error,
+            page_title: result.page_title,
+            page_url: result.page_url,
+        }))
     }
 
     async fn browser_screenshot(
         &self,
-        _request: Request<BrowserScreenshotRequest>,
+        request: Request<BrowserScreenshotRequest>,
     ) -> Result<Response<BrowserScreenshotResponse>, Status> {
-        Err(Status::unimplemented(
-            "Browser screenshot requires Chrome DevTools Protocol — not yet implemented",
-        ))
+        let req = request.into_inner();
+        let result: ui_sidecar::BrowserScreenshotResult = ui_sidecar::call_typed(
+            "browser.screenshot",
+            json!({
+                "format": req.format,
+                "full_page": req.full_page,
+            }),
+        )
+        .await
+        .map_err(|e| {
+            Status::failed_precondition(format!("Browser sidecar screenshot failed: {e}"))
+        })?;
+        let image_data = decode_base64(&result.image_data_base64)
+            .map_err(|e| Status::internal(format!("decode browser screenshot: {e}")))?;
+        Ok(Response::new(BrowserScreenshotResponse {
+            image_data,
+            format: result.format,
+            width: result.width,
+            height: result.height,
+        }))
     }
 
     // ── Restriction Verification ────────────────────────────────
@@ -2068,11 +2114,6 @@ mod tests {
             .verify_restriction(Request::new(VerifyRestrictionRequest::default()))
             .await;
         assert_eq!(r.unwrap_err().code(), tonic::Code::Unimplemented);
-
-        let r = svc
-            .browser_navigate(Request::new(BrowserNavigateRequest::default()))
-            .await;
-        assert_eq!(r.unwrap_err().code(), tonic::Code::Unimplemented);
     }
 
     #[tokio::test]
@@ -2093,6 +2134,26 @@ mod tests {
 
         let r = svc
             .ui_screenshot(Request::new(UiScreenshotRequest::default()))
+            .await;
+        assert_eq!(r.unwrap_err().code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn test_browser_rpcs_require_sidecar() {
+        let svc = make_service();
+
+        let r = svc
+            .browser_navigate(Request::new(BrowserNavigateRequest::default()))
+            .await;
+        assert_eq!(r.unwrap_err().code(), tonic::Code::FailedPrecondition);
+
+        let r = svc
+            .browser_click(Request::new(BrowserClickRequest::default()))
+            .await;
+        assert_eq!(r.unwrap_err().code(), tonic::Code::FailedPrecondition);
+
+        let r = svc
+            .browser_screenshot(Request::new(BrowserScreenshotRequest::default()))
             .await;
         assert_eq!(r.unwrap_err().code(), tonic::Code::FailedPrecondition);
     }
