@@ -26,11 +26,11 @@ ROADMAP-quoted top-line numbers come from the same counting method.
 |----------------|-----------------------------|-------|-------|----------|
 | TypeScript     | unit + smoke (in-process)   | 46    | 1048  | `host/src/__tests__/` |
 | TypeScript     | verb integration (in-process) | 5   | 46    | `host/src/verbs/__tests__/` |
-| Rust (guest)   | unit (mod tests)            | 9     | 131   | `guest/src/*.rs` `#[cfg(test)] mod tests` |
+| Rust (guest)   | unit (mod tests)            | 9     | 132   | `guest/src/*.rs` `#[cfg(test)] mod tests` |
 | Rust (service) | unit + integration          | 8     | 110   | `service/src/*.rs`, `service/tests/*.rs` |
 | Rust (plugin)  | unit + integration          | 11    | 135   | `plugins/signalman-loom-plugin/src/*.rs`, `plugins/signalman-loom-plugin/tests/` |
 
-Totals: **1094 TypeScript** test cases across 51 files, **376 Rust**
+Totals: **1094 TypeScript** test cases across 51 files, **377 Rust**
 test cases across 28 files. ROADMAP.md reports `151 Rust + 769 TS = 920`
 as an older rounded headline — the per-call count above is the more
 granular number, and the per-class split here counts `it(...)`

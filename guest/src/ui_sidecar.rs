@@ -756,7 +756,13 @@ fn browser_cdp_screenshot(
 }
 
 fn browser_timeout(timeout_ms: Option<u64>) -> std::time::Duration {
-    std::time::Duration::from_millis(timeout_ms.unwrap_or(5_000).max(100))
+    let requested = timeout_ms.unwrap_or(5_000).max(100);
+    let bounded = if requested > 1_000 {
+        requested.saturating_sub(1_000)
+    } else {
+        requested
+    };
+    std::time::Duration::from_millis(bounded)
 }
 
 fn browser_cdp_unavailable_action_with_reason(
@@ -794,9 +800,12 @@ impl BrowserCdpClient {
         let deadline = std::time::Instant::now()
             .checked_add(timeout)
             .unwrap_or_else(std::time::Instant::now);
-        let mut last_error: Option<anyhow::Error> = None;
+        let mut last_error: Option<anyhow::Error> = match browser_cdp_target(&config) {
+            Ok(target) => return Self::connect_target(&target, timeout),
+            Err(err) => Some(err),
+        };
         if config.auto_launch {
-            let _ = ensure_browser_debugger(&config);
+            ensure_browser_debugger(&config)?;
         }
         while std::time::Instant::now() <= deadline {
             match browser_cdp_target(&config) {
@@ -979,11 +988,7 @@ fn http_request_localhost(
         body.len()
     );
     stream.write_all(request.as_bytes())?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response)?;
-    let (headers, response_body) = response
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| anyhow!("invalid browser CDP HTTP response"))?;
+    let (headers, response_body) = read_http_response(&mut stream)?;
     if !headers.starts_with("HTTP/1.1 2") && !headers.starts_with("HTTP/1.0 2") {
         return Err(anyhow!(
             "browser CDP HTTP request failed: {}",
@@ -991,6 +996,47 @@ fn http_request_localhost(
         ));
     }
     Ok(response_body.to_string())
+}
+
+fn read_http_response<R: Read>(stream: &mut R) -> anyhow::Result<(String, String)> {
+    let mut response = Vec::new();
+    let mut byte = [0u8; 1];
+    while stream.read(&mut byte)? == 1 {
+        response.push(byte[0]);
+        if response.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| anyhow!("invalid browser CDP HTTP response"))?;
+    let header_bytes = &response[..header_end];
+    let headers = String::from_utf8_lossy(header_bytes).to_string();
+    let already_read = response[(header_end + 4)..].to_vec();
+    let content_length = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.eq_ignore_ascii_case("content-length") {
+            value.trim().parse::<usize>().ok()
+        } else {
+            None
+        }
+    });
+    let body = if let Some(content_length) = content_length {
+        let mut body = already_read;
+        if body.len() < content_length {
+            let mut rest = vec![0u8; content_length - body.len()];
+            stream.read_exact(&mut rest)?;
+            body.extend_from_slice(&rest);
+        }
+        body.truncate(content_length);
+        body
+    } else {
+        let mut body = already_read;
+        let _ = stream.read_to_end(&mut body);
+        body
+    };
+    Ok((headers, String::from_utf8_lossy(&body).to_string()))
 }
 
 #[cfg(target_os = "windows")]
@@ -1002,15 +1048,59 @@ fn ensure_browser_debugger(config: &BrowserCdpConfig) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("Microsoft Edge executable was not found"))?;
     let user_data_dir = std::env::temp_dir().join("signalman-browser-cdp-profile");
     let _ = std::fs::create_dir_all(&user_data_dir);
+    let args = browser_launch_args(config, &user_data_dir);
     Command::new(edge)
-        .arg(format!("--remote-debugging-port={}", config.port))
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg(format!("--user-data-dir={}", user_data_dir.display()))
-        .arg("about:blank")
+        .args(&args)
         .spawn()
         .context("launch Microsoft Edge with CDP enabled")?;
-    Ok(())
+    if wait_browser_debugger(config, std::time::Duration::from_secs(8)) {
+        return Ok(());
+    }
+
+    let edge = browser_executable_path()
+        .ok_or_else(|| anyhow!("Microsoft Edge executable was not found"))?;
+    let mut start_args = vec![
+        "/C".to_string(),
+        "start".to_string(),
+        String::new(),
+        edge.display().to_string(),
+    ];
+    start_args.extend(args);
+    Command::new("cmd.exe")
+        .args(start_args)
+        .spawn()
+        .context("launch Microsoft Edge with CDP enabled via shell")?;
+    if wait_browser_debugger(config, std::time::Duration::from_secs(12)) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "Microsoft Edge was launched but CDP did not become reachable on {}",
+        config.addr()
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn browser_launch_args(config: &BrowserCdpConfig, user_data_dir: &std::path::Path) -> Vec<String> {
+    vec![
+        format!("--remote-debugging-port={}", config.port),
+        "--no-first-run".to_string(),
+        "--no-default-browser-check".to_string(),
+        format!("--user-data-dir={}", user_data_dir.display()),
+        "about:blank".to_string(),
+    ]
+}
+
+fn wait_browser_debugger(config: &BrowserCdpConfig, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(std::time::Instant::now);
+    while std::time::Instant::now() <= deadline {
+        if http_request_localhost(config, "GET", "/json/version", "").is_ok() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(BROWSER_CDP_POLL_MS));
+    }
+    false
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1035,12 +1125,15 @@ fn browser_executable_path() -> Option<std::path::PathBuf> {
                 .join("Application")
                 .join("msedge.exe")
         }),
-        Some(std::path::PathBuf::from("msedge.exe")),
+        std::env::var_os("LOCALAPPDATA").map(|root| {
+            std::path::PathBuf::from(root)
+                .join("Microsoft")
+                .join("Edge")
+                .join("Application")
+                .join("msedge.exe")
+        }),
     ];
-    candidates
-        .into_iter()
-        .flatten()
-        .find(|path| path == std::path::Path::new("msedge.exe") || path.exists())
+    candidates.into_iter().flatten().find(|path| path.exists())
 }
 
 fn websocket_handshake(stream: &mut std::net::TcpStream, ws: &BrowserWsUrl) -> anyhow::Result<()> {
@@ -3182,6 +3275,15 @@ mod tests {
         assert_eq!(normalize_browser_screenshot_format("png"), "png");
         assert_eq!(normalize_browser_screenshot_format("JPG"), "jpeg");
         assert_eq!(normalize_browser_screenshot_format("jpeg"), "jpeg");
+    }
+
+    #[test]
+    fn cdp_http_response_reader_respects_content_length() {
+        let mut response =
+            std::io::Cursor::new(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhelloignored");
+        let (headers, body) = read_http_response(&mut response).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200"));
+        assert_eq!(body, "hello");
     }
 
     #[test]

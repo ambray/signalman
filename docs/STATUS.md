@@ -24,8 +24,8 @@ recordings and LLM-driven workflows. The native sidecar engine now covers
 screenshot, find, click, type, key operations, wait timeouts, UIA
 Value-pattern descriptors, and the first loopback-only CDP implementation
 behind the reserved Browser* RPCs. It is covered
-by the live `Win11_test` `live-ui-sidecar-smoke` and
-`live-ui-browser-smoke` scenarios. Versions in every
+by the live `Win11_test` `live-ui-sidecar-smoke`, `live-ui-browser-smoke`,
+and `live-browser-cdp-smoke.ps1` checks. Versions in every
 manifest read `0.1.0` and need to bump to `0.1.1` together with a tag push to
 ship — the release workflow validates the manifest version matches the tag
 before publishing. The four GitHub repo secrets
@@ -110,14 +110,14 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
 |---|---|---|---|
 | Host (TypeScript / vitest) — `host/src/__tests__/` | 1048 | 46 | 2026-05-09 |
 | Host (TypeScript / vitest) — `host/src/verbs/__tests__/` | 46 | 5 | 2026-05-09 |
-| Guest (Rust / cargo) | 131 | 9 | 2026-05-09 |
+| Guest (Rust / cargo) | 132 | 9 | 2026-05-09 |
 | Service (Rust / cargo) | 110 | 8 (incl. 2 integration files) | 2026-05-09 |
 | Plugin (Rust / cargo) | 135 | 11 (incl. 2 integration files) | 2026-05-09 |
-| **Total** | **1470** test attributes / `it()` calls | **79** files | |
+| **Total** | **1471** test attributes / `it()` calls | **79** files | |
 
 > The ROADMAP headline "151 Rust + 769 TS = 920" predates the v0.1.1
 > P9 work and the user-session UI/browser milestones. `docs/testing.md`
-> now quotes 1094 TypeScript / 376 Rust source-level cases; vitest
+> now quotes 1094 TypeScript / 377 Rust source-level cases; vitest
 > expands parameterized blocks to 1148 run-time tests
 > in the current host coverage run.
 
@@ -326,6 +326,9 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   navigation, CSS-selector click, and browser screenshots. PowerShell engines
   still return the stable CDP-unavailable contract, and the native engine
   reports the same unavailable boundary when no local CDP target can be reached.
+  The live `scripts/live-browser-cdp-smoke.ps1` check on `Win11_test` validates
+  a guest-local HTTP page, interactive Edge CDP launch, Browser* navigation,
+  CSS click, browser screenshot, and preservation of the `base` checkpoint.
 
 - **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
   calls into `.signalman/recordings/`. The agent-first DevOps
