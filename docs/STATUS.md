@@ -296,9 +296,11 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   targets. Browser launch coverage now includes `vm_ui_open_url` / `ui_open_url`
   for safely opening `http(s)` URLs through the interactive Windows Run dialog.
   The live `Win11_test` `live-ui-browser-smoke` scenario validates that path by
-  opening Edge to an isolated `example.test` URL, observing the browser address
-  bar through UI Automation, capturing a screenshot and UIA inventory, and
-  closing the browser. Full DOM/CDP browser control remains future work.
+  closing stale Edge processes, opening Edge to an isolated `example.test` URL,
+  observing the browser address bar through UI Automation, clicking/focusing
+  the address bar, typing and submitting a second URL, verifying the updated
+  address value, capturing a screenshot and UIA inventory, and closing the
+  browser. Full DOM/CDP browser control remains future work.
 
 - **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
   calls into `.signalman/recordings/`. The agent-first DevOps
