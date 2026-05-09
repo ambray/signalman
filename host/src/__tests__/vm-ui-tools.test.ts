@@ -430,6 +430,64 @@ describe("VM UI MCP tools", () => {
     expect(client.uiKey).not.toHaveBeenCalled();
   });
 
+  it("navigates an already-open browser and verifies the address value", async () => {
+    const client = makeClient({
+      uiFindDetailed: vi.fn().mockResolvedValue({
+        durationMs: 21,
+        elements: [
+          {
+            name: "Address and search bar",
+            automationId: "view_1021",
+            controlType: "Edit",
+            value: "example.test/next",
+            isEnabled: true,
+            isVisible: true,
+          },
+        ],
+      }),
+    } as Partial<GuestAgentClient>);
+    const { tools } = toolsFor(client);
+
+    const result = await tools.get("vm_ui_navigate_url")!.handler({
+      name: "Win11_test",
+      url: "http://example.test/next",
+      find_timeout_ms: 3_000,
+      timeout_ms: 10_000,
+    });
+
+    expect(client.uiClick).toHaveBeenCalledWith("[name='Address and search bar']", {
+      timeoutMs: 10_000,
+    });
+    expect(client.uiKey).toHaveBeenNthCalledWith(1, "^l", {
+      selector: "[automationId='view_1021']",
+      timeoutMs: 10_000,
+    });
+    expect(client.uiType).toHaveBeenCalledWith("http://example.test/next", {
+      selector: "[automationId='view_1021']",
+      clearFirst: true,
+      timeoutMs: 10_000,
+    });
+    expect(client.uiKey).toHaveBeenNthCalledWith(2, "{ENTER}", {
+      selector: "[automationId='view_1021']",
+      timeoutMs: 10_000,
+    });
+    expect(client.uiFindDetailed).toHaveBeenCalledWith("[value='example.test/next']", {
+      findTimeoutMs: 3_000,
+      timeoutMs: 10_000,
+    });
+    expect(JSON.parse(result.content[0].text ?? "{}")).toEqual({
+      vm: "Win11_test",
+      success: true,
+      error: "",
+      duration_ms: 77,
+      url: "http://example.test/next",
+      expected_value: "example.test/next",
+      observed: true,
+      observed_count: 1,
+    });
+    expect(result.isError).toBe(false);
+  });
+
   it("recovers an unreachable sidecar for MCP UI actions when recovery options are provided", async () => {
     const client = makeClient({
       uiClick: vi

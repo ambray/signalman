@@ -5,12 +5,30 @@ export interface UiOpenUrlOptions {
   findTimeoutMs?: number;
 }
 
+export interface UiNavigateUrlOptions {
+  addressSelector?: string;
+  addressEditSelector?: string;
+  expectedValue?: string;
+  verify?: boolean;
+  timeoutMs?: number;
+  findTimeoutMs?: number;
+}
+
 export interface UiOpenUrlResult extends UiActionResult {
   url: string;
 }
 
+export interface UiNavigateUrlResult extends UiActionResult {
+  url: string;
+  expectedValue: string;
+  observed: boolean;
+  observedCount: number;
+}
+
 const RUN_DIALOG_EDIT_SELECTOR = "[automationId='1001']";
 const RUN_DIALOG_TITLE = "Run";
+const DEFAULT_BROWSER_ADDRESS_SELECTOR = "[name='Address and search bar']";
+const DEFAULT_BROWSER_ADDRESS_EDIT_SELECTOR = "[automationId='view_1021']";
 
 export function sanitizeBrowserUrl(value: unknown): string {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -33,6 +51,21 @@ export function sanitizeBrowserUrl(value: unknown): string {
   }
 
   return parsed.toString();
+}
+
+function browserDisplayedUrl(url: string): string {
+  const parsed = new URL(url);
+  if (parsed.protocol === "http:") {
+    return `${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`;
+  }
+  return parsed.toString();
+}
+
+function valueSelector(value: string): string {
+  if (/['\]\r\n]/.test(value)) {
+    throw new Error("expected browser URL value contains unsupported selector characters");
+  }
+  return `[value='${value}']`;
 }
 
 export async function openUrlWithUi(
@@ -85,4 +118,111 @@ export async function openUrlWithUi(
   }
 
   return { url, success: true, error: "", durationMs };
+}
+
+export async function navigateUrlWithUi(
+  client: GuestAgentClient,
+  value: unknown,
+  options: UiNavigateUrlOptions = {},
+): Promise<UiNavigateUrlResult> {
+  const url = sanitizeBrowserUrl(value);
+  const addressSelector = options.addressSelector ?? DEFAULT_BROWSER_ADDRESS_SELECTOR;
+  const addressEditSelector = options.addressEditSelector ?? DEFAULT_BROWSER_ADDRESS_EDIT_SELECTOR;
+  const expectedValue = options.expectedValue ?? browserDisplayedUrl(url);
+  const verify = options.verify ?? true;
+  let durationMs = 0;
+
+  const clicked = await client.uiClick(addressSelector, { timeoutMs: options.timeoutMs });
+  durationMs += clicked.durationMs;
+  if (!clicked.success) {
+    return {
+      url,
+      expectedValue,
+      observed: false,
+      observedCount: 0,
+      success: false,
+      error: clicked.error,
+      durationMs,
+    };
+  }
+
+  const focused = await client.uiKey("^l", {
+    selector: addressEditSelector,
+    timeoutMs: options.timeoutMs,
+  });
+  durationMs += focused.durationMs;
+  if (!focused.success) {
+    return {
+      url,
+      expectedValue,
+      observed: false,
+      observedCount: 0,
+      success: false,
+      error: focused.error,
+      durationMs,
+    };
+  }
+
+  const typed = await client.uiType(url, {
+    selector: addressEditSelector,
+    clearFirst: true,
+    timeoutMs: options.timeoutMs,
+  });
+  durationMs += typed.durationMs;
+  if (!typed.success) {
+    return {
+      url,
+      expectedValue,
+      observed: false,
+      observedCount: 0,
+      success: false,
+      error: typed.error,
+      durationMs,
+    };
+  }
+
+  const submitted = await client.uiKey("{ENTER}", {
+    selector: addressEditSelector,
+    timeoutMs: options.timeoutMs,
+  });
+  durationMs += submitted.durationMs;
+  if (!submitted.success) {
+    return {
+      url,
+      expectedValue,
+      observed: false,
+      observedCount: 0,
+      success: false,
+      error: submitted.error,
+      durationMs,
+    };
+  }
+
+  if (!verify) {
+    return {
+      url,
+      expectedValue,
+      observed: false,
+      observedCount: 0,
+      success: true,
+      error: "",
+      durationMs,
+    };
+  }
+
+  const observed = await client.uiFindDetailed(valueSelector(expectedValue), {
+    findTimeoutMs: options.findTimeoutMs,
+    timeoutMs: options.timeoutMs,
+  });
+  durationMs += observed.durationMs;
+  const observedCount = observed.elements.length;
+  return {
+    url,
+    expectedValue,
+    observed: observedCount > 0,
+    observedCount,
+    success: observedCount > 0,
+    error: observedCount > 0 ? "" : `Browser URL value not observed: ${expectedValue}`,
+    durationMs,
+  };
 }

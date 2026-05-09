@@ -42,10 +42,13 @@ The host registers these MCP tools when guest-agent access is available:
 - `vm_ui_type`: type text into the active session, optionally targeting an element first.
 - `vm_ui_open_url`: open an `http://` or `https://` URL in the
   interactive desktop through the Windows Run dialog.
+- `vm_ui_navigate_url`: navigate an already-open browser by focusing the
+  address bar, typing an `http://` or `https://` URL, pressing Enter, and
+  optionally verifying the address value through UI Automation.
 
 Scenario workflows use the same operation names without the `vm_` prefix,
-including `ui_ensure_sidecar` and `ui_open_url` for self-contained live
-smokes and browser launch flows.
+including `ui_ensure_sidecar`, `ui_open_url`, and `ui_navigate_url` for
+self-contained live smokes and browser launch/navigation flows.
 
 UI tool responses include per-RPC timing metadata. Single operations report
 `duration_ms`; snapshots split that into `screenshot_duration_ms` and
@@ -78,8 +81,9 @@ This gives LLM-enabled tests a practical path for desktop workflows:
 4. Confirm the tool returns `ready: true`; increase `wait_ready_ms` for slow logons.
 5. Use normal guest-agent RPCs for setup.
 6. Use `vm_ui_snapshot` for the model's observation loop, then `vm_ui_wait_for`,
-   `vm_ui_find`, `vm_ui_click`, `vm_ui_key`, `vm_ui_type`, and
-   `vm_ui_open_url` for targeted interaction and browser launch.
+   `vm_ui_find`, `vm_ui_click`, `vm_ui_key`, `vm_ui_type`,
+   `vm_ui_open_url`, and `vm_ui_navigate_url` for targeted interaction and
+   browser launch/navigation.
 7. Use screenshots plus UIA element data as the feedback loop.
 
 ## Current Limits
@@ -124,19 +128,25 @@ browser launch bridge: it validates the target as `http(s)`, opens the Windows
 Run dialog with `Win+R`, types the URL into the Run edit control, and presses
 Enter. It intentionally does not accept `file:`, `javascript:`, or shell-like
 targets, and rejects embedded URL credentials so secrets are not echoed in tool
-output; once the browser is open, tests should observe and interact through
-`vm_ui_snapshot`, `vm_ui_find`, `vm_ui_wait_for`, `vm_ui_click`,
-`vm_ui_type`, and `vm_ui_key`. Native UI Automation is the preferred path for
-Windows desktop workflows; the PowerShell engines remain useful fallbacks and
-compatibility probes.
+output.
+
+Once the browser is open, `vm_ui_navigate_url` is the preferred workflow
+primitive for page transitions. It validates the URL with the same rules,
+clicks the address bar, sends Ctrl+L to the editable address control, types the
+normalized URL, presses Enter, and by default waits for the expected address
+value to appear through UI Automation. The default selectors target Microsoft
+Edge (`[name='Address and search bar']` and `[automationId='view_1021']`), but
+callers can override them for another browser or a changed shell surface. Native
+UI Automation is the preferred path for Windows desktop workflows; the
+PowerShell engines remain useful fallbacks and compatibility probes.
 
 The live `live-ui-browser-smoke` scenario pins this browser-launch and
 interaction contract on `Win11_test`: it starts the native sidecar, closes stale
 Edge processes, opens an isolated `example.test` URL, confirms the normalized
 URL reported by `ui_open_url`, observes the browser address value through UI
-Automation, clicks and focuses the address bar, types and submits a second URL,
-captures a browser screenshot plus element inventory, verifies the address bar
-appears as a compact action target, and closes the window.
+Automation, navigates to a second URL through `ui_navigate_url`, captures a
+browser screenshot plus element inventory, verifies the address bar appears as
+a compact action target, and closes the window.
 
 `vm_ui_health` reports the active engine (`powershell-process`,
 `powershell-helper`, or `native`) through the same health surface every backend

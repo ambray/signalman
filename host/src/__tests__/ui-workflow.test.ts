@@ -293,6 +293,69 @@ describe("workflow UI tool blocks", () => {
     expect(client.uiKey).not.toHaveBeenCalled();
   });
 
+  it("navigates an already-open browser through one workflow tool block", async () => {
+    const client = makeClient({
+      uiFindDetailed: vi.fn().mockResolvedValueOnce({
+        durationMs: 16,
+        elements: [
+          {
+            name: "Address and search bar",
+            automationId: "view_1021",
+            controlType: "Edit",
+            value: "example.test/next",
+            isEnabled: true,
+            isVisible: true,
+          },
+        ],
+      }),
+    } as Partial<GuestAgentClient>);
+    const { orchestrator, vmMap } = makeOrchestrator(client);
+
+    const navigated = await orchestrator.executeToolBlock(
+      "ui_navigate_url",
+      {
+        vm: "endpoint-1",
+        url: "http://example.test/next",
+        find_timeout_ms: 2_000,
+        timeout_ms: 5_000,
+      },
+      vmMap,
+    );
+
+    expect(client.uiClick).toHaveBeenCalledWith("[name='Address and search bar']", {
+      timeoutMs: 5_000,
+    });
+    expect(client.uiKey).toHaveBeenNthCalledWith(1, "^l", {
+      selector: "[automationId='view_1021']",
+      timeoutMs: 5_000,
+    });
+    expect(client.uiType).toHaveBeenCalledWith("http://example.test/next", {
+      selector: "[automationId='view_1021']",
+      clearFirst: true,
+      timeoutMs: 5_000,
+    });
+    expect(client.uiKey).toHaveBeenNthCalledWith(2, "{ENTER}", {
+      selector: "[automationId='view_1021']",
+      timeoutMs: 5_000,
+    });
+    expect(client.uiFindDetailed).toHaveBeenCalledWith("[value='example.test/next']", {
+      findTimeoutMs: 2_000,
+      timeoutMs: 5_000,
+    });
+    expect(JSON.parse(navigated)).toEqual({
+      success: true,
+      error: "",
+      duration_ms: 72,
+      url: "http://example.test/next",
+      expected_value: "example.test/next",
+      observed: true,
+      observed_count: 1,
+    });
+    await expect(
+      orchestrator.executeToolBlock("ui_navigate_url", { vm: "endpoint-1" }, vmMap),
+    ).rejects.toThrow("ui_navigate_url missing 'url'");
+  });
+
   it("recovers an unreachable sidecar for workflow UI blocks when configured", async () => {
     const client = makeClient({
       uiClick: vi

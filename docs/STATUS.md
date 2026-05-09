@@ -15,8 +15,8 @@ the onboarding gap (`signalman vm provision` / `vm fetch-template` /
 schema, idempotency contract, `docs/bootstrap.md`) and the first
 interactive user-session UI sidecar (`signalman-guest --ui-sidecar`) with
 MCP tools for screenshots, UIA snapshot/find/wait, click, keyboard input,
-and type, plus a `vm_ui_open_url` bridge for launching `http(s)` browser flows
-through the interactive desktop. The native sidecar engine now covers
+and type, plus `vm_ui_open_url` / `vm_ui_navigate_url` browser primitives for
+launching and navigating `http(s)` flows through the interactive desktop. The native sidecar engine now covers
 screenshot, find, click, type, key operations, wait timeouts, and UIA
 Value-pattern descriptors. It is covered
 by the live `Win11_test` `live-ui-sidecar-smoke` and
@@ -293,14 +293,16 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   Event-driven native UI waits now subscribe to UI Automation structure-change
   events with a bounded fallback timeout. Browser-friendly observation metadata
   now includes normalized roles and fallback labels on UI descriptors and action
-  targets. Browser launch coverage now includes `vm_ui_open_url` / `ui_open_url`
-  for safely opening `http(s)` URLs through the interactive Windows Run dialog.
+  targets. Browser launch/navigation coverage now includes `vm_ui_open_url` /
+  `ui_open_url` for safely opening `http(s)` URLs through the interactive
+  Windows Run dialog and `vm_ui_navigate_url` / `ui_navigate_url` for
+  address-bar page transitions in an already-open browser.
   The live `Win11_test` `live-ui-browser-smoke` scenario validates that path by
   closing stale Edge processes, opening Edge to an isolated `example.test` URL,
-  observing the browser address bar through UI Automation, clicking/focusing
-  the address bar, typing and submitting a second URL, verifying the updated
-  address value, capturing a screenshot and UIA inventory, and closing the
-  browser. Full DOM/CDP browser control remains future work.
+  observing the browser address bar through UI Automation, navigating to a
+  second URL with the reusable browser navigation workflow, verifying the
+  updated address value, capturing a screenshot and UIA inventory, and closing
+  the browser. Full DOM/CDP browser control remains future work.
 
 - **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
   calls into `.signalman/recordings/`. The agent-first DevOps

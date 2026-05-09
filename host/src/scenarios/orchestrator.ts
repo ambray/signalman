@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { HypervisorBackend, VMHandle } from "../hypervisors/interface.js";
 import { GuestAgentClient, type CommandResult } from "../guest/client.js";
-import { openUrlWithUi } from "../guest/ui-browser.js";
+import { navigateUrlWithUi, openUrlWithUi } from "../guest/ui-browser.js";
 import { describeUiActionTargets, describeUiElements } from "../guest/ui-elements.js";
 import { ensureUiSidecar } from "../guest/ui-sidecar.js";
 import { withUiSidecarRecovery, type UiSidecarRecoveryOptions } from "../guest/ui-recovery.js";
@@ -2223,6 +2223,30 @@ export class ScenarioOrchestrator {
         return JSON.stringify({
           ...uiActionWorkflowResult(result),
           url: result.url,
+        });
+      }
+
+      case "ui_navigate_url": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const url = params.url as string | undefined;
+        if (!url) throw new Error(`ui_navigate_url missing 'url'`);
+        const result = await withUiSidecarRecovery(client, uiRecoveryOptions(params), () =>
+          navigateUrlWithUi(client, url, {
+            addressSelector: params.address_selector as string | undefined,
+            addressEditSelector: params.address_edit_selector as string | undefined,
+            expectedValue: params.expected_value as string | undefined,
+            verify: params.verify as boolean | undefined,
+            findTimeoutMs: params.find_timeout_ms as number | undefined,
+            timeoutMs: params.timeout_ms as number | undefined,
+          }),
+        );
+        return JSON.stringify({
+          ...uiActionWorkflowResult(result),
+          url: result.url,
+          expected_value: result.expectedValue,
+          observed: result.observed,
+          observed_count: result.observedCount,
         });
       }
 
