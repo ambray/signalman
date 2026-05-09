@@ -12,32 +12,31 @@ levels; this doc tells contributors which level a new test belongs at,
 so additions don't pile onto the unit base by default.
 
 This doc is intentionally repo-aware. Every example is a file that
-exists at HEAD `ea6852c` (P4.b: cert dir ACL hardening). When the file
+exists at HEAD `9a96bd8` (UI browser helper coverage). When the file
 naming or assertion style drifts, update this doc — it is meant to track
 the codebase, not to describe an idealized testing world.
 
 ## Current state
 
-Counted at HEAD `ea6852c` from the test source itself (vitest
+Counted at HEAD `9a96bd8` from the test source itself (vitest
 `it`/`test` calls and Rust `#[test]`/`#[tokio::test]` attributes); the
 ROADMAP-quoted top-line numbers come from the same counting method.
 
 | Language       | Level                       | Files | Tests | Location |
 |----------------|-----------------------------|-------|-------|----------|
-| TypeScript     | unit + smoke (in-process)   | 27    | 762   | `host/src/__tests__/` |
-| TypeScript     | verb integration (in-process) | 5   | 45    | `host/src/verbs/__tests__/` |
-| Rust (guest)   | unit (mod tests)            | 7     | 81    | `guest/src/*.rs` `#[cfg(test)] mod tests` |
-| Rust (service) | unit (mod tests)            | 5     | 86    | `service/src/*.rs` `#[cfg(test)] mod tests` |
-| Rust (service) | integration (in-process)    | 1     | 1     | `service/tests/named_pipe_smoke.rs` |
-| Rust (plugin)  | unit (mod tests)            | 6     | 71    | `plugins/signalman-loom-plugin/src/*.rs` |
-| Rust (plugin)  | integration (in-process)    | 2     | 6     | `plugins/signalman-loom-plugin/tests/` |
+| TypeScript     | unit + smoke (in-process)   | 45    | 1041  | `host/src/__tests__/` |
+| TypeScript     | verb integration (in-process) | 5   | 46    | `host/src/verbs/__tests__/` |
+| Rust (guest)   | unit (mod tests)            | 9     | 126   | `guest/src/*.rs` `#[cfg(test)] mod tests` |
+| Rust (service) | unit + integration          | 8     | 110   | `service/src/*.rs`, `service/tests/*.rs` |
+| Rust (plugin)  | unit + integration          | 11    | 135   | `plugins/signalman-loom-plugin/src/*.rs`, `plugins/signalman-loom-plugin/tests/` |
 
-Totals: **807 TypeScript** test cases across 32 files, **245 Rust**
-test cases across 21 files. ROADMAP.md reports `151 Rust + 769 TS = 920`
-as a rounded headline — the per-call count above is the more granular
-number, and the per-class split here counts `it(...)` invocations from
-the test sources directly rather than the post-vitest run-time count
-(parameterized blocks expand at runtime).
+Totals: **1087 TypeScript** test cases across 50 files, **371 Rust**
+test cases across 28 files. ROADMAP.md reports `151 Rust + 769 TS = 920`
+as an older rounded headline — the per-call count above is the more
+granular number, and the per-class split here counts `it(...)`
+invocations from the test sources directly rather than the post-vitest
+run-time count (parameterized blocks expand at runtime). The 2026-05-09
+host coverage run expanded to **1141** vitest cases across **50** files.
 
 Two files are smoke tests within `host/src/__tests__/`:
 `scenario-validation.test.ts` (4 cases — walks every scenario directory
@@ -299,8 +298,10 @@ paths at **95%+**. Critical paths are: `host/src/scenarios/orchestrator.ts`,
 (`guest/src/service.rs`), and the plugin state store
 (`plugins/signalman-loom-plugin/src/state.rs`).
 
-As of HEAD `ea6852c`, **coverage measurement is not wired into CI**.
-P7 brings it. The tooling exists and can be run locally:
+As of HEAD `9a96bd8`, **coverage measurement is not wired into CI**.
+The tooling exists and can be run locally, and the current host run is
+above the product target: `npm --prefix host run coverage` reports
+**86.57% statements / 81.67% branches** across 1141 vitest cases.
 
 - TypeScript: `cd host && npx vitest run --coverage`. The
   `@vitest/coverage-v8` package is already in `host/package.json`
