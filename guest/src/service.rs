@@ -1139,6 +1139,31 @@ impl GuestAgent for GuestAgentService {
         }))
     }
 
+    async fn browser_evaluate(
+        &self,
+        request: Request<BrowserEvaluateRequest>,
+    ) -> Result<Response<BrowserEvaluateResponse>, Status> {
+        let req = request.into_inner();
+        let result: ui_sidecar::BrowserEvaluateResult = ui_sidecar::call_typed(
+            "browser.evaluate",
+            json!({
+                "expression": req.expression,
+                "timeout_ms": req.timeout_ms,
+            }),
+        )
+        .await
+        .map_err(|e| {
+            Status::failed_precondition(format!("Browser sidecar evaluate failed: {e}"))
+        })?;
+        Ok(Response::new(BrowserEvaluateResponse {
+            success: result.success,
+            error: result.error,
+            json_value: result.json_value,
+            page_title: result.page_title,
+            page_url: result.page_url,
+        }))
+    }
+
     async fn browser_screenshot(
         &self,
         request: Request<BrowserScreenshotRequest>,
@@ -2149,6 +2174,11 @@ mod tests {
 
         let r = svc
             .browser_click(Request::new(BrowserClickRequest::default()))
+            .await;
+        assert_eq!(r.unwrap_err().code(), tonic::Code::FailedPrecondition);
+
+        let r = svc
+            .browser_evaluate(Request::new(BrowserEvaluateRequest::default()))
             .await;
         assert_eq!(r.unwrap_err().code(), tonic::Code::FailedPrecondition);
 

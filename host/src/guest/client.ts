@@ -301,6 +301,14 @@ export interface BrowserActionResult {
   pageUrl: string;
 }
 
+export interface BrowserEvaluateResult {
+  success: boolean;
+  error: string;
+  jsonValue: string;
+  pageTitle: string;
+  pageUrl: string;
+}
+
 export interface BrowserScreenshot {
   imageData: Buffer;
   format: string;
@@ -1461,6 +1469,33 @@ export class GuestAgentClient {
     return {
       success: response.success,
       error: response.error,
+      pageTitle: response.pageTitle,
+      pageUrl: response.pageUrl,
+    };
+  }
+
+  async browserEvaluate(expression: string, timeoutMs?: number): Promise<BrowserEvaluateResult> {
+    const deadline = timeoutMs ?? this.options.defaultTimeoutMs;
+    const response = await withRetry(
+      () =>
+        unaryCall<
+          { expression: string; timeoutMs: number },
+          { success: boolean; error: string; jsonValue: string; pageTitle: string; pageUrl: string }
+        >(
+          this.client,
+          "browserEvaluate",
+          { expression, timeoutMs: timeoutMs ?? 0 },
+          deadline,
+          this.options.authToken,
+        ),
+      this.options.maxRetries,
+      this.options.initialRetryDelayMs,
+      this.options.maxRetryDelayMs,
+    );
+    return {
+      success: response.success,
+      error: response.error,
+      jsonValue: response.jsonValue,
       pageTitle: response.pageTitle,
       pageUrl: response.pageUrl,
     };

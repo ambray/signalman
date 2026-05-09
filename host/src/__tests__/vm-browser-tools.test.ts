@@ -17,6 +17,13 @@ function makeClient(overrides: Partial<GuestAgentClient> = {}): GuestAgentClient
       pageTitle: "Clicked",
       pageUrl: "https://example.test/clicked",
     }),
+    browserEvaluate: vi.fn().mockResolvedValue({
+      success: true,
+      error: "",
+      jsonValue: "{\"clicked\":true}",
+      pageTitle: "Clicked",
+      pageUrl: "https://example.test/clicked",
+    }),
     browserScreenshot: vi.fn().mockResolvedValue({
       imageData: Buffer.from("browser-png"),
       format: "png",
@@ -88,6 +95,31 @@ describe("VM browser MCP tools", () => {
     });
   });
 
+  it("evaluates browser page state through the guest browser automation RPC", async () => {
+    const client = makeClient();
+    const { tools } = toolsFor(client);
+
+    const result = await tools.get("vm_browser_evaluate")!.handler({
+      name: "Win11_test",
+      expression: "({ clicked: document.body.dataset.clicked === 'true' })",
+      timeout_ms: 5_000,
+    });
+
+    expect(client.browserEvaluate).toHaveBeenCalledWith(
+      "({ clicked: document.body.dataset.clicked === 'true' })",
+      5_000,
+    );
+    expect(result.isError).toBe(false);
+    expect(JSON.parse(result.content[0].text!)).toEqual({
+      vm: "Win11_test",
+      success: true,
+      error: "",
+      json_value: "{\"clicked\":true}",
+      page_title: "Clicked",
+      page_url: "https://example.test/clicked",
+    });
+  });
+
   it("marks browser backend failures as MCP errors", async () => {
     const client = makeClient({
       browserClick: vi.fn().mockRejectedValue(new Error("12 UNIMPLEMENTED: CDP backend missing")),
@@ -148,5 +180,18 @@ describe("VM browser MCP tools", () => {
       }),
     ).rejects.toThrow("css_selector contains null byte");
     expect(client.browserClick).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsafe browser evaluate expressions before calling the guest", async () => {
+    const client = makeClient();
+    const { tools } = toolsFor(client);
+
+    await expect(
+      tools.get("vm_browser_evaluate")!.handler({
+        name: "Win11_test",
+        expression: "document.title\0",
+      }),
+    ).rejects.toThrow("expression contains null byte");
+    expect(client.browserEvaluate).not.toHaveBeenCalled();
   });
 });

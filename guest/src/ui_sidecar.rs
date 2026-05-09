@@ -129,6 +129,13 @@ trait UiAutomationBackend {
         let _ = (&params.css_selector, params.timeout_ms);
         Ok(browser_cdp_unavailable_action(""))
     }
+    fn browser_evaluate(
+        &self,
+        params: &BrowserEvaluateParams,
+    ) -> anyhow::Result<BrowserEvaluateResult> {
+        let _ = (&params.expression, params.timeout_ms);
+        Ok(browser_cdp_unavailable_evaluate())
+    }
     fn browser_screenshot(
         &self,
         params: &BrowserScreenshotParams,
@@ -206,6 +213,13 @@ impl UiAutomationBackend for NativeUiBackend {
 
     fn browser_click(&self, params: &BrowserClickParams) -> anyhow::Result<BrowserActionResult> {
         browser_cdp_click(params)
+    }
+
+    fn browser_evaluate(
+        &self,
+        params: &BrowserEvaluateParams,
+    ) -> anyhow::Result<BrowserEvaluateResult> {
+        browser_cdp_evaluate(params)
     }
 
     fn browser_screenshot(
@@ -309,6 +323,14 @@ struct BrowserClickParams {
 }
 
 #[derive(Debug, Deserialize, Default)]
+struct BrowserEvaluateParams {
+    #[serde(default)]
+    expression: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
 struct BrowserScreenshotParams {
     #[serde(default)]
     format: String,
@@ -380,6 +402,20 @@ pub(crate) struct BrowserActionResult {
     pub(crate) success: bool,
     #[serde(default)]
     pub(crate) error: String,
+    #[serde(default)]
+    pub(crate) page_title: String,
+    #[serde(default)]
+    pub(crate) page_url: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct BrowserEvaluateResult {
+    #[serde(default)]
+    pub(crate) success: bool,
+    #[serde(default)]
+    pub(crate) error: String,
+    #[serde(default)]
+    pub(crate) json_value: String,
     #[serde(default)]
     pub(crate) page_title: String,
     #[serde(default)]
@@ -558,6 +594,10 @@ where
             backend.browser_click(&parse_params(method, params)?)?,
             method,
         ),
+        "browser.evaluate" => to_value(
+            backend.browser_evaluate(&parse_params(method, params)?)?,
+            method,
+        ),
         "browser.screenshot" => to_value(
             backend.browser_screenshot(&parse_params(method, params)?)?,
             method,
@@ -727,6 +767,56 @@ return {{ ok: true, error: "" }};
     client.page_metadata()
 }
 
+fn browser_cdp_evaluate(params: &BrowserEvaluateParams) -> anyhow::Result<BrowserEvaluateResult> {
+    if params.expression.trim().is_empty() {
+        return Ok(BrowserEvaluateResult {
+            success: false,
+            error: "expression is required".to_string(),
+            json_value: String::new(),
+            page_title: String::new(),
+            page_url: String::new(),
+        });
+    }
+    let timeout = browser_timeout(params.timeout_ms);
+    let mut client = match BrowserCdpClient::connect(timeout) {
+        Ok(client) => client,
+        Err(err) => return Ok(browser_cdp_unavailable_evaluate_with_reason(err)),
+    };
+    let result = client.runtime_evaluate(&params.expression)?;
+    let metadata = client.page_metadata()?;
+    if let Some(exception) = result.get("exceptionDetails") {
+        return Ok(BrowserEvaluateResult {
+            success: false,
+            error: exception.to_string(),
+            json_value: String::new(),
+            page_title: metadata.page_title,
+            page_url: metadata.page_url,
+        });
+    }
+    let json_value = browser_cdp_evaluate_json_value(&result)?;
+    Ok(BrowserEvaluateResult {
+        success: true,
+        error: String::new(),
+        json_value,
+        page_title: metadata.page_title,
+        page_url: metadata.page_url,
+    })
+}
+
+fn browser_cdp_evaluate_json_value(result: &Value) -> anyhow::Result<String> {
+    let remote = result.pointer("/result/result").unwrap_or(&Value::Null);
+    if let Some(value) = remote.get("value") {
+        return Ok(serde_json::to_string(value)?);
+    }
+    if let Some(value) = remote.get("unserializableValue").and_then(Value::as_str) {
+        return Ok(serde_json::to_string(value)?);
+    }
+    if remote.get("type").and_then(Value::as_str) == Some("undefined") {
+        return Ok("null".to_string());
+    }
+    Ok(serde_json::to_string(remote)?)
+}
+
 fn browser_cdp_screenshot(
     params: &BrowserScreenshotParams,
 ) -> anyhow::Result<BrowserScreenshotResult> {
@@ -774,6 +864,26 @@ fn browser_cdp_unavailable_action_with_reason(
         error: format!("{BROWSER_CDP_UNAVAILABLE}: {err}"),
         page_title: String::new(),
         page_url: page_url.to_string(),
+    }
+}
+
+fn browser_cdp_unavailable_evaluate() -> BrowserEvaluateResult {
+    BrowserEvaluateResult {
+        success: false,
+        error: BROWSER_CDP_UNAVAILABLE.to_string(),
+        json_value: String::new(),
+        page_title: String::new(),
+        page_url: String::new(),
+    }
+}
+
+fn browser_cdp_unavailable_evaluate_with_reason(err: anyhow::Error) -> BrowserEvaluateResult {
+    BrowserEvaluateResult {
+        success: false,
+        error: format!("{BROWSER_CDP_UNAVAILABLE}: {err}"),
+        json_value: String::new(),
+        page_title: String::new(),
+        page_url: String::new(),
     }
 }
 
@@ -2924,6 +3034,13 @@ mod tests {
         assert!(err
             .to_string()
             .contains("invalid parameters for UI sidecar method 'browser.click'"));
+
+        let err =
+            parse_params::<BrowserEvaluateParams>("browser.evaluate", &json!({ "expression": 9 }))
+                .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("invalid parameters for UI sidecar method 'browser.evaluate'"));
     }
 
     #[test]
@@ -3230,6 +3347,17 @@ mod tests {
         assert_eq!(result.page_url, "");
         assert!(result.error.contains("DOM/CDP automation is not available"));
 
+        let evaluate = UiAutomationEngine::PowershellProcess
+            .execute(
+                "browser.evaluate",
+                &json!({ "expression": "document.title", "timeout_ms": 5000 }),
+            )
+            .unwrap();
+        let result: BrowserEvaluateResult = parse_response("browser.evaluate", evaluate).unwrap();
+        assert!(!result.success);
+        assert_eq!(result.json_value, "");
+        assert!(result.error.contains("DOM/CDP automation is not available"));
+
         let err = UiAutomationEngine::PowershellProcess
             .execute(
                 "browser.screenshot",
@@ -3239,6 +3367,38 @@ mod tests {
         assert!(err
             .to_string()
             .contains("DOM/CDP automation is not available"));
+    }
+
+    #[test]
+    fn browser_cdp_evaluate_extracts_json_values() {
+        assert_eq!(
+            browser_cdp_evaluate_json_value(&json!({
+                "result": { "result": { "type": "string", "value": "hello" } }
+            }))
+            .unwrap(),
+            "\"hello\""
+        );
+        assert_eq!(
+            browser_cdp_evaluate_json_value(&json!({
+                "result": { "result": { "type": "object", "value": { "clicked": true } } }
+            }))
+            .unwrap(),
+            "{\"clicked\":true}"
+        );
+        assert_eq!(
+            browser_cdp_evaluate_json_value(&json!({
+                "result": { "result": { "type": "undefined" } }
+            }))
+            .unwrap(),
+            "null"
+        );
+        assert_eq!(
+            browser_cdp_evaluate_json_value(&json!({
+                "result": { "result": { "type": "number", "unserializableValue": "NaN" } }
+            }))
+            .unwrap(),
+            "\"NaN\""
+        );
     }
 
     #[test]

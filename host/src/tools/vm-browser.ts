@@ -18,6 +18,19 @@ function sanitizeCssSelector(value: unknown): string {
   return value;
 }
 
+function sanitizeBrowserExpression(value: unknown): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error("expression is required");
+  }
+  if (value.includes("\0")) {
+    throw new Error("expression contains null byte");
+  }
+  if (value.length > 10_000) {
+    throw new Error("expression is too long");
+  }
+  return value;
+}
+
 function browserActionJson(
   vm: string,
   result: { success: boolean; error: string; pageTitle: string; pageUrl: string },
@@ -26,6 +39,20 @@ function browserActionJson(
     vm,
     success: result.success,
     error: result.error,
+    page_title: result.pageTitle,
+    page_url: result.pageUrl,
+  };
+}
+
+function browserEvaluateJson(
+  vm: string,
+  result: { success: boolean; error: string; jsonValue: string; pageTitle: string; pageUrl: string },
+) {
+  return {
+    vm,
+    success: result.success,
+    error: result.error,
+    json_value: result.jsonValue,
     page_title: result.pageTitle,
     page_url: result.pageUrl,
   };
@@ -108,6 +135,41 @@ export function createVmBrowserTools(getClient: GuestClientResolver): ToolDefini
           );
           return {
             content: [{ type: "text", text: JSON.stringify(browserActionJson(name, result), null, 2) }],
+            isError: !result.success,
+          };
+        } catch (error) {
+          return {
+            content: [{ type: "text", text: JSON.stringify(toolErrorJson(name, error), null, 2) }],
+            isError: true,
+          };
+        }
+      },
+    },
+    {
+      name: "vm_browser_evaluate",
+      description:
+        "Evaluate a JavaScript expression in the active browser through the guest browser automation backend. Native sidecars use loopback CDP when available.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+          expression: { type: "string", description: "JavaScript expression to evaluate" },
+          timeout_ms: { type: "number", description: "RPC timeout" },
+        },
+        required: ["name", "expression"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const name = sanitizeVmName(params.name as string);
+        const expression = sanitizeBrowserExpression(params.expression);
+        const client = await getClient(name);
+        try {
+          const result = await client.browserEvaluate(
+            expression,
+            sanitizeTimeout(params.timeout_ms as number | undefined),
+          );
+          return {
+            content: [{ type: "text", text: JSON.stringify(browserEvaluateJson(name, result), null, 2) }],
             isError: !result.success,
           };
         } catch (error) {
