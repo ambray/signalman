@@ -87,9 +87,11 @@ LLM-test interaction loop: observe with `vm_ui_snapshot`, locate controls with
 and `vm_ui_key` calls. Prefer explicit selectors for typing and keyboard input;
 untargeted input still goes to whatever window currently owns focus.
 
-Native `vm_ui_find` honors the element wait timeout by polling UI Automation
-until a matching element appears or the timeout expires. Empty-selector
-inventory calls return immediately so snapshots stay cheap.
+Native `vm_ui_find` honors the element wait timeout by checking once, then
+subscribing to UI Automation structure-change events while it waits for a
+matching element. The wait still has a bounded timeout fallback so provider
+quirks cannot hang a scenario. Empty-selector inventory calls return
+immediately so snapshots stay cheap.
 
 Native `vm_ui_click` treats default/left clicks as semantic UI actions first:
 when the target supports UI Automation's Invoke pattern, Signalman invokes the

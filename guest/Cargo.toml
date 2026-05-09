@@ -53,6 +53,7 @@ image = { version = "0.25", optional = true }
 # Windows-specific
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
+    "implement",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_Threading",
@@ -64,6 +65,7 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
 ] }
+windows-core = "0.58"
 
 [build-dependencies]
 tonic-build = "0.12"

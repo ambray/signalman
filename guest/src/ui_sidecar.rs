@@ -24,6 +24,8 @@ const DEFAULT_CONNECT_ADDR: &str = "127.0.0.1:50151";
 const POWERSHELL_PROCESS_ENGINE: &str = "powershell-process";
 const POWERSHELL_HELPER_ENGINE: &str = "powershell-helper";
 const NATIVE_ENGINE: &str = "native";
+#[cfg(target_os = "windows")]
+const NATIVE_UIA_EVENT_FALLBACK_POLL_MS: u64 = 500;
 static START_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 #[cfg(target_os = "windows")]
 static POWERSHELL_HELPER: OnceLock<Mutex<Option<PowershellHelper>>> = OnceLock::new();
@@ -958,18 +960,23 @@ fn native_ui_find(params: &UiFindParams) -> anyhow::Result<UiFindResult> {
     let condition = native_uia_condition(&automation, &selector)?;
 
     let timeout_ms = params.timeout_ms.unwrap_or(2_000);
+    if params.selector.trim().is_empty() || timeout_ms == 0 {
+        let results: Vec<_> = native_uia_collect(&root, &condition, &selector)?
+            .into_iter()
+            .map(|(_, element)| element)
+            .collect();
+        return Ok(UiFindResult { elements: results });
+    }
     let deadline = std::time::Instant::now()
         .checked_add(std::time::Duration::from_millis(timeout_ms))
         .unwrap_or_else(std::time::Instant::now);
+    let event_wait = native_uia_event_waiter(&automation, &root).ok();
     loop {
         let results: Vec<_> = native_uia_collect(&root, &condition, &selector)?
             .into_iter()
             .map(|(_, element)| element)
             .collect();
-        if !results.is_empty() || params.selector.trim().is_empty() {
-            return Ok(UiFindResult { elements: results });
-        }
-        if timeout_ms == 0 {
+        if !results.is_empty() {
             return Ok(UiFindResult { elements: results });
         }
         let now = std::time::Instant::now();
@@ -977,8 +984,92 @@ fn native_ui_find(params: &UiFindParams) -> anyhow::Result<UiFindResult> {
             return Ok(UiFindResult { elements: results });
         }
         let remaining = deadline.saturating_duration_since(now);
-        std::thread::sleep(remaining.min(std::time::Duration::from_millis(100)));
+        if let Some(waiter) = &event_wait {
+            waiter.wait(remaining);
+        } else {
+            std::thread::sleep(remaining.min(std::time::Duration::from_millis(100)));
+        }
     }
+}
+
+#[cfg(target_os = "windows")]
+#[windows::core::implement(windows::Win32::UI::Accessibility::IUIAutomationStructureChangedEventHandler)]
+struct NativeStructureChangedHandler {
+    tx: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(target_os = "windows")]
+#[allow(non_snake_case)]
+impl windows::Win32::UI::Accessibility::IUIAutomationStructureChangedEventHandler_Impl
+    for NativeStructureChangedHandler_Impl
+{
+    fn HandleStructureChangedEvent(
+        &self,
+        _sender: Option<&windows::Win32::UI::Accessibility::IUIAutomationElement>,
+        _changetype: windows::Win32::UI::Accessibility::StructureChangeType,
+        _runtimeid: *const windows::Win32::System::Com::SAFEARRAY,
+    ) -> windows::core::Result<()> {
+        let _ = self.tx.send(());
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct NativeUiaEventWaiter<'a> {
+    automation: &'a windows::Win32::UI::Accessibility::IUIAutomation,
+    root: &'a windows::Win32::UI::Accessibility::IUIAutomationElement,
+    handler: windows::Win32::UI::Accessibility::IUIAutomationStructureChangedEventHandler,
+    rx: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(target_os = "windows")]
+impl NativeUiaEventWaiter<'_> {
+    fn wait(&self, timeout: std::time::Duration) {
+        let bounded_timeout =
+            timeout.min(std::time::Duration::from_millis(NATIVE_UIA_EVENT_FALLBACK_POLL_MS));
+        let _ = self.rx.recv_timeout(bounded_timeout);
+        while self.rx.try_recv().is_ok() {}
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for NativeUiaEventWaiter<'_> {
+    fn drop(&mut self) {
+        let _ = unsafe {
+            self.automation
+                .RemoveStructureChangedEventHandler(self.root, &self.handler)
+        };
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn native_uia_event_waiter<'a>(
+    automation: &'a windows::Win32::UI::Accessibility::IUIAutomation,
+    root: &'a windows::Win32::UI::Accessibility::IUIAutomationElement,
+) -> anyhow::Result<NativeUiaEventWaiter<'a>> {
+    use windows::Win32::UI::Accessibility::{
+        IUIAutomationCacheRequest, IUIAutomationStructureChangedEventHandler, TreeScope_Subtree,
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handler: IUIAutomationStructureChangedEventHandler =
+        NativeStructureChangedHandler { tx }.into();
+    unsafe {
+        automation
+            .AddStructureChangedEventHandler(
+                root,
+                TreeScope_Subtree,
+                None::<&IUIAutomationCacheRequest>,
+                &handler,
+            )
+            .context("native UI Automation structure-changed handler")?;
+    }
+    Ok(NativeUiaEventWaiter {
+        automation,
+        root,
+        handler,
+        rx,
+    })
 }
 
 #[cfg(target_os = "windows")]
