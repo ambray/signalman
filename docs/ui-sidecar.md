@@ -130,6 +130,12 @@ output; once the browser is open, tests should observe and interact through
 Windows desktop workflows; the PowerShell engines remain useful fallbacks and
 compatibility probes.
 
+The live `live-ui-browser-smoke` scenario pins this browser-launch contract on
+`Win11_test`: it starts the native sidecar, opens an isolated `example.test`
+URL, confirms the normalized URL reported by `ui_open_url`, observes the
+browser address value through UI Automation, captures a browser screenshot plus
+element inventory, and closes the window.
+
 `vm_ui_health` reports the active engine (`powershell-process`,
 `powershell-helper`, or `native`) through the same health surface every backend
 uses. The sidecar dispatches requests through an engine boundary, so workflows
