@@ -300,10 +300,11 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   The live `Win11_test` `live-ui-browser-smoke` scenario validates that path by
   closing stale Edge processes, opening Edge to an isolated `example.test` URL,
   observing the browser address bar through UI Automation, navigating to a
-  second URL with the reusable browser navigation workflow, verifying the
-  updated address value, capturing a screenshot and UIA inventory, identifying
-  the address bar in the scored `browser_targets` observation list, and closing
-  the browser. Full DOM/CDP browser control remains future work.
+  second URL with the reusable browser navigation workflow, verifying that the
+  workflow consumed discovered address-bar metadata, verifying the updated
+  address value, capturing a screenshot and UIA inventory, identifying the
+  address bar in the scored `browser_targets` observation list, and closing the
+  browser. Full DOM/CDP browser control remains future work.
 
 - **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
   calls into `.signalman/recordings/`. The agent-first DevOps

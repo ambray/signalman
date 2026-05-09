@@ -1,4 +1,6 @@
 import type { GuestAgentClient, UiActionResult } from "./client.js";
+import { describeUiBrowserTargets, describeUiElements } from "./ui-elements.js";
+import type { UiBrowserTarget } from "./ui-elements.js";
 
 export interface UiOpenUrlOptions {
   timeoutMs?: number;
@@ -8,6 +10,7 @@ export interface UiOpenUrlOptions {
 export interface UiNavigateUrlOptions {
   addressSelector?: string;
   addressEditSelector?: string;
+  discoverTarget?: boolean;
   expectedValue?: string;
   verify?: boolean;
   timeoutMs?: number;
@@ -23,6 +26,10 @@ export interface UiNavigateUrlResult extends UiActionResult {
   expectedValue: string;
   observed: boolean;
   observedCount: number;
+  targetSelector: string;
+  targetEditSelector: string;
+  targetKind: string;
+  targetConfidence: number;
 }
 
 const RUN_DIALOG_EDIT_SELECTOR = "[automationId='1001']";
@@ -66,6 +73,36 @@ function valueSelector(value: string): string {
     throw new Error("expected browser URL value contains unsupported selector characters");
   }
   return `[value='${value}']`;
+}
+
+function emptyNavigateResult(
+  url: string,
+  expectedValue: string,
+  targetSelector: string,
+  targetEditSelector: string,
+  targetKind: string,
+  targetConfidence: number,
+  success: boolean,
+  error: string,
+  durationMs: number,
+): UiNavigateUrlResult {
+  return {
+    url,
+    expectedValue,
+    observed: false,
+    observedCount: 0,
+    targetSelector,
+    targetEditSelector,
+    targetKind,
+    targetConfidence,
+    success,
+    error,
+    durationMs,
+  };
+}
+
+function chooseBrowserTarget(targets: UiBrowserTarget[]): UiBrowserTarget | undefined {
+  return targets.find((target) => target.kind === "address_bar") ?? targets[0];
 }
 
 export async function openUrlWithUi(
@@ -126,24 +163,45 @@ export async function navigateUrlWithUi(
   options: UiNavigateUrlOptions = {},
 ): Promise<UiNavigateUrlResult> {
   const url = sanitizeBrowserUrl(value);
-  const addressSelector = options.addressSelector ?? DEFAULT_BROWSER_ADDRESS_SELECTOR;
-  const addressEditSelector = options.addressEditSelector ?? DEFAULT_BROWSER_ADDRESS_EDIT_SELECTOR;
+  const shouldDiscoverTarget =
+    options.discoverTarget ?? (!options.addressSelector && !options.addressEditSelector);
+  let addressSelector = options.addressSelector ?? DEFAULT_BROWSER_ADDRESS_SELECTOR;
+  let addressEditSelector = options.addressEditSelector ?? DEFAULT_BROWSER_ADDRESS_EDIT_SELECTOR;
+  let targetKind = "default";
+  let targetConfidence = 0;
   const expectedValue = options.expectedValue ?? browserDisplayedUrl(url);
   const verify = options.verify ?? true;
   let durationMs = 0;
 
+  if (shouldDiscoverTarget) {
+    const discovered = await client.uiFindDetailed("", {
+      findTimeoutMs: options.findTimeoutMs,
+      timeoutMs: options.timeoutMs,
+    });
+    durationMs += discovered.durationMs;
+    const target = chooseBrowserTarget(describeUiBrowserTargets(describeUiElements(discovered.elements), 10));
+    if (target) {
+      addressSelector = options.addressSelector ?? target.selector;
+      addressEditSelector = options.addressEditSelector ?? target.edit_selector;
+      targetKind = target.kind;
+      targetConfidence = target.confidence;
+    }
+  }
+
   const clicked = await client.uiClick(addressSelector, { timeoutMs: options.timeoutMs });
   durationMs += clicked.durationMs;
   if (!clicked.success) {
-    return {
+    return emptyNavigateResult(
       url,
       expectedValue,
-      observed: false,
-      observedCount: 0,
-      success: false,
-      error: clicked.error,
+      addressSelector,
+      addressEditSelector,
+      targetKind,
+      targetConfidence,
+      false,
+      clicked.error,
       durationMs,
-    };
+    );
   }
 
   const focused = await client.uiKey("^l", {
@@ -152,15 +210,17 @@ export async function navigateUrlWithUi(
   });
   durationMs += focused.durationMs;
   if (!focused.success) {
-    return {
+    return emptyNavigateResult(
       url,
       expectedValue,
-      observed: false,
-      observedCount: 0,
-      success: false,
-      error: focused.error,
+      addressSelector,
+      addressEditSelector,
+      targetKind,
+      targetConfidence,
+      false,
+      focused.error,
       durationMs,
-    };
+    );
   }
 
   const typed = await client.uiType(url, {
@@ -170,15 +230,17 @@ export async function navigateUrlWithUi(
   });
   durationMs += typed.durationMs;
   if (!typed.success) {
-    return {
+    return emptyNavigateResult(
       url,
       expectedValue,
-      observed: false,
-      observedCount: 0,
-      success: false,
-      error: typed.error,
+      addressSelector,
+      addressEditSelector,
+      targetKind,
+      targetConfidence,
+      false,
+      typed.error,
       durationMs,
-    };
+    );
   }
 
   const submitted = await client.uiKey("{ENTER}", {
@@ -187,15 +249,17 @@ export async function navigateUrlWithUi(
   });
   durationMs += submitted.durationMs;
   if (!submitted.success) {
-    return {
+    return emptyNavigateResult(
       url,
       expectedValue,
-      observed: false,
-      observedCount: 0,
-      success: false,
-      error: submitted.error,
+      addressSelector,
+      addressEditSelector,
+      targetKind,
+      targetConfidence,
+      false,
+      submitted.error,
       durationMs,
-    };
+    );
   }
 
   if (!verify) {
@@ -204,6 +268,10 @@ export async function navigateUrlWithUi(
       expectedValue,
       observed: false,
       observedCount: 0,
+      targetSelector: addressSelector,
+      targetEditSelector: addressEditSelector,
+      targetKind,
+      targetConfidence,
       success: true,
       error: "",
       durationMs,
@@ -221,6 +289,10 @@ export async function navigateUrlWithUi(
     expectedValue,
     observed: observedCount > 0,
     observedCount,
+    targetSelector: addressSelector,
+    targetEditSelector: addressEditSelector,
+    targetKind,
+    targetConfidence,
     success: observedCount > 0,
     error: observedCount > 0 ? "" : `Browser URL value not observed: ${expectedValue}`,
     durationMs,

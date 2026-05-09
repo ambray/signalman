@@ -81,6 +81,14 @@ assertions:
     severity: critical
     description: "The browser should expose at least one matching address-bar value after navigation"
 
+  - id: browser-navigate-used-discovered-target
+    type: json_field
+    source: step-9
+    field: target_kind
+    expected: address_bar
+    severity: high
+    description: "The browser navigation workflow should use discovered address-bar metadata"
+
   - id: browser-snapshot-captured
     type: json_field
     source: step-10

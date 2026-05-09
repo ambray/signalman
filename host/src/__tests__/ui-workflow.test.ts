@@ -295,7 +295,7 @@ describe("workflow UI tool blocks", () => {
 
   it("navigates an already-open browser through one workflow tool block", async () => {
     const client = makeClient({
-      uiFindDetailed: vi.fn().mockResolvedValueOnce({
+      uiFindDetailed: vi.fn().mockResolvedValue({
         durationMs: 16,
         elements: [
           {
@@ -322,7 +322,11 @@ describe("workflow UI tool blocks", () => {
       vmMap,
     );
 
-    expect(client.uiClick).toHaveBeenCalledWith("[name='Address and search bar']", {
+    expect(client.uiFindDetailed).toHaveBeenNthCalledWith(1, "", {
+      findTimeoutMs: 2_000,
+      timeoutMs: 5_000,
+    });
+    expect(client.uiClick).toHaveBeenCalledWith("[automationId='view_1021']", {
       timeoutMs: 5_000,
     });
     expect(client.uiKey).toHaveBeenNthCalledWith(1, "^l", {
@@ -338,22 +342,64 @@ describe("workflow UI tool blocks", () => {
       selector: "[automationId='view_1021']",
       timeoutMs: 5_000,
     });
-    expect(client.uiFindDetailed).toHaveBeenCalledWith("[value='example.test/next']", {
+    expect(client.uiFindDetailed).toHaveBeenNthCalledWith(2, "[value='example.test/next']", {
       findTimeoutMs: 2_000,
       timeoutMs: 5_000,
     });
     expect(JSON.parse(navigated)).toEqual({
       success: true,
       error: "",
-      duration_ms: 72,
+      duration_ms: 88,
       url: "http://example.test/next",
       expected_value: "example.test/next",
       observed: true,
       observed_count: 1,
+      target_selector: "[automationId='view_1021']",
+      target_edit_selector: "[automationId='view_1021']",
+      target_kind: "address_bar",
+      target_confidence: 1,
     });
     await expect(
       orchestrator.executeToolBlock("ui_navigate_url", { vm: "endpoint-1" }, vmMap),
     ).rejects.toThrow("ui_navigate_url missing 'url'");
+  });
+
+  it("honors explicit browser navigation selectors without discovery", async () => {
+    const client = makeClient();
+    const { orchestrator, vmMap } = makeOrchestrator(client);
+
+    const navigated = await orchestrator.executeToolBlock(
+      "ui_navigate_url",
+      {
+        vm: "endpoint-1",
+        url: "http://example.test/manual",
+        address_selector: "[name='Manual bar']",
+        address_edit_selector: "[automationId='manual-edit']",
+        find_timeout_ms: 2_000,
+        timeout_ms: 5_000,
+      },
+      vmMap,
+    );
+
+    expect(client.uiFindDetailed).toHaveBeenCalledTimes(1);
+    expect(client.uiFindDetailed).toHaveBeenCalledWith("[value='example.test/manual']", {
+      findTimeoutMs: 2_000,
+      timeoutMs: 5_000,
+    });
+    expect(client.uiClick).toHaveBeenCalledWith("[name='Manual bar']", {
+      timeoutMs: 5_000,
+    });
+    expect(client.uiKey).toHaveBeenNthCalledWith(1, "^l", {
+      selector: "[automationId='manual-edit']",
+      timeoutMs: 5_000,
+    });
+    expect(JSON.parse(navigated)).toMatchObject({
+      success: true,
+      target_selector: "[name='Manual bar']",
+      target_edit_selector: "[automationId='manual-edit']",
+      target_kind: "default",
+      target_confidence: 0,
+    });
   });
 
   it("recovers an unreachable sidecar for workflow UI blocks when configured", async () => {

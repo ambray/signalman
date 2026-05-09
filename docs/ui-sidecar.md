@@ -132,13 +132,19 @@ output.
 
 Once the browser is open, `vm_ui_navigate_url` is the preferred workflow
 primitive for page transitions. It validates the URL with the same rules,
-clicks the address bar, sends Ctrl+L to the editable address control, types the
-normalized URL, presses Enter, and by default waits for the expected address
-value to appear through UI Automation. The default selectors target Microsoft
-Edge (`[name='Address and search bar']` and `[automationId='view_1021']`), but
-callers can override them for another browser or a changed shell surface. Native
-UI Automation is the preferred path for Windows desktop workflows; the
-PowerShell engines remain useful fallbacks and compatibility probes.
+discovers an address/search target from UI Automation when selectors are not
+provided, clicks that target, sends Ctrl+L to the editable address control,
+types the normalized URL, presses Enter, and by default waits for the expected
+address value to appear through UI Automation. The response reports
+`target_selector`, `target_edit_selector`, `target_kind`, and
+`target_confidence` so recordings and LLM agents can explain which observed
+control they used. Explicit `address_selector` / `address_edit_selector`
+overrides skip discovery and remain available for pinned browser-specific flows.
+If discovery finds no browser target, Signalman falls back to the current
+Microsoft Edge selectors (`[name='Address and search bar']` and
+`[automationId='view_1021']`). Native UI Automation is the preferred path for
+Windows desktop workflows; the PowerShell engines remain useful fallbacks and
+compatibility probes.
 
 The live `live-ui-browser-smoke` scenario pins this browser-launch and
 interaction contract on `Win11_test`: it starts the native sidecar, closes stale
