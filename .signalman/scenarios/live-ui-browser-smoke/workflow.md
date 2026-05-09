@@ -70,46 +70,9 @@ ui_find:
 ```
 
 ```tool
-ui_click:
+ui_navigate_url:
   vm: Win11_test
-  selector: "[name='Address and search bar']"
-  timeout_ms: 15000
-```
-
-```tool
-ui_key:
-  vm: Win11_test
-  selector: "[automationId='view_1021']"
-  keys: "^l"
-  timeout_ms: 15000
-```
-
-```tool
-ui_type:
-  vm: Win11_test
-  selector: "[automationId='view_1021']"
-  text: "http://example.test/signalman-browser-interaction"
-  clear_first: true
-  timeout_ms: 15000
-```
-
-```tool
-ui_key:
-  vm: Win11_test
-  selector: "[automationId='view_1021']"
-  keys: "{ENTER}"
-  timeout_ms: 15000
-```
-
-```tool
-wait:
-  duration_ms: 2000
-```
-
-```tool
-ui_find:
-  vm: Win11_test
-  selector: "[value='example.test/signalman-browser-interaction']"
+  url: "http://example.test/signalman-browser-interaction"
   find_timeout_ms: 15000
   timeout_ms: 20000
 ```

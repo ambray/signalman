@@ -56,50 +56,34 @@ assertions:
     severity: critical
     description: "The launched browser should expose the target URL through UI Automation"
 
-  - id: address-bar-clicked
+  - id: browser-navigate-url-succeeded
     type: json_field
     source: step-9
     field: success
     expected: true
     severity: critical
-    description: "The smoke should click the browser address bar as an actionable UI target"
+    description: "The browser workflow should navigate by focusing and typing into the address bar"
 
-  - id: address-bar-focused
+  - id: browser-navigate-url-observed
     type: json_field
-    source: step-10
-    field: success
+    source: step-9
+    field: observed
     expected: true
     severity: critical
-    description: "The smoke should focus the browser address bar with Ctrl+L before typing"
+    description: "The browser workflow should verify the typed URL through UI Automation"
 
-  - id: address-bar-typed
+  - id: browser-navigate-url-count
     type: json_field
-    source: step-11
-    field: success
-    expected: true
-    severity: critical
-    description: "The smoke should type a second URL into the browser address bar"
-
-  - id: address-bar-submitted
-    type: json_field
-    source: step-12
-    field: success
-    expected: true
-    severity: critical
-    description: "The smoke should submit the typed browser address with Enter"
-
-  - id: interaction-url-observed
-    type: json_field
-    source: step-14
-    field: count
+    source: step-9
+    field: observed_count
     comparison: gte
     expected: 1
     severity: critical
-    description: "The browser should expose the interactively typed URL through UI Automation"
+    description: "The browser should expose at least one matching address-bar value after navigation"
 
   - id: browser-snapshot-captured
     type: json_field
-    source: step-15
+    source: step-10
     field: bytes
     comparison: gt
     expected: 0
@@ -108,7 +92,7 @@ assertions:
 
   - id: browser-elements-found
     type: json_field
-    source: step-15
+    source: step-10
     field: element_count
     comparison: gt
     expected: 0
@@ -117,7 +101,7 @@ assertions:
 
   - id: address-bar-action-target
     type: json_field
-    source: step-15
+    source: step-10
     field: "action_targets[?label=='Address and search bar'].actions"
     comparison: includes
     expected: type
@@ -126,7 +110,7 @@ assertions:
 
   - id: browser-closed
     type: json_field
-    source: step-16
+    source: step-11
     field: success
     expected: true
     severity: high

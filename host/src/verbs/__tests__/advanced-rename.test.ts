@@ -38,6 +38,7 @@ describe("advanced namespace contract", () => {
       "vm_ui_key",
       "vm_ui_type",
       "vm_ui_open_url",
+      "vm_ui_navigate_url",
     ]));
     // Docker tools register too.
     const dockerNames = names.filter((n) => n.startsWith("docker_"));

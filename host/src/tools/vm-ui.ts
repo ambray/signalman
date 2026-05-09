@@ -8,7 +8,7 @@
 
 import type { ToolDefinition, ToolResult } from "./types.js";
 import type { GuestAgentClient } from "../guest/client.js";
-import { openUrlWithUi } from "../guest/ui-browser.js";
+import { navigateUrlWithUi, openUrlWithUi } from "../guest/ui-browser.js";
 import type { UiSidecarRecoveryOptions } from "../guest/ui-recovery.js";
 import { ensureUiSidecar } from "../guest/ui-sidecar.js";
 import { describeUiActionTargets, describeUiElements } from "../guest/ui-elements.js";
@@ -550,6 +550,71 @@ export function createVmUiTools(
             {
               type: "text",
               text: JSON.stringify({ ...uiActionJson(name, result), url: result.url }, null, 2),
+            },
+          ],
+          isError: !result.success,
+        };
+      },
+    },
+    {
+      name: "vm_ui_navigate_url",
+      description: "Navigate an already-open browser by focusing the address bar, typing an http(s) URL, submitting it, and optionally verifying the address value",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+          url: { type: "string", description: "http:// or https:// URL to navigate to" },
+          address_selector: {
+            type: "string",
+            description: "Selector for the browser address bar action target",
+          },
+          address_edit_selector: {
+            type: "string",
+            description: "Selector for the address bar edit control used for typing",
+          },
+          expected_value: {
+            type: "string",
+            description: "Expected UI Automation value after navigation; defaults to the browser-displayed URL",
+          },
+          verify: {
+            type: "boolean",
+            description: "Whether to wait for the expected address value after submitting, default true",
+          },
+          ...recoveryProperties,
+          find_timeout_ms: { type: "number", description: "Address value verification wait timeout" },
+          timeout_ms: { type: "number", description: "RPC timeout" },
+        },
+        required: ["name", "url"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const name = sanitizeVmName(params.name as string);
+        const client = await getClient(name);
+        const result = await withUiSidecarRecovery(client, recoveryOptions(params), () =>
+          navigateUrlWithUi(client, params.url, {
+            addressSelector: params.address_selector as string | undefined,
+            addressEditSelector: params.address_edit_selector as string | undefined,
+            expectedValue: params.expected_value as string | undefined,
+            verify: params.verify as boolean | undefined,
+            findTimeoutMs: sanitizeTimeout(params.find_timeout_ms as number | undefined, 5_000),
+            timeoutMs: sanitizeTimeout(params.timeout_ms as number | undefined),
+          }),
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  ...uiActionJson(name, result),
+                  url: result.url,
+                  expected_value: result.expectedValue,
+                  observed: result.observed,
+                  observed_count: result.observedCount,
+                },
+                null,
+                2,
+              ),
             },
           ],
           isError: !result.success,
