@@ -45,6 +45,10 @@ The host registers these MCP tools when guest-agent access is available:
 - `vm_ui_navigate_url`: navigate an already-open browser by focusing the
   address bar, typing an `http://` or `https://` URL, pressing Enter, and
   optionally verifying the address value through UI Automation.
+- `vm_browser_navigate`, `vm_browser_click`, `vm_browser_screenshot`: expose
+  the reserved guest Browser* RPC contract for future DOM/CDP control. Current
+  guests may return UNIMPLEMENTED; use the `vm_ui_*` browser primitives above
+  for working Windows desktop flows today.
 
 Scenario workflows use the same operation names without the `vm_` prefix,
 including `ui_ensure_sidecar`, `ui_open_url`, and `ui_navigate_url` for
@@ -123,12 +127,19 @@ PowerShell engines still accept broader Windows SendKeys syntax, but scenarios
 intended to run on the native engine should stay within the documented subset.
 
 More complex desktop workflows still need richer eventing and eventually a
-first-class browser DOM/CDP observation loop. `vm_ui_open_url` is the current
-browser launch bridge: it validates the target as `http(s)`, opens the Windows
-Run dialog with `Win+R`, types the URL into the Run edit control, and presses
-Enter. It intentionally does not accept `file:`, `javascript:`, or shell-like
-targets, and rejects embedded URL credentials so secrets are not echoed in tool
-output.
+first-class browser DOM/CDP observation loop. The guest proto already reserves
+`BrowserNavigate`, `BrowserClick`, and `BrowserScreenshot`; the host exposes
+those as `vm_browser_navigate`, `vm_browser_click`, and
+`vm_browser_screenshot` so agents see the intended browser contract. Current
+guests still return UNIMPLEMENTED for those calls until the CDP sidecar runtime
+lands, so production workflows should continue to use the UIA browser
+primitives below.
+
+`vm_ui_open_url` is the current browser launch bridge: it validates the target
+as `http(s)`, opens the Windows Run dialog with `Win+R`, types the URL into the
+Run edit control, and presses Enter. It intentionally does not accept `file:`,
+`javascript:`, or shell-like targets, and rejects embedded URL credentials so
+secrets are not echoed in tool output.
 
 Once the browser is open, `vm_ui_navigate_url` is the preferred workflow
 primitive for page transitions. It validates the URL with the same rules,

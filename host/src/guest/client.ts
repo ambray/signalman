@@ -294,6 +294,20 @@ export interface UiHealthResult {
   durationMs: number;
 }
 
+export interface BrowserActionResult {
+  success: boolean;
+  error: string;
+  pageTitle: string;
+  pageUrl: string;
+}
+
+export interface BrowserScreenshot {
+  imageData: Buffer;
+  format: string;
+  width: number;
+  height: number;
+}
+
 // ── Proto Loading (lazy) ──────────────────────────────────────────
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1398,6 +1412,89 @@ export class GuestAgentClient {
     } = {},
   ): Promise<UiElement[]> {
     return (await this.uiFindDetailed(selector, options)).elements;
+  }
+
+  async browserNavigate(url: string, timeoutMs?: number): Promise<BrowserActionResult> {
+    const deadline = timeoutMs ?? this.options.defaultTimeoutMs;
+    const response = await withRetry(
+      () =>
+        unaryCall<
+          { url: string; timeoutMs: number },
+          { success: boolean; error: string; pageTitle: string; pageUrl: string }
+        >(
+          this.client,
+          "browserNavigate",
+          { url, timeoutMs: timeoutMs ?? 0 },
+          deadline,
+          this.options.authToken,
+        ),
+      this.options.maxRetries,
+      this.options.initialRetryDelayMs,
+      this.options.maxRetryDelayMs,
+    );
+    return {
+      success: response.success,
+      error: response.error,
+      pageTitle: response.pageTitle,
+      pageUrl: response.pageUrl,
+    };
+  }
+
+  async browserClick(cssSelector: string, timeoutMs?: number): Promise<BrowserActionResult> {
+    const deadline = timeoutMs ?? this.options.defaultTimeoutMs;
+    const response = await withRetry(
+      () =>
+        unaryCall<
+          { cssSelector: string; timeoutMs: number },
+          { success: boolean; error: string; pageTitle: string; pageUrl: string }
+        >(
+          this.client,
+          "browserClick",
+          { cssSelector, timeoutMs: timeoutMs ?? 0 },
+          deadline,
+          this.options.authToken,
+        ),
+      this.options.maxRetries,
+      this.options.initialRetryDelayMs,
+      this.options.maxRetryDelayMs,
+    );
+    return {
+      success: response.success,
+      error: response.error,
+      pageTitle: response.pageTitle,
+      pageUrl: response.pageUrl,
+    };
+  }
+
+  async browserScreenshot(
+    options: { format?: string; fullPage?: boolean; timeoutMs?: number } = {},
+  ): Promise<BrowserScreenshot> {
+    const deadline = options.timeoutMs ?? this.options.defaultTimeoutMs;
+    const response = await withRetry(
+      () =>
+        unaryCall<
+          { format: string; fullPage: boolean },
+          { imageData: Buffer | Uint8Array; format: string; width: number; height: number }
+        >(
+          this.client,
+          "browserScreenshot",
+          {
+            format: options.format ?? "png",
+            fullPage: options.fullPage ?? false,
+          },
+          deadline,
+          this.options.authToken,
+        ),
+      this.options.maxRetries,
+      this.options.initialRetryDelayMs,
+      this.options.maxRetryDelayMs,
+    );
+    return {
+      imageData: Buffer.from(response.imageData),
+      format: response.format,
+      width: response.width,
+      height: response.height,
+    };
   }
 
 }

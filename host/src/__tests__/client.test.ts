@@ -224,6 +224,36 @@ describe("GuestAgentClient", () => {
           cb(null, { success: true, error: "", durationMs: 15 });
         },
       );
+      this.browserNavigate = vi.fn(
+        (_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+          cb(null, {
+            success: true,
+            error: "",
+            pageTitle: "Example",
+            pageUrl: "https://example.test/",
+          });
+        },
+      );
+      this.browserClick = vi.fn(
+        (_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+          cb(null, {
+            success: true,
+            error: "",
+            pageTitle: "Clicked",
+            pageUrl: "https://example.test/clicked",
+          });
+        },
+      );
+      this.browserScreenshot = vi.fn(
+        (_req: unknown, _opts: unknown, cb: (err: null, res: object) => void) => {
+          cb(null, {
+            imageData: Buffer.from("browser-png"),
+            format: "png",
+            width: 640,
+            height: 480,
+          });
+        },
+      );
       this.close = vi.fn();
     });
 
@@ -378,6 +408,28 @@ describe("GuestAgentClient", () => {
       success: true,
       error: "",
       durationMs: 15,
+    });
+  });
+
+  it("routes browser automation RPCs through the guest agent", async () => {
+    const client = new GuestAgentClient("127.0.0.1");
+    await expect(client.browserNavigate("https://example.test/", 5_000)).resolves.toEqual({
+      success: true,
+      error: "",
+      pageTitle: "Example",
+      pageUrl: "https://example.test/",
+    });
+    await expect(client.browserClick("#continue", 5_000)).resolves.toEqual({
+      success: true,
+      error: "",
+      pageTitle: "Clicked",
+      pageUrl: "https://example.test/clicked",
+    });
+    await expect(client.browserScreenshot({ format: "png", fullPage: true })).resolves.toEqual({
+      imageData: Buffer.from("browser-png"),
+      format: "png",
+      width: 640,
+      height: 480,
     });
   });
 });

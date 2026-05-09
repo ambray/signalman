@@ -107,17 +107,17 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
 
 | Crate / package | Test count (source) | Files | Last verified |
 |---|---|---|---|
-| Host (TypeScript / vitest) — `host/src/__tests__/` | 1041 | 45 | 2026-05-09 |
+| Host (TypeScript / vitest) — `host/src/__tests__/` | 1048 | 46 | 2026-05-09 |
 | Host (TypeScript / vitest) — `host/src/verbs/__tests__/` | 46 | 5 | 2026-05-09 |
 | Guest (Rust / cargo) | 126 | 9 | 2026-05-09 |
 | Service (Rust / cargo) | 110 | 8 (incl. 2 integration files) | 2026-05-09 |
 | Plugin (Rust / cargo) | 135 | 11 (incl. 2 integration files) | 2026-05-09 |
-| **Total** | **1458** test attributes / `it()` calls | **78** files | |
+| **Total** | **1465** test attributes / `it()` calls | **79** files | |
 
 > The ROADMAP headline "151 Rust + 769 TS = 920" predates the v0.1.1
 > P9 work and the user-session UI/browser milestones. `docs/testing.md`
-> now quotes 1087 TypeScript / 371 Rust source-level cases at HEAD
-> `9a96bd8`; vitest expands parameterized blocks to 1141 run-time tests
+> now quotes 1094 TypeScript / 371 Rust source-level cases; vitest
+> expands parameterized blocks to 1148 run-time tests
 > in the current host coverage run.
 
 ### Canonical test files (what each one pins)
@@ -156,6 +156,10 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
   Run-dialog browser launch, UIA browser target discovery, stale-target
   fallback, explicit-selector failure behavior, and no-verify browser
   navigation.
+- **`host/src/__tests__/vm-browser-tools.test.ts`** — pins the MCP
+  wrapper contract for the guest Browser* RPCs, including safe URL
+  validation, CSS-selector guardrails, screenshot image content, and
+  current UNIMPLEMENTED/CDP-missing error visibility.
 - **`host/src/__tests__/selector.test.ts`** — service-first backend
   ordering for both scenario runs and CLI VM verbs.
 - **`host/src/__tests__/scenario-retry.test.ts`** — closes P3 C5
@@ -313,8 +317,11 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   workflow consumed discovered address-bar metadata without needing stale-target
   fallback, verifying the updated address value, capturing a screenshot and UIA
   inventory, identifying the address bar in the scored `browser_targets`
-  observation list, and closing the browser. Full DOM/CDP browser control
-  remains future work.
+  observation list, and closing the browser. Host-side wrappers and MCP tools
+  now expose the reserved guest Browser* RPC contract as
+  `vm_browser_navigate`, `vm_browser_click`, and `vm_browser_screenshot`;
+  current guests still return UNIMPLEMENTED until the CDP sidecar runtime
+  lands.
 
 - **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
   calls into `.signalman/recordings/`. The agent-first DevOps
