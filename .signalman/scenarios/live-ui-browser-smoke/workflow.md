@@ -19,6 +19,24 @@ ui_health:
 ```
 
 ```tool
+vm_run_command:
+  vm: Win11_test
+  command: powershell.exe
+  args:
+    - -NoProfile
+    - -ExecutionPolicy
+    - Bypass
+    - -Command
+    - "Stop-Process -Name msedge -Force -ErrorAction SilentlyContinue"
+  timeout_ms: 30000
+```
+
+```tool
+wait:
+  duration_ms: 1000
+```
+
+```tool
 ui_key:
   vm: Win11_test
   keys: "{ESC}"
@@ -47,6 +65,51 @@ wait:
 ui_find:
   vm: Win11_test
   selector: "[value='example.test/signalman-browser-smoke']"
+  find_timeout_ms: 15000
+  timeout_ms: 20000
+```
+
+```tool
+ui_click:
+  vm: Win11_test
+  selector: "[name='Address and search bar']"
+  timeout_ms: 15000
+```
+
+```tool
+ui_key:
+  vm: Win11_test
+  selector: "[automationId='view_1021']"
+  keys: "^l"
+  timeout_ms: 15000
+```
+
+```tool
+ui_type:
+  vm: Win11_test
+  selector: "[automationId='view_1021']"
+  text: "http://example.test/signalman-browser-interaction"
+  clear_first: true
+  timeout_ms: 15000
+```
+
+```tool
+ui_key:
+  vm: Win11_test
+  selector: "[automationId='view_1021']"
+  keys: "{ENTER}"
+  timeout_ms: 15000
+```
+
+```tool
+wait:
+  duration_ms: 2000
+```
+
+```tool
+ui_find:
+  vm: Win11_test
+  selector: "[value='example.test/signalman-browser-interaction']"
   find_timeout_ms: 15000
   timeout_ms: 20000
 ```

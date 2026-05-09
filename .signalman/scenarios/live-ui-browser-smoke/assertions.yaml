@@ -25,7 +25,7 @@ assertions:
 
   - id: desktop-cleaned
     type: json_field
-    source: step-2
+    source: step-4
     field: success
     expected: true
     severity: high
@@ -33,7 +33,7 @@ assertions:
 
   - id: browser-url-opened
     type: json_field
-    source: step-4
+    source: step-6
     field: success
     expected: true
     severity: critical
@@ -41,7 +41,7 @@ assertions:
 
   - id: browser-url-normalized
     type: json_field
-    source: step-4
+    source: step-6
     field: url
     expected: "http://example.test/signalman-browser-smoke"
     severity: high
@@ -49,16 +49,57 @@ assertions:
 
   - id: browser-url-observed
     type: json_field
-    source: step-6
+    source: step-8
     field: count
     comparison: gte
     expected: 1
     severity: critical
     description: "The launched browser should expose the target URL through UI Automation"
 
+  - id: address-bar-clicked
+    type: json_field
+    source: step-9
+    field: success
+    expected: true
+    severity: critical
+    description: "The smoke should click the browser address bar as an actionable UI target"
+
+  - id: address-bar-focused
+    type: json_field
+    source: step-10
+    field: success
+    expected: true
+    severity: critical
+    description: "The smoke should focus the browser address bar with Ctrl+L before typing"
+
+  - id: address-bar-typed
+    type: json_field
+    source: step-11
+    field: success
+    expected: true
+    severity: critical
+    description: "The smoke should type a second URL into the browser address bar"
+
+  - id: address-bar-submitted
+    type: json_field
+    source: step-12
+    field: success
+    expected: true
+    severity: critical
+    description: "The smoke should submit the typed browser address with Enter"
+
+  - id: interaction-url-observed
+    type: json_field
+    source: step-14
+    field: count
+    comparison: gte
+    expected: 1
+    severity: critical
+    description: "The browser should expose the interactively typed URL through UI Automation"
+
   - id: browser-snapshot-captured
     type: json_field
-    source: step-7
+    source: step-15
     field: bytes
     comparison: gt
     expected: 0
@@ -67,16 +108,25 @@ assertions:
 
   - id: browser-elements-found
     type: json_field
-    source: step-7
+    source: step-15
     field: element_count
     comparison: gt
     expected: 0
     severity: high
     description: "The browser observation loop should include visible UI Automation elements"
 
+  - id: address-bar-action-target
+    type: json_field
+    source: step-15
+    field: "action_targets[?label=='Address and search bar'].actions"
+    comparison: includes
+    expected: type
+    severity: high
+    description: "The browser snapshot should expose the address bar as a compact LLM action target"
+
   - id: browser-closed
     type: json_field
-    source: step-8
+    source: step-16
     field: success
     expected: true
     severity: high
