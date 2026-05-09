@@ -1,6 +1,6 @@
 # Signalman — Status & Resume Context
 
-> Last updated: 2026-05-08. Living document — update on every commit
+> Last updated: 2026-05-09. Living document — update on every commit
 > that changes scope, ships a feature, closes an audit finding, or
 > introduces a new TODO bucket. See [Document maintenance](#document-maintenance)
 > for the trigger rules.
@@ -16,7 +16,11 @@ schema, idempotency contract, `docs/bootstrap.md`) and the first
 interactive user-session UI sidecar (`signalman-guest --ui-sidecar`) with
 MCP tools for screenshots, UIA snapshot/find/wait, click, keyboard input,
 and type, plus `vm_ui_open_url` / `vm_ui_navigate_url` browser primitives for
-launching and navigating `http(s)` flows through the interactive desktop. The native sidecar engine now covers
+launching and navigating `http(s)` flows through the interactive desktop.
+Browser navigation now discovers likely address/search targets from UIA
+metadata, falls back to the current Edge address-bar selectors when a
+discovered target goes stale, and reports the target/fallback metadata to
+recordings and LLM-driven workflows. The native sidecar engine now covers
 screenshot, find, click, type, key operations, wait timeouts, and UIA
 Value-pattern descriptors. It is covered
 by the live `Win11_test` `live-ui-sidecar-smoke` and
@@ -103,17 +107,18 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
 
 | Crate / package | Test count (source) | Files | Last verified |
 |---|---|---|---|
-| Host (TypeScript / vitest) — `host/src/__tests__/` | 980 | 39 | 2026-05-05 |
-| Host (TypeScript / vitest) — `host/src/verbs/__tests__/` | 46 | 5 | 2026-05-05 |
-| Guest (Rust / cargo) | 108 | 9 | 2026-05-05 |
-| Service (Rust / cargo) | 108 | 8 (incl. 2 integration files) | 2026-05-05 |
-| Plugin (Rust / cargo) | 135 | 11 (incl. 2 integration files) | 2026-04-28 |
-| **Total** | **1377** test attributes / `it()` calls | **72** files | |
+| Host (TypeScript / vitest) — `host/src/__tests__/` | 1041 | 45 | 2026-05-09 |
+| Host (TypeScript / vitest) — `host/src/verbs/__tests__/` | 46 | 5 | 2026-05-09 |
+| Guest (Rust / cargo) | 126 | 9 | 2026-05-09 |
+| Service (Rust / cargo) | 110 | 8 (incl. 2 integration files) | 2026-05-09 |
+| Plugin (Rust / cargo) | 135 | 11 (incl. 2 integration files) | 2026-05-09 |
+| **Total** | **1458** test attributes / `it()` calls | **78** files | |
 
 > The ROADMAP headline "151 Rust + 769 TS = 920" predates the v0.1.1
-> P9 work (which added the provisioning, bundle, idempotency, and
-> bootstrap surfaces). `docs/testing.md` quotes 807 TypeScript / 245 Rust
-> at HEAD `ea6852c` — the figure above is the post-`50807f6` count.
+> P9 work and the user-session UI/browser milestones. `docs/testing.md`
+> now quotes 1087 TypeScript / 371 Rust source-level cases at HEAD
+> `9a96bd8`; vitest expands parameterized blocks to 1141 run-time tests
+> in the current host coverage run.
 
 ### Canonical test files (what each one pins)
 
@@ -147,6 +152,10 @@ expand at runtime — see `docs/testing.md` for the variance discussion.
   **`bundle.test.ts`** — P9.5 / P9.1 / P9.2 surfaces.
 - **`host/src/__tests__/hyperv-backend.test.ts`** — direct Hyper-V
   backend status mapping and guest-agent health probing.
+- **`host/src/__tests__/ui-browser.test.ts`** — pins URL safety,
+  Run-dialog browser launch, UIA browser target discovery, stale-target
+  fallback, explicit-selector failure behavior, and no-verify browser
+  navigation.
 - **`host/src/__tests__/selector.test.ts`** — service-first backend
   ordering for both scenario runs and CLI VM verbs.
 - **`host/src/__tests__/scenario-retry.test.ts`** — closes P3 C5
