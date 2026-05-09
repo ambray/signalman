@@ -358,6 +358,7 @@ describe("workflow UI tool blocks", () => {
       target_edit_selector: "[automationId='view_1021']",
       target_kind: "address_bar",
       target_confidence: 1,
+      target_fallback: false,
     });
     await expect(
       orchestrator.executeToolBlock("ui_navigate_url", { vm: "endpoint-1" }, vmMap),
@@ -399,6 +400,64 @@ describe("workflow UI tool blocks", () => {
       target_edit_selector: "[automationId='manual-edit']",
       target_kind: "default",
       target_confidence: 0,
+      target_fallback: false,
+    });
+  });
+
+  it("falls back to default browser selectors when a discovered click target is stale", async () => {
+    const client = makeClient({
+      uiFindDetailed: vi.fn().mockResolvedValue({
+        durationMs: 16,
+        elements: [
+          {
+            name: "Address and search bar",
+            automationId: "stale-address",
+            controlType: "Edit",
+            value: "example.test/fallback",
+            isEnabled: true,
+            isVisible: true,
+            x: 0,
+            y: 0,
+            width: 600,
+            height: 30,
+          },
+        ],
+      }),
+      uiClick: vi
+        .fn()
+        .mockResolvedValueOnce({ success: false, error: "stale element", durationMs: 17 })
+        .mockResolvedValueOnce({ success: true, error: "", durationMs: 18 }),
+    } as Partial<GuestAgentClient>);
+    const { orchestrator, vmMap } = makeOrchestrator(client);
+
+    const navigated = await orchestrator.executeToolBlock(
+      "ui_navigate_url",
+      {
+        vm: "endpoint-1",
+        url: "http://example.test/fallback",
+        find_timeout_ms: 2_000,
+        timeout_ms: 5_000,
+      },
+      vmMap,
+    );
+
+    expect(client.uiClick).toHaveBeenNthCalledWith(1, "[automationId='stale-address']", {
+      timeoutMs: 5_000,
+    });
+    expect(client.uiClick).toHaveBeenNthCalledWith(2, "[name='Address and search bar']", {
+      timeoutMs: 5_000,
+    });
+    expect(client.uiKey).toHaveBeenNthCalledWith(1, "^l", {
+      selector: "[automationId='view_1021']",
+      timeoutMs: 5_000,
+    });
+    expect(JSON.parse(navigated)).toMatchObject({
+      success: true,
+      target_selector: "[name='Address and search bar']",
+      target_edit_selector: "[automationId='view_1021']",
+      target_kind: "default",
+      target_confidence: 0,
+      target_fallback: true,
     });
   });
 

@@ -138,13 +138,15 @@ types the normalized URL, presses Enter, and by default waits for the expected
 address value to appear through UI Automation. The response reports
 `target_selector`, `target_edit_selector`, `target_kind`, and
 `target_confidence` so recordings and LLM agents can explain which observed
-control they used. Explicit `address_selector` / `address_edit_selector`
-overrides skip discovery and remain available for pinned browser-specific flows.
-If discovery finds no browser target, Signalman falls back to the current
-Microsoft Edge selectors (`[name='Address and search bar']` and
-`[automationId='view_1021']`). Native UI Automation is the preferred path for
-Windows desktop workflows; the PowerShell engines remain useful fallbacks and
-compatibility probes.
+control they used. If an auto-discovered target goes stale before it can be
+clicked or focused, Signalman retries once with the current Microsoft Edge
+selectors (`[name='Address and search bar']` and `[automationId='view_1021']`)
+and reports `target_fallback: true`. Explicit `address_selector` /
+`address_edit_selector` overrides skip discovery and stale-target fallback so
+pinned browser-specific flows fail clearly. If discovery finds no browser
+target, Signalman uses the same Edge selectors as the default path. Native UI
+Automation is the preferred path for Windows desktop workflows; the PowerShell
+engines remain useful fallbacks and compatibility probes.
 
 The live `live-ui-browser-smoke` scenario pins this browser-launch and
 interaction contract on `Win11_test`: it starts the native sidecar, closes stale

@@ -492,6 +492,7 @@ describe("VM UI MCP tools", () => {
       target_edit_selector: "[automationId='view_1021']",
       target_kind: "address_bar",
       target_confidence: 1,
+      target_fallback: false,
     });
     expect(result.isError).toBe(false);
   });

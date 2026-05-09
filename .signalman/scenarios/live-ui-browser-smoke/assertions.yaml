@@ -89,6 +89,14 @@ assertions:
     severity: high
     description: "The browser navigation workflow should use discovered address-bar metadata"
 
+  - id: browser-navigate-no-fallback
+    type: json_field
+    source: step-9
+    field: target_fallback
+    expected: false
+    severity: high
+    description: "The happy-path browser navigation should not need stale-target fallback"
+
   - id: browser-snapshot-captured
     type: json_field
     source: step-10
