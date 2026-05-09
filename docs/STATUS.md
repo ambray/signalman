@@ -285,9 +285,10 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   `Win11_test` smoke coverage now exercises native health, screenshot,
   wait/find, targeted click, targeted type, direct edit-control value
   observation, indexed typed-text observation, key, snapshot, and compact
-  `action_targets` for LLM observation loops. Follow-up work should add broader
-  native key syntax, event-driven UI wait semantics, and a first-class browser
-  observation loop.
+  `action_targets` for LLM observation loops. Follow-up native key work added
+  common navigation, function, print-screen, pause, and application-menu tokens.
+  Remaining work should add event-driven UI wait semantics and a first-class
+  browser observation loop.
 
 - **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
   calls into `.signalman/recordings/`. The agent-first DevOps
