@@ -142,6 +142,13 @@ require a pre-existing debug target. PowerShell engines keep returning
 `success: false` with the CDP-unavailable error for navigate/click, while
 screenshots fail because the screenshot proto has no error field.
 
+The live `scripts/live-browser-cdp-smoke.ps1` harness validates this path on
+`Win11_test`: it confirms the named checkpoint exists, starts a guest-local HTTP
+page, ensures the native sidecar, launches Edge with CDP through the interactive
+Run dialog, calls `BrowserNavigate`, `BrowserClick`, and `BrowserScreenshot`,
+writes a screenshot under `output/screenshots/`, and confirms the checkpoint is
+still present afterward.
+
 `vm_ui_open_url` is the current browser launch bridge: it validates the target
 as `http(s)`, opens the Windows Run dialog with `Win+R`, types the URL into the
 Run edit control, and presses Enter. It intentionally does not accept `file:`,
