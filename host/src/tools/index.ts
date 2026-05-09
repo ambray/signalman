@@ -15,6 +15,7 @@ export { createDockerTools } from "./docker-tools.js";
 export { createVmTemplateTools } from "./vm-template.js";
 export { createVmProvisioningTools } from "./vm-provisioning.js";
 export { createVmUiTools } from "./vm-ui.js";
+export { createVmBrowserTools } from "./vm-browser.js";
 // P9.2 — `vm_install_bundle` requires a per-VM GuestAgentClient
 // resolver, which createAllTools doesn't have on hand. Main session
 // wires the tool up alongside the orchestrator so the resolver
@@ -32,6 +33,7 @@ import { createVmTemplateTools } from "./vm-template.js";
 import { createVmProvisioningTools } from "./vm-provisioning.js";
 import { createVmInstallBundleTool } from "./vm-install-bundle.js";
 import { createVmUiTools } from "./vm-ui.js";
+import { createVmBrowserTools } from "./vm-browser.js";
 import { makeGuestClientResolver } from "../provisioning/guest-client-factory.js";
 import { DockerClient } from "../docker/client.js";
 
@@ -70,6 +72,7 @@ export function createAllTools(
     // gate on it.
     ...createVmProvisioningTools(getBackend),
     ...createVmUiTools(getGuestClient),
+    ...createVmBrowserTools(getGuestClient),
     // P9.2: vm_install_bundle. Same default-namespace + "Modifies VM
     // state" description rule.
     createVmInstallBundleTool(getBackend, getGuestClient),
