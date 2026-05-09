@@ -20,6 +20,7 @@ export interface UiElementDescriptor {
   enabled: boolean;
   visible: boolean;
   value: string;
+  actions: string[];
   raw: UiElement;
 }
 
@@ -82,6 +83,38 @@ function boundsForElement(element: UiElement): UiBounds {
   };
 }
 
+function actionsForElement(element: UiElement, controlType: string): string[] {
+  const enabled = Boolean(element.isEnabled);
+  const visible = Boolean(element.isVisible);
+  if (!enabled || !visible) {
+    return [];
+  }
+
+  const normalized = controlType.toLowerCase();
+  const actions = new Set<string>();
+  if (
+    [
+      "button",
+      "checkbox",
+      "combobox",
+      "hyperlink",
+      "listitem",
+      "menuitem",
+      "radiobutton",
+      "tabitem",
+    ].includes(normalized)
+  ) {
+    actions.add("click");
+  }
+  if (["combobox", "document", "edit"].includes(normalized)) {
+    actions.add("type");
+  }
+  if (["combobox", "document", "edit", "list", "listitem", "tree", "treeitem"].includes(normalized)) {
+    actions.add("key");
+  }
+  return [...actions];
+}
+
 export function describeUiElements(elements: UiElement[]): UiElementDescriptor[] {
   return elements.map((element, index) => {
     const bounds = boundsForElement(element);
@@ -110,6 +143,7 @@ export function describeUiElements(elements: UiElement[]): UiElementDescriptor[]
       enabled: Boolean(element.isEnabled),
       visible: Boolean(element.isVisible),
       value: element.value ?? "",
+      actions: actionsForElement(element, controlType),
       raw: element,
     };
   });

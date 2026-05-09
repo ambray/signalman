@@ -43,6 +43,7 @@ describe("UI element descriptors", () => {
       enabled: true,
       visible: true,
       value: "",
+      actions: ["click"],
       raw: elements[0],
     });
   });
@@ -94,6 +95,56 @@ describe("UI element descriptors", () => {
       "[name='Don\\'t Save']",
       "[className='TextBox']",
       "[controlType='Window']",
+    ]);
+  });
+
+  it("adds conservative action hints for LLM UI observation loops", () => {
+    const descriptors = describeUiElements([
+      {
+        name: "Search",
+        automationId: "",
+        controlType: "ControlType.Edit",
+        className: "Edit",
+        isEnabled: true,
+        isVisible: true,
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 20,
+        value: "",
+      },
+      {
+        name: "Disabled",
+        automationId: "",
+        controlType: "ControlType.Button",
+        className: "Button",
+        isEnabled: false,
+        isVisible: true,
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 20,
+        value: "",
+      },
+      {
+        name: "Results",
+        automationId: "",
+        controlType: "ControlType.List",
+        className: "ListBox",
+        isEnabled: true,
+        isVisible: true,
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 20,
+        value: "",
+      },
+    ]);
+
+    expect(descriptors.map((element) => element.actions)).toEqual([
+      ["type", "key"],
+      [],
+      ["key"],
     ]);
   });
 });
