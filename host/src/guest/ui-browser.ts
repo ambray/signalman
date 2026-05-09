@@ -30,6 +30,7 @@ export interface UiNavigateUrlResult extends UiActionResult {
   targetEditSelector: string;
   targetKind: string;
   targetConfidence: number;
+  targetFallback: boolean;
 }
 
 const RUN_DIALOG_EDIT_SELECTOR = "[automationId='1001']";
@@ -82,6 +83,7 @@ function emptyNavigateResult(
   targetEditSelector: string,
   targetKind: string,
   targetConfidence: number,
+  targetFallback: boolean,
   success: boolean,
   error: string,
   durationMs: number,
@@ -95,6 +97,7 @@ function emptyNavigateResult(
     targetEditSelector,
     targetKind,
     targetConfidence,
+    targetFallback,
     success,
     error,
     durationMs,
@@ -169,6 +172,8 @@ export async function navigateUrlWithUi(
   let addressEditSelector = options.addressEditSelector ?? DEFAULT_BROWSER_ADDRESS_EDIT_SELECTOR;
   let targetKind = "default";
   let targetConfidence = 0;
+  let targetFallback = false;
+  let discoveredTarget = false;
   const expectedValue = options.expectedValue ?? browserDisplayedUrl(url);
   const verify = options.verify ?? true;
   let durationMs = 0;
@@ -185,11 +190,33 @@ export async function navigateUrlWithUi(
       addressEditSelector = options.addressEditSelector ?? target.edit_selector;
       targetKind = target.kind;
       targetConfidence = target.confidence;
+      discoveredTarget = true;
     }
   }
 
-  const clicked = await client.uiClick(addressSelector, { timeoutMs: options.timeoutMs });
+  const canFallbackToDefault = () =>
+    discoveredTarget &&
+    !targetFallback &&
+    !options.addressSelector &&
+    !options.addressEditSelector &&
+    (addressSelector !== DEFAULT_BROWSER_ADDRESS_SELECTOR ||
+      addressEditSelector !== DEFAULT_BROWSER_ADDRESS_EDIT_SELECTOR);
+
+  const switchToDefaultTarget = () => {
+    addressSelector = DEFAULT_BROWSER_ADDRESS_SELECTOR;
+    addressEditSelector = DEFAULT_BROWSER_ADDRESS_EDIT_SELECTOR;
+    targetKind = "default";
+    targetConfidence = 0;
+    targetFallback = true;
+  };
+
+  let clicked = await client.uiClick(addressSelector, { timeoutMs: options.timeoutMs });
   durationMs += clicked.durationMs;
+  if (!clicked.success && canFallbackToDefault()) {
+    switchToDefaultTarget();
+    clicked = await client.uiClick(addressSelector, { timeoutMs: options.timeoutMs });
+    durationMs += clicked.durationMs;
+  }
   if (!clicked.success) {
     return emptyNavigateResult(
       url,
@@ -198,17 +225,42 @@ export async function navigateUrlWithUi(
       addressEditSelector,
       targetKind,
       targetConfidence,
+      targetFallback,
       false,
       clicked.error,
       durationMs,
     );
   }
 
-  const focused = await client.uiKey("^l", {
+  let focused = await client.uiKey("^l", {
     selector: addressEditSelector,
     timeoutMs: options.timeoutMs,
   });
   durationMs += focused.durationMs;
+  if (!focused.success && canFallbackToDefault()) {
+    switchToDefaultTarget();
+    const fallbackClicked = await client.uiClick(addressSelector, { timeoutMs: options.timeoutMs });
+    durationMs += fallbackClicked.durationMs;
+    if (!fallbackClicked.success) {
+      return emptyNavigateResult(
+        url,
+        expectedValue,
+        addressSelector,
+        addressEditSelector,
+        targetKind,
+        targetConfidence,
+        targetFallback,
+        false,
+        fallbackClicked.error,
+        durationMs,
+      );
+    }
+    focused = await client.uiKey("^l", {
+      selector: addressEditSelector,
+      timeoutMs: options.timeoutMs,
+    });
+    durationMs += focused.durationMs;
+  }
   if (!focused.success) {
     return emptyNavigateResult(
       url,
@@ -217,6 +269,7 @@ export async function navigateUrlWithUi(
       addressEditSelector,
       targetKind,
       targetConfidence,
+      targetFallback,
       false,
       focused.error,
       durationMs,
@@ -237,6 +290,7 @@ export async function navigateUrlWithUi(
       addressEditSelector,
       targetKind,
       targetConfidence,
+      targetFallback,
       false,
       typed.error,
       durationMs,
@@ -256,6 +310,7 @@ export async function navigateUrlWithUi(
       addressEditSelector,
       targetKind,
       targetConfidence,
+      targetFallback,
       false,
       submitted.error,
       durationMs,
@@ -272,6 +327,7 @@ export async function navigateUrlWithUi(
       targetEditSelector: addressEditSelector,
       targetKind,
       targetConfidence,
+      targetFallback,
       success: true,
       error: "",
       durationMs,
@@ -293,6 +349,7 @@ export async function navigateUrlWithUi(
     targetEditSelector: addressEditSelector,
     targetKind,
     targetConfidence,
+    targetFallback,
     success: observedCount > 0,
     error: observedCount > 0 ? "" : `Browser URL value not observed: ${expectedValue}`,
     durationMs,

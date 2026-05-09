@@ -633,6 +633,7 @@ export function createVmUiTools(
                   target_edit_selector: result.targetEditSelector,
                   target_kind: result.targetKind,
                   target_confidence: result.targetConfidence,
+                  target_fallback: result.targetFallback,
                 },
                 null,
                 2,
