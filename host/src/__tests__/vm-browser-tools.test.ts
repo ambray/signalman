@@ -88,7 +88,7 @@ describe("VM browser MCP tools", () => {
     });
   });
 
-  it("marks current unimplemented browser RPC failures as MCP errors", async () => {
+  it("marks browser backend failures as MCP errors", async () => {
     const client = makeClient({
       browserClick: vi.fn().mockRejectedValue(new Error("12 UNIMPLEMENTED: CDP backend missing")),
     } as Partial<GuestAgentClient>);
