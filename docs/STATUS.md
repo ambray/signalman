@@ -342,9 +342,11 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
 - **v0.2.0-1 Record/Replay** — First slice in progress:
   `signalman.record` now starts a durable recording session under
   `.signalman/recordings/<safe-name>/<recording-id>/`, writes `state.json`
-  plus an empty `calls.jsonl`, validates recording name/duration, and returns
-  the session paths through CLI/MCP parity. Next slice: append captured MCP
-  calls into `calls.jsonl` and synthesize candidate scenario files.
+  plus `calls.jsonl`, validates recording name/duration, returns the session
+  paths through CLI/MCP parity, appends redacted MCP call events while the
+  session is active, and rediscovers active sessions after MCP server
+  reconstitution. Next slice: synthesize candidate scenario files from
+  `calls.jsonl`.
 - **v0.2.0-2 Ephemeral VM Provisioning** — Differencing-disk pipeline,
   per-scenario disposable guests, real `template:` wiring (C9), streamed
   `vm_copy_file` progress (C8).

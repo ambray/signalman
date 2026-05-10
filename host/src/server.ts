@@ -34,7 +34,7 @@ import { runDescribe } from "./verbs/describe.js";
 import { runPlan } from "./verbs/plan.js";
 import { runRun } from "./verbs/run.js";
 import { runStatus } from "./verbs/status.js";
-import { runRecord } from "./verbs/record.js";
+import { recordMcpCall, runRecord } from "./verbs/record.js";
 import { createDefaultExecutor } from "./verbs/default-executor.js";
 
 // ── Backend Discovery ─────────────────────────────────────────────
@@ -175,15 +175,16 @@ for (const tool of allTools) {
 
   const handler = tool.handler;
   const advancedName = `signalman_advanced_${tool.name}`;
-  const wrappedHandler = async (params: Record<string, unknown>) => {
-    const result = await handler(params);
-    return {
-      content: result.content.map((c) => ({
-        type: c.type as "text",
-        text: c.text ?? "",
-      })),
-    };
-  };
+  const wrappedHandler = async (params: Record<string, unknown>) =>
+    withRecording(advancedName, params, async () => {
+      const result = await handler(params);
+      return {
+        content: result.content.map((c) => ({
+          type: c.type as "text",
+          text: c.text ?? "",
+        })),
+      };
+    });
 
   server.tool(advancedName, tool.description, zodShape, wrappedHandler);
 
@@ -215,6 +216,43 @@ function asMcpResult(value: unknown) {
   };
 }
 
+async function withRecording<T>(
+  tool: string,
+  params: Record<string, unknown>,
+  fn: () => Promise<T> | T,
+  options: { capture?: boolean } = {},
+): Promise<T> {
+  const started = new Date();
+  try {
+    const result = await fn();
+    const finished = new Date();
+    if (options.capture !== false) {
+      recordMcpCall({
+        tool,
+        params,
+        result,
+        started_at: started.toISOString(),
+        finished_at: finished.toISOString(),
+        duration_ms: finished.getTime() - started.getTime(),
+      });
+    }
+    return result;
+  } catch (err) {
+    const finished = new Date();
+    if (options.capture !== false) {
+      recordMcpCall({
+        tool,
+        params,
+        error: err,
+        started_at: started.toISOString(),
+        finished_at: finished.toISOString(),
+        duration_ms: finished.getTime() - started.getTime(),
+      });
+    }
+    throw err;
+  }
+}
+
 server.tool(
   "signalman_list",
   "List all scenarios under .signalman/scenarios/. Returns id, name, tags, scenario_hash, and last_run if available.",
@@ -222,7 +260,10 @@ server.tool(
     tag: z.string().optional().describe("Filter by tag."),
     pattern: z.string().optional().describe("Glob pattern matching the scenario id (e.g. 'example/**')."),
   },
-  async (params) => asMcpResult(runList(params as { tag?: string; pattern?: string })),
+  async (params) =>
+    withRecording("signalman_list", params, () =>
+      asMcpResult(runList(params as { tag?: string; pattern?: string })),
+    ),
 );
 
 server.tool(
@@ -231,7 +272,10 @@ server.tool(
   {
     id: z.string().describe("Scenario id (e.g. 'example/v2/network-egress')."),
   },
-  async (params) => asMcpResult(runDescribe(params as { id: string })),
+  async (params) =>
+    withRecording("signalman_describe", params, () =>
+      asMcpResult(runDescribe(params as { id: string })),
+    ),
 );
 
 server.tool(
@@ -242,7 +286,9 @@ server.tool(
     parameters: z.record(z.string(), z.unknown()).optional().describe("Caller-supplied parameter overrides."),
   },
   async (params) =>
-    asMcpResult(runPlan(params as { id: string; parameters?: Record<string, unknown> })),
+    withRecording("signalman_plan", params, () =>
+      asMcpResult(runPlan(params as { id: string; parameters?: Record<string, unknown> })),
+    ),
 );
 
 server.tool(
@@ -259,15 +305,17 @@ server.tool(
     ),
   },
   async (params) =>
-    asMcpResult(
-      await runRun(
-        params as {
-          id: string;
-          parameters?: Record<string, unknown>;
-          network_class?: "isolated" | "nat" | "internet";
-          trace_id?: string;
-        },
-        defaultRunExecutor,
+    withRecording("signalman_run", params, async () =>
+      asMcpResult(
+        await runRun(
+          params as {
+            id: string;
+            parameters?: Record<string, unknown>;
+            network_class?: "isolated" | "nat" | "internet";
+            trace_id?: string;
+          },
+          defaultRunExecutor,
+        ),
       ),
     ),
 );
@@ -281,8 +329,10 @@ server.tool(
     wait_ms: z.number().int().min(0).max(30_000).optional().describe("Long-poll up to this many ms for the next event."),
   },
   async (params) =>
-    asMcpResult(
-      await runStatus(params as { run_id?: string; since_event_seq?: number; wait_ms?: number }),
+    withRecording("signalman_status", params, async () =>
+      asMcpResult(
+        await runStatus(params as { run_id?: string; since_event_seq?: number; wait_ms?: number }),
+      ),
     ),
 );
 
@@ -293,7 +343,13 @@ server.tool(
     name: z.string().describe("Scenario name to record under."),
     duration_seconds: z.number().int().min(1).optional().describe("Max recording duration; default 600s."),
   },
-  async (params) => asMcpResult(runRecord(params as { name: string; duration_seconds?: number })),
+  async (params) =>
+    withRecording(
+      "signalman_record",
+      params,
+      () => asMcpResult(runRecord(params as { name: string; duration_seconds?: number })),
+      { capture: false },
+    ),
 );
 
 // ── Start Server ──────────────────────────────────────────────────
