@@ -1,0 +1,23 @@
+name: "Live Browser CDP Workflow"
+version: "1.0"
+tags: ["windows", "hyperv", "browser", "cdp", "workflow", "live", "smoke"]
+
+vms:
+  - name: Win11_test
+    template: win11-test
+    pre_started: true
+    guest_agent_port: 50051
+
+capabilities:
+  vms: ["Win11_test"]
+  host_paths:
+    write:
+      - ./output/live-browser-cdp-workflow/browser.png
+
+setup: []
+
+teardown: []
+
+checkpoints:
+  before_test: false
+  on_failure: false

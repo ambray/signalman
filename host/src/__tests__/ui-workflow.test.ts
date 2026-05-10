@@ -88,6 +88,31 @@ function makeClient(overrides: Partial<GuestAgentClient> = {}): GuestAgentClient
       error: "",
       durationMs: 16,
     }),
+    browserNavigate: vi.fn().mockResolvedValue({
+      success: true,
+      error: "",
+      pageTitle: "Browser Smoke",
+      pageUrl: "http://example.test/",
+    }),
+    browserClick: vi.fn().mockResolvedValue({
+      success: true,
+      error: "",
+      pageTitle: "Clicked",
+      pageUrl: "http://example.test/#clicked",
+    }),
+    browserEvaluate: vi.fn().mockResolvedValue({
+      success: true,
+      error: "",
+      jsonValue: "{\"clicked\":true}",
+      pageTitle: "Clicked",
+      pageUrl: "http://example.test/#clicked",
+    }),
+    browserScreenshot: vi.fn().mockResolvedValue({
+      imageData: Buffer.from("browser-png"),
+      format: "png",
+      width: 640,
+      height: 480,
+    }),
     ...overrides,
   } as unknown as GuestAgentClient;
 }
@@ -459,6 +484,128 @@ describe("workflow UI tool blocks", () => {
       target_confidence: 0,
       target_fallback: true,
     });
+  });
+
+  it("runs browser CDP workflow tool blocks for navigate, click, expect, and snapshot", async () => {
+    const client = makeClient();
+    const { orchestrator, vmMap } = makeOrchestrator(client);
+
+    const navigated = await orchestrator.executeToolBlock(
+      "browser_navigate",
+      { vm: "endpoint-1", url: "http://example.test", timeout_ms: 5_000 },
+      vmMap,
+    );
+    const clicked = await orchestrator.executeToolBlock(
+      "browser_click",
+      { vm: "endpoint-1", css_selector: "#mark", timeout_ms: 5_000 },
+      vmMap,
+    );
+    const expected = await orchestrator.executeToolBlock(
+      "browser_expect",
+      {
+        vm: "endpoint-1",
+        expression: "({ clicked: document.body.dataset.clicked === 'true' })",
+        expected: { clicked: true },
+        timeout_ms: 5_000,
+        screenshot_on_failure: true,
+      },
+      vmMap,
+    );
+    const snapshot = await orchestrator.executeToolBlock(
+      "browser_snapshot",
+      {
+        vm: "endpoint-1",
+        expression: "document.title",
+        format: "png",
+        full_page: false,
+        timeout_ms: 5_000,
+      },
+      vmMap,
+    );
+
+    expect(client.browserNavigate).toHaveBeenCalledWith("http://example.test/", 5_000);
+    expect(client.browserClick).toHaveBeenCalledWith("#mark", 5_000);
+    expect(client.browserEvaluate).toHaveBeenCalledWith(
+      "({ clicked: document.body.dataset.clicked === 'true' })",
+      5_000,
+    );
+    expect(client.browserEvaluate).toHaveBeenCalledWith("document.title", 5_000);
+    expect(JSON.parse(navigated)).toMatchObject({
+      success: true,
+      url: "http://example.test/",
+      page_title: "Browser Smoke",
+    });
+    expect(JSON.parse(clicked)).toMatchObject({
+      success: true,
+      css_selector: "#mark",
+      page_title: "Clicked",
+    });
+    expect(JSON.parse(expected)).toMatchObject({
+      success: true,
+      matched: true,
+      expected_json: "{\"clicked\":true}",
+      actual_json: "{\"clicked\":true}",
+      attempts: 1,
+      screenshot: null,
+    });
+    expect(JSON.parse(snapshot)).toMatchObject({
+      format: "png",
+      width: 640,
+      height: 480,
+      bytes: 11,
+      saved_path: null,
+      evaluation: {
+        success: true,
+        expression: "document.title",
+        actual_json: "{\"clicked\":true}",
+      },
+    });
+  });
+
+  it("captures failure screenshots for browser_expect tool blocks", async () => {
+    const client = makeClient({
+      browserEvaluate: vi.fn().mockResolvedValue({
+        success: true,
+        error: "",
+        jsonValue: "false",
+        pageTitle: "Not ready",
+        pageUrl: "http://example.test/",
+      }),
+    } as Partial<GuestAgentClient>);
+    const { orchestrator, vmMap } = makeOrchestrator(client);
+
+    const expected = await orchestrator.executeToolBlock(
+      "browser_expect",
+      {
+        vm: "endpoint-1",
+        expression: "window.__ready",
+        timeout_ms: 100,
+        poll_interval_ms: 50,
+        screenshot_on_failure: true,
+      },
+      vmMap,
+    );
+
+    expect(client.browserScreenshot).toHaveBeenCalledWith({
+      format: "png",
+      fullPage: false,
+      timeoutMs: 100,
+    });
+    expect(JSON.parse(expected)).toMatchObject({
+      success: false,
+      matched: false,
+      actual_json: "false",
+      screenshot: {
+        format: "png",
+        width: 640,
+        height: 480,
+        bytes: 11,
+        saved_path: null,
+      },
+    });
+    await expect(
+      orchestrator.executeToolBlock("browser_expect", { vm: "endpoint-1" }, vmMap),
+    ).rejects.toThrow("browser_expect missing 'expression'");
   });
 
   it("recovers an unreachable sidecar for workflow UI blocks when configured", async () => {

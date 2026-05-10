@@ -18,25 +18,25 @@ the codebase, not to describe an idealized testing world.
 
 ## Current state
 
-Counted at the UI sidecar CDP milestone from the test source itself (vitest
+Counted at the browser workflow scenario milestone from the test source itself (vitest
 `it`/`test` calls and Rust `#[test]`/`#[tokio::test]` attributes); the
 ROADMAP-quoted top-line numbers come from the same counting method.
 
 | Language       | Level                       | Files | Tests | Location |
 |----------------|-----------------------------|-------|-------|----------|
-| TypeScript     | unit + smoke (in-process)   | 46    | 1050  | `host/src/__tests__/` |
+| TypeScript     | unit + smoke (in-process)   | 47    | 1057  | `host/src/__tests__/` |
 | TypeScript     | verb integration (in-process) | 5   | 46    | `host/src/verbs/__tests__/` |
 | Rust (guest)   | unit (mod tests)            | 9     | 133   | `guest/src/*.rs` `#[cfg(test)] mod tests` |
 | Rust (service) | unit + integration          | 8     | 110   | `service/src/*.rs`, `service/tests/*.rs` |
 | Rust (plugin)  | unit + integration          | 11    | 135   | `plugins/signalman-loom-plugin/src/*.rs`, `plugins/signalman-loom-plugin/tests/` |
 
-Totals: **1096 TypeScript** test cases across 51 files, **378 Rust**
+Totals: **1103 TypeScript** test cases across 52 files, **378 Rust**
 test cases across 28 files. ROADMAP.md reports `151 Rust + 769 TS = 920`
 as an older rounded headline — the per-call count above is the more
 granular number, and the per-class split here counts `it(...)`
 invocations from the test sources directly rather than the post-vitest
 run-time count (parameterized blocks expand at runtime). The 2026-05-09
-host coverage run expanded to **1150** vitest cases across **51** files.
+host coverage run expanded to **1160** vitest cases across **52** files.
 
 Two files are smoke tests within `host/src/__tests__/`:
 `scenario-validation.test.ts` (4 cases — walks every scenario directory

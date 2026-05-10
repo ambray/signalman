@@ -332,6 +332,12 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   a guest-local HTTP page, interactive Edge CDP launch, Browser* navigation,
   CSS click, DOM evaluation, browser screenshot, and preservation of the `base`
   checkpoint.
+  Scenario workflows now expose `browser_navigate`, `browser_click`,
+  `browser_expect`, and `browser_snapshot` blocks backed by reusable host
+  browser workflow helpers. The live `live-browser-cdp-workflow` scenario on
+  `Win11_test` validates the scenario-level path end to end: guest-local HTTP
+  page, interactive Edge CDP launch, DOM-state expectation, screenshot capture,
+  and cleanup.
 
 - **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
   calls into `.signalman/recordings/`. The agent-first DevOps
