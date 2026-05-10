@@ -288,7 +288,7 @@ server.tool(
 
 server.tool(
   "signalman_record",
-  "[v0.2.0 stub] Capture the next N MCP calls into .signalman/recordings/<run_id>/ as a candidate scenario.",
+  "Start a durable v0.2.0 record/replay session under .signalman/recordings/<name>/<recording_id>/.",
   {
     name: z.string().describe("Scenario name to record under."),
     duration_seconds: z.number().int().min(1).optional().describe("Max recording duration; default 600s."),

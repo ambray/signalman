@@ -93,15 +93,26 @@ When terminal, `status` returns the full envelope (§4).
 
 **Errors**: `not-found`, `validation-error` (Zod), `backend-unavailable` returned at protocol level. `setup-failure` is reported in-envelope as a non-pass result, not as a protocol error.
 
-### 1.5 `signalman.record` (stub for v0.1.0)
+### 1.5 `signalman.record`
 
-Captures the next N MCP calls into `.signalman/recordings/<run_id>/` as a candidate scenario. Full impl in v0.2.0; v0.1.0 stub returns:
+Starts a durable v0.2.0 record/replay capture session under
+`.signalman/recordings/<safe-name>/<recording_id>/`. The current slice writes
+`state.json` plus an empty `calls.jsonl`; MCP/CLI capture hooks append to that
+JSONL file in the next slice.
 
 ```json
-{ "status":"not-implemented", "message":"signalman.record lands in v0.2.0 (ROADMAP v0.2.0-1)." }
+{
+  "status": "recording",
+  "recording_id": "rec_...",
+  "recording_path": ".signalman/recordings/demo/rec_...",
+  "state_path": ".signalman/recordings/demo/rec_.../state.json",
+  "calls_path": ".signalman/recordings/demo/rec_.../calls.jsonl"
+}
 ```
 
-Params: `name: string`, `duration_seconds?: number` (default 600). The stub exists in v0.1.0 so prompts and Loom registration target the final shape; callers get "not implemented" rather than `tool-not-found`.
+Params: `name: string`, `duration_seconds?: number` (default 600, max 86400).
+The durable session contract exists before call interception so agents and CI
+can agree on where the candidate scenario capture will live.
 
 ### 1.6 `signalman.status`
 
