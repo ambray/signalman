@@ -115,6 +115,13 @@ function emitJson(value: unknown): void {
   process.stdout.write(JSON.stringify(value, null, 2) + "\n");
 }
 
+function resolveCliHostPath(value: string): string {
+  if (path.isAbsolute(value) || path.win32.isAbsolute(value)) {
+    return value;
+  }
+  return path.resolve(value);
+}
+
 function emitTable(rows: Array<Record<string, string>>): void {
   if (rows.length === 0) {
     process.stdout.write("(no scenarios)\n");
@@ -522,6 +529,8 @@ async function cmdVm(args: ParsedArgs): Promise<number> {
       return await cmdVmProbeGuest(args);
     case "exec":
       return await cmdVmExec(args);
+    case "copy-file":
+      return await cmdVmCopyFile(args);
     default:
       usageError(`unknown vm subcommand: ${sub}`);
   }
@@ -732,14 +741,54 @@ async function cmdVmExec(args: ParsedArgs): Promise<number> {
 
 // ── vm probe-guest (diagnostic) ────────────────────────────────────
 //
-// `vm status`'s `guestAgentReachable` field comes from a TLS+token
-// gRPC Health RPC that swallows every error path silently and
-// returns false. That's the right behaviour for a status probe but
-// it makes "the guest health check is failing for SOME reason"
-// debugging painful.  This subcommand runs the same probe but
-// surfaces the actual exception (cert chain mismatch, auth-token
-// rejection, TCP refused, gRPC UNAVAILABLE, etc) so the operator
-// can fix it without turning on a logging build of signalman-guest.
+// vm copy-file:
+// Usage:
+//   signalman vm copy-file <name> <host_path> <guest_path>
+//   signalman vm copy-file <name> <guest_path> <host_path> --direction guest-to-host
+async function cmdVmCopyFile(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  const firstPath = args.positional[1];
+  const secondPath = args.positional[2];
+  if (!name || !firstPath || !secondPath) {
+    usageError("vm copy-file requires <name> <host_path> <guest_path>");
+  }
+  const direction = args.options.get("direction") ?? "host-to-guest";
+  const format = args.options.get("format");
+  const backend = await getCliBackend();
+
+  try {
+    const handle = await resolveVmHandleByName(backend, name);
+    if (direction === "host-to-guest") {
+      await backend.copyFileToVM(handle, resolveCliHostPath(firstPath), secondPath);
+    } else if (direction === "guest-to-host") {
+      await backend.copyFileFromVM(handle, firstPath, resolveCliHostPath(secondPath));
+    } else {
+      usageError("vm copy-file --direction must be host-to-guest or guest-to-host");
+    }
+
+    const result = {
+      vmName: name,
+      direction,
+      source: firstPath,
+      destination: secondPath,
+    };
+    if (format === "json") {
+      emitJson(result);
+    } else {
+      process.stdout.write(
+        `Copied file ${direction} for VM '${name}': ${firstPath} -> ${secondPath}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman vm copy-file: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// vm probe-guest diagnostic:
+// Re-runs the guest health probe with full error surface instead of the
+// quiet boolean used by `vm status`.
 async function cmdVmProbeGuest(args: ParsedArgs): Promise<number> {
   const name = args.positional[0];
   if (!name) usageError("vm probe-guest requires <name>");

@@ -10,6 +10,12 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { HypervisorBackend, VMHandle } from "../hypervisors/interface.js";
 import { GuestAgentClient, type CommandResult } from "../guest/client.js";
+import {
+  browserClickWorkflow,
+  browserExpectWorkflow,
+  browserNavigateWorkflow,
+  browserSnapshotWorkflow,
+} from "../guest/browser-workflow.js";
 import { navigateUrlWithUi, openUrlWithUi } from "../guest/ui-browser.js";
 import {
   describeUiActionTargets,
@@ -108,6 +114,20 @@ function uiActionWorkflowResult(result: { success: boolean; error: string; durat
     success: result.success,
     error: result.error,
     duration_ms: result.durationMs ?? 0,
+  };
+}
+
+function browserActionWorkflowJson(result: {
+  success: boolean;
+  error: string;
+  pageTitle: string;
+  pageUrl: string;
+}) {
+  return {
+    success: result.success,
+    error: result.error,
+    page_title: result.pageTitle,
+    page_url: result.pageUrl,
   };
 }
 
@@ -2257,6 +2277,108 @@ export class ScenarioOrchestrator {
           target_kind: result.targetKind,
           target_confidence: result.targetConfidence,
           target_fallback: result.targetFallback,
+        });
+      }
+
+      case "browser_navigate": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const url = params.url as string | undefined;
+        if (!url) throw new Error(`browser_navigate missing 'url'`);
+        const result = await browserNavigateWorkflow(client, url, {
+          timeoutMs: params.timeout_ms as number | undefined,
+        });
+        return JSON.stringify({
+          ...browserActionWorkflowJson(result),
+          url: result.url,
+        });
+      }
+
+      case "browser_click": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const result = await browserClickWorkflow(client, {
+          cssSelector: params.css_selector,
+          timeoutMs: params.timeout_ms as number | undefined,
+        });
+        return JSON.stringify({
+          ...browserActionWorkflowJson(result),
+          css_selector: result.cssSelector,
+        });
+      }
+
+      case "browser_expect": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const expression = params.expression as string | undefined;
+        if (!expression) throw new Error(`browser_expect missing 'expression'`);
+        const result = await browserExpectWorkflow(client, expression, {
+          expected: params.expected,
+          pollIntervalMs: params.poll_interval_ms as number | undefined,
+          screenshotOnFailure: (params.screenshot_on_failure as boolean | undefined) ?? true,
+          screenshotFormat: params.format as "png" | "jpeg" | undefined,
+          fullPage: params.full_page as boolean | undefined,
+          timeoutMs: params.timeout_ms as number | undefined,
+        });
+        let savedPath: string | undefined;
+        if (result.screenshot && typeof params.output === "string" && params.output.length > 0) {
+          const fs = await import("node:fs");
+          savedPath = resolveWorkflowScreenshotPath(params.output, this.config);
+          fs.mkdirSync(path.dirname(savedPath), { recursive: true });
+          fs.writeFileSync(savedPath, result.screenshot.imageData);
+        }
+        return JSON.stringify({
+          ...browserActionWorkflowJson(result),
+          expression: result.expression,
+          expected_json: result.expectedJson,
+          actual_json: result.actualJson,
+          matched: result.matched,
+          attempts: result.attempts,
+          elapsed_ms: result.elapsedMs,
+          screenshot: result.screenshot
+            ? {
+                format: result.screenshot.format,
+                width: result.screenshot.width,
+                height: result.screenshot.height,
+                bytes: result.screenshot.imageData.length,
+                saved_path: savedPath ?? null,
+              }
+            : null,
+        });
+      }
+
+      case "browser_snapshot": {
+        const client = this.guestClients.get(vmName);
+        if (!client) throw new Error(`No guest client for VM '${vmName}'`);
+        const result = await browserSnapshotWorkflow(client, {
+          expression: params.expression,
+          format: params.format as "png" | "jpeg" | undefined,
+          fullPage: params.full_page as boolean | undefined,
+          timeoutMs: params.timeout_ms as number | undefined,
+        });
+        let savedPath: string | undefined;
+        if (typeof params.output === "string" && params.output.length > 0) {
+          const fs = await import("node:fs");
+          savedPath = resolveWorkflowScreenshotPath(params.output, this.config);
+          fs.mkdirSync(path.dirname(savedPath), { recursive: true });
+          fs.writeFileSync(savedPath, result.screenshot.imageData);
+        }
+        return JSON.stringify({
+          format: result.format,
+          width: result.width,
+          height: result.height,
+          bytes: result.bytes,
+          saved_path: savedPath ?? null,
+          evaluation: result.evaluation
+            ? {
+                success: result.evaluation.success,
+                error: result.evaluation.error,
+                expression: result.evaluation.expression,
+                actual_json: result.evaluation.actualJson,
+                page_title: result.evaluation.pageTitle,
+                page_url: result.evaluation.pageUrl,
+              }
+            : null,
         });
       }
 
