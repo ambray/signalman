@@ -1,35 +1,10 @@
 import type { GuestAgentClient } from "../guest/client.js";
+import { sanitizeBrowserExpression, sanitizeCssSelector } from "../guest/browser-workflow.js";
 import { sanitizeBrowserUrl } from "../guest/ui-browser.js";
 import { sanitizeTimeout, sanitizeVmName } from "../sanitize.js";
 import type { ToolDefinition, ToolResult } from "./types.js";
 
 type GuestClientResolver = (vmName: string) => Promise<GuestAgentClient>;
-
-function sanitizeCssSelector(value: unknown): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error("css_selector is required");
-  }
-  if (value.includes("\0")) {
-    throw new Error("css_selector contains null byte");
-  }
-  if (value.length > 2_000) {
-    throw new Error("css_selector is too long");
-  }
-  return value;
-}
-
-function sanitizeBrowserExpression(value: unknown): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error("expression is required");
-  }
-  if (value.includes("\0")) {
-    throw new Error("expression contains null byte");
-  }
-  if (value.length > 10_000) {
-    throw new Error("expression is too long");
-  }
-  return value;
-}
 
 function browserActionJson(
   vm: string,

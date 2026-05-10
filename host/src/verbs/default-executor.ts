@@ -61,11 +61,28 @@ export function createDefaultExecutor(): RunExecutor {
             keyPath: config.guestAgent.tls.keyPath,
           }
         : undefined;
+      const allVms = await backend.listVMs().catch(() => []);
       for (const vm of scenarioCfg.vms ?? []) {
-        const ip = vm.network?.static_ip;
+        let ip = vm.network?.static_ip;
+        if (!ip) {
+          const physicalName = config.vmAliases?.[vm.name] ?? vm.name;
+          const handle = allVms.find(
+            (candidate) => candidate.name.toLowerCase() === physicalName.toLowerCase(),
+          );
+          if (handle) {
+            ip = backend.getVmIpAddress
+              ? await backend.getVmIpAddress(handle)
+              : (await backend.getStatus(handle)).ipAddress;
+          }
+        }
         if (!ip) continue; // skip VMs with no addressable agent (e.g. docker-only)
         const port = vm.guest_agent_port ?? config.guestAgent?.defaultPort ?? 50051;
-        guestClients.set(vm.name, new GuestAgentClient(ip, port, tlsCfg));
+        guestClients.set(
+          vm.name,
+          new GuestAgentClient(ip, port, tlsCfg, {
+            authToken: config.guestAgent?.authToken,
+          }),
+        );
       }
     } catch {
       // Best-effort — orchestrator surfaces the original "no guest

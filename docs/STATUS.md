@@ -1,6 +1,6 @@
 # Signalman — Status & Resume Context
 
-> Last updated: 2026-05-09. Living document — update on every commit
+> Last updated: 2026-05-10. Living document — update on every commit
 > that changes scope, ships a feature, closes an audit finding, or
 > introduces a new TODO bucket. See [Document maintenance](#document-maintenance)
 > for the trigger rules.
@@ -332,10 +332,25 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   a guest-local HTTP page, interactive Edge CDP launch, Browser* navigation,
   CSS click, DOM evaluation, browser screenshot, and preservation of the `base`
   checkpoint.
+  Scenario workflows now expose `browser_navigate`, `browser_click`,
+  `browser_expect`, and `browser_snapshot` blocks backed by reusable host
+  browser workflow helpers. The live `live-browser-cdp-workflow` scenario on
+  `Win11_test` validates the scenario-level path end to end: guest-local HTTP
+  page, interactive Edge CDP launch, DOM-state expectation, screenshot capture,
+  and cleanup.
 
-- **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
-  calls into `.signalman/recordings/`. The agent-first DevOps
-  differentiator.
+- **v0.2.0-1 Record/Replay** — First slice in progress:
+  `signalman.record` now starts a durable recording session under
+  `.signalman/recordings/<safe-name>/<recording-id>/`, writes `state.json`
+  plus `calls.jsonl`, validates recording name/duration, returns the session
+  paths through CLI/MCP parity, appends redacted MCP call events while the
+  session is active, and rediscovers active sessions after MCP server
+  reconstitution. `signalman record finalize` /
+  `signalman_record_finalize` now synthesizes candidate `setup.yaml`,
+  `workflow.md`, and `assertions.yaml` files from `calls.jsonl`, preserving
+  unsupported high-level MCP calls as review comments and requiring explicit
+  force before overwriting an existing scenario. Next slice: replay/validate
+  a finalized candidate scenario from the recording workflow.
 - **v0.2.0-2 Ephemeral VM Provisioning** — Differencing-disk pipeline,
   per-scenario disposable guests, real `template:` wiring (C9), streamed
   `vm_copy_file` progress (C8).
