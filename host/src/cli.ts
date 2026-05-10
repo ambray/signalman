@@ -726,7 +726,25 @@ async function cmdVmExec(args: ParsedArgs): Promise<number> {
   const format = args.options.get("format");
   const timeoutMs = parseInt(args.options.get("timeout") ?? "60000", 10);
 
-  const backend = await getCliBackend();
+  // --username / --password are PER-CALL credential overrides for the
+  // PowerShell-Direct dispatch path. Use these when:
+  //   * the target VM doesn't have signalman-guest installed yet
+  //     (e.g. one-shot bootstrap), so all commands must go through
+  //     Invoke-Command -VMName -Credential rather than gRPC;
+  //   * AND the VM's local user isn't the same as the global
+  //     hypervisor.guestCredentials in .signalman/config.yaml.
+  // Both flags must be supplied together; mismatched usage is a
+  // CLI error.
+  const cliUser = args.options.get("username");
+  const cliPass = args.options.get("password");
+  if ((cliUser && !cliPass) || (!cliUser && cliPass)) {
+    usageError("vm exec: --username and --password must be supplied together");
+  }
+  const credOverride = cliUser && cliPass
+    ? { username: cliUser, password: cliPass }
+    : undefined;
+
+  const backend = await getCliBackend(credOverride);
   try {
     const handle = await resolveVmHandleByName(backend, name);
     const cmd = cmdArgs[0];
@@ -769,7 +787,24 @@ async function cmdVmCopyFile(args: ParsedArgs): Promise<number> {
   }
   const direction = args.options.get("direction") ?? "host-to-guest";
   const format = args.options.get("format");
-  const backend = await getCliBackend();
+
+  // --username / --password mirror cmdVmExec: per-call override of
+  // the signalman config's `hypervisor.guestCredentials`. The service
+  // backend's vmCopyFile RPC uses PowerShell Direct under the hood
+  // (`New-PSSession -VMName -Credential` + `Copy-Item -ToSession`),
+  // not Hyper-V's no-cred Copy-VMFile integration -- so a Win11_test
+  // bootstrap whose user differs from the persisted demo/demo creds
+  // hits "The credential is invalid" without this override.
+  const cliUser = args.options.get("username");
+  const cliPass = args.options.get("password");
+  if ((cliUser && !cliPass) || (!cliUser && cliPass)) {
+    usageError("vm copy-file: --username and --password must be supplied together");
+  }
+  const credOverride = cliUser && cliPass
+    ? { username: cliUser, password: cliPass }
+    : undefined;
+
+  const backend = await getCliBackend(credOverride);
 
   try {
     const handle = await resolveVmHandleByName(backend, name);
@@ -1042,10 +1077,26 @@ async function cmdVmInstallBundle(args: ParsedArgs): Promise<number> {
  * honors the service-first daemon path and only falls back to direct
  * Hyper-V/gsudo when the daemon is unavailable.
  */
-async function getCliBackend(): Promise<HypervisorBackend> {
+async function getCliBackend(
+  credOverride?: { username: string; password: string },
+): Promise<HypervisorBackend> {
   const { loadConfig } = await import("./config.js");
   const { selectBackend } = await import("./hypervisors/selector.js");
   const config = loadConfig();
+  if (credOverride) {
+    // Per-call credential override for `vm exec --username ... --password ...`.
+    // The unprivileged-bootstrap path needs this: when the operator is
+    // bringing up a fresh VM whose user isn't `demo/demo`, the global
+    // hypervisor.guestCredentials in `.signalman/config.yaml` doesn't
+    // match. Mutate the in-memory config (NOT the on-disk file) so the
+    // backend reaches Invoke-Command -VMName -Credential with the
+    // operator-supplied account, and so subsequent CLI invocations
+    // without the override fall back cleanly to the persisted config.
+    config.hypervisor.guestCredentials = {
+      username: credOverride.username,
+      password: credOverride.password,
+    };
+  }
   return await selectBackend(config);
 }
 
