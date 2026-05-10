@@ -9,6 +9,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
+import YAML from "yaml";
 import { resolveLayout } from "../scenarios/project-layout.js";
 
 export interface RecordParams {
@@ -28,6 +29,27 @@ export interface RecordResult {
   state_path: string;
   calls_path: string;
   message: string;
+}
+
+export interface RecordFinalizeParams {
+  recording_path?: string;
+  recording_id?: string;
+  scenario_id?: string;
+  force?: boolean;
+}
+
+export interface RecordFinalizeResult {
+  status: "finalized";
+  recording_id: string;
+  scenario_id: string;
+  scenario_path: string;
+  setup_path: string;
+  workflow_path: string;
+  assertions_path: string;
+  captured_call_count: number;
+  emitted_tool_blocks: number;
+  skipped_call_count: number;
+  malformed_line_count: number;
 }
 
 export interface RecordedMcpCallInput {
@@ -119,6 +141,76 @@ export function runRecord(params: RecordParams, cwd: string = process.cwd()): Re
   };
 }
 
+export function runRecordFinalize(
+  params: RecordFinalizeParams,
+  cwd: string = process.cwd(),
+): RecordFinalizeResult {
+  const layout = resolveLayout(cwd);
+  const statePath = resolveRecordingStatePath(params, layout.recordingsDir);
+  const state = readRecordingStateForFinalize(statePath);
+  const scenarioId = validateScenarioId(params.scenario_id ?? state.safe_name ?? state.recording_id);
+  const scenarioPath = path.join(layout.scenariosDir, ...scenarioId.split("/"));
+  if (fs.existsSync(scenarioPath) && !params.force) {
+    throw new RecordValidationError(
+      `candidate scenario already exists: ${scenarioId}; pass force to overwrite`,
+    );
+  }
+
+  const recordingDir = path.dirname(statePath);
+  const callsPath = resolveRecordingFilePath(
+    recordingDir,
+    typeof state.calls_path === "string" ? state.calls_path : "calls.jsonl",
+  );
+  const { calls, malformedLineCount } = readRecordedCalls(callsPath);
+  const synthesized = synthesizeScenarioFromCalls({
+    name: typeof state.name === "string" ? state.name : scenarioId,
+    scenarioId,
+    recordingId: state.recording_id,
+    calls,
+    malformedLineCount,
+  });
+
+  fs.mkdirSync(scenarioPath, { recursive: true });
+  const setupPath = path.join(scenarioPath, "setup.yaml");
+  const workflowPath = path.join(scenarioPath, "workflow.md");
+  const assertionsPath = path.join(scenarioPath, "assertions.yaml");
+  fs.writeFileSync(setupPath, synthesized.setupYaml);
+  fs.writeFileSync(workflowPath, synthesized.workflowMarkdown);
+  fs.writeFileSync(assertionsPath, synthesized.assertionsYaml);
+  updateRecordingState(
+    {
+      recording_id: state.recording_id,
+      state_path: statePath,
+      calls_path: callsPath,
+      expires_at: typeof state.expires_at === "string" ? state.expires_at : new Date().toISOString(),
+      captured_call_count: synthesized.capturedCallCount,
+    },
+    {
+      status: "finalized",
+      finalized_at: new Date().toISOString(),
+      scenario_id: scenarioId,
+      scenario_path: scenarioPath,
+      emitted_tool_blocks: synthesized.emittedToolBlocks,
+      skipped_call_count: synthesized.skippedCallCount,
+      malformed_line_count: malformedLineCount,
+    },
+  );
+
+  return {
+    status: "finalized",
+    recording_id: state.recording_id,
+    scenario_id: scenarioId,
+    scenario_path: scenarioPath,
+    setup_path: setupPath,
+    workflow_path: workflowPath,
+    assertions_path: assertionsPath,
+    captured_call_count: synthesized.capturedCallCount,
+    emitted_tool_blocks: synthesized.emittedToolBlocks,
+    skipped_call_count: synthesized.skippedCallCount,
+    malformed_line_count: malformedLineCount,
+  };
+}
+
 export function recordMcpCall(input: RecordedMcpCallInput, cwd: string = process.cwd()): void {
   try {
     refreshActiveRecordings(cwd);
@@ -162,6 +254,39 @@ export function _resetRecordCaptureForTests(): void {
   lastDiscoveryAt = 0;
 }
 
+type RecordingState = Record<string, unknown> & {
+  recording_id: string;
+  safe_name?: string;
+  name?: string;
+  calls_path?: string;
+  expires_at?: string;
+};
+
+interface RecordedCallEvent {
+  seq?: number;
+  tool?: string;
+  ok?: boolean;
+  params_redacted?: unknown;
+  error?: unknown;
+}
+
+interface SynthesisInput {
+  name: string;
+  scenarioId: string;
+  recordingId: string;
+  calls: RecordedCallEvent[];
+  malformedLineCount: number;
+}
+
+interface SynthesisOutput {
+  setupYaml: string;
+  workflowMarkdown: string;
+  assertionsYaml: string;
+  capturedCallCount: number;
+  emittedToolBlocks: number;
+  skippedCallCount: number;
+}
+
 function validateRecordingName(value: string): string {
   const trimmed = value.trim();
   if (trimmed.length === 0) {
@@ -184,6 +309,24 @@ function validateDurationSeconds(value: number | undefined): number {
   return duration;
 }
 
+function validateScenarioId(value: string): string {
+  const trimmed = value.trim().replace(/\\/g, "/");
+  if (trimmed.length === 0 || trimmed.length > 160) {
+    throw new RecordValidationError("scenario_id must be 1-160 characters");
+  }
+  if (
+    trimmed.startsWith("/") ||
+    trimmed.includes("//") ||
+    trimmed.split("/").some((part) => part === "." || part === ".." || part.length === 0) ||
+    !/^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*$/.test(trimmed)
+  ) {
+    throw new RecordValidationError(
+      "scenario_id must be a safe relative path using letters, numbers, dots, dashes, underscores, and slashes",
+    );
+  }
+  return trimmed;
+}
+
 function recordingSafeName(value: string): string {
   const safe = value
     .toLowerCase()
@@ -199,6 +342,175 @@ function recordingSafeName(value: string): string {
 function newRecordingId(now: Date): string {
   const ts = now.toISOString().replace(/[:.]/g, "-").replace(/Z$/, "Z");
   return `rec_${ts}_${randomBytes(3).toString("hex")}`;
+}
+
+function resolveRecordingStatePath(params: RecordFinalizeParams, recordingsDir: string): string {
+  if (params.recording_path) {
+    const recordingPath = path.resolve(params.recording_path);
+    return fs.existsSync(path.join(recordingPath, "state.json"))
+      ? path.join(recordingPath, "state.json")
+      : recordingPath;
+  }
+  if (!params.recording_id) {
+    throw new RecordValidationError("record finalize requires recording_path or recording_id");
+  }
+  if (!/^rec_[A-Za-z0-9_.-]+$/.test(params.recording_id)) {
+    throw new RecordValidationError("recording_id has invalid characters");
+  }
+  const found = findRecordingStateById(recordingsDir, params.recording_id);
+  if (!found) {
+    throw new RecordValidationError(`recording_id not found: ${params.recording_id}`);
+  }
+  return found;
+}
+
+function findRecordingStateById(recordingsDir: string, recordingId: string): string | null {
+  for (const safeNameEntry of safeReadDir(recordingsDir)) {
+    if (!safeNameEntry.isDirectory()) continue;
+    const candidate = path.join(recordingsDir, safeNameEntry.name, recordingId, "state.json");
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function readRecordingStateForFinalize(statePath: string): RecordingState {
+  try {
+    const state = JSON.parse(fs.readFileSync(statePath, "utf-8")) as RecordingState;
+    if (!state || typeof state.recording_id !== "string") {
+      throw new RecordValidationError("recording state is missing recording_id");
+    }
+    return state;
+  } catch (err) {
+    if (err instanceof RecordValidationError) throw err;
+    throw new RecordValidationError(`cannot read recording state: ${(err as Error).message}`);
+  }
+}
+
+function resolveRecordingFilePath(recordingDir: string, relativePath: string): string {
+  const normalized = relativePath.trim().replace(/\\/g, "/");
+  if (
+    normalized.length === 0 ||
+    normalized.startsWith("/") ||
+    normalized.includes("//") ||
+    normalized.split("/").some((part) => part === "." || part === ".." || part.length === 0)
+  ) {
+    throw new RecordValidationError("recording state has an unsafe calls_path");
+  }
+  return path.join(recordingDir, ...normalized.split("/"));
+}
+
+function readRecordedCalls(callsPath: string): {
+  calls: RecordedCallEvent[];
+  malformedLineCount: number;
+} {
+  if (!fs.existsSync(callsPath)) {
+    return { calls: [], malformedLineCount: 0 };
+  }
+  const calls: RecordedCallEvent[] = [];
+  let malformedLineCount = 0;
+  const lines = fs.readFileSync(callsPath, "utf-8").split(/\r?\n/);
+  for (const line of lines) {
+    if (line.trim().length === 0) continue;
+    try {
+      const parsed = JSON.parse(line) as RecordedCallEvent;
+      calls.push(parsed);
+    } catch {
+      malformedLineCount += 1;
+    }
+  }
+  calls.sort((a, b) => (typeof a.seq === "number" ? a.seq : 0) - (typeof b.seq === "number" ? b.seq : 0));
+  return { calls, malformedLineCount };
+}
+
+function synthesizeScenarioFromCalls(input: SynthesisInput): SynthesisOutput {
+  const setup = {
+    name: `${input.name} candidate`,
+    version: "1.0",
+    tags: ["recorded", "candidate"],
+    vms: [
+      {
+        name: "recorded-vm",
+        template: "recorded-template",
+        guest_agent_port: 50051,
+        pre_started: true,
+      },
+    ],
+  };
+  let emittedToolBlocks = 0;
+  let skippedCallCount = 0;
+  const sections = [
+    `# ${input.name} candidate`,
+    "",
+    `Generated from recording \`${input.recordingId}\`. Review VM placeholders, selectors, waits, and assertions before treating this as a stable scenario.`,
+    "",
+  ];
+
+  for (const call of input.calls) {
+    const tool = typeof call.tool === "string" ? call.tool : "";
+    const workflowTool = workflowToolName(tool);
+    if (!workflowTool) {
+      skippedCallCount += 1;
+      sections.push(`<!-- Skipped recorded MCP call ${labelSeq(call)}: ${tool || "(missing tool)"} -->`, "");
+      continue;
+    }
+    const params =
+      call.params_redacted && typeof call.params_redacted === "object"
+        ? (call.params_redacted as Record<string, unknown>)
+        : {};
+    emittedToolBlocks += 1;
+    sections.push(
+      `## Recorded call ${labelSeq(call)}`,
+      "",
+      "```tool",
+      `${workflowTool}:`,
+      indentYaml(YAML.stringify(params).trimEnd()),
+      "```",
+      "",
+    );
+    if (call.ok === false) {
+      sections.push(`<!-- Recorded call failed: ${JSON.stringify(call.error ?? {})} -->`, "");
+    }
+  }
+
+  if (input.malformedLineCount > 0) {
+    sections.push(`<!-- ${input.malformedLineCount} malformed calls.jsonl line(s) were ignored. -->`, "");
+  }
+
+  const assertions = {
+    assertions: [],
+    pass_threshold: 1.0,
+    critical_must_pass: true,
+  };
+  return {
+    setupYaml: YAML.stringify(setup),
+    workflowMarkdown: sections.join("\n").replace(/\n{3,}/g, "\n\n"),
+    assertionsYaml: YAML.stringify(assertions),
+    capturedCallCount: input.calls.length,
+    emittedToolBlocks,
+    skippedCallCount,
+  };
+}
+
+function workflowToolName(tool: string): string | null {
+  if (tool.startsWith("signalman_advanced_")) {
+    return tool.slice("signalman_advanced_".length);
+  }
+  if (/^(vm|docker|kernel|driver|ui|browser)_/.test(tool)) {
+    return tool;
+  }
+  return null;
+}
+
+function labelSeq(call: RecordedCallEvent): string {
+  return typeof call.seq === "number" ? String(call.seq) : "?";
+}
+
+function indentYaml(value: string): string {
+  if (!value) return "  {}";
+  return value
+    .split(/\r?\n/)
+    .map((line) => `  ${line}`)
+    .join("\n");
 }
 
 function registerActiveRecording(recording: ActiveRecording): void {

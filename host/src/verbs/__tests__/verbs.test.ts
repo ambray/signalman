@@ -12,7 +12,12 @@ import * as path from "node:path";
 import { runList } from "../list.js";
 import { runDescribe, ScenarioNotFoundError } from "../describe.js";
 import { runPlan, ParameterUnresolvedError } from "../plan.js";
-import { _resetRecordCaptureForTests, recordMcpCall, runRecord } from "../record.js";
+import {
+  _resetRecordCaptureForTests,
+  recordMcpCall,
+  runRecord,
+  runRecordFinalize,
+} from "../record.js";
 import { runStatus } from "../status.js";
 import { _resetForTests } from "../run-store.js";
 
@@ -305,6 +310,104 @@ describe("signalman.record", () => {
       ok: false,
       error: { name: "Error", message: "not found" },
     });
+  });
+
+  it("finalizes a recording into deterministic candidate scenario files", () => {
+    const root = makeProject({});
+    const r = runRecord({ name: "Demo Flow", duration_seconds: 30 }, root);
+    recordMcpCall(
+      {
+        tool: "signalman_advanced_vm_run_command",
+        params: { vm: "endpoint-1", command: "hostname", authToken: "secret-token" },
+        result: { content: [{ type: "text", text: "ok" }] },
+      },
+      root,
+    );
+    recordMcpCall(
+      {
+        tool: "signalman_list",
+        params: {},
+        result: { content: [] },
+      },
+      root,
+    );
+    fs.appendFileSync(r.calls_path, "{not-json}\n");
+
+    const finalized = runRecordFinalize(
+      { recording_path: r.recording_path, scenario_id: "recorded/demo-flow" },
+      root,
+    );
+
+    expect(finalized).toMatchObject({
+      status: "finalized",
+      recording_id: r.recording_id,
+      scenario_id: "recorded/demo-flow",
+      captured_call_count: 2,
+      emitted_tool_blocks: 1,
+      skipped_call_count: 1,
+      malformed_line_count: 1,
+    });
+    const setup = fs.readFileSync(finalized.setup_path, "utf-8");
+    const workflow = fs.readFileSync(finalized.workflow_path, "utf-8");
+    const assertions = fs.readFileSync(finalized.assertions_path, "utf-8");
+    expect(setup).toContain("name: Demo Flow candidate");
+    expect(setup).toContain("pre_started: true");
+    expect(workflow).toContain("vm_run_command:");
+    expect(workflow).toContain('authToken: "[redacted]"');
+    expect(workflow).toContain("Skipped recorded MCP call 1: signalman_list");
+    expect(workflow).toContain("1 malformed calls.jsonl line(s) were ignored");
+    expect(assertions).toContain("assertions: []");
+
+    const state = JSON.parse(fs.readFileSync(r.state_path, "utf-8"));
+    expect(state.status).toBe("finalized");
+    expect(state.scenario_id).toBe("recorded/demo-flow");
+  });
+
+  it("refuses to overwrite finalized candidate scenarios unless forced", () => {
+    const root = makeProject({});
+    const r = runRecord({ name: "Demo Flow", duration_seconds: 30 }, root);
+    runRecordFinalize({ recording_path: r.recording_path, scenario_id: "demo-flow" }, root);
+
+    expect(() =>
+      runRecordFinalize({ recording_path: r.recording_path, scenario_id: "demo-flow" }, root),
+    ).toThrow(/already exists/);
+    expect(
+      runRecordFinalize({ recording_path: r.recording_path, scenario_id: "demo-flow", force: true }, root)
+        .status,
+    ).toBe("finalized");
+  });
+
+  it("validates finalize lookup and scenario id inputs defensively", () => {
+    const root = makeProject({});
+    const r = runRecord({ name: "Demo Flow", duration_seconds: 30 }, root);
+
+    expect(() =>
+      runRecordFinalize({ recording_path: r.recording_path, scenario_id: "../escape" }, root),
+    ).toThrow(/scenario_id/);
+    expect(() => runRecordFinalize({ recording_id: "../bad" }, root)).toThrow(/recording_id/);
+    expect(() => runRecordFinalize({}, root)).toThrow(/record finalize requires/);
+  });
+
+  it("surfaces malformed recording state as a validation error", () => {
+    const root = makeProject({});
+    const badDir = path.join(root, ".signalman", "recordings", "bad", "rec_bad");
+    fs.mkdirSync(badDir, { recursive: true });
+    fs.writeFileSync(path.join(badDir, "state.json"), "{not-json}\n");
+
+    expect(() => runRecordFinalize({ recording_path: badDir }, root)).toThrow(
+      /cannot read recording state/,
+    );
+  });
+
+  it("rejects unsafe calls_path values from recording state", () => {
+    const root = makeProject({});
+    const r = runRecord({ name: "Demo Flow", duration_seconds: 30 }, root);
+    const state = JSON.parse(fs.readFileSync(r.state_path, "utf-8"));
+    fs.writeFileSync(r.state_path, JSON.stringify({ ...state, calls_path: "../calls.jsonl" }));
+
+    expect(() => runRecordFinalize({ recording_path: r.recording_path }, root)).toThrow(
+      /unsafe calls_path/,
+    );
   });
 });
 

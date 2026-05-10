@@ -345,8 +345,12 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   plus `calls.jsonl`, validates recording name/duration, returns the session
   paths through CLI/MCP parity, appends redacted MCP call events while the
   session is active, and rediscovers active sessions after MCP server
-  reconstitution. Next slice: synthesize candidate scenario files from
-  `calls.jsonl`.
+  reconstitution. `signalman record finalize` /
+  `signalman_record_finalize` now synthesizes candidate `setup.yaml`,
+  `workflow.md`, and `assertions.yaml` files from `calls.jsonl`, preserving
+  unsupported high-level MCP calls as review comments and requiring explicit
+  force before overwriting an existing scenario. Next slice: replay/validate
+  a finalized candidate scenario from the recording workflow.
 - **v0.2.0-2 Ephemeral VM Provisioning** — Differencing-disk pipeline,
   per-scenario disposable guests, real `template:` wiring (C9), streamed
   `vm_copy_file` progress (C8).
