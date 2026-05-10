@@ -76,7 +76,8 @@ function parseArgs(argv: string[]): ParsedArgs {
         key === "no-follow" ||
         key === "force" ||
         key === "bootstrap" ||
-        key === "cleanup-on-failure"
+        key === "cleanup-on-failure" ||
+        key === "wait-guest"
       ) {
         flags.add(key);
         if (eq >= 0) {
@@ -496,7 +497,7 @@ async function cmdVm(args: ParsedArgs): Promise<number> {
   const sub = args.positional.shift();
   if (!sub) {
     usageError(
-      "vm requires a subcommand (e.g. fetch-template, provision, cleanup, install-bundle)",
+      "vm requires a subcommand (e.g. start, stop, status, fetch-template, provision, cleanup, install-bundle)",
     );
   }
 
@@ -511,8 +512,346 @@ async function cmdVm(args: ParsedArgs): Promise<number> {
       return await cmdVmCreate(args);
     case "install-bundle":
       return await cmdVmInstallBundle(args);
+    case "start":
+      return await cmdVmStart(args);
+    case "stop":
+      return await cmdVmStop(args);
+    case "status":
+      return await cmdVmStatus(args);
+    case "probe-guest":
+      return await cmdVmProbeGuest(args);
+    case "exec":
+      return await cmdVmExec(args);
     default:
       usageError(`unknown vm subcommand: ${sub}`);
+  }
+}
+
+/**
+ * Resolve a VM handle by name via the active backend.
+ *
+ * Used by `vm start` / `vm stop` / `vm status` -- those subcommands
+ * take just `<name>` on the CLI but need a `VMHandle` (id + name +
+ * backend) to feed `backend.startVM(handle)` etc.  We resolve via
+ * `listVMs` rather than synthesising a handle from the name alone
+ * because some backends key off the id (Hyper-V GUID, Tart UUID, etc)
+ * and a name-only handle would be a foot-gun on rename.
+ */
+async function resolveVmHandleByName(
+  backend: HypervisorBackend,
+  name: string,
+): Promise<VMHandle> {
+  const all = await backend.listVMs();
+  const matched = all.find((v) => v.name === name);
+  if (!matched) {
+    throw new Error(
+      `VM '${name}' not found via ${backend.name} backend. ` +
+      `Run 'signalman vm create ${name} --template <T>' first, ` +
+      `or check that ${backend.name} is the right backend (signalman list-backends).`
+    );
+  }
+  return matched;
+}
+
+// ── vm start (idempotent VM power-on) ──────────────────────────────
+//
+// Wraps `HypervisorBackend.startVM` for the operator's "bring my
+// demo VM up so I can run a scenario against it" workflow. The
+// scenarios under `.signalman/scenarios/*/setup.yaml` mostly use
+// `pre_started: true` (the unprivileged signalman CLI cannot drive
+// Hyper-V cmdlets directly), but the ELEVATED service-first backend
+// CAN -- so this verb gives the operator a one-line repeatable path
+// that doesn't reach for raw `Start-VM` PowerShell.
+//
+// Flags:
+//   --checkpoint <label>   Restore the named checkpoint before starting.
+//                          Useful for "snap to a known state then go".
+//   --wait-guest           Block until the guest agent's gRPC port
+//                          (default 50051) reports reachable.
+//   --wait-timeout <ms>    Override the wait-guest deadline (default
+//                          120s, matches provisioning's waitForGuestAgent).
+//   --format json          Emit a structured envelope on stdout
+//                          instead of the human-readable summary.
+async function cmdVmStart(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm start requires <name>");
+  const checkpointLabel = args.options.get("checkpoint");
+  const waitGuest = args.flags.has("wait-guest");
+  const waitTimeoutMs = parseInt(args.options.get("wait-timeout") ?? "120000", 10);
+  const format = args.options.get("format");
+
+  const backend = await getCliBackend();
+  try {
+    const handle = await resolveVmHandleByName(backend, name);
+
+    // Optional checkpoint restore. We use the existing
+    // `restoreCheckpoint` API which expects a CheckpointHandle, so
+    // we synthesise one from `{ vmHandle, label }` -- the Hyper-V
+    // backend resolves the snapshot by VM+name lookup at restore
+    // time so an empty `id` field is fine.
+    if (checkpointLabel) {
+      process.stderr.write(`[vm start] restoring checkpoint '${checkpointLabel}'...\n`);
+      await backend.restoreCheckpoint({
+        id: "",
+        vmHandle: handle,
+        label: checkpointLabel,
+      });
+    }
+
+    process.stderr.write(`[vm start] starting VM '${name}'...\n`);
+    await backend.startVM(handle);
+
+    let guestReachable: boolean | undefined;
+    if (waitGuest) {
+      process.stderr.write(
+        `[vm start] waiting up to ${waitTimeoutMs}ms for guest agent...\n`,
+      );
+      const deadline = Date.now() + waitTimeoutMs;
+      guestReachable = false;
+      while (Date.now() < deadline) {
+        try {
+          const status = await backend.getStatus(handle);
+          if (status.guestAgentReachable) {
+            guestReachable = true;
+            break;
+          }
+        } catch {
+          // ignore transient errors during boot
+        }
+        await new Promise((r) => setTimeout(r, 2_000));
+      }
+      if (!guestReachable) {
+        const err = new Error(
+          `Guest agent on '${name}' did not become reachable within ${waitTimeoutMs}ms. ` +
+          `Check that SignalmanGuest scheduled task / service is running inside the VM, ` +
+          `and that Autologon completed (so the desktop session is up).`,
+        );
+        if (format === "json") {
+          emitJson({ vmName: name, started: true, guestReachable: false, error: err.message });
+          return 4;
+        }
+        throw err;
+      }
+    }
+
+    if (format === "json") {
+      emitJson({
+        vmName: name,
+        backend: backend.name,
+        started: true,
+        checkpointRestored: checkpointLabel ?? null,
+        guestReachable: guestReachable ?? null,
+      });
+    } else {
+      const tag = guestReachable ? " (guest agent reachable)" : "";
+      const cpTag = checkpointLabel ? ` [restored from '${checkpointLabel}']` : "";
+      process.stdout.write(`VM '${name}' started${cpTag}${tag}.\n`);
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman vm start: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// ── vm stop ────────────────────────────────────────────────────────
+async function cmdVmStop(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm stop requires <name>");
+  const force = args.flags.has("force");
+  const format = args.options.get("format");
+  const backend = await getCliBackend();
+  try {
+    const handle = await resolveVmHandleByName(backend, name);
+    process.stderr.write(`[vm stop] stopping VM '${name}' (force=${force})...\n`);
+    await backend.stopVM(handle, force);
+    if (format === "json") {
+      emitJson({ vmName: name, backend: backend.name, stopped: true, force });
+    } else {
+      process.stdout.write(`VM '${name}' stopped${force ? " (forced)" : ""}.\n`);
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman vm stop: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// ── vm exec (PowerShell Direct fallback, bypasses guest agent) ─────
+//
+// `signalman vm exec <name> -- <command>` drives `Invoke-Command
+// -VMName` against the running VM via the host's elevated
+// PowerShell Direct path. Critically this DOES NOT need
+// SignalmanGuest to be reachable -- the auth surface is the
+// host-configured guestCredentials (username/password), not the
+// guest agent's TLS+token.  Used when:
+//   * the guest agent is broken (token rotated, cert expired,
+//     scheduled task crashed) and we need to introspect or fix it
+//   * a one-shot bootstrap-style command should run before the
+//     guest agent is installed at all
+//
+// The command after `--` is passed verbatim to PowerShell inside
+// the VM. Exit code, stdout, stderr round-trip back. -- is required
+// to delimit so signalman's own arg parser doesn't try to interpret
+// flags that belong to the inner command.
+async function cmdVmExec(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm exec requires <name> -- <command...>");
+  const cmdArgs = args.positional.slice(1);
+  if (cmdArgs.length === 0) usageError("vm exec: missing command after VM name (use -- to delimit)");
+  const format = args.options.get("format");
+  const timeoutMs = parseInt(args.options.get("timeout") ?? "60000", 10);
+
+  const backend = await getCliBackend();
+  try {
+    const handle = await resolveVmHandleByName(backend, name);
+    const cmd = cmdArgs[0];
+    const cmdRest = cmdArgs.slice(1);
+    const result = await backend.executeCommand(handle, cmd, cmdRest, timeoutMs);
+
+    if (format === "json") {
+      emitJson({
+        vmName: name,
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      });
+    } else {
+      if (result.stdout) process.stdout.write(result.stdout);
+      if (result.stderr) process.stderr.write(result.stderr);
+      if (result.exitCode !== 0) {
+        process.stderr.write(`\n[vm exec] exit code: ${result.exitCode}\n`);
+      }
+    }
+    return result.exitCode === 0 ? 0 : 4;
+  } catch (err) {
+    console.error(`signalman vm exec: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// ── vm probe-guest (diagnostic) ────────────────────────────────────
+//
+// `vm status`'s `guestAgentReachable` field comes from a TLS+token
+// gRPC Health RPC that swallows every error path silently and
+// returns false. That's the right behaviour for a status probe but
+// it makes "the guest health check is failing for SOME reason"
+// debugging painful.  This subcommand runs the same probe but
+// surfaces the actual exception (cert chain mismatch, auth-token
+// rejection, TCP refused, gRPC UNAVAILABLE, etc) so the operator
+// can fix it without turning on a logging build of signalman-guest.
+async function cmdVmProbeGuest(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm probe-guest requires <name>");
+  const format = args.options.get("format");
+  const backend = await getCliBackend();
+  try {
+    const handle = await resolveVmHandleByName(backend, name);
+    const status = await backend.getStatus(handle);
+    if (!status.ipAddress) {
+      throw new Error(`VM '${name}' has no IP address yet (state=${status.state})`);
+    }
+
+    // Re-run the health check inline with full error surface.  We
+    // duplicate a small slice of `defaultGuestAgentHealthCheck`
+    // here rather than threading an `errorOut` parameter through
+    // every backend's getStatus path; this keeps the diagnostic
+    // surface scoped to the diagnostic subcommand.
+    const { loadConfig } = await import("./config.js");
+    const cfg = loadConfig();
+    const port = cfg.guestAgent.defaultPort ?? 50051;
+    const authToken = cfg.guestAgent.authToken;
+    const tls = cfg.guestAgent.tls?.enabled
+      ? {
+          caPath: cfg.guestAgent.tls.caPath,
+          certPath: cfg.guestAgent.tls.certPath,
+          keyPath: cfg.guestAgent.tls.keyPath,
+        }
+      : undefined;
+
+    const { GuestAgentClient } = await import("./guest/client.js");
+    const client = new GuestAgentClient(status.ipAddress, port, tls, {
+      connectionTimeoutMs: 10_000,
+      defaultTimeoutMs: 10_000,
+      maxRetries: 0,
+      authToken,
+    });
+    let probeResult: { ok: boolean; error?: string } = { ok: false };
+    try {
+      // Call the health RPC directly so the underlying error surfaces.
+      const { unaryCall } = await import("./guest/client.js");
+      await unaryCall(
+        // accessing private field for diagnostic; intentional
+        (client as unknown as { client: unknown }).client,
+        "health",
+        {},
+        10_000,
+        authToken,
+      );
+      probeResult = { ok: true };
+    } catch (e) {
+      probeResult = { ok: false, error: (e as Error).message ?? String(e) };
+    } finally {
+      client.dispose();
+    }
+
+    if (format === "json") {
+      emitJson({
+        vmName: name,
+        ipAddress: status.ipAddress,
+        port,
+        tlsEnabled: tls !== undefined,
+        ok: probeResult.ok,
+        error: probeResult.error ?? null,
+      });
+    } else {
+      const tag = probeResult.ok ? "OK" : "FAIL";
+      process.stdout.write(
+        `[${tag}] guest agent at ${status.ipAddress}:${port} (tls=${tls !== undefined})\n`,
+      );
+      if (probeResult.error) {
+        process.stdout.write(`  error: ${probeResult.error}\n`);
+      }
+    }
+    return probeResult.ok ? 0 : 4;
+  } catch (err) {
+    console.error(`signalman vm probe-guest: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// ── vm status ──────────────────────────────────────────────────────
+async function cmdVmStatus(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm status requires <name>");
+  const format = args.options.get("format");
+  const backend = await getCliBackend();
+  try {
+    const handle = await resolveVmHandleByName(backend, name);
+    const status = await backend.getStatus(handle);
+    if (format === "json") {
+      emitJson({
+        vmName: name,
+        backend: backend.name,
+        state: status.state,
+        ipAddress: status.ipAddress ?? null,
+        guestAgentReachable: status.guestAgentReachable,
+        uptimeSeconds: status.uptimeSeconds,
+        memoryUsedMB: status.memoryUsedMB,
+      });
+    } else {
+      process.stdout.write(
+        `${name}: ${status.state}` +
+          (status.ipAddress ? ` ip=${status.ipAddress}` : "") +
+          ` guest=${status.guestAgentReachable ? "reachable" : "unreachable"}` +
+          ` uptime=${status.uptimeSeconds}s` +
+          ` mem=${status.memoryUsedMB}MB\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman vm status: ${(err as Error).message}`);
+    return 4;
   }
 }
 
