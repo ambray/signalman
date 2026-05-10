@@ -193,11 +193,49 @@ describe("signalman.plan", () => {
   });
 });
 
-describe("signalman.record (stub)", () => {
-  it("returns not-implemented", () => {
-    const r = runRecord({ name: "demo" });
-    expect(r.status).toBe("not-implemented");
-    expect(r.message).toMatch(/v0\.2\.0/);
+describe("signalman.record", () => {
+  it("starts a durable recording session", () => {
+    const root = makeProject({});
+    const r = runRecord({ name: "Demo Flow", duration_seconds: 30 }, root);
+
+    expect(r.status).toBe("recording");
+    expect(r.recording_id).toMatch(/^rec_/);
+    expect(r.name).toBe("Demo Flow");
+    expect(r.safe_name).toBe("demo-flow");
+    expect(r.duration_seconds).toBe(30);
+    expect(r.recording_path).toContain(path.join(".signalman", "recordings", "demo-flow"));
+    expect(fs.existsSync(r.state_path)).toBe(true);
+    expect(fs.existsSync(r.calls_path)).toBe(true);
+
+    const state = JSON.parse(fs.readFileSync(r.state_path, "utf-8"));
+    expect(state).toMatchObject({
+      schema_version: 1,
+      status: "recording",
+      recording_id: r.recording_id,
+      name: "Demo Flow",
+      safe_name: "demo-flow",
+      duration_seconds: 30,
+      captured_call_count: 0,
+      calls_path: "calls.jsonl",
+    });
+    expect(fs.readFileSync(r.calls_path, "utf-8")).toBe("");
+  });
+
+  it("defaults duration and rejects unsafe record names", () => {
+    const root = makeProject({});
+    const r = runRecord({ name: "demo" }, root);
+
+    expect(r.duration_seconds).toBe(600);
+    expect(() => runRecord({ name: "   " }, root)).toThrow(/must not be empty/);
+    expect(() => runRecord({ name: "!!!" }, root)).toThrow(/letter or number/);
+  });
+
+  it("rejects invalid durations", () => {
+    const root = makeProject({});
+
+    expect(() => runRecord({ name: "demo", duration_seconds: 0 }, root)).toThrow(/duration_seconds/);
+    expect(() => runRecord({ name: "demo", duration_seconds: 86_401 }, root)).toThrow(/duration_seconds/);
+    expect(() => runRecord({ name: "demo", duration_seconds: 1.5 }, root)).toThrow(/duration_seconds/);
   });
 });
 

@@ -266,7 +266,8 @@ async function cmdStatus(args: ParsedArgs): Promise<number> {
 async function cmdRecord(args: ParsedArgs): Promise<number> {
   const name = args.positional[0];
   if (!name) usageError("record requires <name>");
-  const duration = args.options.get("duration") ? parseInt(args.options.get("duration") ?? "600", 10) : undefined;
+  const durationRaw = args.options.get("duration");
+  const duration = durationRaw ? Number(durationRaw) : undefined;
   const result = runRecord({ name, duration_seconds: duration });
   emitJson(result);
   return 0;
@@ -1150,6 +1151,10 @@ async function main(argv: string[]): Promise<number> {
       return 5;
     }
     if ((err as Error).name === "ParameterUnresolvedError") {
+      console.error(`signalman: ${(err as Error).message}`);
+      return 5;
+    }
+    if ((err as Error).name === "RecordValidationError") {
       console.error(`signalman: ${(err as Error).message}`);
       return 5;
     }

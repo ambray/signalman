@@ -1,6 +1,6 @@
 # Signalman — Status & Resume Context
 
-> Last updated: 2026-05-09. Living document — update on every commit
+> Last updated: 2026-05-10. Living document — update on every commit
 > that changes scope, ships a feature, closes an audit finding, or
 > introduces a new TODO bucket. See [Document maintenance](#document-maintenance)
 > for the trigger rules.
@@ -339,9 +339,12 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
   page, interactive Edge CDP launch, DOM-state expectation, screenshot capture,
   and cleanup.
 
-- **v0.2.0-1 Record/Replay** — `signalman.record` captures next N MCP
-  calls into `.signalman/recordings/`. The agent-first DevOps
-  differentiator.
+- **v0.2.0-1 Record/Replay** — First slice in progress:
+  `signalman.record` now starts a durable recording session under
+  `.signalman/recordings/<safe-name>/<recording-id>/`, writes `state.json`
+  plus an empty `calls.jsonl`, validates recording name/duration, and returns
+  the session paths through CLI/MCP parity. Next slice: append captured MCP
+  calls into `calls.jsonl` and synthesize candidate scenario files.
 - **v0.2.0-2 Ephemeral VM Provisioning** — Differencing-disk pipeline,
   per-scenario disposable guests, real `template:` wiring (C9), streamed
   `vm_copy_file` progress (C8).
