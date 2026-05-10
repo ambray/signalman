@@ -14,6 +14,7 @@
  *   signalman run <id> [--param k=v]... [--trace-id HEX] [--follow] [--format json]
  *   signalman status [--run RUN_ID] [--wait N]
  *   signalman record <name> [--duration N]
+ *   signalman record finalize <recording_path_or_id> [--scenario-id ID] [--force]
  */
 
 import * as path from "node:path";
@@ -23,7 +24,7 @@ import { runDescribe } from "./verbs/describe.js";
 import { runPlan } from "./verbs/plan.js";
 import { runRun } from "./verbs/run.js";
 import { runStatus } from "./verbs/status.js";
-import { runRecord } from "./verbs/record.js";
+import { runRecord, runRecordFinalize } from "./verbs/record.js";
 import { runInit } from "./verbs/init.js";
 import { createDefaultExecutor } from "./verbs/default-executor.js";
 import { provisionVM } from "./provisioning/provision.js";
@@ -264,6 +265,19 @@ async function cmdStatus(args: ParsedArgs): Promise<number> {
 }
 
 async function cmdRecord(args: ParsedArgs): Promise<number> {
+  if (args.positional[0] === "finalize") {
+    const target = args.positional[1];
+    if (!target) usageError("record finalize requires <recording_path_or_id>");
+    const isId = target.startsWith("rec_");
+    const result = runRecordFinalize({
+      recording_id: isId ? target : undefined,
+      recording_path: isId ? undefined : target,
+      scenario_id: args.options.get("scenario-id"),
+      force: args.flags.has("force"),
+    });
+    emitJson(result);
+    return 0;
+  }
   const name = args.positional[0];
   if (!name) usageError("record requires <name>");
   const durationRaw = args.options.get("duration");
@@ -1176,6 +1190,7 @@ function printHelp(): void {
       "  run <id> [--param k=v]... [--no-follow] [--format json]",
       "  status [--run RUN_ID] [--wait MS]",
       "  record <name> [--duration SECS]",
+      "  record finalize <recording_path_or_id> [--scenario-id ID] [--force]",
       "  vm <subcommand>   (provision, cleanup, create, install-bundle,",
       "                     fetch-template — see ROADMAP P9 / signalman vm --help)",
       "",

@@ -117,6 +117,13 @@ Captured call events include `tool`, timing, success/error status,
 redacted and large strings/arrays/objects are bounded so record/replay does not
 turn into an unbounded log or secret store.
 
+`signalman.record.finalize` / `signalman record finalize` reads `calls.jsonl`
+and writes candidate `setup.yaml`, `workflow.md`, and `assertions.yaml` files
+under `.signalman/scenarios/<scenario-id>/`. Synthesis is intentionally
+conservative: scenario-compatible advanced calls become workflow tool blocks,
+high-level MCP calls become review comments, malformed JSONL lines are counted
+and skipped, and existing scenario directories require `force`.
+
 ### 1.6 `signalman.status`
 
 Two modes by param shape:

@@ -34,7 +34,7 @@ import { runDescribe } from "./verbs/describe.js";
 import { runPlan } from "./verbs/plan.js";
 import { runRun } from "./verbs/run.js";
 import { runStatus } from "./verbs/status.js";
-import { recordMcpCall, runRecord } from "./verbs/record.js";
+import { recordMcpCall, runRecord, runRecordFinalize } from "./verbs/record.js";
 import { createDefaultExecutor } from "./verbs/default-executor.js";
 
 // ── Backend Discovery ─────────────────────────────────────────────
@@ -348,6 +348,34 @@ server.tool(
       "signalman_record",
       params,
       () => asMcpResult(runRecord(params as { name: string; duration_seconds?: number })),
+      { capture: false },
+    ),
+);
+
+server.tool(
+  "signalman_record_finalize",
+  "Synthesize candidate scenario files from a record/replay calls.jsonl capture.",
+  {
+    recording_path: z.string().optional().describe("Recording directory or state.json path."),
+    recording_id: z.string().optional().describe("Recording id to find under .signalman/recordings/."),
+    scenario_id: z.string().optional().describe("Scenario id/path to write under .signalman/scenarios/."),
+    force: z.boolean().optional().describe("Overwrite an existing candidate scenario directory."),
+  },
+  async (params) =>
+    withRecording(
+      "signalman_record_finalize",
+      params,
+      () =>
+        asMcpResult(
+          runRecordFinalize(
+            params as {
+              recording_path?: string;
+              recording_id?: string;
+              scenario_id?: string;
+              force?: boolean;
+            },
+          ),
+        ),
       { capture: false },
     ),
 );
