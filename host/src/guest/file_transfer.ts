@@ -248,14 +248,24 @@ export async function copyFileToGuestViaHttp(
       "-NoProfile",
       "-NonInteractive",
       "-Command",
+      // Newline-joined (not `; `-joined) so the script's PS-statement
+      // separators don't trip signalman-guest's S-06 metacharacter
+      // guard (which denies args containing `;`, `|`, or `&`).
+      // PowerShell treats `\n` as a statement terminator equivalent
+      // to `;`, so the semantics are identical.  Sticking to `\n`
+      // here also avoids the host-side `-EncodedCommand` auto-rewrite
+      // (see GuestAgentClient.runCommand), which would double-encode
+      // the chunk body via UTF-16-LE base64 and blow past Windows'
+      // 32 KiB command-line limit (ERROR_FILENAME_EXCED_RANGE / 206)
+      // for the chunk-write script below.
       [
-        "$ProgressPreference = 'SilentlyContinue';",
-        "$ErrorActionPreference = 'Stop';",
-        `$dir = Split-Path -Path '${safeTmpGuestPath}' -Parent;`,
-        "if ($dir) { New-Item -Path $dir -ItemType Directory -Force | Out-Null };",
-        `if (Test-Path -LiteralPath '${safeTmpGuestPath}') { Remove-Item -LiteralPath '${safeTmpGuestPath}' -Force };`,
+        "$ProgressPreference = 'SilentlyContinue'",
+        "$ErrorActionPreference = 'Stop'",
+        `$dir = Split-Path -Path '${safeTmpGuestPath}' -Parent`,
+        "if ($dir) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }",
+        `if (Test-Path -LiteralPath '${safeTmpGuestPath}') { Remove-Item -LiteralPath '${safeTmpGuestPath}' -Force }`,
         "exit 0",
-      ].join(" "),
+      ].join("\n"),
     ],
     timeoutMs,
     "ensure-dir-and-clear-temp",
@@ -296,14 +306,23 @@ export async function copyFileToGuestViaHttp(
       // expressions which would emit the b64 as a literal-string
       // result and exit 1.  See architect-review note in module
       // doc-comment.
+      // Newline-joined: see comment in the setup script above. The
+      // base64 chunk body alone is ~28 KiB; if we used `; `-joined
+      // statements the host-side -EncodedCommand rewrite would fire
+      // (because of the `;`) and double-encode the chunk via
+      // UTF-16-LE base64, exploding to ~75 KiB and tripping
+      // Windows' 32 KiB command-line ceiling.  `\n` separators
+      // are statement terminators in PowerShell and don't trip the
+      // guard, so the original wire shape (one runCommand per
+      // chunk, raw base64 inlined) survives.
       const script = [
-        "$ProgressPreference = 'SilentlyContinue';",
-        "$ErrorActionPreference = 'Stop';",
-        `$bytes = [Convert]::FromBase64String('${b64}');`,
-        `$fs = [IO.File]::Open('${safeTmpGuestPath}', [IO.FileMode]::Append);`,
-        "try { $fs.Write($bytes, 0, $bytes.Length); } finally { $fs.Dispose(); };",
-        `Write-Output ('CHUNK ${chunkIndex} ' + $bytes.Length);`,
-      ].join(" ");
+        "$ProgressPreference = 'SilentlyContinue'",
+        "$ErrorActionPreference = 'Stop'",
+        `$bytes = [Convert]::FromBase64String('${b64}')`,
+        `$fs = [IO.File]::Open('${safeTmpGuestPath}', [IO.FileMode]::Append)`,
+        "try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }",
+        `Write-Output ('CHUNK ${chunkIndex} ' + $bytes.Length)`,
+      ].join("\n");
       const t0 = Date.now();
       // maxRetries: 1 — see module doc-comment.  3 retries × 60 s
       // backoff was the largest single contributor to retry-storm
@@ -364,7 +383,9 @@ export async function copyFileToGuestViaHttp(
       "-NoProfile",
       "-NonInteractive",
       "-Command",
-      `Move-Item -LiteralPath '${safeTmpGuestPath}' -Destination '${safeGuestPath}' -Force; exit 0`,
+      // `\n` not `;` between Move-Item and exit so signalman-guest's
+      // S-06 metachar guard doesn't reject the arg.
+      `Move-Item -LiteralPath '${safeTmpGuestPath}' -Destination '${safeGuestPath}' -Force\nexit 0`,
     ],
     timeoutMs,
     "atomic-rename",

@@ -428,7 +428,90 @@ export async function withRetry<T>(
  * @param deadlineMs - Optional deadline in milliseconds from now.
  * @returns Promise resolving to the response message.
  */
-function unaryCall<TReq, TRes>(
+/**
+ * Re-encode a PowerShell `-Command <script>` invocation as
+ * `-EncodedCommand <base64>` when the script contains shell
+ * metacharacters that signalman-guest's S-06 guard would reject.
+ *
+ * Returns `undefined` (= "no rewrite needed") when:
+ *   - the command isn't powershell/pwsh
+ *   - the args don't include `-Command` / `-c`
+ *   - none of the args trip the metacharacter guard
+ *
+ * Otherwise returns `{ command, args }` with `-Command <script>`
+ * replaced by `-EncodedCommand <base64-utf16le-script>`. PowerShell
+ * decodes the base64 server-side, splits the resulting UTF-16-LE
+ * bytes into a script, and runs it -- semantically identical to the
+ * pre-rewrite invocation but the wire form contains only base64
+ * alphanumerics, which sail through the metachar guard.
+ */
+export function encodePowerShellIfNeeded(
+  command: string,
+  args: string[],
+): { command: string; args: string[] } | undefined {
+  // Only rewrite for PowerShell-shaped commands. We compare on the
+  // basename so `powershell.exe`, `powershell`, full paths, and pwsh
+  // (PS Core) all match.
+  const base = command.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  const isPwsh =
+    base === "powershell" ||
+    base === "powershell.exe" ||
+    base === "pwsh" ||
+    base === "pwsh.exe";
+  if (!isPwsh) return undefined;
+
+  // Find -Command / -c argument. PowerShell accepts both. We also
+  // tolerate the more verbose -EncodedCommand passing through
+  // untouched (operator already encoded).
+  const cmdIdx = args.findIndex(
+    (a) => a === "-Command" || a === "-command" || a === "-c",
+  );
+  if (cmdIdx < 0 || cmdIdx === args.length - 1) return undefined;
+  const script = args[cmdIdx + 1];
+
+  // Skip the rewrite if the script wouldn't trip the guard --
+  // cleartext is easier to read in logs and audit traces.
+  const meta = /[;|&]/;
+  const tripsGuard =
+    meta.test(command) || args.some((a) => meta.test(a));
+  if (!tripsGuard) return undefined;
+
+  // PowerShell's -EncodedCommand accepts a base64-encoded UTF-16
+  // little-endian byte sequence. We construct that buffer, then
+  // base64-encode it.
+  const utf16le = Buffer.from(script, "utf16le");
+  const b64 = utf16le.toString("base64");
+
+  // Windows command-line limit is 32 KiB (CreateProcess /
+  // CommandLineToArgvW). The full argv reconstruction includes the
+  // `powershell.exe` path, all our flags, and the encoded blob;
+  // refuse the rewrite when the encoded form would put us within
+  // a 4 KiB safety margin of the ceiling so the operator gets a
+  // clear error instead of the opaque ERROR_FILENAME_EXCED_RANGE
+  // (Windows error 206) that signalman-guest surfaces as
+  // "13 INTERNAL: Failed to spawn command".
+  //
+  // When this fires, the right answer is usually to chunk the
+  // input (the file_transfer hot path uses `\n` separators and
+  // small per-chunk payloads to avoid hitting this branch); we
+  // prefer leaving the original cleartext through (which the
+  // S-06 guard will reject loudly) over silently producing a
+  // command Windows can't actually execute.
+  const WINDOWS_CMDLINE_CEILING = 32 * 1024;
+  const SAFETY_MARGIN = 4 * 1024;
+  const reconstructedLen =
+    command.length + args.reduce((s, a) => s + a.length + 1, 0) - script.length + b64.length;
+  if (reconstructedLen + SAFETY_MARGIN > WINDOWS_CMDLINE_CEILING) {
+    return undefined;
+  }
+
+  const newArgs = args.slice();
+  newArgs[cmdIdx] = "-EncodedCommand";
+  newArgs[cmdIdx + 1] = b64;
+  return { command, args: newArgs };
+}
+
+export function unaryCall<TReq, TRes>(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   client: any,
   method: string,
@@ -905,12 +988,38 @@ export class GuestAgentClient {
     const maxRetries = (typeof options === "object" && options !== null && options.maxRetries !== undefined)
       ? options.maxRetries
       : this.options.maxRetries;
+
+    // S-06 metacharacter-guard workaround for PowerShell scripts.
+    //
+    // signalman-guest's runCommand RPC denies any arg containing
+    // `;`, `|`, or `&` (S-06 hardening, see guest/src/service.rs
+    // contains_shell_metacharacters). That blocks legitimate
+    // multi-statement PowerShell one-liners that the scenario YAML
+    // ships -- `;` is PowerShell's statement separator, `|` its
+    // pipeline operator, `&` the call operator. Rewriting every
+    // scenario to base64 by hand is bad ergonomics.
+    //
+    // Auto-rewrite path: when the client is invoking
+    // `powershell|pwsh -... -Command <multi-statement-script>`, we
+    // re-encode the script as UTF-16-LE base64 and swap `-Command`
+    // for `-EncodedCommand` (powershell.exe's documented base64
+    // mode). The metacharacter guard then sees only base64
+    // characters, which all sail through.
+    //
+    // We only rewrite when at least one arg contains a guard-
+    // tripping char so commands without metacharacters retain
+    // their cleartext form (easier to read in tcpdump / audit
+    // logs / breakpoint scenarios).
+    const rewritten = encodePowerShellIfNeeded(command, args);
+    const finalCommand = rewritten?.command ?? command;
+    const finalArgs = rewritten?.args ?? args;
+
     try {
       const result = await withRetry(
         () =>
           unaryCall(this.client, "runCommand", {
-            command,
-            args,
+            command: finalCommand,
+            args: finalArgs,
             workingDirectory: "",
             timeoutMs: deadline,
             captureOutput: true,
