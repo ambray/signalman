@@ -25,18 +25,18 @@ ROADMAP-quoted top-line numbers come from the same counting method.
 | Language       | Level                       | Files | Tests | Location |
 |----------------|-----------------------------|-------|-------|----------|
 | TypeScript     | unit + smoke (in-process)   | 47    | 1057  | `host/src/__tests__/` |
-| TypeScript     | verb integration (in-process) | 5   | 48    | `host/src/verbs/__tests__/` |
+| TypeScript     | verb integration (in-process) | 5   | 50    | `host/src/verbs/__tests__/` |
 | Rust (guest)   | unit (mod tests)            | 9     | 133   | `guest/src/*.rs` `#[cfg(test)] mod tests` |
 | Rust (service) | unit + integration          | 8     | 110   | `service/src/*.rs`, `service/tests/*.rs` |
 | Rust (plugin)  | unit + integration          | 11    | 135   | `plugins/signalman-loom-plugin/src/*.rs`, `plugins/signalman-loom-plugin/tests/` |
 
-Totals: **1105 TypeScript** test cases across 52 files, **378 Rust**
+Totals: **1107 TypeScript** test cases across 52 files, **378 Rust**
 test cases across 28 files. ROADMAP.md reports `151 Rust + 769 TS = 920`
 as an older rounded headline — the per-call count above is the more
 granular number, and the per-class split here counts `it(...)`
 invocations from the test sources directly rather than the post-vitest
 run-time count (parameterized blocks expand at runtime). The 2026-05-09
-host coverage run expanded to **1162** vitest cases across **52** files.
+host coverage run expanded to **1164** vitest cases across **52** files.
 
 Two files are smoke tests within `host/src/__tests__/`:
 `scenario-validation.test.ts` (4 cases — walks every scenario directory
@@ -301,7 +301,7 @@ paths at **95%+**. Critical paths are: `host/src/scenarios/orchestrator.ts`,
 As of the UI browser MCP contract milestone, **coverage measurement is not wired into CI**.
 The tooling exists and can be run locally, and the current host run is
 above the product target: `npm --prefix host run coverage` reports
-**86.72% statements / 81.40% branches** across 1162 vitest cases.
+**86.66% statements / 80.77% branches** across 1164 vitest cases.
 
 - TypeScript: `cd host && npx vitest run --coverage`. The
   `@vitest/coverage-v8` package is already in `host/package.json`

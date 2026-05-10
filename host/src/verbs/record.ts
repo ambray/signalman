@@ -30,12 +30,40 @@ export interface RecordResult {
   message: string;
 }
 
+export interface RecordedMcpCallInput {
+  tool: string;
+  params: unknown;
+  result?: unknown;
+  error?: unknown;
+  started_at?: string;
+  finished_at?: string;
+  duration_ms?: number;
+}
+
+interface ActiveRecording {
+  recording_id: string;
+  state_path: string;
+  calls_path: string;
+  expires_at: string;
+  captured_call_count: number;
+}
+
 export class RecordValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "RecordValidationError";
   }
 }
+
+const activeRecordings = new Map<string, ActiveRecording>();
+let lastDiscoveryAt = 0;
+const DISCOVERY_INTERVAL_MS = 5_000;
+const MAX_STRING_LENGTH = 4_096;
+const MAX_ARRAY_ITEMS = 50;
+const MAX_OBJECT_KEYS = 100;
+const MAX_REDACTION_DEPTH = 6;
+const SENSITIVE_KEY_RE =
+  /(?:password|passwd|pwd|token|secret|credential|authorization|auth|api[_-]?key|bearer|private[_-]?key)/i;
 
 export function runRecord(params: RecordParams, cwd: string = process.cwd()): RecordResult {
   const name = validateRecordingName(params.name);
@@ -67,6 +95,13 @@ export function runRecord(params: RecordParams, cwd: string = process.cwd()): Re
   };
   fs.writeFileSync(statePath, JSON.stringify(state, null, 2) + "\n");
   fs.writeFileSync(callsPath, "");
+  registerActiveRecording({
+    recording_id: recordingId,
+    state_path: statePath,
+    calls_path: callsPath,
+    expires_at: expiresAt.toISOString(),
+    captured_call_count: 0,
+  });
 
   return {
     status: "recording",
@@ -82,6 +117,49 @@ export function runRecord(params: RecordParams, cwd: string = process.cwd()): Re
     message:
       "Recording session started. Capture hooks will append MCP calls to calls.jsonl in a follow-up v0.2.0 slice.",
   };
+}
+
+export function recordMcpCall(input: RecordedMcpCallInput, cwd: string = process.cwd()): void {
+  try {
+    refreshActiveRecordings(cwd);
+    if (activeRecordings.size === 0) return;
+
+    for (const rec of Array.from(activeRecordings.values())) {
+      if (isExpired(rec.expires_at)) {
+        markRecordingExpired(rec);
+        activeRecordings.delete(rec.recording_id);
+        continue;
+      }
+
+      const seq = rec.captured_call_count;
+      const event = {
+        schema_version: 1,
+        seq,
+        ts: input.finished_at ?? new Date().toISOString(),
+        recording_id: rec.recording_id,
+        tool: input.tool,
+        started_at: input.started_at,
+        finished_at: input.finished_at,
+        duration_ms: input.duration_ms,
+        ok: input.error == null,
+        params_redacted: sanitizeForRecording(input.params),
+        result_redacted: input.error == null ? sanitizeForRecording(input.result) : undefined,
+        error: input.error == null ? undefined : sanitizeErrorForRecording(input.error),
+      };
+
+      fs.appendFileSync(rec.calls_path, JSON.stringify(event) + "\n");
+      rec.captured_call_count += 1;
+      updateCapturedCallCount(rec);
+    }
+  } catch {
+    // Recording must never change tool semantics. A broken disk, stale path, or
+    // malformed state file should cost us capture fidelity, not scenario execution.
+  }
+}
+
+export function _resetRecordCaptureForTests(): void {
+  activeRecordings.clear();
+  lastDiscoveryAt = 0;
 }
 
 function validateRecordingName(value: string): string {
@@ -121,4 +199,142 @@ function recordingSafeName(value: string): string {
 function newRecordingId(now: Date): string {
   const ts = now.toISOString().replace(/[:.]/g, "-").replace(/Z$/, "Z");
   return `rec_${ts}_${randomBytes(3).toString("hex")}`;
+}
+
+function registerActiveRecording(recording: ActiveRecording): void {
+  activeRecordings.set(recording.recording_id, recording);
+  lastDiscoveryAt = Date.now();
+}
+
+function refreshActiveRecordings(cwd: string): void {
+  const now = Date.now();
+  if (now - lastDiscoveryAt < DISCOVERY_INTERVAL_MS) return;
+  lastDiscoveryAt = now;
+
+  const layout = resolveLayout(cwd);
+  if (!fs.existsSync(layout.recordingsDir)) return;
+
+  for (const safeNameEntry of safeReadDir(layout.recordingsDir)) {
+    if (!safeNameEntry.isDirectory()) continue;
+    const safeNameDir = path.join(layout.recordingsDir, safeNameEntry.name);
+    for (const recordingEntry of safeReadDir(safeNameDir)) {
+      if (!recordingEntry.isDirectory()) continue;
+      const statePath = path.join(safeNameDir, recordingEntry.name, "state.json");
+      const active = readActiveRecordingState(statePath);
+      if (!active) continue;
+      activeRecordings.set(active.recording_id, active);
+    }
+  }
+}
+
+function readActiveRecordingState(statePath: string): ActiveRecording | null {
+  try {
+    const state = JSON.parse(fs.readFileSync(statePath, "utf-8")) as {
+      status?: unknown;
+      recording_id?: unknown;
+      expires_at?: unknown;
+      captured_call_count?: unknown;
+      calls_path?: unknown;
+    };
+    if (state.status !== "recording") return null;
+    if (typeof state.recording_id !== "string") return null;
+    if (typeof state.expires_at !== "string" || isExpired(state.expires_at)) return null;
+    const callsRel = typeof state.calls_path === "string" ? state.calls_path : "calls.jsonl";
+    return {
+      recording_id: state.recording_id,
+      state_path: statePath,
+      calls_path: path.join(path.dirname(statePath), callsRel),
+      expires_at: state.expires_at,
+      captured_call_count:
+        typeof state.captured_call_count === "number" && Number.isInteger(state.captured_call_count)
+          ? state.captured_call_count
+          : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function safeReadDir(dir: string): fs.Dirent[] {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+function isExpired(expiresAt: string): boolean {
+  const ts = Date.parse(expiresAt);
+  return Number.isNaN(ts) || ts <= Date.now();
+}
+
+function markRecordingExpired(recording: ActiveRecording): void {
+  updateRecordingState(recording, { status: "expired" });
+}
+
+function updateCapturedCallCount(recording: ActiveRecording): void {
+  updateRecordingState(recording, { captured_call_count: recording.captured_call_count });
+}
+
+function updateRecordingState(recording: ActiveRecording, patch: Record<string, unknown>): void {
+  const current = JSON.parse(fs.readFileSync(recording.state_path, "utf-8")) as Record<string, unknown>;
+  fs.writeFileSync(recording.state_path, JSON.stringify({ ...current, ...patch }, null, 2) + "\n");
+}
+
+function sanitizeForRecording(value: unknown, depth = 0): unknown {
+  if (depth > MAX_REDACTION_DEPTH) return "[max-depth]";
+  if (value == null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") return sanitizeStringForRecording(value);
+  if (Array.isArray(value)) {
+    const items = value.slice(0, MAX_ARRAY_ITEMS).map((item) => sanitizeForRecording(item, depth + 1));
+    if (value.length > MAX_ARRAY_ITEMS) {
+      items.push(`[truncated ${value.length - MAX_ARRAY_ITEMS} items]`);
+    }
+    return items;
+  }
+  if (typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    const entries = Object.entries(value as Record<string, unknown>).slice(0, MAX_OBJECT_KEYS);
+    for (const [key, child] of entries) {
+      out[key] = SENSITIVE_KEY_RE.test(key) ? "[redacted]" : sanitizeForRecording(child, depth + 1);
+    }
+    const total = Object.keys(value as Record<string, unknown>).length;
+    if (total > MAX_OBJECT_KEYS) {
+      out.__truncated_keys = total - MAX_OBJECT_KEYS;
+    }
+    return out;
+  }
+  return String(value);
+}
+
+function sanitizeStringForRecording(value: string): string {
+  const withoutUrlCredentials = redactUrlCredentials(value);
+  if (withoutUrlCredentials.length <= MAX_STRING_LENGTH) return withoutUrlCredentials;
+  return `${withoutUrlCredentials.slice(0, MAX_STRING_LENGTH)}...[truncated ${
+    withoutUrlCredentials.length - MAX_STRING_LENGTH
+  } chars]`;
+}
+
+function redactUrlCredentials(value: string): string {
+  try {
+    const parsed = new URL(value);
+    if (!parsed.username && !parsed.password) return value;
+    parsed.username = "[redacted]";
+    parsed.password = "[redacted]";
+    return parsed.toString();
+  } catch {
+    return value;
+  }
+}
+
+function sanitizeErrorForRecording(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: sanitizeStringForRecording(error.message),
+    };
+  }
+  return {
+    message: sanitizeForRecording(error),
+  };
 }

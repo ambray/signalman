@@ -97,8 +97,9 @@ When terminal, `status` returns the full envelope (§4).
 
 Starts a durable v0.2.0 record/replay capture session under
 `.signalman/recordings/<safe-name>/<recording_id>/`. The current slice writes
-`state.json` plus an empty `calls.jsonl`; MCP/CLI capture hooks append to that
-JSONL file in the next slice.
+`state.json` plus `calls.jsonl`; MCP tool handlers append one redacted JSONL
+event per call while the session is active. On MCP server restart, Signalman
+rediscovers active, unexpired `state.json` files and resumes appending.
 
 ```json
 {
@@ -111,8 +112,10 @@ JSONL file in the next slice.
 ```
 
 Params: `name: string`, `duration_seconds?: number` (default 600, max 86400).
-The durable session contract exists before call interception so agents and CI
-can agree on where the candidate scenario capture will live.
+Captured call events include `tool`, timing, success/error status,
+`params_redacted`, and `result_redacted` or `error`. Sensitive field names are
+redacted and large strings/arrays/objects are bounded so record/replay does not
+turn into an unbounded log or secret store.
 
 ### 1.6 `signalman.status`
 

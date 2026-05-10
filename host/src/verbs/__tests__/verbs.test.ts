@@ -12,7 +12,7 @@ import * as path from "node:path";
 import { runList } from "../list.js";
 import { runDescribe, ScenarioNotFoundError } from "../describe.js";
 import { runPlan, ParameterUnresolvedError } from "../plan.js";
-import { runRecord } from "../record.js";
+import { _resetRecordCaptureForTests, recordMcpCall, runRecord } from "../record.js";
 import { runStatus } from "../status.js";
 import { _resetForTests } from "../run-store.js";
 
@@ -38,7 +38,10 @@ vms:
     guest_agent_port: 50051
 `;
 
-beforeEach(() => _resetForTests());
+beforeEach(() => {
+  _resetForTests();
+  _resetRecordCaptureForTests();
+});
 
 describe("signalman.list", () => {
   it("enumerates scenarios", () => {
@@ -236,6 +239,72 @@ describe("signalman.record", () => {
     expect(() => runRecord({ name: "demo", duration_seconds: 0 }, root)).toThrow(/duration_seconds/);
     expect(() => runRecord({ name: "demo", duration_seconds: 86_401 }, root)).toThrow(/duration_seconds/);
     expect(() => runRecord({ name: "demo", duration_seconds: 1.5 }, root)).toThrow(/duration_seconds/);
+  });
+
+  it("appends redacted MCP calls to active recordings", () => {
+    const root = makeProject({});
+    const r = runRecord({ name: "Demo Flow", duration_seconds: 30 }, root);
+
+    recordMcpCall(
+      {
+        tool: "signalman_plan",
+        params: {
+          id: "demo",
+          authToken: "secret-token",
+          nested: { password: "secret-password" },
+        },
+        result: {
+          url: "https://user:pass@example.test/path",
+          output: "x".repeat(4_200),
+        },
+        started_at: "2026-05-10T00:00:00.000Z",
+        finished_at: "2026-05-10T00:00:00.010Z",
+        duration_ms: 10,
+      },
+      root,
+    );
+
+    const lines = fs.readFileSync(r.calls_path, "utf-8").trim().split(/\r?\n/);
+    expect(lines).toHaveLength(1);
+    const event = JSON.parse(lines[0]);
+    expect(event).toMatchObject({
+      schema_version: 1,
+      seq: 0,
+      recording_id: r.recording_id,
+      tool: "signalman_plan",
+      ok: true,
+      duration_ms: 10,
+    });
+    expect(event.params_redacted.authToken).toBe("[redacted]");
+    expect(event.params_redacted.nested.password).toBe("[redacted]");
+    expect(event.result_redacted.url).not.toContain("user:pass");
+    expect(event.result_redacted.output).toContain("[truncated ");
+
+    const state = JSON.parse(fs.readFileSync(r.state_path, "utf-8"));
+    expect(state.captured_call_count).toBe(1);
+  });
+
+  it("rediscovers active recordings after process-local state is reconstituted", () => {
+    const root = makeProject({});
+    const r = runRecord({ name: "Demo Flow", duration_seconds: 30 }, root);
+    _resetRecordCaptureForTests();
+
+    recordMcpCall(
+      {
+        tool: "signalman_status",
+        params: { run_id: "run_1" },
+        error: new Error("not found"),
+      },
+      root,
+    );
+
+    const event = JSON.parse(fs.readFileSync(r.calls_path, "utf-8").trim());
+    expect(event).toMatchObject({
+      seq: 0,
+      tool: "signalman_status",
+      ok: false,
+      error: { name: "Error", message: "not found" },
+    });
   });
 });
 
