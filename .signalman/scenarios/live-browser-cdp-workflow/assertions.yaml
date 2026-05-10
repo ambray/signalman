@@ -1,0 +1,84 @@
+assertions:
+  - id: sidecar-ready
+    type: json_field
+    source: step-0
+    field: ready
+    expected: true
+    severity: critical
+    description: "The native user-session sidecar should be ready before browser CDP workflow steps"
+
+  - id: guest-http-server-ready
+    type: json_field
+    source: step-1
+    field: StatusCode
+    expected: 200
+    severity: critical
+    description: "The guest-local HTTP page should start successfully"
+
+  - id: cdp-ready
+    type: json_field
+    source: step-8
+    field: Ready
+    expected: true
+    severity: critical
+    description: "Microsoft Edge should expose the loopback CDP endpoint"
+
+  - id: browser-navigate-succeeded
+    type: json_field
+    source: step-9
+    field: success
+    expected: true
+    severity: critical
+    description: "The scenario-level browser_navigate step should reach the guest-local page"
+
+  - id: browser-click-succeeded
+    type: json_field
+    source: step-10
+    field: success
+    expected: true
+    severity: critical
+    description: "The scenario-level browser_click step should click the page button"
+
+  - id: browser-expect-matched
+    type: json_field
+    source: step-11
+    field: matched
+    expected: true
+    severity: critical
+    description: "browser_expect should observe the clicked DOM state"
+
+  - id: browser-expect-actual-state
+    type: json_field
+    source: step-11
+    field: actual_json
+    expected: "{\"clicked\":true,\"hash\":\"#clicked\",\"title\":\"Clicked\"}"
+    severity: high
+    description: "browser_expect should report the exact evaluated DOM state as JSON"
+
+  - id: browser-snapshot-captured
+    type: json_field
+    source: step-12
+    field: bytes
+    comparison: gt
+    expected: 1000
+    severity: critical
+    description: "browser_snapshot should capture a non-trivial browser screenshot"
+
+  - id: browser-snapshot-evaluated-title
+    type: json_field
+    source: step-12
+    field: evaluation.actual_json
+    expected: "\"Clicked\""
+    severity: high
+    description: "browser_snapshot should include optional BrowserEvaluate page state"
+
+  - id: cleanup-ran
+    type: json_field
+    source: step-13
+    field: Done
+    expected: true
+    severity: medium
+    description: "The scenario should clean up Edge and the guest-local HTTP server"
+
+pass_threshold: 1.0
+critical_must_pass: true

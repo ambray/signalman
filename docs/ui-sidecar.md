@@ -56,7 +56,12 @@ The host registers these MCP tools when guest-agent access is available:
 
 Scenario workflows use the same operation names without the `vm_` prefix,
 including `ui_ensure_sidecar`, `ui_open_url`, and `ui_navigate_url` for
-self-contained live smokes and browser launch/navigation flows.
+self-contained live smokes and browser launch/navigation flows. Browser CDP
+scenario workflows also expose higher-level `browser_navigate`,
+`browser_click`, `browser_expect`, and `browser_snapshot` blocks. `browser_expect`
+polls a JavaScript expression until it returns a truthy value or an expected
+JSON value, captures a failure screenshot when requested, and reports canonical
+JSON so object key order does not make equivalent DOM state fail.
 
 UI tool responses include per-RPC timing metadata. Single operations report
 `duration_ms`; snapshots split that into `screenshot_duration_ms` and
@@ -153,6 +158,12 @@ page, ensures the native sidecar, launches Edge with CDP through the interactive
 Run dialog, calls `BrowserNavigate`, `BrowserClick`, `BrowserEvaluate`, and
 `BrowserScreenshot`, writes a screenshot under `output/screenshots/`, and
 confirms the checkpoint is still present afterward.
+
+The live `live-browser-cdp-workflow` scenario validates the scenario-level
+browser blocks on `Win11_test`: it starts a guest-local HTTP page, launches Edge
+with CDP through the interactive Run dialog, calls `browser_navigate`,
+`browser_click`, `browser_expect`, and `browser_snapshot`, then asserts the
+clicked DOM state and screenshot metadata from normal scenario assertions.
 
 `vm_ui_open_url` is the current browser launch bridge: it validates the target
 as `http(s)`, opens the Windows Run dialog with `Win+R`, types the URL into the
