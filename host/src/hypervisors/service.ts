@@ -597,6 +597,54 @@ export class ServiceBackend implements HypervisorBackend {
     );
   }
 
+  /**
+   * Return a clone scoped to a different set of guest credentials.
+   * The clone shares this instance's lazy gRPC client (`_client`) so
+   * we don't pay a TLS handshake per credential switch -- that means
+   * the credential override is checked at call time (in
+   * `credentialsToWire()`), not bound into the connection.
+   *
+   * For scenarios with N VMs each declaring their own credentials,
+   * this is N cheap clones over one TCP/mTLS session to the daemon.
+   */
+  withGuestCredentials(
+    credentials: { username: string; password: string },
+  ): ServiceBackend {
+    const clone = new ServiceBackend({
+      host: this.host,
+      port: this.port,
+      certDir: this.certDir,
+      defaultDeadlineMs: this.defaultDeadlineMs,
+      guestCredentials: credentials,
+    });
+    // Share the lazy gRPC client. The cast threads through the
+    // private slot without exposing it as part of the public API.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (clone as any)._client = this._client;
+    clone.upstreamBackend = this.upstreamBackend;
+    return clone;
+  }
+
+  async setVmFirmware(
+    handle: VMHandle,
+    opts: { secureBootEnabled?: boolean },
+  ): Promise<void> {
+    // Translate the Option-style TS shape to the tri-state proto shape:
+    //   undefined  -> { *_set: false, *_value: <ignored> }
+    //   value      -> { *_set: true,  *_value: value }
+    const secureBootSet = opts.secureBootEnabled !== undefined;
+    await unaryCall(
+      this.client(),
+      "vmSetFirmware",
+      {
+        handle: handleToWire(handle),
+        secureBootSet,
+        secureBootEnabled: opts.secureBootEnabled ?? false,
+      },
+      this.defaultDeadlineMs,
+    );
+  }
+
   private credentialsToWire():
     | { username: string; password: string }
     | undefined {

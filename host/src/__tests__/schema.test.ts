@@ -287,6 +287,82 @@ describe("validateScenarioConfig — validation errors", () => {
     expect(cfg.vms[0].wait_for_heartbeat).toBe(false);
   });
 
+  it("accepts per-VM credentials with username + password", () => {
+    const cfg = validateScenarioConfig(
+      {
+        ...validScenario(),
+        vms: [
+          {
+            name: "endpoint-1",
+            template: "win11",
+            guest_agent_port: 50051,
+            credentials: { username: "test", password: "test123" },
+          },
+        ],
+      },
+      "setup.yaml",
+    );
+    expect(cfg.vms[0].credentials).toEqual({
+      username: "test",
+      password: "test123",
+    });
+  });
+
+  it("accepts ${secret:...} placeholders in credentials (substitution runs later)", () => {
+    // The schema runs before substituteRuntimeRefsDeep, so raw
+    // secret placeholders must pass the z.string() check.
+    const cfg = validateScenarioConfig(
+      {
+        ...validScenario(),
+        vms: [
+          {
+            name: "endpoint-1",
+            template: "win11",
+            guest_agent_port: 50051,
+            credentials: {
+              username: "test",
+              password: "${secret:WIN11_TEST_PASSWORD}",
+            },
+          },
+        ],
+      },
+      "setup.yaml",
+    );
+    expect(cfg.vms[0].credentials?.password).toBe(
+      "${secret:WIN11_TEST_PASSWORD}",
+    );
+  });
+
+  it("rejects credentials with empty username", () => {
+    const bad = {
+      ...validScenario(),
+      vms: [
+        {
+          name: "endpoint-1",
+          template: "win11",
+          guest_agent_port: 50051,
+          credentials: { username: "", password: "pw" },
+        },
+      ],
+    };
+    expect(() => validateScenarioConfig(bad, "setup.yaml")).toThrow();
+  });
+
+  it("rejects credentials with missing password", () => {
+    const bad = {
+      ...validScenario(),
+      vms: [
+        {
+          name: "endpoint-1",
+          template: "win11",
+          guest_agent_port: 50051,
+          credentials: { username: "test" },
+        },
+      ],
+    };
+    expect(() => validateScenarioConfig(bad, "setup.yaml")).toThrow();
+  });
+
   it("rejects kernel_debug.enabled as a string (not boolean)", () => {
     const bad = {
       ...validScenario(),

@@ -270,6 +270,18 @@ export interface VmDefinition {
   /** Kernel-debug config, copied through from setup.yaml. When
    * `enabled: true`, `resolveVms` spawns a KdSession for this VM. */
   kernel_debug?: import("./runner.js").KernelDebugConfig;
+  /**
+   * Per-VM guest credentials for PowerShell-Direct operations. When
+   * present, scenario steps targeting this VM run with these creds
+   * instead of the global `hypervisor.guestCredentials`. See
+   * `vmConfigSchema.credentials` in `host/src/scenarios/schema.ts`
+   * for the YAML-side doc and the `${secret:NAME}` substitution
+   * pattern. The orchestrator looks this up via `backendForVm`
+   * before each `executeCommand` / `copyFileToVM` / `copyFileFromVM`
+   * dispatch. Requires a backend that implements
+   * `withGuestCredentials` (today: `ServiceBackend`).
+   */
+  credentials?: { username: string; password: string };
 }
 
 /** Result of a single setup/teardown step. */
@@ -575,6 +587,30 @@ export class ScenarioOrchestrator {
   private readonly toolRegistry: import("../kernel-debug/tool-registry.js").ToolRegistry;
   private processExitCleanup: (() => void) | undefined;
 
+  /**
+   * Per-VM guest-credential overrides, populated from
+   * `scenarioConfig.vms[].credentials` on each scenario run. Looked
+   * up by `backendForVm(name)` to scope the active backend to the
+   * right credentials before dispatching guest-bound calls.
+   *
+   * Map shape: VM name -> { username, password }. Missing entries
+   * mean "use the default backend credentials" (the global
+   * `hypervisor.guestCredentials` from `.signalman/config.yaml`).
+   */
+  private vmCredentials: Map<
+    string,
+    { username: string; password: string }
+  > = new Map();
+
+  /**
+   * Per-VM backend-clone cache. Built lazily by `backendForVm` so we
+   * don't pay the clone cost on every dispatch. Cleared (alongside
+   * `vmCredentials`) by `rebuildVmCredentialsIndex` so back-to-back
+   * scenarios on the same orchestrator instance don't keep stale
+   * credential-scoped clones in memory.
+   */
+  private vmBackendCache: Map<string, HypervisorBackend> = new Map();
+
   constructor(
     private backend: HypervisorBackend,
     private guestClients: Map<string, GuestAgentClient>,
@@ -602,6 +638,73 @@ export class ScenarioOrchestrator {
    */
   getGuestClient(vmName: string): GuestAgentClient | undefined {
     return this.guestClients.get(vmName);
+  }
+
+  /**
+   * Rebuild the per-VM credentials index from a fresh `VmDefinition[]`.
+   * Called once per scenario run from the top of `runScenario` so
+   * back-to-back runs of different scenarios on the same orchestrator
+   * instance don't see each other's credential overrides.
+   *
+   * Also validates that any VM declaring credentials targets a backend
+   * that can honor them -- otherwise the scenario would silently run
+   * with the wrong creds. Backends without `withGuestCredentials`
+   * (today: direct `HyperVBackend`) make this a hard error rather
+   * than a silent fallthrough.
+   */
+  private rebuildVmCredentialsIndex(vmDefs: VmDefinition[]): void {
+    this.vmCredentials.clear();
+    this.vmBackendCache.clear();
+    const offenders: string[] = [];
+    for (const def of vmDefs) {
+      if (!def.credentials) continue;
+      this.vmCredentials.set(def.name, def.credentials);
+      if (!this.backend.withGuestCredentials) {
+        offenders.push(def.name);
+      }
+    }
+    if (offenders.length > 0) {
+      throw new Error(
+        `Scenario declares per-VM credentials on ${offenders.join(", ")}, ` +
+          `but the active backend '${this.backend.name}' does not support ` +
+          `credential overrides (no withGuestCredentials method). ` +
+          `Either install the signalman service daemon (signalman-service install) ` +
+          `so the ServiceBackend handles guest credentials, or remove the ` +
+          `vms[].credentials block(s) and align local VM accounts with the ` +
+          `global hypervisor.guestCredentials in .signalman/config.yaml.`,
+      );
+    }
+  }
+
+  /**
+   * Resolve the backend instance to use for guest-bound dispatch on
+   * the given VM. Returns the default backend when no per-VM
+   * credentials are declared, or a credentials-scoped clone (cached)
+   * when they are. Cache TTL is the scenario run -- cleared by
+   * `rebuildVmCredentialsIndex` at the start of the next run.
+   *
+   * Use this in front of `executeCommand`, `copyFileToVM`, and
+   * `copyFileFromVM` for any call that originates from a scenario
+   * step. Bare uses of `this.backend.*` are still valid for non-
+   * credential-bearing methods (lifecycle, checkpoints, listVMs).
+   */
+  private backendForVm(vmName: string): HypervisorBackend {
+    const creds = this.vmCredentials.get(vmName);
+    if (!creds) return this.backend;
+    const cached = this.vmBackendCache.get(vmName);
+    if (cached) return cached;
+    if (!this.backend.withGuestCredentials) {
+      // Defensive -- rebuildVmCredentialsIndex should have failed
+      // already, but if a caller bypasses the index this gives a
+      // clear runtime error instead of a silent default-creds fall.
+      throw new Error(
+        `Backend '${this.backend.name}' does not support per-VM credentials, ` +
+          `but a credential override was requested for VM '${vmName}'.`,
+      );
+    }
+    const wrapped = this.backend.withGuestCredentials(creds);
+    this.vmBackendCache.set(vmName, wrapped);
+    return wrapped;
   }
 
   /**
@@ -861,7 +964,14 @@ export class ScenarioOrchestrator {
     const client = this.guestClients.get(vmName);
     const resolvedHostPath = resolveHostFilePath(hostPath);
     if (!client) {
-      await this.backend.copyFileToVM(handle, resolvedHostPath, guestPath);
+      // backendForVm honors any per-VM credentials declared in the
+      // scenario's vms[].credentials block; falls back to the global
+      // backend when none are set.
+      await this.backendForVm(vmName).copyFileToVM(
+        handle,
+        resolvedHostPath,
+        guestPath,
+      );
       return;
     }
 
@@ -914,7 +1024,14 @@ export class ScenarioOrchestrator {
     const client = this.guestClients.get(vmName);
     const resolvedHostPath = resolveHostFilePath(hostPath);
     if (!client) {
-      await this.backend.copyFileFromVM(handle, guestPath, resolvedHostPath);
+      // backendForVm honors any per-VM credentials declared in the
+      // scenario's vms[].credentials block; falls back to the global
+      // backend when none are set.
+      await this.backendForVm(vmName).copyFileFromVM(
+        handle,
+        guestPath,
+        resolvedHostPath,
+      );
       return;
     }
     fs.mkdirSync(path.dirname(resolvedHostPath), { recursive: true });
@@ -1035,7 +1152,14 @@ export class ScenarioOrchestrator {
         guest_agent_port: vm.guest_agent_port,
         network: vm.network,
         kernel_debug: vm.kernel_debug,
+        credentials: vm.credentials,
       }));
+      // Cache per-VM credential definitions for backendForVm lookups
+      // during step dispatch. Re-populated on each scenario run so
+      // back-to-back runs of different scenarios don't leak each
+      // other's creds.
+      this.rebuildVmCredentialsIndex(vmDefs);
+
       // v0.3.0-3 — classify each VM's network. Done from vmDefs (not
       // vmMap) so the class reflects the scenario's declared intent,
       // not just the resolved backend handle. Per-VM classes are
@@ -1851,7 +1975,9 @@ export class ScenarioOrchestrator {
                   { timeoutMs, runAs },
                 );
               } else {
-                const result = await this.backend.executeCommand(
+                // Per-VM credentials, if declared, route via
+                // backendForVm. Default backend is used when none.
+                const result = await this.backendForVm(vmName).executeCommand(
                   handle,
                   step.command as string,
                   cmdArgs,
@@ -2016,7 +2142,14 @@ export class ScenarioOrchestrator {
             return await client.runCommand(command, args, { timeoutMs, runAs });
           }
           if (handle) {
-            return await this.backend.executeCommand(handle, command, args, timeoutMs);
+            // Per-VM credentials, if declared, route via backendForVm.
+            // Default backend is used when none.
+            return await this.backendForVm(vmName).executeCommand(
+              handle,
+              command,
+              args,
+              timeoutMs,
+            );
           }
           return undefined;
         };

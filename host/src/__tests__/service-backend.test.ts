@@ -377,6 +377,74 @@ describe("ServiceBackend.copyFileToVM / copyFileFromVM", () => {
   });
 });
 
+describe("ServiceBackend.withGuestCredentials", () => {
+  it("returns a clone scoped to the supplied credentials", async () => {
+    const capturedReqs: unknown[] = [];
+    fakeState.streams.set("vmRunCommand", (req) => {
+      capturedReqs.push(req);
+      return makeStream([
+        { result: { exitCode: 0, stdout: "", stderr: "", durationMs: 1 } },
+      ]);
+    });
+    const original = new ServiceBackend({
+      guestCredentials: { username: "default", password: "default-pw" },
+    });
+    const scoped = original.withGuestCredentials({
+      username: "vm-specific",
+      password: "vm-specific-pw",
+    });
+
+    // Calls on the scoped clone use the override...
+    await scoped.executeCommand(
+      { id: "1", name: "vm-a", backend: "hyperv" },
+      "whoami",
+    );
+    // ...while calls on the original still use the default creds.
+    await original.executeCommand(
+      { id: "2", name: "vm-b", backend: "hyperv" },
+      "whoami",
+    );
+
+    expect(capturedReqs).toHaveLength(2);
+    expect(capturedReqs[0]).toMatchObject({
+      credentials: { username: "vm-specific", password: "vm-specific-pw" },
+    });
+    expect(capturedReqs[1]).toMatchObject({
+      credentials: { username: "default", password: "default-pw" },
+    });
+    original.dispose();
+  });
+
+  it("does not mutate the original backend's credentials", async () => {
+    fakeState.streams.set("vmRunCommand", () =>
+      makeStream([
+        { result: { exitCode: 0, stdout: "", stderr: "", durationMs: 1 } },
+      ]),
+    );
+    const original = new ServiceBackend({
+      guestCredentials: { username: "default", password: "default-pw" },
+    });
+    // Calling withGuestCredentials must not poison the original; the
+    // clone is independent and the original keeps its baseline creds.
+    original.withGuestCredentials({ username: "other", password: "other-pw" });
+    let capturedReq: unknown = null;
+    fakeState.streams.set("vmRunCommand", (req) => {
+      capturedReq = req;
+      return makeStream([
+        { result: { exitCode: 0, stdout: "", stderr: "", durationMs: 1 } },
+      ]);
+    });
+    await original.executeCommand(
+      { id: "1", name: "vm-a", backend: "hyperv" },
+      "whoami",
+    );
+    expect(capturedReq).toMatchObject({
+      credentials: { username: "default", password: "default-pw" },
+    });
+    original.dispose();
+  });
+});
+
 describe("ServiceBackend.waitForHeartbeat", () => {
   it("returns true when the stream reports Ready", async () => {
     fakeState.streams.set("vmWaitAgent", () =>

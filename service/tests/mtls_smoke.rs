@@ -137,6 +137,13 @@ impl Backend for MockBackend {
     async fn set_vm_processor(&self, _h: &VmHandle, _count: u32) -> BackendResult<()> {
         Ok(())
     }
+    async fn set_vm_firmware(
+        &self,
+        _h: &VmHandle,
+        _secure_boot_enabled: Option<bool>,
+    ) -> BackendResult<()> {
+        Ok(())
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

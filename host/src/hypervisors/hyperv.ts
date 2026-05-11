@@ -725,4 +725,22 @@ SELECT * FROM __InstanceModificationEvent WITHIN 1
     const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
     await ps(`Set-VMProcessor -VMName '${safeName}' -Count ${count}`);
   }
+
+  async setVmFirmware(
+    handle: VMHandle,
+    opts: { secureBootEnabled?: boolean },
+  ): Promise<void> {
+    // Empty request is an error rather than a silent no-op so a
+    // CLI typo (forgetting --secure-boot) doesn't pretend to succeed.
+    if (opts.secureBootEnabled === undefined) {
+      throw new Error("setVmFirmware called with no fields to set");
+    }
+    const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
+    const parts = [`-VMName '${safeName}'`];
+    // Set-VMFirmware accepts the literal tokens On / Off; an
+    // unrecognized value throws inside PowerShell.
+    const val = opts.secureBootEnabled ? "On" : "Off";
+    parts.push(`-EnableSecureBoot ${val}`);
+    await ps(`Set-VMFirmware ${parts.join(" ")}`);
+  }
 }
