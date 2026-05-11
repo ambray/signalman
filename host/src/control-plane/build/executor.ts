@@ -175,6 +175,13 @@ export interface RunBuildOptions {
    * to inheriting process.stderr.
    */
   out?: NodeJS.WritableStream;
+  /**
+   * Optional Ed25519 private key (PEM, PKCS#8) to sign the release
+   * manifest with (PR 10a). When supplied, the release row's
+   * `signature_b64` + `signed_by` are populated. When omitted, the
+   * release is unsigned — current default.
+   */
+  signingKeyPem?: string;
 }
 
 export interface RunBuildResult {
@@ -182,6 +189,8 @@ export interface RunBuildResult {
   manifest: ReleaseManifest;
   manifestSha256: string;
   artifacts: Artifact[];
+  /** Set when the build was signed; mirrors the values persisted on the release. */
+  signature?: { signatureB64: string; signedBy: string };
 }
 
 const STDERR_TAIL_BYTES = 4096;
@@ -286,6 +295,18 @@ export async function runBuild(opts: RunBuildOptions): Promise<RunBuildResult> {
     });
     const manifestSha256 = hashManifest(manifest);
 
+    // Optional Ed25519 signature over the canonical manifest bytes.
+    // The release row records (signature_b64, signed_by) so verifiers
+    // with the matching public key can prove integrity + identity.
+    let signature: { signatureB64: string; signedBy: string } | undefined;
+    if (opts.signingKeyPem) {
+      const { signManifest } = await import("./signing.js");
+      signature = signManifest(manifest, opts.signingKeyPem);
+      out.write(
+        `[release build] signed manifest with key ${signature.signedBy}\n`,
+      );
+    }
+
     const finished = await controlPlane.releases.update(release.id, {
       status: "ready",
       manifestSha256,
@@ -294,6 +315,12 @@ export async function runBuild(opts: RunBuildOptions): Promise<RunBuildResult> {
       // Persist the parsed build.yaml so the deploy executor + health
       // verbs can rediscover probes without re-cloning the source tree.
       buildYamlJson: JSON.stringify(parsed),
+      ...(signature
+        ? {
+            signedBy: signature.signedBy,
+            signatureB64: signature.signatureB64,
+          }
+        : {}),
     });
 
     await controlPlane.auditLog.append({
@@ -302,10 +329,21 @@ export async function runBuild(opts: RunBuildOptions): Promise<RunBuildResult> {
       action: "release.build.completed",
       entityType: "release",
       entityId: release.id,
-      detail: { tag, manifestSha256, artifactCount: artifactRows.length },
+      detail: {
+        tag,
+        manifestSha256,
+        artifactCount: artifactRows.length,
+        ...(signature ? { signedBy: signature.signedBy } : {}),
+      },
     });
 
-    return { release: finished, manifest, manifestSha256, artifacts: artifactRows };
+    return {
+      release: finished,
+      manifest,
+      manifestSha256,
+      artifacts: artifactRows,
+      ...(signature ? { signature } : {}),
+    };
   } catch (err) {
     const detail =
       err instanceof Error ? { error: err.message, name: err.name } : { error: String(err) };

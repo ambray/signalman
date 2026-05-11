@@ -60,14 +60,21 @@ import {
   runReleaseRollback,
   runHealthCheck,
   runHealthHistory,
+  runReleaseVerify,
 } from "./verbs/control-plane.js";
 // PR 6 — `signalman serve` HTTP control plane.
 // PR 7 — `signalman api-key create`.
 // PR 8 — `signalman runner register/start`, `release build --remote`.
+// PR 10a — `signalman key generate/fingerprint`, `release verify`, build --sign.
 import { startServer } from "./http/index.js";
 import { generateApiKey } from "./http/auth.js";
 import { ControlPlane } from "./control-plane/index.js";
 import { loadConfig } from "./config.js";
+import {
+  fingerprintPublicKey,
+  generateKeypair,
+} from "./control-plane/build/index.js";
+import * as fsp from "node:fs/promises";
 import {
   HttpClient,
   HttpClientError,
@@ -116,7 +123,8 @@ function parseArgs(argv: string[]): ParsedArgs {
         key === "bootstrap" ||
         key === "cleanup-on-failure" ||
         key === "wait-guest" ||
-        key === "remote"
+        key === "remote" ||
+        key === "sign"
       ) {
         flags.add(key);
         if (eq >= 0) {
@@ -1302,7 +1310,10 @@ async function cmdProductRemove(args: ParsedArgs): Promise<number> {
 
 async function cmdRelease(args: ParsedArgs): Promise<number> {
   const sub = args.positional.shift();
-  if (!sub) usageError("release requires a subcommand (build, list, show, deploy, rollback)");
+  if (!sub)
+    usageError(
+      "release requires a subcommand (build, list, show, deploy, rollback, verify)",
+    );
   switch (sub) {
     case "build":
       return await cmdReleaseBuild(args);
@@ -1314,6 +1325,8 @@ async function cmdRelease(args: ParsedArgs): Promise<number> {
       return await cmdReleaseDeploy(args);
     case "rollback":
       return await cmdReleaseRollback(args);
+    case "verify":
+      return await cmdReleaseVerify(args);
     default:
       usageError(`unknown release subcommand: ${sub}`);
   }
@@ -1767,6 +1780,128 @@ async function cmdApiKeyRevoke(args: ParsedArgs): Promise<number> {
   }
 }
 
+// ── key (PR 10a — release signing) ──────────────────────────────────
+
+async function cmdKey(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) usageError("key requires a subcommand (generate, fingerprint)");
+  switch (sub) {
+    case "generate":
+      return await cmdKeyGenerate(args);
+    case "fingerprint":
+      return await cmdKeyFingerprint(args);
+    default:
+      usageError(`unknown key subcommand: ${sub}`);
+  }
+}
+
+async function cmdKeyGenerate(args: ParsedArgs): Promise<number> {
+  const out = args.options.get("out") ?? path.join(os.homedir(), ".signalman", "keys");
+  const name = args.options.get("name") ?? "signing";
+  const force = args.flags.has("force");
+  const format = args.options.get("format");
+  const pubPath = path.join(out, `${name}.pub`);
+  const privPath = path.join(out, `${name}.key`);
+  if (!force) {
+    for (const p of [pubPath, privPath]) {
+      try {
+        await fsp.access(p);
+        console.error(
+          `signalman key generate: ${p} already exists. Re-run with --force to overwrite (loses the existing key!).`,
+        );
+        return 5;
+      } catch {
+        // ENOENT: good, slot is free.
+      }
+    }
+  }
+  await fsp.mkdir(out, { recursive: true });
+  const kp = generateKeypair();
+  // Public key: world-readable; private key: mode 0600.
+  await fsp.writeFile(pubPath, kp.publicKeyPem, "utf-8");
+  await fsp.writeFile(privPath, kp.privateKeyPem, { encoding: "utf-8", mode: 0o600 });
+  const fp = fingerprintPublicKey(kp.publicKeyPem);
+  if (format === "json") {
+    emitJson({ public_key: pubPath, private_key: privPath, fingerprint: fp });
+  } else {
+    process.stdout.write(
+      `Generated Ed25519 signing keypair\n` +
+        `  public:      ${pubPath}\n` +
+        `  private:     ${privPath}  (mode 0600 — guard this file)\n` +
+        `  fingerprint: ${fp}\n`,
+    );
+  }
+  return 0;
+}
+
+async function cmdKeyFingerprint(args: ParsedArgs): Promise<number> {
+  const keyPath = args.positional[0] ?? args.options.get("path");
+  if (!keyPath) usageError("key fingerprint requires <public_key_path>");
+  let pem: string;
+  try {
+    pem = await fsp.readFile(resolveCliHostPath(keyPath), "utf-8");
+  } catch (err) {
+    console.error(
+      `signalman key fingerprint: could not read '${keyPath}': ${(err as Error).message}`,
+    );
+    return 5;
+  }
+  try {
+    const fp = fingerprintPublicKey(pem);
+    if (args.options.get("format") === "json") {
+      emitJson({ fingerprint: fp });
+    } else {
+      process.stdout.write(`${fp}\n`);
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman key fingerprint: ${(err as Error).message}`);
+    return 5;
+  }
+}
+
+async function cmdReleaseVerify(args: ParsedArgs): Promise<number> {
+  const releaseId = args.positional[0] ?? args.options.get("release");
+  const pubKeyPath = args.options.get("public-key");
+  if (!releaseId) usageError("release verify requires <release_id>");
+  if (!pubKeyPath) usageError("release verify requires --public-key <PATH>");
+  let pem: string;
+  try {
+    pem = await fsp.readFile(resolveCliHostPath(pubKeyPath), "utf-8");
+  } catch (err) {
+    console.error(
+      `signalman release verify: could not read --public-key '${pubKeyPath}': ${(err as Error).message}`,
+    );
+    return 5;
+  }
+  const format = args.options.get("format");
+  try {
+    const result = await withControlPlane((cp) =>
+      runReleaseVerify(cp, { releaseId, publicKeyPem: pem }),
+    );
+    if (format === "json") {
+      emitJson(result);
+      return result.verified ? 0 : 1;
+    }
+    if (result.verified) {
+      process.stdout.write(
+        `OK — release ${result.release.tag} (${result.release.id})\n` +
+          `  signed_by: ${result.release.signedBy}\n` +
+          `  manifest:  ${result.release.manifestSha256}\n`,
+      );
+      return 0;
+    }
+    process.stderr.write(
+      `FAIL — release ${result.release.tag} (${result.release.id})\n` +
+        `  ${result.reason}\n`,
+    );
+    return 1;
+  } catch (err) {
+    console.error(`signalman release verify: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
 // ── serve (PR 6 — HTTP control plane) ───────────────────────────────
 
 async function cmdServe(args: ParsedArgs): Promise<number> {
@@ -1871,12 +2006,30 @@ async function cmdReleaseBuild(args: ParsedArgs): Promise<number> {
   if (remote) {
     return await cmdReleaseBuildRemote(args, { productName, tag });
   }
+  // PR 10a: optional `--sign --key <path>` reads the Ed25519 private
+  // key + tells the build executor to sign the manifest.
+  const sign = args.flags.has("sign");
+  const keyPath = args.options.get("key");
+  if (sign && !keyPath) {
+    usageError("release build --sign requires --key <PATH_TO_PRIVATE_KEY_PEM>");
+  }
+  let signingKeyPem: string | undefined;
+  if (sign && keyPath) {
+    try {
+      signingKeyPem = await fsp.readFile(resolveCliHostPath(keyPath), "utf-8");
+    } catch (err) {
+      console.error(
+        `signalman release build: could not read --key '${keyPath}': ${(err as Error).message}`,
+      );
+      return 5;
+    }
+  }
   const format = args.options.get("format");
   try {
     const result = await withControlPlane((cp) =>
       runReleaseBuild(
         cp,
-        { productName, tag, workDir },
+        { productName, tag, workDir, signingKeyPem },
         { out: process.stderr },
       ),
     );
@@ -1885,11 +2038,15 @@ async function cmdReleaseBuild(args: ParsedArgs): Promise<number> {
         release: result.release,
         manifest_sha256: result.manifestSha256,
         artifact_count: result.artifacts.length,
+        signed_by: result.signature?.signedBy,
       });
     } else {
       process.stdout.write(
         `Release ${result.release.tag} ready (id=${result.release.id})\n` +
           `  manifest: ${result.manifestSha256}\n` +
+          (result.signature
+            ? `  signed_by: ${result.signature.signedBy}\n`
+            : "") +
           `  artifacts: ${result.artifacts.length}\n`,
       );
     }
@@ -2107,6 +2264,8 @@ async function main(argv: string[]): Promise<number> {
         return await cmdApiKey(args);
       case "runner":
         return await cmdRunner(args);
+      case "key":
+        return await cmdKey(args);
       default:
         usageError(`unknown verb: ${verb}`);
     }
@@ -2155,6 +2314,7 @@ function printHelp(): void {
       "  serve [--port P] [--host H]   (start the control-plane HTTP server)",
       "  api-key <subcommand>   (create, list, revoke)",
       "  runner <subcommand>    (register, start)",
+      "  key <subcommand>       (generate, fingerprint — Ed25519 release signing)",
       "",
       "Exit codes (per docs/design/p0-mcp-surface.md §5):",
       "  0  pass        2  workflow fail        4  infra error",

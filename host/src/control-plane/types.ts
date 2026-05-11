@@ -59,7 +59,18 @@ export interface Release {
   tag: string;
   commitSha: string;
   manifestSha256: string | null;
+  /**
+   * Public-key fingerprint of the signer (first 16 hex chars of
+   * `sha256(DER(public key))`). Paired with `signatureB64` for verifies.
+   * Null on unsigned releases.
+   */
   signedBy: string | null;
+  /**
+   * Base64-encoded Ed25519 signature over the canonical manifest JSON.
+   * Verify with the public key whose fingerprint matches `signedBy`.
+   * Null on unsigned releases. (PR 10a — manifest signing.)
+   */
+  signatureB64: string | null;
   builtAt: string | null;
   builtByRunnerId: string | null;
   status: ReleaseStatus;

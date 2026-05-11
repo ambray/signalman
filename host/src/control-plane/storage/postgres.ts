@@ -331,6 +331,7 @@ function mapRelease(row: SqlRow): Release {
     commitSha: row.commit_sha as string,
     manifestSha256: (row.manifest_sha256 as string | null) ?? null,
     signedBy: (row.signed_by as string | null) ?? null,
+    signatureB64: (row.signature_b64 as string | null) ?? null,
     builtAt: (row.built_at as string | null) ?? null,
     builtByRunnerId: (row.built_by_runner_id as string | null) ?? null,
     status: row.status as ReleaseStatus,
@@ -742,6 +743,7 @@ class PgReleaseRepo implements ReleaseRepo {
       ...bind,
       manifest_sha256: null,
       signed_by: null,
+      signature_b64: null,
       built_at: null,
       built_by_runner_id: null,
       build_yaml_json: null,
@@ -794,6 +796,7 @@ class PgReleaseRepo implements ReleaseRepo {
         Release,
         | "manifestSha256"
         | "signedBy"
+        | "signatureB64"
         | "builtAt"
         | "builtByRunnerId"
         | "status"
@@ -807,6 +810,7 @@ class PgReleaseRepo implements ReleaseRepo {
       id: existing.id,
       manifest_sha256: patch.manifestSha256 ?? existing.manifestSha256,
       signed_by: patch.signedBy ?? existing.signedBy,
+      signature_b64: patch.signatureB64 ?? existing.signatureB64,
       built_at: patch.builtAt ?? existing.builtAt,
       built_by_runner_id: patch.builtByRunnerId ?? existing.builtByRunnerId,
       status: patch.status ?? existing.status,
@@ -815,7 +819,7 @@ class PgReleaseRepo implements ReleaseRepo {
     };
     await pgQuery(
       this.pool,
-      "UPDATE release SET manifest_sha256 = @manifest_sha256, signed_by = @signed_by, built_at = @built_at, built_by_runner_id = @built_by_runner_id, status = @status, build_yaml_json = @build_yaml_json, updated_at = @updated_at WHERE id = @id",
+      "UPDATE release SET manifest_sha256 = @manifest_sha256, signed_by = @signed_by, signature_b64 = @signature_b64, built_at = @built_at, built_by_runner_id = @built_by_runner_id, status = @status, build_yaml_json = @build_yaml_json, updated_at = @updated_at WHERE id = @id",
       bind,
     );
     return mapRelease({
