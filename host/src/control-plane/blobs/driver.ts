@@ -43,6 +43,18 @@ export interface BlobDriver {
 
   /** Existence check. */
   exists(uri: string): Promise<boolean>;
+
+  /**
+   * Reconstruct a blob's URI from `(orgId, sha256)`. Used by the
+   * control-plane HTTP layer's `GET /v1/blobs/:sha256` to look up
+   * the driver-specific URI given an operator-supplied sha. The
+   * driver applies the same layout it writes during `put()`.
+   *
+   * Implementations MUST validate `sha256` (regex-check 64 hex chars
+   * is sufficient) and `orgId` (no path separators / `..`) to
+   * prevent traversal-style attacks on driver-local layouts.
+   */
+  resolveBySha(orgId: string, sha256: string): string;
 }
 
 /** Thrown when a referenced blob URI is not present in the store. */

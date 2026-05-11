@@ -126,6 +126,16 @@ export class LocalFsBlobDriver implements BlobDriver {
     return this.fileExists(this.fileFromUri(uri));
   }
 
+  resolveBySha(orgId: string, sha256: string): string {
+    // `pathFor` runs the same input validation `put` uses, so callers
+    // can't drive a traversal via a crafted sha or org id.
+    const p = this.pathFor(orgId, sha256);
+    const normalized = p.replace(/\\/g, "/");
+    return normalized.startsWith("/")
+      ? `file://${normalized}`
+      : `file:///${normalized}`;
+  }
+
   // ── Internals ─────────────────────────────────────────────────────
 
   private pathFor(orgId: string, sha256: string): string {

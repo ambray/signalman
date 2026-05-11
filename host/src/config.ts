@@ -128,11 +128,25 @@ export interface SignalmanConfig {
       url: string;
     };
     /** Blob store driver for artifacts. */
-    blobs?: {
-      driver: "local" | "s3";
-      /** Local: filesystem root. S3: bucket name (additional S3 fields land in v0.3). */
-      root: string;
-    };
+    /**
+     * Blob storage configuration. Tagged-union by `driver`:
+     *   * `local` — `root` is a filesystem path.
+     *   * `s3`    — `bucket` required; `prefix`, `region`, `endpoint`,
+     *               `accessKeyId`/`secretAccessKey` optional. Credentials
+     *               default to the AWS SDK chain (env, IMDS, etc.) when
+     *               unspecified.
+     */
+    blobs?:
+      | { driver: "local"; root: string }
+      | {
+          driver: "s3";
+          bucket: string;
+          prefix?: string;
+          region?: string;
+          endpoint?: string;
+          accessKeyId?: string;
+          secretAccessKey?: string;
+        };
   };
 }
 
@@ -365,10 +379,22 @@ function mergeConfig(
       };
     }
     if (partial.controlPlane.blobs) {
-      cp.blobs = {
-        driver: partial.controlPlane.blobs.driver,
-        root: partial.controlPlane.blobs.root,
-      };
+      const b = partial.controlPlane.blobs;
+      if (b.driver === "s3") {
+        cp.blobs = {
+          driver: "s3",
+          bucket: b.bucket,
+          ...(b.prefix !== undefined ? { prefix: b.prefix } : {}),
+          ...(b.region !== undefined ? { region: b.region } : {}),
+          ...(b.endpoint !== undefined ? { endpoint: b.endpoint } : {}),
+          ...(b.accessKeyId !== undefined ? { accessKeyId: b.accessKeyId } : {}),
+          ...(b.secretAccessKey !== undefined
+            ? { secretAccessKey: b.secretAccessKey }
+            : {}),
+        };
+      } else {
+        cp.blobs = { driver: "local", root: b.root };
+      }
     }
     result.controlPlane = cp;
   }
