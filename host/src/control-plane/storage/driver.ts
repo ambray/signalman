@@ -24,6 +24,8 @@ import type {
   Deployment,
   HealthCheck,
   HealthStatus,
+  Job,
+  JobStatus,
   Org,
   OrgTier,
   Product,
@@ -203,6 +205,38 @@ export interface ScenarioRepo {
   softDelete(id: string): Promise<void>;
 }
 
+export interface JobRepo {
+  create(input: {
+    orgId: string;
+    kind: string;
+    input?: Record<string, unknown>;
+  }): Promise<Job>;
+  get(id: string): Promise<Job | null>;
+  listForOrg(
+    orgId: string,
+    opts?: { limit?: number; status?: JobStatus },
+  ): Promise<Job[]>;
+  /**
+   * Atomically claim the oldest pending job for an org. Returns null
+   * when the queue is empty. The repo guarantees at most one worker
+   * sees a given job in `claimed` state, even under concurrent calls.
+   */
+  claimNext(input: {
+    orgId: string;
+    claimedBy: string;
+  }): Promise<Job | null>;
+  /** Set status / started_at / completed_at / result / error. */
+  update(
+    id: string,
+    patch: Partial<
+      Pick<
+        Job,
+        "status" | "result" | "error" | "startedAt" | "completedAt"
+      >
+    >,
+  ): Promise<Job>;
+}
+
 export interface RunRepo {
   create(input: {
     orgId: string;
@@ -244,6 +278,9 @@ export interface StorageDriver {
   // PR 5:
   readonly scenarios: ScenarioRepo;
   readonly runs: RunRepo;
+
+  // PR 8 — runner queue:
+  readonly jobs: JobRepo;
 }
 
 /** Thrown by repos that are declared in this PR but not yet implemented. */

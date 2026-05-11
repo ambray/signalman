@@ -129,4 +129,7 @@ export class ControlPlane {
   get runs() {
     return this.storage.runs;
   }
+  get jobs() {
+    return this.storage.jobs;
+  }
 }

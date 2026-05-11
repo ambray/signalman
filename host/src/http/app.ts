@@ -63,6 +63,7 @@ import type {
   ArtifactKind,
   DeploymentStatus,
   HealthStatus,
+  JobStatus,
   ReleaseStatus,
   TargetConnection,
   TargetKind,
@@ -457,7 +458,120 @@ export function buildApp(opts: AppOptions): Router {
     return { status: 204, body: null };
   });
 
+  // ── Jobs (PR 8 — submit-mode runner queue) ────────────────────────
+
+  router.post("/v1/jobs", async (ctx) => {
+    const body = asObject(ctx.body, "request body");
+    const kind = readString(body, "kind");
+    const inputObj =
+      body.input !== undefined ? asObject(body.input, "input") : undefined;
+    const job = await cp.jobs.create({
+      orgId: ctx.auth.orgId,
+      kind,
+      input: inputObj,
+    });
+    return { status: 201, body: { job } };
+  });
+
+  router.get("/v1/jobs", async (ctx) => {
+    const limit = readIntQuery(ctx, "limit");
+    const statusFilter = readStringQuery(ctx, "status");
+    if (
+      statusFilter !== undefined &&
+      !["pending", "claimed", "running", "succeeded", "failed"].includes(
+        statusFilter,
+      )
+    ) {
+      throw badRequest(`invalid status: '${statusFilter}'`);
+    }
+    const status = statusFilter as JobStatus | undefined;
+    return {
+      jobs: await cp.jobs.listForOrg(ctx.auth.orgId, { limit, status }),
+    };
+  });
+
+  router.get("/v1/jobs/:id", async (ctx) => {
+    const job = await cp.jobs.get(ctx.params.id);
+    if (!job || job.orgId !== ctx.auth.orgId) {
+      throw notFound(`job not found: ${ctx.params.id}`);
+    }
+    return { job };
+  });
+
+  /**
+   * Runner claim: returns the oldest pending job for the caller's org,
+   * atomically transitioning it to `claimed`. Returns `{ job: null }`
+   * when the queue is empty — the runner should sleep + poll again.
+   */
+  router.post("/v1/jobs/claim", async (ctx) => {
+    const body = ctx.body !== undefined ? asObject(ctx.body, "request body") : {};
+    const claimedBy = readOptionalString(body, "claimed_by") ?? "anonymous";
+    const job = await cp.jobs.claimNext({
+      orgId: ctx.auth.orgId,
+      claimedBy,
+    });
+    return { job };
+  });
+
+  router.post("/v1/jobs/:id/complete", async (ctx) => {
+    const job = await jobInOrg(cp, ctx);
+    const body = ctx.body !== undefined ? asObject(ctx.body, "request body") : {};
+    const result =
+      body.result !== undefined ? asObject(body.result, "result") : undefined;
+    const updated = await cp.jobs.update(job.id, {
+      status: "succeeded",
+      result: result ?? null,
+      completedAt: new Date().toISOString(),
+    });
+    return { job: updated };
+  });
+
+  router.post("/v1/jobs/:id/fail", async (ctx) => {
+    const job = await jobInOrg(cp, ctx);
+    const body = ctx.body !== undefined ? asObject(ctx.body, "request body") : {};
+    const error = readString(body, "error");
+    const updated = await cp.jobs.update(job.id, {
+      status: "failed",
+      error,
+      completedAt: new Date().toISOString(),
+    });
+    return { job: updated };
+  });
+
+  router.patch("/v1/jobs/:id", async (ctx) => {
+    const job = await jobInOrg(cp, ctx);
+    const body = asObject(ctx.body, "request body");
+    const patch = {
+      status: readOptionalEnum(body, "status", [
+        "pending",
+        "claimed",
+        "running",
+        "succeeded",
+        "failed",
+      ] as const) as JobStatus | undefined,
+      startedAt: readOptionalString(body, "started_at"),
+      completedAt: readOptionalString(body, "completed_at"),
+      error: readOptionalString(body, "error"),
+      result:
+        body.result === undefined
+          ? undefined
+          : body.result === null
+            ? null
+            : asObject(body.result, "result"),
+    };
+    const updated = await cp.jobs.update(job.id, patch);
+    return { job: updated };
+  });
+
   return router;
+}
+
+async function jobInOrg(cp: ControlPlane, ctx: RequestContext) {
+  const job = await cp.jobs.get(ctx.params.id);
+  if (!job || job.orgId !== ctx.auth.orgId) {
+    throw notFound(`job not found: ${ctx.params.id}`);
+  }
+  return job;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

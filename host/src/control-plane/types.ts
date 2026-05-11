@@ -196,6 +196,35 @@ export interface Run {
   deletedAt: string | null;
 }
 
+// ── Jobs (PR 8 — submit-mode runner queue) ──────────────────────────
+
+export type JobStatus =
+  | "pending"
+  | "claimed"
+  | "running"
+  | "succeeded"
+  | "failed";
+
+export interface Job {
+  id: string;
+  orgId: string;
+  /** Free-form kind (e.g. `noop`, `release.build`). Worker dispatches on this. */
+  kind: string;
+  /** Parsed job input. Worker schema-validates per `kind`. */
+  input: Record<string, unknown>;
+  status: JobStatus;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  /** Identity of the runner that claimed the job (worker name or hostname). */
+  claimedBy: string | null;
+  claimedAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+}
+
 // ── Audit log ───────────────────────────────────────────────────────
 
 export interface AuditLogEntry {
