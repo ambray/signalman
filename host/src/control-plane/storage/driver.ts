@@ -99,6 +99,7 @@ export interface ReleaseRepo {
         Release,
         | "manifestSha256"
         | "signedBy"
+        | "signatureB64"
         | "builtAt"
         | "builtByRunnerId"
         | "status"

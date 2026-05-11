@@ -31,4 +31,17 @@ export {
   ReleaseAlreadyExistsError,
   runBuild,
 } from "./executor.js";
-export type { RunBuildOptions, RunBuildResult } from "./executor.js";
+export type {
+  BuildControlPlane,
+  RunBuildOptions,
+  RunBuildResult,
+} from "./executor.js";
+
+export {
+  SignatureVerificationError,
+  fingerprintPublicKey,
+  generateKeypair,
+  signManifest,
+  verifyManifest,
+} from "./signing.js";
+export type { Keypair, SignedManifest } from "./signing.js";

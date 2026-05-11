@@ -21,7 +21,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ControlPlane } from "../control-plane/index.js";
 import {
+  buildManifest,
+  hashManifest,
   runBuild,
+  verifyManifest,
   type RunBuildResult,
 } from "../control-plane/build/index.js";
 import {
@@ -158,6 +161,12 @@ export interface ReleaseBuildInput {
   runnerId?: string;
   /** Audit-log actor (default: 'cli'). */
   actor?: string;
+  /**
+   * Optional PEM-encoded Ed25519 private key for manifest signing
+   * (PR 10a). When supplied, the release row records the signature +
+   * fingerprint. Verifiers use `signalman release verify --public-key`.
+   */
+  signingKeyPem?: string;
 }
 
 export async function runReleaseBuild(
@@ -203,6 +212,7 @@ export async function runReleaseBuild(
       runnerId: input.runnerId,
       actor: input.actor,
       out: options.out,
+      signingKeyPem: input.signingKeyPem,
     });
   } finally {
     if (cleanup) await cleanup();
@@ -241,6 +251,83 @@ export interface ReleaseShowResult {
   release: Release;
   product: Product;
   artifacts: Artifact[];
+}
+
+export interface ReleaseVerifyResult {
+  release: Release;
+  product: Product;
+  /** True when (manifestSha256, signatureB64, signedBy) verify against publicKeyPem. */
+  verified: boolean;
+  reason?: string;
+}
+
+/**
+ * Verify a release's signature against an operator-supplied public
+ * key. Reconstructs the canonical manifest from the release +
+ * artifact rows (the same shape the build executor signed), then
+ * checks the stored signature.
+ */
+export async function runReleaseVerify(
+  controlPlane: ControlPlane,
+  input: { releaseId: string; publicKeyPem: string },
+): Promise<ReleaseVerifyResult> {
+  const release = await controlPlane.releases.get(input.releaseId);
+  if (!release) throw new Error(`release not found: ${input.releaseId}`);
+  const product = await controlPlane.products.get(release.productId);
+  if (!product) {
+    throw new Error(
+      `release ${input.releaseId} references a missing product (${release.productId})`,
+    );
+  }
+  if (!release.signatureB64 || !release.signedBy) {
+    return {
+      release,
+      product,
+      verified: false,
+      reason: "release is unsigned (no signature_b64 / signed_by on the row)",
+    };
+  }
+  const artifacts = await controlPlane.artifacts.listForRelease(release.id);
+  const manifest = buildManifest({
+    product: product.name,
+    tag: release.tag,
+    commitSha: release.commitSha,
+    entries: artifacts.map((a) =>
+      a.kind === "blob"
+        ? { component: a.component, kind: "blob" as const, sha256: a.sha256 ?? undefined }
+        : { component: a.component, kind: "image_ref" as const, image_ref: a.imageRef ?? undefined },
+    ),
+  });
+  // Belt-and-suspenders: confirm our reconstruction matches the
+  // stored manifest hash before we run crypto.verify on it.
+  const reconstructedHash = hashManifest(manifest);
+  if (
+    release.manifestSha256 !== null &&
+    reconstructedHash !== release.manifestSha256
+  ) {
+    return {
+      release,
+      product,
+      verified: false,
+      reason: `manifest reconstruction mismatch — stored ${release.manifestSha256}, reconstructed ${reconstructedHash}. The catalog may have been tampered with between build and verify.`,
+    };
+  }
+  try {
+    verifyManifest(
+      manifest,
+      release.signatureB64,
+      release.signedBy,
+      input.publicKeyPem,
+    );
+    return { release, product, verified: true };
+  } catch (err) {
+    return {
+      release,
+      product,
+      verified: false,
+      reason: (err as Error).message,
+    };
+  }
 }
 
 export async function runReleaseShow(
