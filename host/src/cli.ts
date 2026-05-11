@@ -43,6 +43,12 @@ import {
   parseBundle,
   BundleValidationError,
 } from "./provisioning/bundle-types.js";
+// PR 6 — `signalman serve` HTTP control plane.
+// PR 7 — `signalman api-key create`.
+import { startServer } from "./http/index.js";
+import { generateApiKey } from "./http/auth.js";
+import { ControlPlane } from "./control-plane/index.js";
+import { loadConfig } from "./config.js";
 // PR 2 — control-plane verbs (product, release).
 // PR 3 — target, release deploy/rollback.
 import {
@@ -1713,6 +1719,168 @@ async function cmdReleaseShow(args: ParsedArgs): Promise<number> {
   }
 }
 
+// ── api-key (PR 7 — bearer tokens) ──────────────────────────────────
+
+async function cmdApiKey(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) usageError("api-key requires a subcommand (create, list, revoke)");
+  switch (sub) {
+    case "create":
+      return await cmdApiKeyCreate(args);
+    case "list":
+      return await cmdApiKeyList(args);
+    case "revoke":
+      return await cmdApiKeyRevoke(args);
+    default:
+      usageError(`unknown api-key subcommand: ${sub}`);
+  }
+}
+
+async function cmdApiKeyCreate(args: ParsedArgs): Promise<number> {
+  const name = args.options.get("name") ?? args.positional[0];
+  if (!name) usageError("api-key create requires --name <NAME>");
+  const expiresAt = args.options.get("expires-at");
+  const format = args.options.get("format");
+  const config = loadConfig();
+  const controlPlane = ControlPlane.fromConfig(config.controlPlane);
+  try {
+    const { defaultOrg } = await controlPlane.init();
+    const generated = generateApiKey();
+    const row = await controlPlane.apiKeys.create({
+      orgId: defaultOrg.id,
+      name,
+      prefix: generated.prefix,
+      hash: generated.hash,
+      expiresAt,
+    });
+    if (format === "json") {
+      emitJson({
+        api_key: { ...row, hash: undefined },
+        token: generated.token,
+      });
+    } else {
+      process.stdout.write(
+        `Created api key '${row.name}' (${row.id})\n` +
+          `  prefix:  ${row.prefix}\n` +
+          `  expires: ${row.expiresAt ?? "never"}\n` +
+          `\n` +
+          `  TOKEN (shown once — save it now):\n` +
+          `  ${generated.token}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman api-key create: ${(err as Error).message}`);
+    return 4;
+  } finally {
+    await controlPlane.close();
+  }
+}
+
+async function cmdApiKeyList(args: ParsedArgs): Promise<number> {
+  const format = args.options.get("format");
+  const config = loadConfig();
+  const controlPlane = ControlPlane.fromConfig(config.controlPlane);
+  try {
+    const { defaultOrg } = await controlPlane.init();
+    const keys = await controlPlane.apiKeys.listForOrg(defaultOrg.id);
+    const sanitized = keys.map((k) => ({ ...k, hash: undefined }));
+    if (format === "json") {
+      emitJson(sanitized);
+      return 0;
+    }
+    if (sanitized.length === 0) {
+      process.stdout.write("(no api keys)\n");
+      return 0;
+    }
+    emitTable(
+      sanitized.map((k) => ({
+        name: k.name,
+        prefix: k.prefix,
+        id: k.id,
+        expires_at: k.expiresAt ?? "never",
+      })),
+    );
+    return 0;
+  } finally {
+    await controlPlane.close();
+  }
+}
+
+async function cmdApiKeyRevoke(args: ParsedArgs): Promise<number> {
+  const id = args.positional[0] ?? args.options.get("id");
+  if (!id) usageError("api-key revoke requires <id>");
+  const config = loadConfig();
+  const controlPlane = ControlPlane.fromConfig(config.controlPlane);
+  try {
+    await controlPlane.init();
+    const key = await controlPlane.apiKeys.get(id);
+    if (!key) {
+      console.error(`signalman api-key revoke: not found: ${id}`);
+      return 5;
+    }
+    await controlPlane.apiKeys.softDelete(key.id);
+    process.stdout.write(`Revoked api key '${key.name}' (${key.id})\n`);
+    return 0;
+  } finally {
+    await controlPlane.close();
+  }
+}
+
+// ── serve (PR 6 — HTTP control plane) ───────────────────────────────
+
+async function cmdServe(args: ParsedArgs): Promise<number> {
+  const portRaw = args.options.get("port");
+  const port = portRaw ? parseInt(portRaw, 10) : 8765;
+  if (Number.isNaN(port) || port < 0 || port > 65535) {
+    usageError(`serve: invalid --port '${portRaw}'`);
+  }
+  const host = args.options.get("host") ?? "127.0.0.1";
+
+  const config = loadConfig();
+  const controlPlane = ControlPlane.fromConfig(config.controlPlane);
+  try {
+    await controlPlane.init();
+  } catch (err) {
+    console.error(`signalman serve: failed to init control plane: ${(err as Error).message}`);
+    await controlPlane.close();
+    return 4;
+  }
+
+  let server;
+  try {
+    server = await startServer({ controlPlane, port, host });
+  } catch (err) {
+    console.error(`signalman serve: failed to bind ${host}:${port}: ${(err as Error).message}`);
+    await controlPlane.close();
+    return 4;
+  }
+
+  process.stdout.write(`signalman serve: listening on ${server.url}\n`);
+  if (host !== "127.0.0.1") {
+    process.stderr.write(
+      `signalman serve: WARNING: bound to ${host} without auth bypass disabled. ` +
+        `Pass --no-loopback-bypass for non-loopback binds.\n`,
+    );
+  }
+
+  await new Promise<void>((resolve) => {
+    const shutdown = (signal: NodeJS.Signals) => {
+      process.stderr.write(`signalman serve: received ${signal}, shutting down...\n`);
+      resolve();
+    };
+    // Signal handlers live on the global process (EventEmitter); the
+    // `node:process` module namespace import at the top of this file
+    // doesn't re-export `.once`.
+    globalThis.process.once("SIGINT", shutdown);
+    globalThis.process.once("SIGTERM", shutdown);
+  });
+
+  await server.stop();
+  await controlPlane.close();
+  return 0;
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 async function main(argv: string[]): Promise<number> {
@@ -1749,6 +1917,10 @@ async function main(argv: string[]): Promise<number> {
         return await cmdTarget(args);
       case "health":
         return await cmdHealth(args);
+      case "serve":
+        return await cmdServe(args);
+      case "api-key":
+        return await cmdApiKey(args);
       default:
         usageError(`unknown verb: ${verb}`);
     }
@@ -1794,6 +1966,8 @@ function printHelp(): void {
       "  release <subcommand>   (build, list, show, deploy, rollback)",
       "  target <subcommand>    (add, list, remove)",
       "  health <subcommand>    (check, history)",
+      "  serve [--port P] [--host H]   (start the control-plane HTTP server)",
+      "  api-key <subcommand>   (create, list, revoke)",
       "",
       "Exit codes (per docs/design/p0-mcp-surface.md §5):",
       "  0  pass        2  workflow fail        4  infra error",
