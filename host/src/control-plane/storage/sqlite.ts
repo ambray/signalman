@@ -31,6 +31,8 @@ import type {
   DeploymentStatus,
   HealthCheck,
   HealthStatus,
+  Job,
+  JobStatus,
   Org,
   OrgTier,
   Product,
@@ -50,6 +52,7 @@ import {
   type AuditLogRepo,
   type DeploymentRepo,
   type HealthCheckRepo,
+  type JobRepo,
   type OrgRepo,
   type ProductRepo,
   type ReleaseRepo,
@@ -93,6 +96,7 @@ export class SqliteStorageDriver implements StorageDriver {
   readonly healthChecks: HealthCheckRepo;
   readonly scenarios: ScenarioRepo;
   readonly runs: RunRepo;
+  readonly jobs: JobRepo;
 
   constructor(opts: SqliteDriverOptions) {
     if (opts.path !== ":memory:") {
@@ -118,6 +122,7 @@ export class SqliteStorageDriver implements StorageDriver {
     this.healthChecks = new SqliteHealthCheckRepo(this.db);
     this.scenarios = new SqliteScenarioRepo(this.db);
     this.runs = new SqliteRunRepo(this.db);
+    this.jobs = new SqliteJobRepo(this.db);
   }
 
   async migrate(): Promise<void> {
@@ -1349,6 +1354,179 @@ class SqliteRunRepo implements RunRepo {
       scenario_id: existing.scenarioId,
       target_id: existing.targetId,
       triggered_by: existing.triggeredBy,
+      created_at: existing.createdAt,
+      deleted_at: existing.deletedAt,
+    });
+  }
+}
+
+// ── Job repo (PR 8) ─────────────────────────────────────────────────
+
+function mapJob(row: SqlRow): Job {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    kind: row.kind as string,
+    input: JSON.parse(row.input as string) as Record<string, unknown>,
+    status: row.status as JobStatus,
+    result: row.result
+      ? (JSON.parse(row.result as string) as Record<string, unknown>)
+      : null,
+    error: (row.error as string | null) ?? null,
+    claimedBy: (row.claimed_by as string | null) ?? null,
+    claimedAt: (row.claimed_at as string | null) ?? null,
+    startedAt: (row.started_at as string | null) ?? null,
+    completedAt: (row.completed_at as string | null) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+class SqliteJobRepo implements JobRepo {
+  constructor(private readonly db: DatabaseSync) {}
+
+  async create(input: {
+    orgId: string;
+    kind: string;
+    input?: Record<string, unknown>;
+  }): Promise<Job> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      kind: input.kind,
+      input: JSON.stringify(input.input ?? {}),
+      status: "pending" as JobStatus,
+      created_at: now,
+      updated_at: now,
+    };
+    try {
+      prep(
+        this.db,
+        "INSERT INTO job (id, org_id, kind, input, status, created_at, updated_at) VALUES (@id, @org_id, @kind, @input, @status, @created_at, @updated_at)",
+      ).run(bind);
+    } catch (err) {
+      mapSqliteError(err);
+    }
+    return mapJob({
+      ...bind,
+      result: null,
+      error: null,
+      claimed_by: null,
+      claimed_at: null,
+      started_at: null,
+      completed_at: null,
+      deleted_at: null,
+    });
+  }
+
+  async get(id: string): Promise<Job | null> {
+    const row = this.db
+      .prepare("SELECT * FROM job WHERE id = ? AND deleted_at IS NULL")
+      .get(id) as SqlRow | undefined;
+    return row ? mapJob(row) : null;
+  }
+
+  async listForOrg(
+    orgId: string,
+    opts: { limit?: number; status?: JobStatus } = {},
+  ): Promise<Job[]> {
+    const limit = opts.limit ?? 50;
+    if (opts.status) {
+      return (
+        this.db
+          .prepare(
+            "SELECT * FROM job WHERE org_id = ? AND status = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?",
+          )
+          .all(orgId, opts.status, limit) as SqlRow[]
+      ).map(mapJob);
+    }
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM job WHERE org_id = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?",
+        )
+        .all(orgId, limit) as SqlRow[]
+    ).map(mapJob);
+  }
+
+  async claimNext(input: {
+    orgId: string;
+    claimedBy: string;
+  }): Promise<Job | null> {
+    // Atomic claim:
+    //   BEGIN IMMEDIATE — acquires the writer lock before reading,
+    //     so two concurrent claim()s serialize.
+    //   SELECT oldest pending for this org.
+    //   UPDATE it to 'claimed' (with WHERE status='pending' as belt
+    //     and suspenders against weird concurrency).
+    //   COMMIT.
+    return runInTransaction(this.db, () => {
+      const pending = this.db
+        .prepare(
+          "SELECT * FROM job WHERE org_id = ? AND status = 'pending' AND deleted_at IS NULL ORDER BY created_at LIMIT 1",
+        )
+        .get(input.orgId) as SqlRow | undefined;
+      if (!pending) return null;
+      const now = nowIso();
+      const updateResult = this.db
+        .prepare(
+          "UPDATE job SET status = 'claimed', claimed_by = ?, claimed_at = ?, updated_at = ? WHERE id = ? AND status = 'pending'",
+        )
+        .run(input.claimedBy, now, now, pending.id as string);
+      if (updateResult.changes === 0) return null;
+      return mapJob({
+        ...pending,
+        status: "claimed",
+        claimed_by: input.claimedBy,
+        claimed_at: now,
+        updated_at: now,
+      });
+    });
+  }
+
+  async update(
+    id: string,
+    patch: Partial<
+      Pick<Job, "status" | "result" | "error" | "startedAt" | "completedAt">
+    >,
+  ): Promise<Job> {
+    const existing = await this.get(id);
+    if (!existing) throw new StorageNotFoundError("job", id);
+    const bind = {
+      id: existing.id,
+      status: patch.status ?? existing.status,
+      result:
+        patch.result !== undefined
+          ? patch.result === null
+            ? null
+            : JSON.stringify(patch.result)
+          : existing.result
+            ? JSON.stringify(existing.result)
+            : null,
+      error: patch.error !== undefined ? patch.error : existing.error,
+      started_at:
+        patch.startedAt !== undefined ? patch.startedAt : existing.startedAt,
+      completed_at:
+        patch.completedAt !== undefined ? patch.completedAt : existing.completedAt,
+      updated_at: nowIso(),
+    };
+    try {
+      prep(
+        this.db,
+        "UPDATE job SET status = @status, result = @result, error = @error, started_at = @started_at, completed_at = @completed_at, updated_at = @updated_at WHERE id = @id",
+      ).run(bind);
+    } catch (err) {
+      mapSqliteError(err);
+    }
+    return mapJob({
+      ...bind,
+      org_id: existing.orgId,
+      kind: existing.kind,
+      input: JSON.stringify(existing.input),
+      claimed_by: existing.claimedBy,
+      claimed_at: existing.claimedAt,
       created_at: existing.createdAt,
       deleted_at: existing.deletedAt,
     });

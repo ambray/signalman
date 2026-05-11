@@ -43,12 +43,6 @@ import {
   parseBundle,
   BundleValidationError,
 } from "./provisioning/bundle-types.js";
-// PR 6 — `signalman serve` HTTP control plane.
-// PR 7 — `signalman api-key create`.
-import { startServer } from "./http/index.js";
-import { generateApiKey } from "./http/auth.js";
-import { ControlPlane } from "./control-plane/index.js";
-import { loadConfig } from "./config.js";
 // PR 2 — control-plane verbs (product, release).
 // PR 3 — target, release deploy/rollback.
 import {
@@ -67,6 +61,25 @@ import {
   runHealthCheck,
   runHealthHistory,
 } from "./verbs/control-plane.js";
+// PR 6 — `signalman serve` HTTP control plane.
+// PR 7 — `signalman api-key create`.
+// PR 8 — `signalman runner register/start`, `release build --remote`.
+import { startServer } from "./http/index.js";
+import { generateApiKey } from "./http/auth.js";
+import { ControlPlane } from "./control-plane/index.js";
+import { loadConfig } from "./config.js";
+import {
+  HttpClient,
+  HttpClientError,
+  defaultHandlers,
+  runWorker,
+} from "./runner/worker.js";
+import {
+  defaultRunnerConfigPath,
+  loadRunnerConfig,
+  writeRunnerConfig,
+} from "./runner/config.js";
+import * as os from "node:os";
 
 // ── Tiny argv parser ──────────────────────────────────────────────
 
@@ -102,7 +115,8 @@ function parseArgs(argv: string[]): ParsedArgs {
         key === "force" ||
         key === "bootstrap" ||
         key === "cleanup-on-failure" ||
-        key === "wait-guest"
+        key === "wait-guest" ||
+        key === "remote"
       ) {
         flags.add(key);
         if (eq >= 0) {
@@ -1561,160 +1575,86 @@ async function cmdHealthHistory(args: ParsedArgs): Promise<number> {
   }
 }
 
-async function cmdReleaseRollback(args: ParsedArgs): Promise<number> {
-  const targetName = args.options.get("target");
-  const toReleaseId = args.options.get("to-release");
-  if (!targetName) usageError("release rollback requires --target <NAME>");
-  const format = args.options.get("format");
+// ── runner (PR 8 — submit-mode worker) ──────────────────────────────
+
+async function cmdRunner(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) usageError("runner requires a subcommand (register, start)");
+  switch (sub) {
+    case "register":
+      return await cmdRunnerRegister(args);
+    case "start":
+      return await cmdRunnerStart(args);
+    default:
+      usageError(`unknown runner subcommand: ${sub}`);
+  }
+}
+
+async function cmdRunnerRegister(args: ParsedArgs): Promise<number> {
+  const url = args.options.get("control-plane");
+  const token = args.options.get("token");
+  const workerName = args.options.get("worker-name");
+  if (!url) usageError("runner register requires --control-plane <URL>");
+  if (!token) usageError("runner register requires --token <TOKEN>");
   try {
-    const result = await withControlPlane((cp) =>
-      runReleaseRollback(
-        cp,
-        { targetName, toReleaseId },
-        { out: process.stderr },
-      ),
+    const target = defaultRunnerConfigPath();
+    await writeRunnerConfig(
+      { controlPlaneUrl: url, token, workerName },
+      target,
     );
-    if (format === "json") {
-      emitJson({
-        deployment: result.deployment,
-        release_id: result.release.id,
-        target_id: result.target.id,
-        health: result.healthSummary,
-      });
-    } else {
-      process.stdout.write(
-        `Rolled back ${result.target.name} → ${result.release.tag}\n` +
-          `  deployment: ${result.deployment.id}\n`,
-      );
-    }
+    process.stdout.write(`Registered runner at ${target}\n`);
     return 0;
   } catch (err) {
-    const name = (err as Error).name;
-    if (name === "DeployBlockedError" || name === "DeployHealthFailedError") {
-      console.error(`signalman release rollback: ${(err as Error).message}`);
-      return 2;
-    }
-    console.error(`signalman release rollback: ${(err as Error).message}`);
+    console.error(`signalman runner register: ${(err as Error).message}`);
     return 4;
   }
 }
 
-async function cmdReleaseBuild(args: ParsedArgs): Promise<number> {
-  const productName = args.options.get("product");
-  const tag = args.options.get("tag");
-  const workDir = args.options.get("work-dir");
-  if (!productName) usageError("release build requires --product <NAME>");
-  if (!tag) usageError("release build requires --tag <TAG>");
-  const format = args.options.get("format");
-  try {
-    const result = await withControlPlane((cp) =>
-      runReleaseBuild(
-        cp,
-        { productName, tag, workDir },
-        { out: process.stderr },
-      ),
-    );
-    if (format === "json") {
-      emitJson({
-        release: result.release,
-        manifest_sha256: result.manifestSha256,
-        artifact_count: result.artifacts.length,
-      });
-    } else {
-      process.stdout.write(
-        `Release ${result.release.tag} ready (id=${result.release.id})\n` +
-          `  manifest: ${result.manifestSha256}\n` +
-          `  artifacts: ${result.artifacts.length}\n`,
-      );
-    }
-    return 0;
-  } catch (err) {
-    const name = (err as Error).name;
-    if (
-      name === "BuildYamlValidationError" ||
-      name === "ComponentBuildError" ||
-      name === "MissingArtifactError" ||
-      name === "ReleaseAlreadyExistsError"
-    ) {
-      console.error(`signalman release build: ${(err as Error).message}`);
-      return name === "BuildYamlValidationError" ? 5 : 2;
-    }
-    console.error(`signalman release build: ${(err as Error).message}`);
-    return 4;
+async function cmdRunnerStart(args: ParsedArgs): Promise<number> {
+  const intervalRaw = args.options.get("poll-interval-ms");
+  const pollIntervalMs = intervalRaw ? parseInt(intervalRaw, 10) : 1000;
+  if (Number.isNaN(pollIntervalMs) || pollIntervalMs < 50) {
+    usageError("--poll-interval-ms must be >= 50");
   }
-}
+  let config;
+  try {
+    config = await loadRunnerConfig();
+  } catch (err) {
+    console.error(`signalman runner start: ${(err as Error).message}`);
+    return 5;
+  }
+  const workerName =
+    args.options.get("worker-name") ??
+    config.workerName ??
+    `${os.hostname()}:${process.pid}`;
+  const client = new HttpClient({
+    baseUrl: config.controlPlaneUrl,
+    token: config.token,
+  });
 
-async function cmdReleaseList(args: ParsedArgs): Promise<number> {
-  const productName = args.options.get("product");
-  const statusOpt = args.options.get("status");
-  const validStatuses = new Set(["building", "ready", "failed"]);
-  if (statusOpt && !validStatuses.has(statusOpt)) {
-    usageError(`release list: invalid --status '${statusOpt}' (expected building|ready|failed)`);
-  }
-  const status = statusOpt as "building" | "ready" | "failed" | undefined;
-  const format = args.options.get("format");
-  try {
-    const entries = await withControlPlane((cp) =>
-      runReleaseList(cp, { productName, status }),
-    );
-    if (format === "json") {
-      emitJson(entries);
-      return 0;
-    }
-    if (entries.length === 0) {
-      process.stdout.write("(no releases)\n");
-      return 0;
-    }
-    emitTable(
-      entries.map((e) => ({
-        product: e.product.name,
-        tag: e.release.tag,
-        status: e.release.status,
-        commit: e.release.commitSha.slice(0, 7),
-        id: e.release.id,
-        built_at: e.release.builtAt ?? "—",
-      })),
-    );
-    return 0;
-  } catch (err) {
-    console.error(`signalman release list: ${(err as Error).message}`);
-    return 4;
-  }
-}
+  process.stdout.write(
+    `signalman runner start: '${workerName}' → ${config.controlPlaneUrl}\n`,
+  );
 
-async function cmdReleaseShow(args: ParsedArgs): Promise<number> {
-  const releaseId = args.positional[0];
-  if (!releaseId) usageError("release show requires <release_id>");
-  const format = args.options.get("format");
+  const controller = new AbortController();
+  const shutdown = (signal: NodeJS.Signals) => {
+    process.stderr.write(`signalman runner: received ${signal}, stopping...\n`);
+    controller.abort();
+  };
+  globalThis.process.once("SIGINT", shutdown);
+  globalThis.process.once("SIGTERM", shutdown);
+
   try {
-    const result = await withControlPlane((cp) =>
-      runReleaseShow(cp, { releaseId }),
-    );
-    if (format === "json") {
-      emitJson(result);
-      return 0;
-    }
-    const r = result.release;
-    process.stdout.write(
-      `Release ${r.tag} (${r.id})\n` +
-        `  product: ${result.product.name}\n` +
-        `  status: ${r.status}\n` +
-        `  commit: ${r.commitSha}\n` +
-        `  manifest: ${r.manifestSha256 ?? "—"}\n` +
-        `  built_at: ${r.builtAt ?? "—"}\n` +
-        `  built_by: ${r.builtByRunnerId ?? "—"}\n` +
-        `  artifacts (${result.artifacts.length}):\n`,
-    );
-    for (const a of result.artifacts) {
-      const detail =
-        a.kind === "blob"
-          ? `sha256=${(a.sha256 ?? "").slice(0, 16)}… size=${a.sizeBytes ?? "?"}B`
-          : `ref=${a.imageRef ?? ""}`;
-      process.stdout.write(`    - ${a.component} (${a.kind}) ${detail}\n`);
-    }
+    await runWorker({
+      client,
+      workerName,
+      pollIntervalMs,
+      signal: controller.signal,
+      handlers: defaultHandlers(),
+    });
     return 0;
   } catch (err) {
-    console.error(`signalman release show: ${(err as Error).message}`);
+    console.error(`signalman runner start: ${(err as Error).message}`);
     return 4;
   }
 }
@@ -1858,9 +1798,11 @@ async function cmdServe(args: ParsedArgs): Promise<number> {
 
   process.stdout.write(`signalman serve: listening on ${server.url}\n`);
   if (host !== "127.0.0.1") {
+    // PR 7 lands bearer-token auth. Until then, the operator owns the
+    // network exposure decision; warn loudly on non-loopback binds.
     process.stderr.write(
-      `signalman serve: WARNING: bound to ${host} without auth bypass disabled. ` +
-        `Pass --no-loopback-bypass for non-loopback binds.\n`,
+      `signalman serve: WARNING: bound to ${host} without auth. ` +
+        `Bind to 127.0.0.1 until PR 7 lands bearer-token middleware.\n`,
     );
   }
 
@@ -1879,6 +1821,248 @@ async function cmdServe(args: ParsedArgs): Promise<number> {
   await server.stop();
   await controlPlane.close();
   return 0;
+}
+
+async function cmdReleaseRollback(args: ParsedArgs): Promise<number> {
+  const targetName = args.options.get("target");
+  const toReleaseId = args.options.get("to-release");
+  if (!targetName) usageError("release rollback requires --target <NAME>");
+  const format = args.options.get("format");
+  try {
+    const result = await withControlPlane((cp) =>
+      runReleaseRollback(
+        cp,
+        { targetName, toReleaseId },
+        { out: process.stderr },
+      ),
+    );
+    if (format === "json") {
+      emitJson({
+        deployment: result.deployment,
+        release_id: result.release.id,
+        target_id: result.target.id,
+        health: result.healthSummary,
+      });
+    } else {
+      process.stdout.write(
+        `Rolled back ${result.target.name} → ${result.release.tag}\n` +
+          `  deployment: ${result.deployment.id}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    const name = (err as Error).name;
+    if (name === "DeployBlockedError" || name === "DeployHealthFailedError") {
+      console.error(`signalman release rollback: ${(err as Error).message}`);
+      return 2;
+    }
+    console.error(`signalman release rollback: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdReleaseBuild(args: ParsedArgs): Promise<number> {
+  const productName = args.options.get("product");
+  const tag = args.options.get("tag");
+  const workDir = args.options.get("work-dir");
+  if (!productName) usageError("release build requires --product <NAME>");
+  if (!tag) usageError("release build requires --tag <TAG>");
+  const remote = args.flags.has("remote");
+  if (remote) {
+    return await cmdReleaseBuildRemote(args, { productName, tag });
+  }
+  const format = args.options.get("format");
+  try {
+    const result = await withControlPlane((cp) =>
+      runReleaseBuild(
+        cp,
+        { productName, tag, workDir },
+        { out: process.stderr },
+      ),
+    );
+    if (format === "json") {
+      emitJson({
+        release: result.release,
+        manifest_sha256: result.manifestSha256,
+        artifact_count: result.artifacts.length,
+      });
+    } else {
+      process.stdout.write(
+        `Release ${result.release.tag} ready (id=${result.release.id})\n` +
+          `  manifest: ${result.manifestSha256}\n` +
+          `  artifacts: ${result.artifacts.length}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    const name = (err as Error).name;
+    if (
+      name === "BuildYamlValidationError" ||
+      name === "ComponentBuildError" ||
+      name === "MissingArtifactError" ||
+      name === "ReleaseAlreadyExistsError"
+    ) {
+      console.error(`signalman release build: ${(err as Error).message}`);
+      return name === "BuildYamlValidationError" ? 5 : 2;
+    }
+    console.error(`signalman release build: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+/**
+ * Submit-mode build: pushes a `release.build` job onto the remote
+ * control plane, then polls until the job is terminal. PR 8a stubs
+ * the runner-side handler with a "deferred to 8b" failure; the wiring
+ * is provable end-to-end (job lands, runner claims, status flows back)
+ * once you `signalman runner start` alongside.
+ */
+async function cmdReleaseBuildRemote(
+  args: ParsedArgs,
+  input: { productName: string; tag: string },
+): Promise<number> {
+  const format = args.options.get("format");
+  let config;
+  try {
+    config = await loadRunnerConfig();
+  } catch (err) {
+    console.error(`signalman release build --remote: ${(err as Error).message}`);
+    return 5;
+  }
+  const client = new HttpClient({
+    baseUrl: config.controlPlaneUrl,
+    token: config.token,
+  });
+  try {
+    const product = await client.productByName(input.productName);
+    const job = await client.submitJob("release.build", {
+      product_id: product.id,
+      product_name: product.name,
+      tag: input.tag,
+    });
+    process.stderr.write(
+      `[release build --remote] submitted job ${job.id}; polling...\n`,
+    );
+    const terminal = await followJob(client, job.id, process.stderr);
+    if (format === "json") {
+      emitJson(terminal);
+      return terminal.status === "succeeded" ? 0 : 2;
+    }
+    if (terminal.status === "succeeded") {
+      process.stdout.write(
+        `Remote build succeeded (job ${terminal.id})\n` +
+          (terminal.result ? `  result: ${JSON.stringify(terminal.result)}\n` : ""),
+      );
+      return 0;
+    }
+    process.stderr.write(
+      `Remote build failed (job ${terminal.id}): ${terminal.error ?? "unknown error"}\n`,
+    );
+    return 2;
+  } catch (err) {
+    if (err instanceof HttpClientError) {
+      console.error(
+        `signalman release build --remote: HTTP ${err.status} (${err.code}): ${err.message}`,
+      );
+      return 4;
+    }
+    console.error(`signalman release build --remote: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function followJob(
+  client: HttpClient,
+  jobId: string,
+  out: NodeJS.WritableStream,
+): Promise<Awaited<ReturnType<typeof client.getJob>>> {
+  let lastStatus: string | null = null;
+  while (true) {
+    const job = await client.getJob(jobId);
+    if (job.status !== lastStatus) {
+      out.write(`  ${job.id} → ${job.status}\n`);
+      lastStatus = job.status;
+    }
+    if (job.status === "succeeded" || job.status === "failed") {
+      return job;
+    }
+    await new Promise((r) => setTimeout(r, 750));
+  }
+}
+
+async function cmdReleaseList(args: ParsedArgs): Promise<number> {
+  const productName = args.options.get("product");
+  const statusOpt = args.options.get("status");
+  const validStatuses = new Set(["building", "ready", "failed"]);
+  if (statusOpt && !validStatuses.has(statusOpt)) {
+    usageError(`release list: invalid --status '${statusOpt}' (expected building|ready|failed)`);
+  }
+  const status = statusOpt as "building" | "ready" | "failed" | undefined;
+  const format = args.options.get("format");
+  try {
+    const entries = await withControlPlane((cp) =>
+      runReleaseList(cp, { productName, status }),
+    );
+    if (format === "json") {
+      emitJson(entries);
+      return 0;
+    }
+    if (entries.length === 0) {
+      process.stdout.write("(no releases)\n");
+      return 0;
+    }
+    emitTable(
+      entries.map((e) => ({
+        product: e.product.name,
+        tag: e.release.tag,
+        status: e.release.status,
+        commit: e.release.commitSha.slice(0, 7),
+        id: e.release.id,
+        built_at: e.release.builtAt ?? "—",
+      })),
+    );
+    return 0;
+  } catch (err) {
+    console.error(`signalman release list: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdReleaseShow(args: ParsedArgs): Promise<number> {
+  const releaseId = args.positional[0];
+  if (!releaseId) usageError("release show requires <release_id>");
+  const format = args.options.get("format");
+  try {
+    const result = await withControlPlane((cp) =>
+      runReleaseShow(cp, { releaseId }),
+    );
+    if (format === "json") {
+      emitJson(result);
+      return 0;
+    }
+    const r = result.release;
+    process.stdout.write(
+      `Release ${r.tag} (${r.id})\n` +
+        `  product: ${result.product.name}\n` +
+        `  status: ${r.status}\n` +
+        `  commit: ${r.commitSha}\n` +
+        `  manifest: ${r.manifestSha256 ?? "—"}\n` +
+        `  built_at: ${r.builtAt ?? "—"}\n` +
+        `  built_by: ${r.builtByRunnerId ?? "—"}\n` +
+        `  artifacts (${result.artifacts.length}):\n`,
+    );
+    for (const a of result.artifacts) {
+      const detail =
+        a.kind === "blob"
+          ? `sha256=${(a.sha256 ?? "").slice(0, 16)}… size=${a.sizeBytes ?? "?"}B`
+          : `ref=${a.imageRef ?? ""}`;
+      process.stdout.write(`    - ${a.component} (${a.kind}) ${detail}\n`);
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman release show: ${(err as Error).message}`);
+    return 4;
+  }
 }
 
 // ── Entry point ───────────────────────────────────────────────────
@@ -1921,6 +2105,8 @@ async function main(argv: string[]): Promise<number> {
         return await cmdServe(args);
       case "api-key":
         return await cmdApiKey(args);
+      case "runner":
+        return await cmdRunner(args);
       default:
         usageError(`unknown verb: ${verb}`);
     }
@@ -1968,6 +2154,7 @@ function printHelp(): void {
       "  health <subcommand>    (check, history)",
       "  serve [--port P] [--host H]   (start the control-plane HTTP server)",
       "  api-key <subcommand>   (create, list, revoke)",
+      "  runner <subcommand>    (register, start)",
       "",
       "Exit codes (per docs/design/p0-mcp-surface.md §5):",
       "  0  pass        2  workflow fail        4  infra error",
