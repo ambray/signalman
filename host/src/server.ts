@@ -36,6 +36,22 @@ import { runRun } from "./verbs/run.js";
 import { runStatus } from "./verbs/status.js";
 import { recordMcpCall, runRecord, runRecordFinalize } from "./verbs/record.js";
 import { createDefaultExecutor } from "./verbs/default-executor.js";
+import {
+  runHealthCheck,
+  runHealthHistory,
+  runProductAdd,
+  runProductList,
+  runProductRemove,
+  runReleaseBuild,
+  runReleaseDeploy,
+  runReleaseList,
+  runReleaseRollback,
+  runReleaseShow,
+  runTargetAdd,
+  runTargetList,
+  runTargetRemove,
+  withControlPlane,
+} from "./verbs/control-plane.js";
 
 // ── Backend Discovery ─────────────────────────────────────────────
 
@@ -378,6 +394,313 @@ server.tool(
         ),
       { capture: false },
     ),
+);
+
+// ── Control-plane verbs (PR 2 — product, release) ────────────────
+
+server.tool(
+  "signalman_product_add",
+  "Register a product for signalman to build. The product's signalman.build.yaml declares its components.",
+  {
+    name: z.string().describe("Product name (unique per org)."),
+    repo_url: z.string().describe("Git URL signalman will clone at build time."),
+    build_yaml_path: z
+      .string()
+      .optional()
+      .describe("Path to signalman.build.yaml inside the repo (default: signalman.build.yaml)."),
+  },
+  async (params) =>
+    withRecording("signalman_product_add", params, async () =>
+      asMcpResult(
+        await withControlPlane((cp) =>
+          runProductAdd(cp, {
+            name: (params as { name: string }).name,
+            repoUrl: (params as { repo_url: string }).repo_url,
+            buildYamlPath: (params as { build_yaml_path?: string }).build_yaml_path,
+          }),
+        ),
+      ),
+    ),
+);
+
+server.tool(
+  "signalman_product_list",
+  "List registered products in the active org.",
+  {},
+  async (params) =>
+    withRecording("signalman_product_list", params, async () =>
+      asMcpResult(await withControlPlane((cp) => runProductList(cp))),
+    ),
+);
+
+server.tool(
+  "signalman_product_remove",
+  "Soft-delete a product by name. Releases remain in the catalog for historical reference.",
+  {
+    name: z.string().describe("Product name to remove."),
+  },
+  async (params) =>
+    withRecording("signalman_product_remove", params, async () => {
+      await withControlPlane((cp) =>
+        runProductRemove(cp, { name: (params as { name: string }).name }),
+      );
+      return asMcpResult({ removed: true });
+    }),
+);
+
+server.tool(
+  "signalman_release_build",
+  "Build a release of a product at a tag. Clones the repo, executes signalman.build.yaml, captures artifacts.",
+  {
+    product: z.string().describe("Product name."),
+    tag: z.string().describe("Git tag to build."),
+    work_dir: z
+      .string()
+      .optional()
+      .describe("Pre-cloned source tree (skips the internal clone). Useful for offline builds and tests."),
+  },
+  async (params) =>
+    withRecording("signalman_release_build", params, async () => {
+      const p = params as { product: string; tag: string; work_dir?: string };
+      const result = await withControlPlane((cp) =>
+        runReleaseBuild(
+          cp,
+          { productName: p.product, tag: p.tag, workDir: p.work_dir },
+          { out: process.stderr },
+        ),
+      );
+      return asMcpResult({
+        release: result.release,
+        manifest_sha256: result.manifestSha256,
+        artifact_count: result.artifacts.length,
+      });
+    }),
+);
+
+server.tool(
+  "signalman_release_list",
+  "List releases, optionally filtered by product or status.",
+  {
+    product: z.string().optional().describe("Filter by product name."),
+    status: z
+      .enum(["building", "ready", "failed"])
+      .optional()
+      .describe("Filter by release status."),
+  },
+  async (params) =>
+    withRecording("signalman_release_list", params, async () =>
+      asMcpResult(
+        await withControlPlane((cp) =>
+          runReleaseList(cp, {
+            productName: (params as { product?: string }).product,
+            status: (params as { status?: "building" | "ready" | "failed" }).status,
+          }),
+        ),
+      ),
+    ),
+);
+
+server.tool(
+  "signalman_release_show",
+  "Show a release's full record: status, manifest sha, and the list of artifacts.",
+  {
+    release_id: z.string().describe("Release id (ULID, from signalman_release_list)."),
+  },
+  async (params) =>
+    withRecording("signalman_release_show", params, async () =>
+      asMcpResult(
+        await withControlPlane((cp) =>
+          runReleaseShow(cp, {
+            releaseId: (params as { release_id: string }).release_id,
+          }),
+        ),
+      ),
+    ),
+);
+
+// ── Target verbs (PR 3) ───────────────────────────────────────────
+
+server.tool(
+  "signalman_target_add",
+  "Register a deployable surface (VM or Docker stack) that signalman can deploy releases onto.",
+  {
+    name: z.string().describe("Target name (unique per org)."),
+    kind: z.enum(["vm_test", "vm_demo", "docker_test", "docker_demo"]).describe("Target kind."),
+    vm_name: z.string().optional().describe("Hyper-V VM name (for vm_test / vm_demo)."),
+    backend: z.string().optional().describe("Hypervisor backend override (default: from config)."),
+    connection: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe("Raw connection JSON; overrides vm_name + backend if supplied."),
+  },
+  async (params) =>
+    withRecording("signalman_target_add", params, async () => {
+      const p = params as {
+        name: string;
+        kind: "vm_test" | "vm_demo" | "docker_test" | "docker_demo";
+        vm_name?: string;
+        backend?: string;
+        connection?: Record<string, unknown>;
+      };
+      const connection = p.connection
+        ? p.connection
+        : {
+            ...(p.vm_name ? { vmName: p.vm_name } : {}),
+            ...(p.backend ? { backend: p.backend } : {}),
+          };
+      const target = await withControlPlane((cp) =>
+        runTargetAdd(cp, { name: p.name, kind: p.kind, connection }),
+      );
+      return asMcpResult(target);
+    }),
+);
+
+server.tool(
+  "signalman_target_list",
+  "List registered targets in the active org.",
+  {},
+  async (params) =>
+    withRecording("signalman_target_list", params, async () =>
+      asMcpResult(await withControlPlane((cp) => runTargetList(cp))),
+    ),
+);
+
+server.tool(
+  "signalman_target_remove",
+  "Soft-delete a target by name. Past deployments remain in the ledger.",
+  {
+    name: z.string().describe("Target name."),
+  },
+  async (params) =>
+    withRecording("signalman_target_remove", params, async () => {
+      await withControlPlane((cp) =>
+        runTargetRemove(cp, { name: (params as { name: string }).name }),
+      );
+      return asMcpResult({ removed: true });
+    }),
+);
+
+server.tool(
+  "signalman_release_deploy",
+  "Deploy a release to a target. Pre-deploy checkpoint, stage artifacts, health probe, promote on pass.",
+  {
+    target: z.string().describe("Target name."),
+    release: z.string().optional().describe("Release id (alternative to product + tag)."),
+    product: z.string().optional().describe("Product name (with --tag, alternative to --release)."),
+    tag: z.string().optional().describe("Release tag (with --product, alternative to --release)."),
+  },
+  async (params) =>
+    withRecording("signalman_release_deploy", params, async () => {
+      const p = params as {
+        target: string;
+        release?: string;
+        product?: string;
+        tag?: string;
+      };
+      const result = await withControlPlane((cp) =>
+        runReleaseDeploy(
+          cp,
+          {
+            targetName: p.target,
+            releaseId: p.release,
+            productName: p.product,
+            tag: p.tag,
+          },
+          { out: process.stderr },
+        ),
+      );
+      return asMcpResult({
+        deployment: result.deployment,
+        release: result.release,
+        target: result.target,
+        health: result.healthSummary,
+      });
+    }),
+);
+
+server.tool(
+  "signalman_release_rollback",
+  "Roll back a target by redeploying the previous-active release (or an explicit prior release).",
+  {
+    target: z.string().describe("Target name."),
+    to_release: z
+      .string()
+      .optional()
+      .describe("Optional explicit release id to roll back to. Default: most recent superseded."),
+  },
+  async (params) =>
+    withRecording("signalman_release_rollback", params, async () => {
+      const p = params as { target: string; to_release?: string };
+      const result = await withControlPlane((cp) =>
+        runReleaseRollback(
+          cp,
+          { targetName: p.target, toReleaseId: p.to_release },
+          { out: process.stderr },
+        ),
+      );
+      return asMcpResult({
+        deployment: result.deployment,
+        release: result.release,
+        target: result.target,
+        health: result.healthSummary,
+      });
+    }),
+);
+
+// ── Health verbs (PR 4) ───────────────────────────────────────────
+
+server.tool(
+  "signalman_health_check",
+  "Run health probes against a target. Default: the target's active deployment + all declared probes.",
+  {
+    target: z.string().describe("Target name."),
+    probe_names: z
+      .array(z.string())
+      .optional()
+      .describe("Subset of probe names to run. Default: all declared on the release."),
+    release: z
+      .string()
+      .optional()
+      .describe("Optional release id override; default uses the target's active deployment."),
+  },
+  async (params) =>
+    withRecording("signalman_health_check", params, async () => {
+      const p = params as {
+        target: string;
+        probe_names?: string[];
+        release?: string;
+      };
+      const result = await withControlPlane((cp) =>
+        runHealthCheck(
+          cp,
+          { targetName: p.target, probeNames: p.probe_names, releaseId: p.release },
+          { out: process.stderr },
+        ),
+      );
+      return asMcpResult(result);
+    }),
+);
+
+server.tool(
+  "signalman_health_history",
+  "Query past health-check results for a target's deployments, newest first.",
+  {
+    target: z.string().describe("Target name."),
+    since: z.string().optional().describe("ISO-8601 lower bound on checked_at."),
+    limit: z.number().int().positive().optional().describe("Max entries per deployment."),
+  },
+  async (params) =>
+    withRecording("signalman_health_history", params, async () => {
+      const p = params as { target: string; since?: string; limit?: number };
+      const entries = await withControlPlane((cp) =>
+        runHealthHistory(cp, {
+          targetName: p.target,
+          sinceIso: p.since,
+          limit: p.limit,
+        }),
+      );
+      return asMcpResult(entries);
+    }),
 );
 
 // ── Start Server ──────────────────────────────────────────────────

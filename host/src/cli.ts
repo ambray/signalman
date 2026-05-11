@@ -43,6 +43,24 @@ import {
   parseBundle,
   BundleValidationError,
 } from "./provisioning/bundle-types.js";
+// PR 2 — control-plane verbs (product, release).
+// PR 3 — target, release deploy/rollback.
+import {
+  withControlPlane,
+  runProductAdd,
+  runProductList,
+  runProductRemove,
+  runReleaseBuild,
+  runReleaseList,
+  runReleaseShow,
+  runTargetAdd,
+  runTargetList,
+  runTargetRemove,
+  runReleaseDeploy,
+  runReleaseRollback,
+  runHealthCheck,
+  runHealthHistory,
+} from "./verbs/control-plane.js";
 
 // ── Tiny argv parser ──────────────────────────────────────────────
 
@@ -145,6 +163,11 @@ async function cmdList(args: ParsedArgs): Promise<number> {
     tag: args.options.get("tag"),
     pattern: args.options.get("pattern"),
   });
+  // PR 5: mirror the disk listing into the control-plane scenario
+  // catalog. Best-effort; failures log a warning but don't affect
+  // the verb's exit code or output.
+  const { indexListResult } = await import("./verbs/indexing.js");
+  await indexListResult(result);
   if (args.options.get("format") === "json") {
     emitJson(result);
   } else {
@@ -1175,6 +1198,521 @@ async function cmdVmCleanup(args: ParsedArgs): Promise<number> {
   }
 }
 
+// ── Product / Release verbs (PR 2 — control-plane) ────────────────
+
+async function cmdProduct(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) usageError("product requires a subcommand (add, list, remove)");
+  switch (sub) {
+    case "add":
+      return await cmdProductAdd(args);
+    case "list":
+      return await cmdProductList(args);
+    case "remove":
+      return await cmdProductRemove(args);
+    default:
+      usageError(`unknown product subcommand: ${sub}`);
+  }
+}
+
+async function cmdProductAdd(args: ParsedArgs): Promise<number> {
+  const name = args.options.get("name") ?? args.positional[0];
+  const repoUrl = args.options.get("repo") ?? args.options.get("repo-url");
+  const buildYamlPath = args.options.get("build-yaml");
+  if (!name) usageError("product add requires --name <NAME>");
+  if (!repoUrl) usageError("product add requires --repo <URL>");
+  const format = args.options.get("format");
+  try {
+    const product = await withControlPlane((cp) =>
+      runProductAdd(cp, { name, repoUrl, buildYamlPath }),
+    );
+    if (format === "json") {
+      emitJson(product);
+    } else {
+      process.stdout.write(
+        `Added product '${product.name}' (${product.id})\n  repo: ${product.repoUrl}\n  build.yaml: ${product.buildYamlPath}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman product add: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdProductList(args: ParsedArgs): Promise<number> {
+  const format = args.options.get("format");
+  try {
+    const products = await withControlPlane((cp) => runProductList(cp));
+    if (format === "json") {
+      emitJson(products);
+      return 0;
+    }
+    if (products.length === 0) {
+      process.stdout.write("(no products)\n");
+      return 0;
+    }
+    emitTable(
+      products.map((p) => ({
+        name: p.name,
+        id: p.id,
+        repo: p.repoUrl,
+        "build.yaml": p.buildYamlPath,
+      })),
+    );
+    return 0;
+  } catch (err) {
+    console.error(`signalman product list: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdProductRemove(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0] ?? args.options.get("name");
+  if (!name) usageError("product remove requires <name>");
+  try {
+    await withControlPlane((cp) => runProductRemove(cp, { name }));
+    process.stdout.write(`Removed product '${name}'.\n`);
+    return 0;
+  } catch (err) {
+    console.error(`signalman product remove: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdRelease(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) usageError("release requires a subcommand (build, list, show, deploy, rollback)");
+  switch (sub) {
+    case "build":
+      return await cmdReleaseBuild(args);
+    case "list":
+      return await cmdReleaseList(args);
+    case "show":
+      return await cmdReleaseShow(args);
+    case "deploy":
+      return await cmdReleaseDeploy(args);
+    case "rollback":
+      return await cmdReleaseRollback(args);
+    default:
+      usageError(`unknown release subcommand: ${sub}`);
+  }
+}
+
+// ── target verbs ─────────────────────────────────────────────────
+
+async function cmdTarget(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) usageError("target requires a subcommand (add, list, remove)");
+  switch (sub) {
+    case "add":
+      return await cmdTargetAdd(args);
+    case "list":
+      return await cmdTargetList(args);
+    case "remove":
+      return await cmdTargetRemove(args);
+    default:
+      usageError(`unknown target subcommand: ${sub}`);
+  }
+}
+
+async function cmdTargetAdd(args: ParsedArgs): Promise<number> {
+  const name = args.options.get("name") ?? args.positional[0];
+  const kindRaw = args.options.get("kind");
+  if (!name) usageError("target add requires --name <NAME>");
+  if (!kindRaw) usageError("target add requires --kind <vm_test|vm_demo|docker_test|docker_demo>");
+  const validKinds = new Set(["vm_test", "vm_demo", "docker_test", "docker_demo"]);
+  if (!validKinds.has(kindRaw)) {
+    usageError(`target add: invalid --kind '${kindRaw}'`);
+  }
+  const kind = kindRaw as "vm_test" | "vm_demo" | "docker_test" | "docker_demo";
+
+  // Connection: either an explicit JSON blob, or assembled from
+  // --vm-name + --backend for the common VM-target case.
+  const connectionJson = args.options.get("connection");
+  let connection: Record<string, unknown>;
+  if (connectionJson) {
+    try {
+      connection = JSON.parse(connectionJson);
+    } catch {
+      usageError(`target add: --connection must be valid JSON`);
+    }
+  } else {
+    const vmName = args.options.get("vm-name");
+    if (!vmName) {
+      usageError(
+        "target add: provide --vm-name <VM> (and optionally --backend) or pass --connection '<json>'",
+      );
+    }
+    const backend = args.options.get("backend");
+    connection = { vmName, ...(backend ? { backend } : {}) };
+  }
+  const format = args.options.get("format");
+  try {
+    const target = await withControlPlane((cp) =>
+      runTargetAdd(cp, { name, kind, connection }),
+    );
+    if (format === "json") {
+      emitJson(target);
+    } else {
+      process.stdout.write(
+        `Added target '${target.name}' (${target.id})\n  kind: ${target.kind}\n  connection: ${JSON.stringify(target.connection)}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman target add: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdTargetList(args: ParsedArgs): Promise<number> {
+  const format = args.options.get("format");
+  try {
+    const targets = await withControlPlane((cp) => runTargetList(cp));
+    if (format === "json") {
+      emitJson(targets);
+      return 0;
+    }
+    if (targets.length === 0) {
+      process.stdout.write("(no targets)\n");
+      return 0;
+    }
+    emitTable(
+      targets.map((t) => ({
+        name: t.name,
+        kind: t.kind,
+        connection: JSON.stringify(t.connection),
+        id: t.id,
+      })),
+    );
+    return 0;
+  } catch (err) {
+    console.error(`signalman target list: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdTargetRemove(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0] ?? args.options.get("name");
+  if (!name) usageError("target remove requires <name>");
+  try {
+    await withControlPlane((cp) => runTargetRemove(cp, { name }));
+    process.stdout.write(`Removed target '${name}'.\n`);
+    return 0;
+  } catch (err) {
+    console.error(`signalman target remove: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// ── release deploy / rollback ───────────────────────────────────────
+
+async function cmdReleaseDeploy(args: ParsedArgs): Promise<number> {
+  const productName = args.options.get("product");
+  const tag = args.options.get("tag");
+  const releaseId = args.options.get("release");
+  const targetName = args.options.get("target");
+  if (!targetName) usageError("release deploy requires --target <NAME>");
+  if (!releaseId && !(productName && tag)) {
+    usageError("release deploy requires either --release <ID> or --product <NAME> + --tag <TAG>");
+  }
+  const format = args.options.get("format");
+  try {
+    const result = await withControlPlane((cp) =>
+      runReleaseDeploy(
+        cp,
+        { releaseId, productName, tag, targetName },
+        { out: process.stderr },
+      ),
+    );
+    if (format === "json") {
+      emitJson({
+        deployment: result.deployment,
+        release_id: result.release.id,
+        target_id: result.target.id,
+        health: result.healthSummary,
+      });
+    } else {
+      process.stdout.write(
+        `Deployed ${result.release.tag} → ${result.target.name}\n` +
+          `  deployment: ${result.deployment.id}\n` +
+          `  status: ${result.deployment.status}\n` +
+          `  health: ${result.healthSummary.pass}/${result.healthSummary.total} probes passed\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    const name = (err as Error).name;
+    if (name === "DeployBlockedError" || name === "DeployHealthFailedError") {
+      console.error(`signalman release deploy: ${(err as Error).message}`);
+      return 2;
+    }
+    console.error(`signalman release deploy: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// ── health verbs ────────────────────────────────────────────────────
+
+async function cmdHealth(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) usageError("health requires a subcommand (check, history)");
+  switch (sub) {
+    case "check":
+      return await cmdHealthCheck(args);
+    case "history":
+      return await cmdHealthHistory(args);
+    default:
+      usageError(`unknown health subcommand: ${sub}`);
+  }
+}
+
+async function cmdHealthCheck(args: ParsedArgs): Promise<number> {
+  const targetName = args.options.get("target");
+  if (!targetName) usageError("health check requires --target <NAME>");
+  // --probe may be repeated via comma-separation: --probe a,b,c.
+  // Keeps the parser simple without per-flag repetition support.
+  const probeOpt = args.options.get("probe");
+  const probeNames = probeOpt
+    ? probeOpt.split(",").map((s) => s.trim()).filter((s) => s.length > 0)
+    : undefined;
+  const releaseId = args.options.get("release");
+  const format = args.options.get("format");
+  try {
+    const result = await withControlPlane((cp) =>
+      runHealthCheck(
+        cp,
+        { targetName, probeNames, releaseId },
+        { out: process.stderr },
+      ),
+    );
+    if (format === "json") {
+      emitJson(result);
+      return 0;
+    }
+    process.stdout.write(
+      `Target '${result.target.name}' — release ${result.release.tag} (${result.release.id})\n` +
+        `  vm_reachable: ${result.reachability.reachable ? "pass" : "fail"}` +
+        (result.reachability.detail ? `  (${result.reachability.detail})` : "") +
+        "\n",
+    );
+    if (result.probes.length === 0) {
+      process.stdout.write("  (no declared probes)\n");
+    } else {
+      for (const p of result.probes) {
+        process.stdout.write(`  ${p.name}: ${p.status}  (${p.detail})\n`);
+      }
+    }
+    const anyFail =
+      !result.reachability.reachable || result.probes.some((p) => p.status === "fail");
+    return anyFail ? 1 : 0;
+  } catch (err) {
+    console.error(`signalman health check: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdHealthHistory(args: ParsedArgs): Promise<number> {
+  const targetName = args.options.get("target");
+  if (!targetName) usageError("health history requires --target <NAME>");
+  const sinceIso = args.options.get("since");
+  const limitRaw = args.options.get("limit");
+  const limit = limitRaw ? parseInt(limitRaw, 10) : undefined;
+  const format = args.options.get("format");
+  try {
+    const entries = await withControlPlane((cp) =>
+      runHealthHistory(cp, { targetName, sinceIso, limit }),
+    );
+    if (format === "json") {
+      emitJson(entries);
+      return 0;
+    }
+    if (entries.length === 0) {
+      process.stdout.write("(no deployments on target)\n");
+      return 0;
+    }
+    for (const e of entries) {
+      process.stdout.write(
+        `Deployment ${e.deployment.id} (${e.deployment.status}) — release ${e.release.tag}\n`,
+      );
+      if (e.checks.length === 0) {
+        process.stdout.write("  (no health checks)\n");
+        continue;
+      }
+      for (const c of e.checks) {
+        process.stdout.write(
+          `  ${c.checkedAt}  ${c.probeName}: ${c.status}` +
+            (c.detail ? `  (${c.detail})` : "") +
+            "\n",
+        );
+      }
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman health history: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdReleaseRollback(args: ParsedArgs): Promise<number> {
+  const targetName = args.options.get("target");
+  const toReleaseId = args.options.get("to-release");
+  if (!targetName) usageError("release rollback requires --target <NAME>");
+  const format = args.options.get("format");
+  try {
+    const result = await withControlPlane((cp) =>
+      runReleaseRollback(
+        cp,
+        { targetName, toReleaseId },
+        { out: process.stderr },
+      ),
+    );
+    if (format === "json") {
+      emitJson({
+        deployment: result.deployment,
+        release_id: result.release.id,
+        target_id: result.target.id,
+        health: result.healthSummary,
+      });
+    } else {
+      process.stdout.write(
+        `Rolled back ${result.target.name} → ${result.release.tag}\n` +
+          `  deployment: ${result.deployment.id}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    const name = (err as Error).name;
+    if (name === "DeployBlockedError" || name === "DeployHealthFailedError") {
+      console.error(`signalman release rollback: ${(err as Error).message}`);
+      return 2;
+    }
+    console.error(`signalman release rollback: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdReleaseBuild(args: ParsedArgs): Promise<number> {
+  const productName = args.options.get("product");
+  const tag = args.options.get("tag");
+  const workDir = args.options.get("work-dir");
+  if (!productName) usageError("release build requires --product <NAME>");
+  if (!tag) usageError("release build requires --tag <TAG>");
+  const format = args.options.get("format");
+  try {
+    const result = await withControlPlane((cp) =>
+      runReleaseBuild(
+        cp,
+        { productName, tag, workDir },
+        { out: process.stderr },
+      ),
+    );
+    if (format === "json") {
+      emitJson({
+        release: result.release,
+        manifest_sha256: result.manifestSha256,
+        artifact_count: result.artifacts.length,
+      });
+    } else {
+      process.stdout.write(
+        `Release ${result.release.tag} ready (id=${result.release.id})\n` +
+          `  manifest: ${result.manifestSha256}\n` +
+          `  artifacts: ${result.artifacts.length}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    const name = (err as Error).name;
+    if (
+      name === "BuildYamlValidationError" ||
+      name === "ComponentBuildError" ||
+      name === "MissingArtifactError" ||
+      name === "ReleaseAlreadyExistsError"
+    ) {
+      console.error(`signalman release build: ${(err as Error).message}`);
+      return name === "BuildYamlValidationError" ? 5 : 2;
+    }
+    console.error(`signalman release build: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdReleaseList(args: ParsedArgs): Promise<number> {
+  const productName = args.options.get("product");
+  const statusOpt = args.options.get("status");
+  const validStatuses = new Set(["building", "ready", "failed"]);
+  if (statusOpt && !validStatuses.has(statusOpt)) {
+    usageError(`release list: invalid --status '${statusOpt}' (expected building|ready|failed)`);
+  }
+  const status = statusOpt as "building" | "ready" | "failed" | undefined;
+  const format = args.options.get("format");
+  try {
+    const entries = await withControlPlane((cp) =>
+      runReleaseList(cp, { productName, status }),
+    );
+    if (format === "json") {
+      emitJson(entries);
+      return 0;
+    }
+    if (entries.length === 0) {
+      process.stdout.write("(no releases)\n");
+      return 0;
+    }
+    emitTable(
+      entries.map((e) => ({
+        product: e.product.name,
+        tag: e.release.tag,
+        status: e.release.status,
+        commit: e.release.commitSha.slice(0, 7),
+        id: e.release.id,
+        built_at: e.release.builtAt ?? "—",
+      })),
+    );
+    return 0;
+  } catch (err) {
+    console.error(`signalman release list: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdReleaseShow(args: ParsedArgs): Promise<number> {
+  const releaseId = args.positional[0];
+  if (!releaseId) usageError("release show requires <release_id>");
+  const format = args.options.get("format");
+  try {
+    const result = await withControlPlane((cp) =>
+      runReleaseShow(cp, { releaseId }),
+    );
+    if (format === "json") {
+      emitJson(result);
+      return 0;
+    }
+    const r = result.release;
+    process.stdout.write(
+      `Release ${r.tag} (${r.id})\n` +
+        `  product: ${result.product.name}\n` +
+        `  status: ${r.status}\n` +
+        `  commit: ${r.commitSha}\n` +
+        `  manifest: ${r.manifestSha256 ?? "—"}\n` +
+        `  built_at: ${r.builtAt ?? "—"}\n` +
+        `  built_by: ${r.builtByRunnerId ?? "—"}\n` +
+        `  artifacts (${result.artifacts.length}):\n`,
+    );
+    for (const a of result.artifacts) {
+      const detail =
+        a.kind === "blob"
+          ? `sha256=${(a.sha256 ?? "").slice(0, 16)}… size=${a.sizeBytes ?? "?"}B`
+          : `ref=${a.imageRef ?? ""}`;
+      process.stdout.write(`    - ${a.component} (${a.kind}) ${detail}\n`);
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman release show: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 async function main(argv: string[]): Promise<number> {
@@ -1203,6 +1741,14 @@ async function main(argv: string[]): Promise<number> {
         return cmdInit(args);
       case "vm":
         return await cmdVm(args);
+      case "product":
+        return await cmdProduct(args);
+      case "release":
+        return await cmdRelease(args);
+      case "target":
+        return await cmdTarget(args);
+      case "health":
+        return await cmdHealth(args);
       default:
         usageError(`unknown verb: ${verb}`);
     }
@@ -1244,6 +1790,10 @@ function printHelp(): void {
       "  record finalize <recording_path_or_id> [--scenario-id ID] [--force]",
       "  vm <subcommand>   (provision, cleanup, create, install-bundle,",
       "                     fetch-template — see ROADMAP P9 / signalman vm --help)",
+      "  product <subcommand>   (add, list, remove)",
+      "  release <subcommand>   (build, list, show, deploy, rollback)",
+      "  target <subcommand>    (add, list, remove)",
+      "  health <subcommand>    (check, history)",
       "",
       "Exit codes (per docs/design/p0-mcp-surface.md §5):",
       "  0  pass        2  workflow fail        4  infra error",

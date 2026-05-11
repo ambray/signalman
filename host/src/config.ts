@@ -110,6 +110,30 @@ export interface SignalmanConfig {
    * tsc error in the orchestrator.
    */
   vmAliases?: Record<string, string>;
+  /**
+   * Optional control-plane configuration. The control plane owns the
+   * release catalog, deployment ledger, scenario index, artifact
+   * metadata, audit log, and tenant model — see
+   * docs/design/meta-build-system.md.
+   *
+   * In v0.2.0 (local mode) the control plane runs in-process inside
+   * the CLI; this block configures its storage backends. When unset,
+   * defaults derived from `~/.signalman/` are used.
+   */
+  controlPlane?: {
+    /** Relational store driver. */
+    storage?: {
+      driver: "sqlite" | "postgres";
+      /** SQLite: filesystem path to the .db file. Postgres: connection URL. */
+      url: string;
+    };
+    /** Blob store driver for artifacts. */
+    blobs?: {
+      driver: "local" | "s3";
+      /** Local: filesystem root. S3: bucket name (additional S3 fields land in v0.3). */
+      root: string;
+    };
+  };
 }
 
 // ── Default Configuration ──────────────────────────────────────────
@@ -330,6 +354,23 @@ function mergeConfig(
     if (partial.docker.registryAuth !== undefined) {
       result.docker.registryAuth = partial.docker.registryAuth;
     }
+  }
+
+  if (partial.controlPlane && typeof partial.controlPlane === "object") {
+    const cp: SignalmanConfig["controlPlane"] = { ...(result.controlPlane ?? {}) };
+    if (partial.controlPlane.storage) {
+      cp.storage = {
+        driver: partial.controlPlane.storage.driver,
+        url: partial.controlPlane.storage.url,
+      };
+    }
+    if (partial.controlPlane.blobs) {
+      cp.blobs = {
+        driver: partial.controlPlane.blobs.driver,
+        root: partial.controlPlane.blobs.root,
+      };
+    }
+    result.controlPlane = cp;
   }
 
   return result;
