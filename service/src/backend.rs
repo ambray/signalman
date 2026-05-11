@@ -242,6 +242,17 @@ pub trait Backend: Send + Sync {
     ) -> BackendResult<bool>;
     async fn set_vm_memory(&self, handle: &VmHandle, memory_mb: u32) -> BackendResult<()>;
     async fn set_vm_processor(&self, handle: &VmHandle, count: u32) -> BackendResult<()>;
+    /// Apply firmware settings (Gen2 VMs only). Each `Option` field
+    /// is independent: `None` means "leave alone", `Some(v)` means
+    /// "set to v". The VM should be Off before this is called; the
+    /// Hyper-V dispatcher does not enforce this -- it lets the
+    /// underlying `Set-VMFirmware` cmdlet's own state check error
+    /// bubble up (e.g. "Cannot modify firmware while VM is Running").
+    async fn set_vm_firmware(
+        &self,
+        handle: &VmHandle,
+        secure_boot_enabled: Option<bool>,
+    ) -> BackendResult<()>;
 }
 
 // ── Hyper-V backend ────────────────────────────────────────────────
@@ -868,6 +879,32 @@ impl Backend for HyperVBackend {
             .await?;
         Ok(())
     }
+
+    async fn set_vm_firmware(
+        &self,
+        handle: &VmHandle,
+        secure_boot_enabled: Option<bool>,
+    ) -> BackendResult<()> {
+        // If every optional field is None there is nothing to apply.
+        // Treat this as a bad request rather than a silent no-op so
+        // the operator notices a CLI typo (e.g. forgetting --secure-boot).
+        if secure_boot_enabled.is_none() {
+            return Err(BackendError::InvalidArgument(
+                "set_vm_firmware called with no fields to set".to_string(),
+            ));
+        }
+        let safe_name = escape_powershell_arg(sanitize_vm_name(&handle.name)?);
+        let mut parts = vec![format!("-VMName '{safe_name}'")];
+        if let Some(enabled) = secure_boot_enabled {
+            // Set-VMFirmware accepts the literal tokens On / Off; an
+            // unrecognized value throws.
+            let val = if enabled { "On" } else { "Off" };
+            parts.push(format!("-EnableSecureBoot {val}"));
+        }
+        let cmd = format!("Set-VMFirmware {}", parts.join(" "));
+        self.runner.run(&cmd, 30_000).await?;
+        Ok(())
+    }
 }
 
 /// Wait for a VM to be in a stable state. Mirrors the TS
@@ -1269,6 +1306,45 @@ mod tests {
             backend.set_vm_memory(&handle("vm1"), 2_000_000).await,
             Err(BackendError::InvalidArgument(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn set_vm_firmware_rejects_empty_request() {
+        let runner = Arc::new(ScriptedRunner::new(vec![]));
+        let backend = HyperVBackend::with_runner(runner);
+        // No fields set -> InvalidArgument, no PowerShell invocation.
+        assert!(matches!(
+            backend.set_vm_firmware(&handle("vm1"), None).await,
+            Err(BackendError::InvalidArgument(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn set_vm_firmware_secure_boot_off_emits_correct_cmdlet() {
+        let runner = Arc::new(ScriptedRunner::new(vec![Ok(String::new())]));
+        let backend = HyperVBackend::with_runner(runner.clone());
+        backend
+            .set_vm_firmware(&handle("vm1"), Some(false))
+            .await
+            .unwrap();
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("Set-VMFirmware"));
+        assert!(calls[0].0.contains("-VMName 'vm1'"));
+        assert!(calls[0].0.contains("-EnableSecureBoot Off"));
+    }
+
+    #[tokio::test]
+    async fn set_vm_firmware_secure_boot_on_emits_correct_cmdlet() {
+        let runner = Arc::new(ScriptedRunner::new(vec![Ok(String::new())]));
+        let backend = HyperVBackend::with_runner(runner.clone());
+        backend
+            .set_vm_firmware(&handle("vm1"), Some(true))
+            .await
+            .unwrap();
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("-EnableSecureBoot On"));
     }
 
     #[tokio::test]

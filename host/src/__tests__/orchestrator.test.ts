@@ -924,6 +924,131 @@ describe("ScenarioOrchestrator", () => {
     expect(emptyClients.get("vm1")).toBeDefined();
     expect(isConnected).toHaveBeenCalled();
   });
+
+  // ── Per-VM credentials (backendForVm) ───────────────────────────
+  //
+  // The contract: when a scenario declares vms[].credentials, the
+  // orchestrator routes guest-bound calls (executeCommand, copyFile)
+  // through `backend.withGuestCredentials(creds)`. VMs without a
+  // credentials block use the default backend unchanged.
+  //
+  // We test the helpers directly via a cast since they're orchestrator-
+  // internal. Full integration through executeToolBlock is covered
+  // by the existing vm_run_command + vm_copy_file tests.
+
+  it("backendForVm returns the default backend when no per-VM creds declared", () => {
+    const orch = new ScenarioOrchestrator(backend, clients, config);
+    const defs: VmDefinition[] = [
+      { name: "vm1", template: "win11-base", guest_agent_port: 50051 },
+    ];
+    (orch as unknown as { rebuildVmCredentialsIndex: (d: VmDefinition[]) => void })
+      .rebuildVmCredentialsIndex(defs);
+    const resolved = (
+      orch as unknown as { backendForVm: (n: string) => HypervisorBackend }
+    ).backendForVm("vm1");
+    expect(resolved).toBe(backend);
+  });
+
+  it("backendForVm returns a credentials-scoped clone when per-VM creds declared", () => {
+    const scopedBackend = makeMockBackend({ name: "service-scoped" });
+    const withGuestCredentials = vi.fn().mockReturnValue(scopedBackend);
+    const credAware = makeMockBackend({ name: "service", withGuestCredentials });
+    const orch = new ScenarioOrchestrator(credAware, clients, config);
+    const defs: VmDefinition[] = [
+      {
+        name: "vm1",
+        template: "win11-base",
+        guest_agent_port: 50051,
+        credentials: { username: "test", password: "test123" },
+      },
+      { name: "vm2", template: "win11-base", guest_agent_port: 50051 },
+    ];
+    (orch as unknown as { rebuildVmCredentialsIndex: (d: VmDefinition[]) => void })
+      .rebuildVmCredentialsIndex(defs);
+    const r1 = (
+      orch as unknown as { backendForVm: (n: string) => HypervisorBackend }
+    ).backendForVm("vm1");
+    const r2 = (
+      orch as unknown as { backendForVm: (n: string) => HypervisorBackend }
+    ).backendForVm("vm2");
+
+    expect(withGuestCredentials).toHaveBeenCalledWith({
+      username: "test",
+      password: "test123",
+    });
+    expect(r1).toBe(scopedBackend); // scoped clone for vm1
+    expect(r2).toBe(credAware); // default backend for vm2 (no creds)
+  });
+
+  it("backendForVm caches the scoped clone across repeated lookups", () => {
+    const scopedBackend = makeMockBackend({ name: "service-scoped" });
+    const withGuestCredentials = vi.fn().mockReturnValue(scopedBackend);
+    const credAware = makeMockBackend({ name: "service", withGuestCredentials });
+    const orch = new ScenarioOrchestrator(credAware, clients, config);
+    const defs: VmDefinition[] = [
+      {
+        name: "vm1",
+        template: "win11-base",
+        guest_agent_port: 50051,
+        credentials: { username: "a", password: "b" },
+      },
+    ];
+    (orch as unknown as { rebuildVmCredentialsIndex: (d: VmDefinition[]) => void })
+      .rebuildVmCredentialsIndex(defs);
+    const helper = (
+      orch as unknown as { backendForVm: (n: string) => HypervisorBackend }
+    ).backendForVm.bind(orch);
+    helper("vm1");
+    helper("vm1");
+    helper("vm1");
+    // withGuestCredentials should be called only once across N lookups
+    // -- subsequent lookups hit the per-VM backend cache.
+    expect(withGuestCredentials).toHaveBeenCalledTimes(1);
+  });
+
+  it("rebuildVmCredentialsIndex throws when a VM declares creds on a backend without withGuestCredentials", () => {
+    // The mock backend factory returns a backend WITHOUT
+    // withGuestCredentials, mirroring the direct HyperVBackend.
+    const orch = new ScenarioOrchestrator(backend, clients, config);
+    const defs: VmDefinition[] = [
+      {
+        name: "vm1",
+        template: "win11-base",
+        guest_agent_port: 50051,
+        credentials: { username: "test", password: "test123" },
+      },
+    ];
+    expect(() =>
+      (orch as unknown as { rebuildVmCredentialsIndex: (d: VmDefinition[]) => void })
+        .rebuildVmCredentialsIndex(defs),
+    ).toThrow(/does not support credential overrides/);
+  });
+
+  it("rebuildVmCredentialsIndex clears stale credentials from a previous run", () => {
+    const scopedBackend = makeMockBackend({ name: "service-scoped" });
+    const withGuestCredentials = vi.fn().mockReturnValue(scopedBackend);
+    const credAware = makeMockBackend({ name: "service", withGuestCredentials });
+    const orch = new ScenarioOrchestrator(credAware, clients, config);
+    // First run declares creds on vm1.
+    (orch as unknown as { rebuildVmCredentialsIndex: (d: VmDefinition[]) => void })
+      .rebuildVmCredentialsIndex([
+        {
+          name: "vm1",
+          template: "win11-base",
+          guest_agent_port: 50051,
+          credentials: { username: "a", password: "b" },
+        },
+      ]);
+    // Second run on the same orchestrator drops the cred on vm1.
+    (orch as unknown as { rebuildVmCredentialsIndex: (d: VmDefinition[]) => void })
+      .rebuildVmCredentialsIndex([
+        { name: "vm1", template: "win11-base", guest_agent_port: 50051 },
+      ]);
+    const resolved = (
+      orch as unknown as { backendForVm: (n: string) => HypervisorBackend }
+    ).backendForVm("vm1");
+    expect(resolved).toBe(credAware); // default, not the stale clone
+  });
 });
 
 describe("runtime references and capability gates", () => {

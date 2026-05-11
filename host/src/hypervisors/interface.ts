@@ -208,6 +208,47 @@ export interface HypervisorBackend {
    * The VM should typically be stopped before changing processors.
    */
   setVmProcessor?(handle: VMHandle, count: number): Promise<void>;
+
+  /**
+   * Return a backend instance scoped to a specific set of guest
+   * credentials. Used by multi-VM scenarios where different VMs
+   * authenticate with different local-admin accounts.
+   *
+   * Implementations should return a CLONE that shares underlying
+   * connection resources (gRPC client / process pools) but uses the
+   * supplied credentials for any PowerShell-Direct operation that
+   * needs them (`executeCommand`, `copyFileToVM`, `copyFileFromVM`).
+   * Methods that don't consume credentials are unaffected.
+   *
+   * Optional because not every backend has credential semantics
+   * (e.g. a future libvirt backend may key off SSH keys instead).
+   * Callers that need credential overrides on a backend without this
+   * method should treat the absence as "credentials not supported"
+   * and surface a descriptive error.
+   */
+  withGuestCredentials?(
+    credentials: { username: string; password: string },
+  ): HypervisorBackend;
+
+  /**
+   * Apply firmware settings (Gen2 VMs only on Hyper-V).
+   *
+   * Currently exposes the Secure Boot toggle, which must be Off
+   * before the guest will accept a test-signed kernel driver
+   * (bcdedit /set testsigning On is refused under Secure Boot).
+   *
+   * Each parameter is independent: pass `undefined` (or omit) to
+   * leave the attribute alone, pass a value to apply it. Passing
+   * no fields at all is an error (it would be a silent no-op).
+   *
+   * The VM should be Off before this is called; backends that
+   * can't change firmware on a Running VM will surface an error
+   * from the underlying hypervisor.
+   */
+  setVmFirmware?(
+    handle: VMHandle,
+    opts: { secureBootEnabled?: boolean },
+  ): Promise<void>;
 }
 
 /** Result of a command execution. */

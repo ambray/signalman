@@ -155,6 +155,39 @@ export const vmConfigSchema = z
       })
       .passthrough()
       .optional(),
+    /**
+     * Per-VM guest credentials for PowerShell-Direct operations
+     * (`executeCommand`, `copyFileToVM`, `copyFileFromVM`). When
+     * present, override the global `hypervisor.guestCredentials` from
+     * `.signalman/config.yaml` for any scenario step targeting this VM.
+     *
+     * Use case: multi-VM scenarios where the test VM and the demo VM
+     * have different local-admin accounts (e.g. Win11_test = test/test123,
+     * Win11_demo = demo/demo). Today the operator either has to align
+     * accounts or pass `--username` / `--password` on every CLI call;
+     * declaring per-VM creds in the scenario removes both of those.
+     *
+     * Storage: values are plain strings here. Use `${secret:NAME}`
+     * substitution to pull the password from `SIGNALMAN_SECRET_NAME`
+     * (or `NAME`) env vars instead of checking it into YAML:
+     *
+     * ```yaml
+     * credentials:
+     *   username: test
+     *   password: ${secret:WIN11_TEST_PASSWORD}
+     * ```
+     *
+     * Substitution runs in `substituteRuntimeRefsDeep` after schema
+     * validation, so raw `${secret:...}` strings pass the `z.string()`
+     * check here.
+     */
+    credentials: z
+      .object({
+        username: z.string().min(1, "credentials.username must be non-empty"),
+        password: z.string().min(1, "credentials.password must be non-empty"),
+      })
+      .passthrough()
+      .optional(),
     kernel_debug: kernelDebugConfigSchema.optional(),
   })
   .passthrough();

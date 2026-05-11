@@ -59,6 +59,11 @@ service ControlPlane {
   rpc VmWaitAgent(VmWaitAgentRequest) returns (stream VmWaitAgentEvent);
   rpc VmSetMemory(VmSetMemoryRequest) returns (Empty);
   rpc VmSetProcessor(VmSetProcessorRequest) returns (Empty);
+  // Set firmware settings (Gen2 VMs only). Currently exposes the
+  // Secure Boot toggle, which must be Off before the guest will
+  // accept a test-signed kernel driver (bcdedit /set testsigning On
+  // is refused under Secure Boot). VM must be Off when this runs.
+  rpc VmSetFirmware(VmSetFirmwareRequest) returns (Empty);
 
   // Server-streaming wrapper around package install — wraps
   // executeCommand with per-source argument construction so the
@@ -293,6 +298,17 @@ message VmSetMemoryRequest {
 message VmSetProcessorRequest {
   VmHandle handle = 1;
   uint32 count = 2;
+}
+
+// Firmware mutation request. Each *_set_* field is a tri-state:
+//   *_set_* == false  -> leave this attribute alone
+//   *_set_* == true   -> apply the corresponding value field
+// This shape lets future firmware attributes ride in without
+// renumbering fields or breaking older callers.
+message VmSetFirmwareRequest {
+  VmHandle handle = 1;
+  bool secure_boot_set = 2;
+  bool secure_boot_enabled = 3;
 }
 
 message VmInstallRequest {

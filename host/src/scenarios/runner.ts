@@ -136,6 +136,14 @@ export interface VmConfig {
    * so the COM1 pipe is wired to kd on startup.
    */
   kernel_debug?: KernelDebugConfig;
+  /**
+   * Per-VM guest credentials. See `vmConfigSchema.credentials` in
+   * `host/src/scenarios/schema.ts` for the full doc and the
+   * `${secret:NAME}` substitution pattern. When present, override
+   * the global `hypervisor.guestCredentials` for scenario steps
+   * targeting this VM.
+   */
+  credentials?: { username: string; password: string };
 }
 
 /**

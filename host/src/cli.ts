@@ -546,6 +546,8 @@ async function cmdVm(args: ParsedArgs): Promise<number> {
       return await cmdVmExec(args);
     case "copy-file":
       return await cmdVmCopyFile(args);
+    case "set-firmware":
+      return await cmdVmSetFirmware(args);
     default:
       usageError(`unknown vm subcommand: ${sub}`);
   }
@@ -832,6 +834,73 @@ async function cmdVmCopyFile(args: ParsedArgs): Promise<number> {
     return 0;
   } catch (err) {
     console.error(`signalman vm copy-file: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// ── vm set-firmware ────────────────────────────────────────────────
+//
+// `signalman vm set-firmware <name> --secure-boot on|off`
+//
+// Drives `Set-VMFirmware -VMName <name> -EnableSecureBoot On|Off`
+// inside the elevated signalman service. The motivating use case is
+// the Win11_test / Win11_demo bootstrap pipeline: a test-signed
+// kernel driver requires `bcdedit /set testsigning On`, which
+// Secure Boot refuses. Without this verb the operator has to drop
+// into an elevated PowerShell window to run `Set-VMFirmware` by
+// hand -- the whole point of the unprivileged signalman flow is to
+// remove that step.
+//
+// VM must be Off; backends will surface the underlying hypervisor's
+// "cannot modify firmware while VM is Running" error if not.
+//
+// Gen2 VMs only. Gen1 VMs have no firmware settings and the cmdlet
+// will throw a clear error.
+async function cmdVmSetFirmware(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm set-firmware requires <name>");
+  const format = args.options.get("format");
+  const secureBootStr = args.options.get("secure-boot");
+
+  // At least one firmware-mutation field must be supplied. As more
+  // attributes are added (boot order, console mode, etc.) this guard
+  // keeps growing -- for now, secure-boot is the only one.
+  if (!secureBootStr) {
+    usageError(
+      "vm set-firmware requires at least one firmware attribute to set (e.g. --secure-boot on|off)",
+    );
+  }
+  const lowered = secureBootStr.toLowerCase();
+  if (lowered !== "on" && lowered !== "off") {
+    usageError(`vm set-firmware --secure-boot must be 'on' or 'off' (got '${secureBootStr}')`);
+  }
+  const secureBootEnabled = lowered === "on";
+
+  const backend = await getCliBackend();
+  try {
+    const handle = await resolveVmHandleByName(backend, name);
+    if (!backend.setVmFirmware) {
+      throw new Error(
+        `Backend '${backend.name}' does not support setVmFirmware. ` +
+        `vm set-firmware is currently Hyper-V only.`,
+      );
+    }
+    await backend.setVmFirmware(handle, { secureBootEnabled });
+
+    if (format === "json") {
+      emitJson({
+        vmName: name,
+        backend: backend.name,
+        secureBootEnabled,
+      });
+    } else {
+      process.stdout.write(
+        `VM '${name}' firmware updated: Secure Boot = ${secureBootEnabled ? "On" : "Off"}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman vm set-firmware: ${(err as Error).message}`);
     return 4;
   }
 }

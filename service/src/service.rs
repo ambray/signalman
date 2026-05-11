@@ -526,6 +526,27 @@ impl proto::signalman_service::control_plane_server::ControlPlane for ControlPla
         Ok(Response::new(proto::Empty {}))
     }
 
+    async fn vm_set_firmware(
+        &self,
+        req: Request<proto::VmSetFirmwareRequest>,
+    ) -> Result<Response<proto::Empty>, Status> {
+        let req = req.into_inner();
+        let h = handle_from_proto(require(req.handle, "handle")?);
+        // Tri-state decode: only forward the bool if the *_set_* flag
+        // is true. This keeps proto3's lack of presence semantics out
+        // of the backend trait, which uses real Option<bool>.
+        let secure_boot = if req.secure_boot_set {
+            Some(req.secure_boot_enabled)
+        } else {
+            None
+        };
+        self.backend
+            .set_vm_firmware(&h, secure_boot)
+            .await
+            .map_err(map_err)?;
+        Ok(Response::new(proto::Empty {}))
+    }
+
     type VmInstallStream =
         Pin<Box<dyn Stream<Item = Result<proto::VmRunCommandEvent, Status>> + Send + 'static>>;
 
@@ -801,5 +822,40 @@ mod tests {
         });
         let err = svc.vm_set_memory(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn vm_set_firmware_rejects_unset_request() {
+        // secure_boot_set = false => Option::None at the backend, which
+        // backend.set_vm_firmware rejects with InvalidArgument.
+        let svc = service_with(vec![]);
+        let req = Request::new(proto::VmSetFirmwareRequest {
+            handle: Some(proto::VmHandle {
+                id: "id1".to_string(),
+                name: "vm1".to_string(),
+                backend: "hyperv".to_string(),
+            }),
+            secure_boot_set: false,
+            secure_boot_enabled: false,
+        });
+        let err = svc.vm_set_firmware(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn vm_set_firmware_secure_boot_off_dispatches() {
+        let svc = service_with(vec![Ok(String::new())]);
+        let req = Request::new(proto::VmSetFirmwareRequest {
+            handle: Some(proto::VmHandle {
+                id: "id1".to_string(),
+                name: "vm1".to_string(),
+                backend: "hyperv".to_string(),
+            }),
+            secure_boot_set: true,
+            secure_boot_enabled: false,
+        });
+        // Just assert it returns Ok; backend tests above check the
+        // exact cmdlet text.
+        svc.vm_set_firmware(req).await.unwrap();
     }
 }
