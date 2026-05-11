@@ -29,12 +29,15 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Readable } from "node:stream";
 import * as YAML from "yaml";
-import type { ControlPlane } from "../index.js";
 import type {
   Artifact,
   ArtifactKind,
+  AuditLogEntry,
+  Product,
   Release,
+  ReleaseStatus,
 } from "../types.js";
 import {
   type BuildArtifact,
@@ -86,8 +89,77 @@ export class ReleaseAlreadyExistsError extends Error {
   }
 }
 
+/**
+ * The narrow subset of ControlPlane methods the build executor uses.
+ * Defined as a structural interface so both the local in-process
+ * `ControlPlane` and the runner-side `HttpControlPlane` (PR 8b) can
+ * be passed in transparently.
+ *
+ * Care: runBuild reaches into `controlPlane.blobs.put`; that body
+ * field accepts either a Buffer or a Readable. Implementations must
+ * NOT buffer Readables into memory — artifacts can be hundreds of MB.
+ */
+export interface BuildControlPlane {
+  readonly products: {
+    get(id: string): Promise<Product | null>;
+  };
+  readonly releases: {
+    getByTag(productId: string, tag: string): Promise<Release | null>;
+    create(input: {
+      orgId: string;
+      productId: string;
+      tag: string;
+      commitSha: string;
+      status?: ReleaseStatus;
+    }): Promise<Release>;
+    softDelete(id: string): Promise<void>;
+    update(
+      id: string,
+      patch: Partial<
+        Pick<
+          Release,
+          | "status"
+          | "manifestSha256"
+          | "signedBy"
+          | "builtAt"
+          | "builtByRunnerId"
+          | "buildYamlJson"
+        >
+      >,
+    ): Promise<Release>;
+  };
+  readonly artifacts: {
+    create(input: {
+      releaseId: string;
+      component: string;
+      kind: ArtifactKind;
+      sha256?: string;
+      sizeBytes?: number;
+      blobUri?: string;
+      imageRef?: string;
+    }): Promise<Artifact>;
+  };
+  readonly auditLog: {
+    append(input: {
+      orgId: string;
+      actor: string;
+      action: string;
+      entityType: string;
+      entityId: string;
+      detail?: Record<string, unknown>;
+    }): Promise<AuditLogEntry>;
+  };
+  readonly blobs: {
+    put(input: {
+      orgId: string;
+      body: Buffer | Readable;
+      contentType?: string;
+    }): Promise<{ uri: string; sha256: string; size: number }>;
+  };
+}
+
 export interface RunBuildOptions {
-  controlPlane: ControlPlane;
+  controlPlane: BuildControlPlane;
   orgId: string;
   productId: string;
   tag: string;
@@ -343,7 +415,7 @@ function runShellCommand(input: ShellCommandInput): Promise<void> {
 // ── Artifact capture ────────────────────────────────────────────────
 
 async function captureArtifact(input: {
-  controlPlane: ControlPlane;
+  controlPlane: BuildControlPlane;
   orgId: string;
   releaseId: string;
   component: string;

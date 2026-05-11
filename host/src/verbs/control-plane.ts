@@ -16,16 +16,18 @@
  * depending on `--format`.
  */
 
-import * as cp from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { promisify } from "node:util";
 import { ControlPlane } from "../control-plane/index.js";
 import {
   runBuild,
   type RunBuildResult,
 } from "../control-plane/build/index.js";
+import {
+  cloneProductAtTag,
+  resolveCommitSha,
+} from "../control-plane/build/git.js";
 import {
   type DeployBackend,
   HypervisorDeployBackend,
@@ -46,8 +48,6 @@ import type {
   TargetConnection,
   TargetKind,
 } from "../control-plane/types.js";
-
-const exec = promisify(cp.exec);
 
 // ── Lifecycle helper ────────────────────────────────────────────────
 
@@ -264,62 +264,8 @@ export async function runReleaseShow(
   return { release, product, artifacts };
 }
 
-// ── Git helpers ─────────────────────────────────────────────────────
-
-interface CloneInput {
-  repoUrl: string;
-  tag: string;
-  destDir: string;
-  out: NodeJS.WritableStream;
-}
-
-async function cloneProductAtTag(input: CloneInput): Promise<void> {
-  input.out.write(
-    `[release build] cloning ${input.repoUrl} @ ${input.tag} into ${input.destDir}\n`,
-  );
-  // --depth 1 + --branch <tag> is the cheapest checkout that still
-  // lets `git rev-parse HEAD` work in the destination. We accept that
-  // a follow-up build cannot inspect history beyond the tag.
-  await spawnGit(
-    [
-      "clone",
-      "--depth",
-      "1",
-      "--branch",
-      input.tag,
-      input.repoUrl,
-      input.destDir,
-    ],
-    process.cwd(),
-    input.out,
-  );
-}
-
-async function resolveCommitSha(workDir: string): Promise<string> {
-  const { stdout } = await exec("git rev-parse HEAD", { cwd: workDir });
-  return stdout.trim();
-}
-
-function spawnGit(
-  args: string[],
-  cwd: string,
-  out: NodeJS.WritableStream,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = cp.spawn("git", args, {
-      cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: false,
-    });
-    child.stdout.on("data", (chunk) => out.write(chunk));
-    child.stderr.on("data", (chunk) => out.write(chunk));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`git ${args.join(" ")} exited with code ${code}`));
-    });
-  });
-}
+// Git helpers extracted to control-plane/build/git.ts (PR 8b) so the
+// remote runner can share them.
 
 // ── Target verbs (PR 3) ─────────────────────────────────────────────
 

@@ -1650,7 +1650,7 @@ async function cmdRunnerStart(args: ParsedArgs): Promise<number> {
       workerName,
       pollIntervalMs,
       signal: controller.signal,
-      handlers: defaultHandlers(),
+      handlers: defaultHandlers({ client, runnerId: workerName }),
     });
     return 0;
   } catch (err) {

@@ -39,6 +39,19 @@ export interface RequestContext {
   params: Record<string, string>;
   query: Record<string, string | string[]>;
   body: unknown;
+  /**
+   * Raw request stream. Only populated for routes registered with
+   * `{ streamBody: true }` (PR 8b — blob upload endpoint). When set,
+   * `body` is undefined and the handler is responsible for consuming
+   * the stream.
+   */
+  bodyStream?: http.IncomingMessage;
+  /**
+   * Raw response object. Only populated for routes registered with
+   * `{ rawResponse: true }`. Handler MUST write the response itself
+   * (status, headers, body).
+   */
+  res?: http.ServerResponse;
   headers: http.IncomingHttpHeaders;
   /** Remote socket address (`req.socket.remoteAddress`). Used for the loopback bypass. */
   remoteAddress: string | undefined;
@@ -47,6 +60,23 @@ export interface RequestContext {
 }
 
 export type RouteHandler = (ctx: RequestContext) => Promise<unknown> | unknown;
+
+export interface RouteOptions {
+  /**
+   * Bypass JSON body parsing + 1 MiB cap; pass the raw request stream
+   * to the handler as `ctx.bodyStream`. Used by `POST /v1/blobs` to
+   * accept artifact uploads without buffering them.
+   */
+  streamBody?: boolean;
+  /**
+   * Don't wrap the handler's return value in JSON. Instead, the
+   * handler receives the raw `ServerResponse` (`ctx.res`) and is
+   * responsible for writing the entire HTTP response (status line,
+   * headers, body). Used by `GET /v1/blobs/:sha256` to stream blob
+   * bytes back without buffering.
+   */
+  rawResponse?: boolean;
+}
 
 /** Authenticate a request. Throw an HttpError to deny. */
 export type Authenticator = (
@@ -68,6 +98,7 @@ export interface RouteDefinition {
   pattern: RegExp;
   paramNames: string[];
   handler: RouteHandler;
+  options: RouteOptions;
 }
 
 export class Router {
@@ -80,7 +111,12 @@ export class Router {
     this.publicPaths = opts.publicPaths ?? new Set();
   }
 
-  route(method: HttpMethod, path: string, handler: RouteHandler): void {
+  route(
+    method: HttpMethod,
+    path: string,
+    handler: RouteHandler,
+    options: RouteOptions = {},
+  ): void {
     const paramNames: string[] = [];
     const escaped = path.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
     const pattern = new RegExp(
@@ -91,36 +127,40 @@ export class Router {
         }) +
         "$",
     );
-    this.routes.push({ method, pattern, paramNames, handler });
+    this.routes.push({ method, pattern, paramNames, handler, options });
   }
 
-  get(path: string, handler: RouteHandler): void {
-    this.route("GET", path, handler);
+  get(path: string, handler: RouteHandler, options?: RouteOptions): void {
+    this.route("GET", path, handler, options);
   }
-  post(path: string, handler: RouteHandler): void {
-    this.route("POST", path, handler);
+  post(path: string, handler: RouteHandler, options?: RouteOptions): void {
+    this.route("POST", path, handler, options);
   }
-  patch(path: string, handler: RouteHandler): void {
-    this.route("PATCH", path, handler);
+  patch(path: string, handler: RouteHandler, options?: RouteOptions): void {
+    this.route("PATCH", path, handler, options);
   }
-  delete(path: string, handler: RouteHandler): void {
-    this.route("DELETE", path, handler);
+  delete(path: string, handler: RouteHandler, options?: RouteOptions): void {
+    this.route("DELETE", path, handler, options);
   }
 
   /** node:http listener that dispatches into the route table. */
   listener(): http.RequestListener {
     return async (req, res) => {
       try {
-        const result = await this.dispatch(req);
-        writeJson(res, result.status, result.body);
+        await this.handle(req, res);
       } catch (err) {
-        const { status, body } = mapError(err);
-        writeJson(res, status, body);
+        if (!res.headersSent) {
+          const { status, body } = mapError(err);
+          writeJson(res, status, body);
+        }
       }
     };
   }
 
-  async dispatch(req: http.IncomingMessage): Promise<{ status: number; body: unknown }> {
+  private async handle(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
     const method = (req.method ?? "GET") as HttpMethod;
     const url = new URL(req.url ?? "/", "http://localhost");
     for (const r of this.routes) {
@@ -142,13 +182,15 @@ export class Router {
           query[k] = [existing, v];
         }
       }
-      const body = await readBody(req);
+      const body = r.options.streamBody ? undefined : await readBody(req);
       const preAuth: PreAuthContext = {
         method,
         path: url.pathname,
         params,
         query,
         body,
+        bodyStream: r.options.streamBody ? req : undefined,
+        res: r.options.rawResponse ? res : undefined,
         headers: req.headers,
         remoteAddress: req.socket?.remoteAddress,
       };
@@ -156,15 +198,29 @@ export class Router {
       // Authenticate unless this is a public route.
       let auth: AuthContext;
       if (this.publicPaths.has(url.pathname) || !this.authenticate) {
-        // Public route: no real org. Handlers on public routes must
-        // not touch ctx.auth.orgId.
         auth = { orgId: "", apiKeyId: null };
       } else {
         auth = await this.authenticate(preAuth);
       }
 
       const result = await r.handler({ ...preAuth, auth });
-      // Handler can return `{ status, body }` to override defaults.
+
+      // Raw routes: handler owns the response. If they didn't write
+      // anything, that's a bug — surface as 500.
+      if (r.options.rawResponse) {
+        if (!res.headersSent) {
+          writeJson(res, 500, {
+            error: {
+              code: "internal_error",
+              message: "raw-response handler did not write a response",
+            },
+          });
+        }
+        return;
+      }
+
+      // JSON-response routes: handler can return `{ status, body }` to
+      // override 200 + raw value.
       if (
         result &&
         typeof result === "object" &&
@@ -173,14 +229,15 @@ export class Router {
         typeof (result as { status?: unknown }).status === "number"
       ) {
         const r2 = result as { status: number; body: unknown };
-        return { status: r2.status, body: r2.body };
+        writeJson(res, r2.status, r2.body);
+      } else {
+        writeJson(res, 200, result);
       }
-      return { status: 200, body: result };
+      return;
     }
-    return {
-      status: 404,
-      body: { error: { code: "not_found", message: `no route for ${method} ${url.pathname}` } },
-    };
+    writeJson(res, 404, {
+      error: { code: "not_found", message: `no route for ${method} ${url.pathname}` },
+    });
   }
 }
 
