@@ -624,17 +624,9 @@ function registerBlobEndpoints(router: Router, cp: ControlPlane): void {
         );
         return;
       }
-      // Resolve the on-disk URI for the org-scoped blob. The local-FS
-      // driver computes `${root}/${orgId}/${sha[0:2]}/${sha}` as a
-      // file:// URI; matching by sha256 within the org is uniquely
-      // identifying because the layout is content-addressed.
-      const orgPrefix = ctx.auth.orgId;
+      // Driver picks the on-disk / S3 layout to look under.
       const sha = ctx.params.sha256;
-      // The BlobDriver doesn't expose a sha-only lookup directly; we
-      // reconstruct the URI using the same layout the local driver
-      // emits. S3 driver (v0.3.x) will diverge — but for v0.3.0 this
-      // is the local-FS shape and the only HTTP-served path.
-      const uri = blobUriFromSha(cp, orgPrefix, sha);
+      const uri = cp.blobs.resolveBySha(ctx.auth.orgId, sha);
       let stream;
       try {
         stream = await cp.blobs.get(uri);
@@ -666,33 +658,8 @@ function registerBlobEndpoints(router: Router, cp: ControlPlane): void {
   );
 }
 
-/**
- * Reconstruct a blob URI from `(org_id, sha256)` using the same layout
- * the local-FS BlobDriver writes. Necessary because the driver doesn't
- * (yet) expose a "fetch by sha" API — it only round-trips URIs.
- *
- * If we later move to S3, swap this for a driver method.
- */
-function blobUriFromSha(cp: ControlPlane, orgId: string, sha256: string): string {
-  // The local driver's `put()` returns a `file://` URI. We can't
-  // easily reach into it; instead we ask the driver to construct the
-  // path by performing a tiny `exists()` against a synthesized URI.
-  // For v0.3.0 the only blob driver is local-fs and the layout is
-  // stable. The S3 driver (v0.3.x) will add a `resolveUri(orgId, sha)`
-  // method to BlobDriver.
-  const config = cp.resolvedConfig.blobs;
-  if (config.driver !== "local") {
-    throw new Error(
-      `blob retrieval by sha256 not implemented for blob driver '${config.driver}'`,
-    );
-  }
-  const path = `${config.root}/${orgId}/${sha256.slice(0, 2)}/${sha256}`;
-  // Normalize Windows paths to file URIs.
-  const normalized = path.replace(/\\/g, "/");
-  return normalized.startsWith("/")
-    ? `file://${normalized}`
-    : `file:///${normalized}`;
-}
+// `blobUriFromSha` (PR 8b's local-FS-specific helper) replaced by
+// `cp.blobs.resolveBySha(orgId, sha)` — see BlobDriver interface.
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
