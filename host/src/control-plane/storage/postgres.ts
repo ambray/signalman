@@ -1,0 +1,1524 @@
+/**
+ * Postgres implementation of StorageDriver. Mirrors the SQLite driver
+ * one-to-one — same schema, same row mappers, same repository
+ * methods.
+ *
+ * The schema was designed for portability (per the conventions header
+ * in 0001_init.sql): TEXT for IDs/timestamps, TEXT (not JSONB) for
+ * JSON-encoded columns, INTEGER not BOOLEAN where applicable. We
+ * therefore reuse the same migration files as SQLite. The migration
+ * runner here applies them inside Postgres transactions instead of
+ * SQLite ones.
+ *
+ * Key differences from sqlite.ts:
+ *   * `pg.Pool` for connection pooling (each repo call acquires +
+ *     releases a client; transactions take a dedicated client).
+ *   * SQL placeholders are `$1, $2, ...` instead of `@name`. The
+ *     `pgQuery` helper translates `@name`-style SQL (identical to the
+ *     sqlite source) into Postgres positional form so the SQL bodies
+ *     stay easy to diff between drivers.
+ *   * `claimNext` uses `SELECT ... FOR UPDATE SKIP LOCKED` instead of
+ *     `BEGIN IMMEDIATE`.
+ *   * Constraint-violation errors come back with SQLSTATE codes; we
+ *     map class-23 ("integrity constraint violation") to
+ *     `StorageConflictError`.
+ *
+ * Test path: pg-mem (in-memory Postgres-compatible engine) covers the
+ * basic CRUD + constraint surface. Behavioural fidelity gaps (e.g.
+ * `SELECT FOR UPDATE SKIP LOCKED` semantics under concurrency) are
+ * left to operator-driven validation against real Postgres.
+ */
+
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import pgPkg from "pg";
+import { newId, nowIso } from "../ids.js";
+import type {
+  ApiKey,
+  Artifact,
+  ArtifactKind,
+  AuditLogEntry,
+  Deployment,
+  DeploymentHealthSummary,
+  DeploymentStatus,
+  HealthCheck,
+  HealthStatus,
+  Job,
+  JobStatus,
+  Org,
+  OrgTier,
+  Product,
+  Release,
+  ReleaseStatus,
+  Run,
+  RunTriggeredBy,
+  Scenario,
+  ScenarioSource,
+  Target,
+  TargetConnection,
+  TargetKind,
+} from "../types.js";
+import {
+  type ApiKeyRepo,
+  type ArtifactRepo,
+  type AuditLogRepo,
+  type DeploymentRepo,
+  type HealthCheckRepo,
+  type JobRepo,
+  type OrgRepo,
+  type ProductRepo,
+  type ReleaseRepo,
+  type RunRepo,
+  type ScenarioRepo,
+  StorageConflictError,
+  type StorageDriver,
+  StorageNotFoundError,
+  type TargetRepo,
+} from "./driver.js";
+
+const { Pool: DefaultPool } = pgPkg;
+type Pool = pgPkg.Pool;
+type PoolClient = pgPkg.PoolClient;
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const MIGRATIONS_DIR = path.join(__dirname, "migrations");
+
+type SqlRow = Record<string, unknown>;
+
+// ── Driver ──────────────────────────────────────────────────────────
+
+export interface PostgresDriverOptions {
+  /** Provide either an existing Pool (tests, custom setups) ... */
+  pool?: Pool;
+  /** ... or a connection string for the default Pool. */
+  connectionString?: string;
+  /** Override migrations directory (tests). */
+  migrationsDir?: string;
+}
+
+export class PostgresStorageDriver implements StorageDriver {
+  readonly pool: Pool;
+  private readonly migrationsDir: string;
+  private readonly ownsPool: boolean;
+  private closed = false;
+
+  readonly orgs: OrgRepo;
+  readonly apiKeys: ApiKeyRepo;
+  readonly products: ProductRepo;
+  readonly releases: ReleaseRepo;
+  readonly artifacts: ArtifactRepo;
+  readonly auditLog: AuditLogRepo;
+  readonly targets: TargetRepo;
+  readonly deployments: DeploymentRepo;
+  readonly healthChecks: HealthCheckRepo;
+  readonly scenarios: ScenarioRepo;
+  readonly runs: RunRepo;
+  readonly jobs: JobRepo;
+
+  constructor(opts: PostgresDriverOptions) {
+    if (opts.pool) {
+      this.pool = opts.pool;
+      this.ownsPool = false;
+    } else if (opts.connectionString) {
+      this.pool = new DefaultPool({ connectionString: opts.connectionString });
+      this.ownsPool = true;
+    } else {
+      throw new Error(
+        "PostgresStorageDriver: provide either `pool` or `connectionString`",
+      );
+    }
+    this.migrationsDir = opts.migrationsDir ?? MIGRATIONS_DIR;
+
+    this.orgs = new PgOrgRepo(this.pool);
+    this.apiKeys = new PgApiKeyRepo(this.pool);
+    this.products = new PgProductRepo(this.pool);
+    this.releases = new PgReleaseRepo(this.pool);
+    this.artifacts = new PgArtifactRepo(this.pool);
+    this.auditLog = new PgAuditLogRepo(this.pool);
+    this.targets = new PgTargetRepo(this.pool);
+    this.deployments = new PgDeploymentRepo(this.pool);
+    this.healthChecks = new PgHealthCheckRepo(this.pool);
+    this.scenarios = new PgScenarioRepo(this.pool);
+    this.runs = new PgRunRepo(this.pool);
+    this.jobs = new PgJobRepo(this.pool);
+  }
+
+  async migrate(): Promise<void> {
+    await runMigrations(this.pool, this.migrationsDir);
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.ownsPool) {
+      await this.pool.end();
+    }
+  }
+}
+
+// ── Migration runner ────────────────────────────────────────────────
+
+interface MigrationFile {
+  version: number;
+  name: string;
+  sql: string;
+}
+
+function loadMigrations(dir: string): MigrationFile[] {
+  if (!fs.existsSync(dir)) {
+    throw new Error(`migrations directory not found: ${dir}`);
+  }
+  return fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith(".sql"))
+    .sort()
+    .map((f) => {
+      const match = /^(\d+)_(.+)\.sql$/.exec(f);
+      if (!match) throw new Error(`bad migration filename: ${f}`);
+      return {
+        version: parseInt(match[1], 10),
+        name: match[2],
+        sql: fs.readFileSync(path.join(dir, f), "utf-8"),
+      };
+    });
+}
+
+async function runMigrations(pool: Pool, dir: string): Promise<void> {
+  const migrations = loadMigrations(dir);
+  const client = await pool.connect();
+  try {
+    // Check if _migrations exists.
+    let applied = new Set<number>();
+    try {
+      const r = await client.query<{ version: number }>(
+        "SELECT version FROM _migrations",
+      );
+      applied = new Set(r.rows.map((row) => row.version));
+    } catch {
+      // _migrations doesn't exist yet — first migration creates it.
+    }
+
+    for (const m of migrations) {
+      if (applied.has(m.version)) continue;
+      await client.query("BEGIN");
+      try {
+        await client.query(m.sql);
+        await client.query(
+          "INSERT INTO _migrations (version, name, applied_at) VALUES ($1, $2, $3)",
+          [m.version, m.name, nowIso()],
+        );
+        await client.query("COMMIT");
+      } catch (err) {
+        try {
+          await client.query("ROLLBACK");
+        } catch {
+          // ignore
+        }
+        throw err;
+      }
+    }
+  } finally {
+    client.release();
+  }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Translate `@name`-style SQL (the sqlite source convention) into
+ * Postgres positional form and run via the pool. Keeps SQL bodies
+ * diff-readable between drivers.
+ */
+async function pgQuery(
+  pool: Pool | PoolClient,
+  sql: string,
+  params: Record<string, unknown> = {},
+): Promise<{ rows: SqlRow[]; rowCount: number | null }> {
+  const names: string[] = [];
+  const positionalSql = sql.replace(/@(\w+)/g, (_m, name: string) => {
+    let idx = names.indexOf(name);
+    if (idx < 0) {
+      names.push(name);
+      idx = names.length - 1;
+    }
+    return `$${idx + 1}`;
+  });
+  const values = names.map((n) => params[n]);
+  try {
+    const r = await pool.query(positionalSql, values);
+    return { rows: r.rows as SqlRow[], rowCount: r.rowCount };
+  } catch (err) {
+    mapPgError(err);
+  }
+}
+
+async function pgPositional(
+  pool: Pool | PoolClient,
+  sql: string,
+  values: unknown[],
+): Promise<{ rows: SqlRow[]; rowCount: number | null }> {
+  try {
+    const r = await pool.query(sql, values);
+    return { rows: r.rows as SqlRow[], rowCount: r.rowCount };
+  } catch (err) {
+    mapPgError(err);
+  }
+}
+
+/**
+ * Postgres errors carry a SQLSTATE in `.code`. Class 23 covers
+ * integrity-constraint violations: 23505 unique, 23503 foreign-key,
+ * 23514 check, 23502 not-null. We coalesce all of class 23 into
+ * StorageConflictError to match the sqlite driver's behaviour.
+ *
+ * https://www.postgresql.org/docs/current/errcodes-appendix.html
+ */
+function mapPgError(err: unknown): never {
+  const e = err as { code?: string; message: string };
+  if (typeof e.code === "string" && e.code.startsWith("23")) {
+    throw new StorageConflictError(e.message);
+  }
+  throw err;
+}
+
+// ── Row mappers (identical to sqlite.ts; JSON columns are TEXT) ─────
+
+function mapOrg(row: SqlRow): Org {
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    tier: row.tier as OrgTier,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+function mapApiKey(row: SqlRow): ApiKey {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    prefix: row.prefix as string,
+    hash: row.hash as string,
+    name: row.name as string,
+    expiresAt: (row.expires_at as string | null) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+function mapProduct(row: SqlRow): Product {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    name: row.name as string,
+    repoUrl: row.repo_url as string,
+    buildYamlPath: row.build_yaml_path as string,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+function mapRelease(row: SqlRow): Release {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    productId: row.product_id as string,
+    tag: row.tag as string,
+    commitSha: row.commit_sha as string,
+    manifestSha256: (row.manifest_sha256 as string | null) ?? null,
+    signedBy: (row.signed_by as string | null) ?? null,
+    builtAt: (row.built_at as string | null) ?? null,
+    builtByRunnerId: (row.built_by_runner_id as string | null) ?? null,
+    status: row.status as ReleaseStatus,
+    buildYamlJson: (row.build_yaml_json as string | null) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+function mapArtifact(row: SqlRow): Artifact {
+  return {
+    id: row.id as string,
+    releaseId: row.release_id as string,
+    component: row.component as string,
+    kind: row.kind as ArtifactKind,
+    sha256: (row.sha256 as string | null) ?? null,
+    sizeBytes: (row.size_bytes as number | null) ?? null,
+    blobUri: (row.blob_uri as string | null) ?? null,
+    imageRef: (row.image_ref as string | null) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+function mapAuditLog(row: SqlRow): AuditLogEntry {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    actor: row.actor as string,
+    action: row.action as string,
+    entityType: row.entity_type as string,
+    entityId: row.entity_id as string,
+    detail: row.detail
+      ? (JSON.parse(row.detail as string) as Record<string, unknown>)
+      : null,
+    at: row.at as string,
+    createdAt: row.created_at as string,
+  };
+}
+
+function mapTarget(row: SqlRow): Target {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    name: row.name as string,
+    kind: row.kind as TargetKind,
+    connection: JSON.parse(row.connection as string) as TargetConnection,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+function mapDeployment(row: SqlRow): Deployment {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    releaseId: row.release_id as string,
+    targetId: row.target_id as string,
+    status: row.status as DeploymentStatus,
+    startedAt: (row.started_at as string | null) ?? null,
+    completedAt: (row.completed_at as string | null) ?? null,
+    previousDeploymentId: (row.previous_deployment_id as string | null) ?? null,
+    healthSummary: row.health_summary
+      ? (JSON.parse(row.health_summary as string) as DeploymentHealthSummary)
+      : null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+function mapHealthCheck(row: SqlRow): HealthCheck {
+  return {
+    id: row.id as string,
+    deploymentId: row.deployment_id as string,
+    probeName: row.probe_name as string,
+    status: row.status as HealthStatus,
+    latencyMs: (row.latency_ms as number | null) ?? null,
+    detail: (row.detail as string | null) ?? null,
+    checkedAt: row.checked_at as string,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+function mapScenario(row: SqlRow): Scenario {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    path: row.path as string,
+    scenarioHash: row.scenario_hash as string,
+    name: row.name as string,
+    tags: JSON.parse(row.tags as string) as string[],
+    source: row.source as ScenarioSource,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+function mapRun(row: SqlRow): Run {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    scenarioId: row.scenario_id as string,
+    targetId: (row.target_id as string | null) ?? null,
+    triggeredBy: row.triggered_by as RunTriggeredBy,
+    envelopeBlobUri: (row.envelope_blob_uri as string | null) ?? null,
+    result: (row.result as string | null) ?? null,
+    startedAt: (row.started_at as string | null) ?? null,
+    completedAt: (row.completed_at as string | null) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+function mapJob(row: SqlRow): Job {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    kind: row.kind as string,
+    input: JSON.parse(row.input as string) as Record<string, unknown>,
+    status: row.status as JobStatus,
+    result: row.result
+      ? (JSON.parse(row.result as string) as Record<string, unknown>)
+      : null,
+    error: (row.error as string | null) ?? null,
+    claimedBy: (row.claimed_by as string | null) ?? null,
+    claimedAt: (row.claimed_at as string | null) ?? null,
+    startedAt: (row.started_at as string | null) ?? null,
+    completedAt: (row.completed_at as string | null) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+// ── Repo implementations ────────────────────────────────────────────
+
+class PgOrgRepo implements OrgRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async create(input: { name: string; tier?: OrgTier }): Promise<Org> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      name: input.name,
+      tier: input.tier ?? "free",
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO org (id, name, tier, created_at, updated_at) VALUES (@id, @name, @tier, @created_at, @updated_at)",
+      bind,
+    );
+    return mapOrg({ ...bind, deleted_at: null });
+  }
+
+  async get(id: string): Promise<Org | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM org WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    return r.rows[0] ? mapOrg(r.rows[0]) : null;
+  }
+
+  async getByName(name: string): Promise<Org | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM org WHERE name = $1 AND deleted_at IS NULL",
+      [name],
+    );
+    return r.rows[0] ? mapOrg(r.rows[0]) : null;
+  }
+
+  async list(): Promise<Org[]> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM org WHERE deleted_at IS NULL ORDER BY created_at",
+      [],
+    );
+    return r.rows.map(mapOrg);
+  }
+
+  async update(id: string, patch: Partial<Pick<Org, "name" | "tier">>): Promise<Org> {
+    const existing = await this.get(id);
+    if (!existing) throw new StorageNotFoundError("org", id);
+    const bind = {
+      id: existing.id,
+      name: patch.name ?? existing.name,
+      tier: patch.tier ?? existing.tier,
+      updated_at: nowIso(),
+    };
+    await pgQuery(
+      this.pool,
+      "UPDATE org SET name = @name, tier = @tier, updated_at = @updated_at WHERE id = @id",
+      bind,
+    );
+    return mapOrg({
+      ...bind,
+      created_at: existing.createdAt,
+      deleted_at: existing.deletedAt,
+    });
+  }
+
+  async softDelete(id: string): Promise<void> {
+    const now = nowIso();
+    const r = await pgPositional(
+      this.pool,
+      "UPDATE org SET deleted_at = $1, updated_at = $2 WHERE id = $3 AND deleted_at IS NULL",
+      [now, now, id],
+    );
+    if (!r.rowCount) throw new StorageNotFoundError("org", id);
+  }
+}
+
+class PgApiKeyRepo implements ApiKeyRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async create(input: {
+    orgId: string;
+    name: string;
+    prefix: string;
+    hash: string;
+    expiresAt?: string;
+  }): Promise<ApiKey> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      prefix: input.prefix,
+      hash: input.hash,
+      name: input.name,
+      expires_at: input.expiresAt ?? null,
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO api_key (id, org_id, prefix, hash, name, expires_at, created_at, updated_at) VALUES (@id, @org_id, @prefix, @hash, @name, @expires_at, @created_at, @updated_at)",
+      bind,
+    );
+    return mapApiKey({ ...bind, deleted_at: null });
+  }
+
+  async get(id: string): Promise<ApiKey | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM api_key WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    return r.rows[0] ? mapApiKey(r.rows[0]) : null;
+  }
+
+  async getByPrefix(prefix: string): Promise<ApiKey | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM api_key WHERE prefix = $1 AND deleted_at IS NULL",
+      [prefix],
+    );
+    return r.rows[0] ? mapApiKey(r.rows[0]) : null;
+  }
+
+  async listForOrg(orgId: string): Promise<ApiKey[]> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM api_key WHERE org_id = $1 AND deleted_at IS NULL ORDER BY created_at",
+      [orgId],
+    );
+    return r.rows.map(mapApiKey);
+  }
+
+  async softDelete(id: string): Promise<void> {
+    const now = nowIso();
+    const r = await pgPositional(
+      this.pool,
+      "UPDATE api_key SET deleted_at = $1, updated_at = $2 WHERE id = $3 AND deleted_at IS NULL",
+      [now, now, id],
+    );
+    if (!r.rowCount) throw new StorageNotFoundError("api_key", id);
+  }
+}
+
+class PgProductRepo implements ProductRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async create(input: {
+    orgId: string;
+    name: string;
+    repoUrl: string;
+    buildYamlPath?: string;
+  }): Promise<Product> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      name: input.name,
+      repo_url: input.repoUrl,
+      build_yaml_path: input.buildYamlPath ?? "signalman.build.yaml",
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO product (id, org_id, name, repo_url, build_yaml_path, created_at, updated_at) VALUES (@id, @org_id, @name, @repo_url, @build_yaml_path, @created_at, @updated_at)",
+      bind,
+    );
+    return mapProduct({ ...bind, deleted_at: null });
+  }
+
+  async get(id: string): Promise<Product | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM product WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    return r.rows[0] ? mapProduct(r.rows[0]) : null;
+  }
+
+  async getByName(orgId: string, name: string): Promise<Product | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM product WHERE org_id = $1 AND name = $2 AND deleted_at IS NULL",
+      [orgId, name],
+    );
+    return r.rows[0] ? mapProduct(r.rows[0]) : null;
+  }
+
+  async listForOrg(orgId: string): Promise<Product[]> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM product WHERE org_id = $1 AND deleted_at IS NULL ORDER BY name",
+      [orgId],
+    );
+    return r.rows.map(mapProduct);
+  }
+
+  async update(
+    id: string,
+    patch: Partial<Pick<Product, "name" | "repoUrl" | "buildYamlPath">>,
+  ): Promise<Product> {
+    const existing = await this.get(id);
+    if (!existing) throw new StorageNotFoundError("product", id);
+    const bind = {
+      id: existing.id,
+      name: patch.name ?? existing.name,
+      repo_url: patch.repoUrl ?? existing.repoUrl,
+      build_yaml_path: patch.buildYamlPath ?? existing.buildYamlPath,
+      updated_at: nowIso(),
+    };
+    await pgQuery(
+      this.pool,
+      "UPDATE product SET name = @name, repo_url = @repo_url, build_yaml_path = @build_yaml_path, updated_at = @updated_at WHERE id = @id",
+      bind,
+    );
+    return mapProduct({
+      ...bind,
+      org_id: existing.orgId,
+      created_at: existing.createdAt,
+      deleted_at: existing.deletedAt,
+    });
+  }
+
+  async softDelete(id: string): Promise<void> {
+    const now = nowIso();
+    const r = await pgPositional(
+      this.pool,
+      "UPDATE product SET deleted_at = $1, updated_at = $2 WHERE id = $3 AND deleted_at IS NULL",
+      [now, now, id],
+    );
+    if (!r.rowCount) throw new StorageNotFoundError("product", id);
+  }
+}
+
+class PgReleaseRepo implements ReleaseRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async create(input: {
+    orgId: string;
+    productId: string;
+    tag: string;
+    commitSha: string;
+    status?: ReleaseStatus;
+  }): Promise<Release> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      product_id: input.productId,
+      tag: input.tag,
+      commit_sha: input.commitSha,
+      status: input.status ?? "building",
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO release (id, org_id, product_id, tag, commit_sha, status, created_at, updated_at) VALUES (@id, @org_id, @product_id, @tag, @commit_sha, @status, @created_at, @updated_at)",
+      bind,
+    );
+    return mapRelease({
+      ...bind,
+      manifest_sha256: null,
+      signed_by: null,
+      built_at: null,
+      built_by_runner_id: null,
+      build_yaml_json: null,
+      deleted_at: null,
+    });
+  }
+
+  async get(id: string): Promise<Release | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM release WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    return r.rows[0] ? mapRelease(r.rows[0]) : null;
+  }
+
+  async getByTag(productId: string, tag: string): Promise<Release | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM release WHERE product_id = $1 AND tag = $2 AND deleted_at IS NULL",
+      [productId, tag],
+    );
+    return r.rows[0] ? mapRelease(r.rows[0]) : null;
+  }
+
+  async listForProduct(
+    productId: string,
+    opts: { status?: ReleaseStatus } = {},
+  ): Promise<Release[]> {
+    if (opts.status) {
+      const r = await pgPositional(
+        this.pool,
+        "SELECT * FROM release WHERE product_id = $1 AND status = $2 AND deleted_at IS NULL ORDER BY created_at DESC",
+        [productId, opts.status],
+      );
+      return r.rows.map(mapRelease);
+    }
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM release WHERE product_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC",
+      [productId],
+    );
+    return r.rows.map(mapRelease);
+  }
+
+  async update(
+    id: string,
+    patch: Partial<
+      Pick<
+        Release,
+        | "manifestSha256"
+        | "signedBy"
+        | "builtAt"
+        | "builtByRunnerId"
+        | "status"
+        | "buildYamlJson"
+      >
+    >,
+  ): Promise<Release> {
+    const existing = await this.get(id);
+    if (!existing) throw new StorageNotFoundError("release", id);
+    const bind = {
+      id: existing.id,
+      manifest_sha256: patch.manifestSha256 ?? existing.manifestSha256,
+      signed_by: patch.signedBy ?? existing.signedBy,
+      built_at: patch.builtAt ?? existing.builtAt,
+      built_by_runner_id: patch.builtByRunnerId ?? existing.builtByRunnerId,
+      status: patch.status ?? existing.status,
+      build_yaml_json: patch.buildYamlJson ?? existing.buildYamlJson,
+      updated_at: nowIso(),
+    };
+    await pgQuery(
+      this.pool,
+      "UPDATE release SET manifest_sha256 = @manifest_sha256, signed_by = @signed_by, built_at = @built_at, built_by_runner_id = @built_by_runner_id, status = @status, build_yaml_json = @build_yaml_json, updated_at = @updated_at WHERE id = @id",
+      bind,
+    );
+    return mapRelease({
+      ...bind,
+      org_id: existing.orgId,
+      product_id: existing.productId,
+      tag: existing.tag,
+      commit_sha: existing.commitSha,
+      created_at: existing.createdAt,
+      deleted_at: existing.deletedAt,
+    });
+  }
+
+  async softDelete(id: string): Promise<void> {
+    const now = nowIso();
+    const r = await pgPositional(
+      this.pool,
+      "UPDATE release SET deleted_at = $1, updated_at = $2 WHERE id = $3 AND deleted_at IS NULL",
+      [now, now, id],
+    );
+    if (!r.rowCount) throw new StorageNotFoundError("release", id);
+  }
+}
+
+class PgArtifactRepo implements ArtifactRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async create(input: {
+    releaseId: string;
+    component: string;
+    kind: ArtifactKind;
+    sha256?: string;
+    sizeBytes?: number;
+    blobUri?: string;
+    imageRef?: string;
+  }): Promise<Artifact> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      release_id: input.releaseId,
+      component: input.component,
+      kind: input.kind,
+      sha256: input.sha256 ?? null,
+      size_bytes: input.sizeBytes ?? null,
+      blob_uri: input.blobUri ?? null,
+      image_ref: input.imageRef ?? null,
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO artifact (id, release_id, component, kind, sha256, size_bytes, blob_uri, image_ref, created_at, updated_at) VALUES (@id, @release_id, @component, @kind, @sha256, @size_bytes, @blob_uri, @image_ref, @created_at, @updated_at)",
+      bind,
+    );
+    return mapArtifact({ ...bind, deleted_at: null });
+  }
+
+  async get(id: string): Promise<Artifact | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM artifact WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    return r.rows[0] ? mapArtifact(r.rows[0]) : null;
+  }
+
+  async listForRelease(releaseId: string): Promise<Artifact[]> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM artifact WHERE release_id = $1 AND deleted_at IS NULL ORDER BY component",
+      [releaseId],
+    );
+    return r.rows.map(mapArtifact);
+  }
+
+  async softDelete(id: string): Promise<void> {
+    const now = nowIso();
+    const r = await pgPositional(
+      this.pool,
+      "UPDATE artifact SET deleted_at = $1, updated_at = $2 WHERE id = $3 AND deleted_at IS NULL",
+      [now, now, id],
+    );
+    if (!r.rowCount) throw new StorageNotFoundError("artifact", id);
+  }
+}
+
+class PgAuditLogRepo implements AuditLogRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async append(input: {
+    orgId: string;
+    actor: string;
+    action: string;
+    entityType: string;
+    entityId: string;
+    detail?: Record<string, unknown>;
+  }): Promise<AuditLogEntry> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      actor: input.actor,
+      action: input.action,
+      entity_type: input.entityType,
+      entity_id: input.entityId,
+      detail: input.detail ? JSON.stringify(input.detail) : null,
+      at: now,
+      created_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO audit_log (id, org_id, actor, action, entity_type, entity_id, detail, at, created_at) VALUES (@id, @org_id, @actor, @action, @entity_type, @entity_id, @detail, @at, @created_at)",
+      bind,
+    );
+    return mapAuditLog(bind);
+  }
+
+  async listForOrg(
+    orgId: string,
+    opts: { limit?: number; entityType?: string; entityId?: string } = {},
+  ): Promise<AuditLogEntry[]> {
+    const limit = opts.limit ?? 100;
+    if (opts.entityType && opts.entityId) {
+      const r = await pgPositional(
+        this.pool,
+        "SELECT * FROM audit_log WHERE org_id = $1 AND entity_type = $2 AND entity_id = $3 ORDER BY at DESC LIMIT $4",
+        [orgId, opts.entityType, opts.entityId, limit],
+      );
+      return r.rows.map(mapAuditLog);
+    }
+    if (opts.entityType) {
+      const r = await pgPositional(
+        this.pool,
+        "SELECT * FROM audit_log WHERE org_id = $1 AND entity_type = $2 ORDER BY at DESC LIMIT $3",
+        [orgId, opts.entityType, limit],
+      );
+      return r.rows.map(mapAuditLog);
+    }
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM audit_log WHERE org_id = $1 ORDER BY at DESC LIMIT $2",
+      [orgId, limit],
+    );
+    return r.rows.map(mapAuditLog);
+  }
+}
+
+class PgTargetRepo implements TargetRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async create(input: {
+    orgId: string;
+    name: string;
+    kind: TargetKind;
+    connection: TargetConnection;
+  }): Promise<Target> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      name: input.name,
+      kind: input.kind,
+      connection: JSON.stringify(input.connection),
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO target (id, org_id, name, kind, connection, created_at, updated_at) VALUES (@id, @org_id, @name, @kind, @connection, @created_at, @updated_at)",
+      bind,
+    );
+    return mapTarget({ ...bind, deleted_at: null });
+  }
+
+  async get(id: string): Promise<Target | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM target WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    return r.rows[0] ? mapTarget(r.rows[0]) : null;
+  }
+
+  async getByName(orgId: string, name: string): Promise<Target | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM target WHERE org_id = $1 AND name = $2 AND deleted_at IS NULL",
+      [orgId, name],
+    );
+    return r.rows[0] ? mapTarget(r.rows[0]) : null;
+  }
+
+  async listForOrg(orgId: string): Promise<Target[]> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM target WHERE org_id = $1 AND deleted_at IS NULL ORDER BY name",
+      [orgId],
+    );
+    return r.rows.map(mapTarget);
+  }
+
+  async softDelete(id: string): Promise<void> {
+    const now = nowIso();
+    const r = await pgPositional(
+      this.pool,
+      "UPDATE target SET deleted_at = $1, updated_at = $2 WHERE id = $3 AND deleted_at IS NULL",
+      [now, now, id],
+    );
+    if (!r.rowCount) throw new StorageNotFoundError("target", id);
+  }
+}
+
+class PgDeploymentRepo implements DeploymentRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async create(input: {
+    orgId: string;
+    releaseId: string;
+    targetId: string;
+    previousDeploymentId?: string;
+  }): Promise<Deployment> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      release_id: input.releaseId,
+      target_id: input.targetId,
+      status: "pending" as DeploymentStatus,
+      previous_deployment_id: input.previousDeploymentId ?? null,
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO deployment (id, org_id, release_id, target_id, status, previous_deployment_id, created_at, updated_at) VALUES (@id, @org_id, @release_id, @target_id, @status, @previous_deployment_id, @created_at, @updated_at)",
+      bind,
+    );
+    return mapDeployment({
+      ...bind,
+      started_at: null,
+      completed_at: null,
+      health_summary: null,
+      deleted_at: null,
+    });
+  }
+
+  async get(id: string): Promise<Deployment | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM deployment WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    return r.rows[0] ? mapDeployment(r.rows[0]) : null;
+  }
+
+  async getActiveForTarget(targetId: string): Promise<Deployment | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM deployment WHERE target_id = $1 AND status = 'active' AND deleted_at IS NULL",
+      [targetId],
+    );
+    return r.rows[0] ? mapDeployment(r.rows[0]) : null;
+  }
+
+  async listForTarget(
+    targetId: string,
+    opts: { limit?: number } = {},
+  ): Promise<Deployment[]> {
+    const limit = opts.limit ?? 100;
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM deployment WHERE target_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT $2",
+      [targetId, limit],
+    );
+    return r.rows.map(mapDeployment);
+  }
+
+  async update(
+    id: string,
+    patch: Partial<
+      Pick<Deployment, "status" | "startedAt" | "completedAt" | "healthSummary">
+    >,
+  ): Promise<Deployment> {
+    const existing = await this.get(id);
+    if (!existing) throw new StorageNotFoundError("deployment", id);
+    const bind = {
+      id: existing.id,
+      status: patch.status ?? existing.status,
+      started_at: patch.startedAt ?? existing.startedAt,
+      completed_at: patch.completedAt ?? existing.completedAt,
+      health_summary:
+        patch.healthSummary !== undefined
+          ? patch.healthSummary === null
+            ? null
+            : JSON.stringify(patch.healthSummary)
+          : existing.healthSummary
+            ? JSON.stringify(existing.healthSummary)
+            : null,
+      updated_at: nowIso(),
+    };
+    await pgQuery(
+      this.pool,
+      "UPDATE deployment SET status = @status, started_at = @started_at, completed_at = @completed_at, health_summary = @health_summary, updated_at = @updated_at WHERE id = @id",
+      bind,
+    );
+    return mapDeployment({
+      ...bind,
+      org_id: existing.orgId,
+      release_id: existing.releaseId,
+      target_id: existing.targetId,
+      previous_deployment_id: existing.previousDeploymentId,
+      created_at: existing.createdAt,
+      deleted_at: existing.deletedAt,
+    });
+  }
+}
+
+class PgHealthCheckRepo implements HealthCheckRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async append(input: {
+    deploymentId: string;
+    probeName: string;
+    status: HealthStatus;
+    latencyMs?: number;
+    detail?: string;
+  }): Promise<HealthCheck> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      deployment_id: input.deploymentId,
+      probe_name: input.probeName,
+      status: input.status,
+      latency_ms: input.latencyMs ?? null,
+      detail: input.detail ?? null,
+      checked_at: now,
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO health_check (id, deployment_id, probe_name, status, latency_ms, detail, checked_at, created_at, updated_at) VALUES (@id, @deployment_id, @probe_name, @status, @latency_ms, @detail, @checked_at, @created_at, @updated_at)",
+      bind,
+    );
+    return mapHealthCheck({ ...bind, deleted_at: null });
+  }
+
+  async listForDeployment(
+    deploymentId: string,
+    opts: { since?: string; limit?: number } = {},
+  ): Promise<HealthCheck[]> {
+    const limit = opts.limit ?? 100;
+    if (opts.since) {
+      const r = await pgPositional(
+        this.pool,
+        "SELECT * FROM health_check WHERE deployment_id = $1 AND checked_at >= $2 AND deleted_at IS NULL ORDER BY checked_at DESC LIMIT $3",
+        [deploymentId, opts.since, limit],
+      );
+      return r.rows.map(mapHealthCheck);
+    }
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM health_check WHERE deployment_id = $1 AND deleted_at IS NULL ORDER BY checked_at DESC LIMIT $2",
+      [deploymentId, limit],
+    );
+    return r.rows.map(mapHealthCheck);
+  }
+}
+
+class PgScenarioRepo implements ScenarioRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async upsertFromDisk(input: {
+    orgId: string;
+    path: string;
+    scenarioHash: string;
+    name: string;
+    tags: string[];
+  }): Promise<Scenario> {
+    const existing = await this.getByPath(input.orgId, input.path);
+    if (existing) {
+      const bind = {
+        id: existing.id,
+        scenario_hash: input.scenarioHash,
+        name: input.name,
+        tags: JSON.stringify(input.tags),
+        updated_at: nowIso(),
+      };
+      await pgQuery(
+        this.pool,
+        "UPDATE scenario SET scenario_hash = @scenario_hash, name = @name, tags = @tags, updated_at = @updated_at WHERE id = @id",
+        bind,
+      );
+      return mapScenario({
+        ...bind,
+        org_id: existing.orgId,
+        path: existing.path,
+        source: existing.source,
+        created_at: existing.createdAt,
+        deleted_at: existing.deletedAt,
+      });
+    }
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      path: input.path,
+      scenario_hash: input.scenarioHash,
+      name: input.name,
+      tags: JSON.stringify(input.tags),
+      source: "disk" as ScenarioSource,
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO scenario (id, org_id, path, scenario_hash, name, tags, source, created_at, updated_at) VALUES (@id, @org_id, @path, @scenario_hash, @name, @tags, @source, @created_at, @updated_at)",
+      bind,
+    );
+    return mapScenario({ ...bind, deleted_at: null });
+  }
+
+  async get(id: string): Promise<Scenario | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM scenario WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    return r.rows[0] ? mapScenario(r.rows[0]) : null;
+  }
+
+  async getByPath(orgId: string, p: string): Promise<Scenario | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM scenario WHERE org_id = $1 AND path = $2 AND deleted_at IS NULL",
+      [orgId, p],
+    );
+    return r.rows[0] ? mapScenario(r.rows[0]) : null;
+  }
+
+  async listForOrg(orgId: string): Promise<Scenario[]> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM scenario WHERE org_id = $1 AND deleted_at IS NULL ORDER BY path",
+      [orgId],
+    );
+    return r.rows.map(mapScenario);
+  }
+
+  async softDelete(id: string): Promise<void> {
+    const now = nowIso();
+    const r = await pgPositional(
+      this.pool,
+      "UPDATE scenario SET deleted_at = $1, updated_at = $2 WHERE id = $3 AND deleted_at IS NULL",
+      [now, now, id],
+    );
+    if (!r.rowCount) throw new StorageNotFoundError("scenario", id);
+  }
+}
+
+class PgRunRepo implements RunRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async create(input: {
+    orgId: string;
+    scenarioId: string;
+    targetId?: string;
+    triggeredBy: RunTriggeredBy;
+  }): Promise<Run> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      scenario_id: input.scenarioId,
+      target_id: input.targetId ?? null,
+      triggered_by: input.triggeredBy,
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO run (id, org_id, scenario_id, target_id, triggered_by, created_at, updated_at) VALUES (@id, @org_id, @scenario_id, @target_id, @triggered_by, @created_at, @updated_at)",
+      bind,
+    );
+    return mapRun({
+      ...bind,
+      envelope_blob_uri: null,
+      result: null,
+      started_at: null,
+      completed_at: null,
+      deleted_at: null,
+    });
+  }
+
+  async get(id: string): Promise<Run | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM run WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    return r.rows[0] ? mapRun(r.rows[0]) : null;
+  }
+
+  async listForScenario(
+    scenarioId: string,
+    opts: { limit?: number } = {},
+  ): Promise<Run[]> {
+    const limit = opts.limit ?? 50;
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM run WHERE scenario_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT $2",
+      [scenarioId, limit],
+    );
+    return r.rows.map(mapRun);
+  }
+
+  async update(
+    id: string,
+    patch: Partial<
+      Pick<Run, "envelopeBlobUri" | "result" | "startedAt" | "completedAt">
+    >,
+  ): Promise<Run> {
+    const existing = await this.get(id);
+    if (!existing) throw new StorageNotFoundError("run", id);
+    const bind = {
+      id: existing.id,
+      envelope_blob_uri: patch.envelopeBlobUri ?? existing.envelopeBlobUri,
+      result: patch.result ?? existing.result,
+      started_at: patch.startedAt ?? existing.startedAt,
+      completed_at: patch.completedAt ?? existing.completedAt,
+      updated_at: nowIso(),
+    };
+    await pgQuery(
+      this.pool,
+      "UPDATE run SET envelope_blob_uri = @envelope_blob_uri, result = @result, started_at = @started_at, completed_at = @completed_at, updated_at = @updated_at WHERE id = @id",
+      bind,
+    );
+    return mapRun({
+      ...bind,
+      org_id: existing.orgId,
+      scenario_id: existing.scenarioId,
+      target_id: existing.targetId,
+      triggered_by: existing.triggeredBy,
+      created_at: existing.createdAt,
+      deleted_at: existing.deletedAt,
+    });
+  }
+}
+
+class PgJobRepo implements JobRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async create(input: {
+    orgId: string;
+    kind: string;
+    input?: Record<string, unknown>;
+  }): Promise<Job> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      kind: input.kind,
+      input: JSON.stringify(input.input ?? {}),
+      status: "pending" as JobStatus,
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO job (id, org_id, kind, input, status, created_at, updated_at) VALUES (@id, @org_id, @kind, @input, @status, @created_at, @updated_at)",
+      bind,
+    );
+    return mapJob({
+      ...bind,
+      result: null,
+      error: null,
+      claimed_by: null,
+      claimed_at: null,
+      started_at: null,
+      completed_at: null,
+      deleted_at: null,
+    });
+  }
+
+  async get(id: string): Promise<Job | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM job WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    return r.rows[0] ? mapJob(r.rows[0]) : null;
+  }
+
+  async listForOrg(
+    orgId: string,
+    opts: { limit?: number; status?: JobStatus } = {},
+  ): Promise<Job[]> {
+    const limit = opts.limit ?? 50;
+    if (opts.status) {
+      const r = await pgPositional(
+        this.pool,
+        "SELECT * FROM job WHERE org_id = $1 AND status = $2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT $3",
+        [orgId, opts.status, limit],
+      );
+      return r.rows.map(mapJob);
+    }
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM job WHERE org_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT $2",
+      [orgId, limit],
+    );
+    return r.rows.map(mapJob);
+  }
+
+  async claimNext(input: {
+    orgId: string;
+    claimedBy: string;
+  }): Promise<Job | null> {
+    // Postgres analog of sqlite's BEGIN IMMEDIATE + UPDATE-WHERE:
+    // SELECT ... FOR UPDATE SKIP LOCKED picks an unlocked pending row
+    // and locks it for the rest of the transaction; the UPDATE
+    // transitions it to claimed; concurrent claimers either see
+    // a different row or block on the locked one (and SKIP LOCKED
+    // skips it entirely).
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const pending = await pgPositional(
+        client,
+        "SELECT * FROM job WHERE org_id = $1 AND status = 'pending' AND deleted_at IS NULL ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED",
+        [input.orgId],
+      );
+      if (pending.rows.length === 0) {
+        await client.query("COMMIT");
+        return null;
+      }
+      const row = pending.rows[0];
+      const now = nowIso();
+      await pgPositional(
+        client,
+        "UPDATE job SET status = 'claimed', claimed_by = $1, claimed_at = $2, updated_at = $3 WHERE id = $4",
+        [input.claimedBy, now, now, row.id as string],
+      );
+      await client.query("COMMIT");
+      return mapJob({
+        ...row,
+        status: "claimed",
+        claimed_by: input.claimedBy,
+        claimed_at: now,
+        updated_at: now,
+      });
+    } catch (err) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // ignore
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async update(
+    id: string,
+    patch: Partial<
+      Pick<Job, "status" | "result" | "error" | "startedAt" | "completedAt">
+    >,
+  ): Promise<Job> {
+    const existing = await this.get(id);
+    if (!existing) throw new StorageNotFoundError("job", id);
+    const bind = {
+      id: existing.id,
+      status: patch.status ?? existing.status,
+      result:
+        patch.result !== undefined
+          ? patch.result === null
+            ? null
+            : JSON.stringify(patch.result)
+          : existing.result
+            ? JSON.stringify(existing.result)
+            : null,
+      error: patch.error !== undefined ? patch.error : existing.error,
+      started_at:
+        patch.startedAt !== undefined ? patch.startedAt : existing.startedAt,
+      completed_at:
+        patch.completedAt !== undefined ? patch.completedAt : existing.completedAt,
+      updated_at: nowIso(),
+    };
+    await pgQuery(
+      this.pool,
+      "UPDATE job SET status = @status, result = @result, error = @error, started_at = @started_at, completed_at = @completed_at, updated_at = @updated_at WHERE id = @id",
+      bind,
+    );
+    return mapJob({
+      ...bind,
+      org_id: existing.orgId,
+      kind: existing.kind,
+      input: JSON.stringify(existing.input),
+      claimed_by: existing.claimedBy,
+      claimed_at: existing.claimedAt,
+      created_at: existing.createdAt,
+      deleted_at: existing.deletedAt,
+    });
+  }
+}
