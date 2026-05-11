@@ -8,7 +8,7 @@
     "signalman": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/copy-assets.mjs",
     "dev": "tsx src/server.ts",
     "cli": "tsx src/cli.ts",
     "lint": "eslint src/",
@@ -25,11 +25,15 @@
   ],
   "author": "Signalman Contributors",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "dependencies": {
     "@grpc/grpc-js": "^1.12.0",
     "@grpc/proto-loader": "^0.7.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "marked": "^12.0.0",
+    "ulid": "^2.3.0",
     "yaml": "^2.4.0",
     "zod": "^3.23.0"
   },
