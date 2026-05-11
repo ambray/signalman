@@ -563,6 +563,9 @@ export function buildApp(opts: AppOptions): Router {
     return { job: updated };
   });
 
+  // ── Blobs (PR 8b) ─────────────────────────────────────────────────
+  registerBlobEndpoints(router, cp);
+
   return router;
 }
 
@@ -572,6 +575,123 @@ async function jobInOrg(cp: ControlPlane, ctx: RequestContext) {
     throw notFound(`job not found: ${ctx.params.id}`);
   }
   return job;
+}
+
+// ── Blobs (PR 8b — remote build artifact upload + retrieval) ────────
+//
+// `POST /v1/blobs` accepts a raw octet-stream and stores it via the
+// configured BlobDriver. Returns the content-addressed sha256 + size
+// + driver-issued URI. The 1 MiB JSON-body cap is bypassed via the
+// `streamBody` route option; artifacts can be hundreds of MB.
+//
+// `GET /v1/blobs/:sha256` streams the blob bytes back. Used by the
+// future runner-side downloader when staging artifacts onto a remote
+// target. Streamed via `rawResponse` to avoid buffering.
+//
+// Blobs are org-scoped on disk (`<root>/<org_id>/<sha[0:2]>/<sha>`) so
+// a sha256 collision across orgs is fine — we look up under the
+// caller's org only.
+
+function registerBlobEndpoints(router: Router, cp: ControlPlane): void {
+  router.post(
+    "/v1/blobs",
+    async (ctx) => {
+      if (!ctx.bodyStream) {
+        throw badRequest("blob upload requires a request body");
+      }
+      const meta = await cp.blobs.put({
+        orgId: ctx.auth.orgId,
+        body: ctx.bodyStream,
+      });
+      return { status: 201, body: meta };
+    },
+    { streamBody: true },
+  );
+
+  router.get(
+    "/v1/blobs/:sha256",
+    async (ctx) => {
+      if (!ctx.res) {
+        throw badRequest("internal: rawResponse handler missing res");
+      }
+      if (!/^[a-f0-9]{64}$/.test(ctx.params.sha256)) {
+        ctx.res.statusCode = 400;
+        ctx.res.setHeader("content-type", "application/json; charset=utf-8");
+        ctx.res.end(
+          JSON.stringify({
+            error: { code: "bad_request", message: "sha256 must be 64 hex chars" },
+          }),
+        );
+        return;
+      }
+      // Resolve the on-disk URI for the org-scoped blob. The local-FS
+      // driver computes `${root}/${orgId}/${sha[0:2]}/${sha}` as a
+      // file:// URI; matching by sha256 within the org is uniquely
+      // identifying because the layout is content-addressed.
+      const orgPrefix = ctx.auth.orgId;
+      const sha = ctx.params.sha256;
+      // The BlobDriver doesn't expose a sha-only lookup directly; we
+      // reconstruct the URI using the same layout the local driver
+      // emits. S3 driver (v0.3.x) will diverge — but for v0.3.0 this
+      // is the local-FS shape and the only HTTP-served path.
+      const uri = blobUriFromSha(cp, orgPrefix, sha);
+      let stream;
+      try {
+        stream = await cp.blobs.get(uri);
+      } catch (err) {
+        if ((err as Error).name === "BlobNotFoundError") {
+          ctx.res.statusCode = 404;
+          ctx.res.setHeader("content-type", "application/json; charset=utf-8");
+          ctx.res.end(
+            JSON.stringify({
+              error: { code: "not_found", message: `blob not found: ${sha}` },
+            }),
+          );
+          return;
+        }
+        throw err;
+      }
+      ctx.res.statusCode = 200;
+      ctx.res.setHeader("content-type", "application/octet-stream");
+      stream.pipe(ctx.res);
+      // Settle when the stream finishes piping so the handler awaits
+      // completion correctly.
+      await new Promise<void>((resolve, reject) => {
+        stream.on("end", resolve);
+        stream.on("error", reject);
+        ctx.res!.on("error", reject);
+      });
+    },
+    { rawResponse: true },
+  );
+}
+
+/**
+ * Reconstruct a blob URI from `(org_id, sha256)` using the same layout
+ * the local-FS BlobDriver writes. Necessary because the driver doesn't
+ * (yet) expose a "fetch by sha" API — it only round-trips URIs.
+ *
+ * If we later move to S3, swap this for a driver method.
+ */
+function blobUriFromSha(cp: ControlPlane, orgId: string, sha256: string): string {
+  // The local driver's `put()` returns a `file://` URI. We can't
+  // easily reach into it; instead we ask the driver to construct the
+  // path by performing a tiny `exists()` against a synthesized URI.
+  // For v0.3.0 the only blob driver is local-fs and the layout is
+  // stable. The S3 driver (v0.3.x) will add a `resolveUri(orgId, sha)`
+  // method to BlobDriver.
+  const config = cp.resolvedConfig.blobs;
+  if (config.driver !== "local") {
+    throw new Error(
+      `blob retrieval by sha256 not implemented for blob driver '${config.driver}'`,
+    );
+  }
+  const path = `${config.root}/${orgId}/${sha256.slice(0, 2)}/${sha256}`;
+  // Normalize Windows paths to file URIs.
+  const normalized = path.replace(/\\/g, "/");
+  return normalized.startsWith("/")
+    ? `file://${normalized}`
+    : `file:///${normalized}`;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

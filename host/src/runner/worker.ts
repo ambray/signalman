@@ -2,19 +2,29 @@
  * Worker loop for `signalman runner start`. Polls the control plane
  * for jobs, dispatches by kind, posts results back.
  *
- * v0.3.0 (PR 8a) ships two job kinds:
+ * v0.3.0 ships two job kinds:
  *   * `noop` — sleeps `input.duration_ms` (default 10ms) and reports
  *     success. Useful for smoke-testing the queue end-to-end.
- *   * `release.build` — currently marked failed with "remote build
- *     execution lands in PR 8b". The runner-side build executor needs
- *     an HTTP-backed ControlPlane subset (blob upload, release row
- *     mutation) which is its own PR.
+ *   * `release.build` — PR 8b: clones the product repo at the tag,
+ *     runs the build executor against an HTTP-backed ControlPlane
+ *     (artifacts upload via POST /v1/blobs, release/artifact rows
+ *     mutate via the REST API), reports the resulting release/manifest
+ *     summary.
  *
  * The loop is stoppable via a `signal` (AbortSignal). Test harnesses
  * use this; the CLI maps SIGINT/SIGTERM into the abort.
  */
 
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { HttpClient, HttpClientError } from "./client.js";
+import { HttpControlPlane } from "./http-control-plane.js";
+import {
+  cloneProductAtTag,
+  resolveCommitSha,
+} from "../control-plane/build/git.js";
+import { runBuild } from "../control-plane/build/executor.js";
 import type { Job } from "../control-plane/types.js";
 
 export interface WorkerOptions {
@@ -46,7 +56,13 @@ export class JobFailedError extends Error {
 export async function runWorker(opts: WorkerOptions): Promise<void> {
   const out = opts.out ?? process.stderr;
   const pollInterval = opts.pollIntervalMs ?? 1_000;
-  const handlers = opts.handlers ?? defaultHandlers();
+  const handlers =
+    opts.handlers ??
+    defaultHandlers({
+      client: opts.client,
+      out: opts.out,
+      runnerId: opts.workerName,
+    });
   out.write(`[runner] starting worker '${opts.workerName}' against ${opts.client["baseUrl" as keyof HttpClient] ?? "<base>"}\n`);
 
   while (!opts.signal.aborted) {
@@ -133,7 +149,20 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 
 // ── Built-in handlers ───────────────────────────────────────────────
 
-export function defaultHandlers(): Record<string, JobHandler> {
+export interface DefaultHandlersOptions {
+  /** HTTP client backing the HttpControlPlane for release.build jobs. */
+  client: HttpClient;
+  /** Logging sink for build progress. Default: process.stderr. */
+  out?: NodeJS.WritableStream;
+  /** Audit-log actor. Default: 'remote-runner'. */
+  actor?: string;
+  /** Runner identity stamped on the release row. Default: workerName. */
+  runnerId?: string;
+}
+
+export function defaultHandlers(
+  opts?: DefaultHandlersOptions,
+): Record<string, JobHandler> {
   return {
     noop: async (job) => {
       const duration =
@@ -143,16 +172,85 @@ export function defaultHandlers(): Record<string, JobHandler> {
       await new Promise((r) => setTimeout(r, duration));
       return { result: { ok: true, slept_ms: duration } };
     },
-    "release.build": async (_job) => {
-      // PR 8b will land the HTTP-backed ControlPlane subset + the
-      // remote build executor that clones, builds, and uploads
-      // artifacts via the control-plane API. Until then, signal
-      // intent clearly to the operator.
-      throw new JobFailedError(
-        "remote 'release.build' execution lands in PR 8b — for now run `signalman release build` without --remote",
-      );
+    "release.build": async (job) => {
+      if (!opts) {
+        // Callers that construct defaultHandlers() with no arguments
+        // (legacy tests, mostly) get a fail-fast for release.build
+        // since we can't reach the control plane.
+        throw new JobFailedError(
+          "release.build handler requires defaultHandlers({ client, ... }) — register the runner first",
+        );
+      }
+      return executeReleaseBuild(job, opts);
     },
   };
+}
+
+/**
+ * Run a `release.build` job end-to-end against the remote control
+ * plane: resolve product → clone repo → resolveCommitSha → runBuild
+ * against an HttpControlPlane. The release executor takes care of
+ * the entire build/manifest/artifact-upload flow; on this side we
+ * just translate inputs and clean up the working tree.
+ */
+async function executeReleaseBuild(
+  job: Job,
+  opts: DefaultHandlersOptions,
+): Promise<{ result?: Record<string, unknown> }> {
+  const productId =
+    typeof job.input.product_id === "string" ? job.input.product_id : null;
+  const tag = typeof job.input.tag === "string" ? job.input.tag : null;
+  if (!productId || !tag) {
+    throw new JobFailedError(
+      `release.build job ${job.id} missing required input.product_id / input.tag`,
+    );
+  }
+  const out = opts.out ?? process.stderr;
+  const httpCp = new HttpControlPlane(opts.client);
+
+  const product = await httpCp.products.get(productId);
+  if (!product) {
+    throw new JobFailedError(
+      `release.build: product ${productId} not found on control plane`,
+    );
+  }
+
+  const tmp = await fs.mkdtemp(
+    path.join(os.tmpdir(), "signalman-remote-build-"),
+  );
+  try {
+    await cloneProductAtTag({
+      repoUrl: product.repoUrl,
+      tag,
+      destDir: tmp,
+      out,
+      logPrefix: "release build --remote",
+    });
+    const commitSha = await resolveCommitSha(tmp);
+
+    const result = await runBuild({
+      controlPlane: httpCp,
+      orgId: product.orgId,
+      productId: product.id,
+      tag,
+      commitSha,
+      workDir: tmp,
+      runnerId: opts.runnerId,
+      actor: opts.actor ?? "remote-runner",
+      out,
+    });
+
+    return {
+      result: {
+        release_id: result.release.id,
+        tag: result.release.tag,
+        manifest_sha256: result.manifestSha256,
+        artifact_count: result.artifacts.length,
+      },
+    };
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 // Re-export for downstream callers (tests, CLI).

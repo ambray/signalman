@@ -194,8 +194,11 @@ describe("runWorker — concurrent safety", () => {
   });
 });
 
-describe("default handlers — release.build stub", () => {
-  it("release.build kind fails with PR 8b deferral message", async () => {
+describe("default handlers — release.build without a client", () => {
+  it("zero-arg defaultHandlers() fails release.build with a clear message", async () => {
+    // Legacy / partial harness: defaultHandlers() with no opts. The
+    // release.build path needs an HttpClient to reach the control
+    // plane; without it, fail-fast with operator-facing instructions.
     const { defaultHandlers } = await import("../runner/worker.js");
     const submitted = await client.submitJob("release.build", {
       product_id: "x",
@@ -206,6 +209,6 @@ describe("default handlers — release.build stub", () => {
       return j.status === "failed";
     });
     const final = await client.getJob(submitted.id);
-    expect(final.error).toMatch(/lands in PR 8b/);
+    expect(final.error).toMatch(/requires defaultHandlers/);
   });
 });

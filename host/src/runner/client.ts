@@ -10,6 +10,7 @@
  * thrown HttpClientError; non-JSON or network failures surface raw.
  */
 
+import type { Readable } from "node:stream";
 import type { Job, JobStatus, Product, Release } from "../control-plane/types.js";
 
 export class HttpClientError extends Error {
@@ -148,6 +149,52 @@ export class HttpClient {
       started_at: new Date().toISOString(),
     });
     return job;
+  }
+
+  /**
+   * Stream a blob to the control plane. Used by the runner-side build
+   * executor when uploading artifacts. Body may be a Buffer or a
+   * Readable; bytes are sent as application/octet-stream and bypass
+   * the JSON 1 MiB body cap on the server (POST /v1/blobs is
+   * registered with streamBody: true).
+   */
+  async uploadBlob(
+    body: Buffer | Readable,
+    contentType?: string,
+  ): Promise<{ uri: string; sha256: string; size: number }> {
+    const headers: Record<string, string> = {
+      accept: "application/json",
+      "content-type": contentType ?? "application/octet-stream",
+    };
+    if (this.token) headers.authorization = `Bearer ${this.token}`;
+    const res = await fetch(`${this.baseUrl}/v1/blobs`, {
+      method: "POST",
+      headers,
+      body: body as unknown as BodyInit,
+      // Node's fetch requires `duplex: "half"` for streaming request
+      // bodies; safe to set unconditionally.
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+    const text = await res.text();
+    let parsed: unknown;
+    try {
+      parsed = text.length > 0 ? JSON.parse(text) : undefined;
+    } catch {
+      throw new HttpClientError(
+        res.status,
+        "non_json_response",
+        `non-JSON response from POST /v1/blobs: ${text.slice(0, 200)}`,
+      );
+    }
+    if (!res.ok) {
+      const err = parsed as { error?: { code?: string; message?: string } };
+      throw new HttpClientError(
+        res.status,
+        err?.error?.code ?? "http_error",
+        err?.error?.message ?? `HTTP ${res.status}`,
+      );
+    }
+    return parsed as { uri: string; sha256: string; size: number };
   }
 }
 
