@@ -17,43 +17,12 @@ v0.2.0 bundles what was originally scoped as v0.2.0 (local
 in-process meta build system) + v0.3.0 (networked control plane:
 HTTP serve, runners, signing, Postgres, S3) into one tag. The two
 were developed in lockstep on the same branch and neither shipped
-independently. Also packages the open-core split (commercial layer
-extracted to `signalman-cloud`), the public-release security pass,
-the Apache-2.0 license migration, and the standard OSS
-community-health files.
+independently. Also packages the public-release security pass, the
+Apache-2.0 license migration, and the standard OSS community-health
+files.
 
 CODE_OF_CONDUCT.md is intentionally deferred (operator decision);
 GitHub's community-profile checklist will show one missing item.
-
-## Cross-repo: open-core split — 2026-05-12
-
-Signalman is now open-core. Three product lines (see
-[signalman-cloud/docs/design.md](../../signalman-cloud/docs/design.md) §D6):
-
-| Product | Repo | License | Distribution |
-| --- | --- | --- | --- |
-| `signalman` | [github.com/ambray/signalman](https://github.com/ambray/signalman) | Apache-2.0 | npm + crates.io + MSI |
-| `signalman-cloud` | [github.com/ambray/signalman-cloud](https://github.com/ambray/signalman-cloud) (not pushed yet) | Proprietary | Hosted SaaS |
-| `signalman-enterprise` | Future build-flag on signalman-cloud; may extract later | Proprietary | On-prem installer |
-
-What moved out of this repo (now in `signalman-cloud/`):
-
-- `hub/` directory (was 122 LOC of TODO stubs; type definitions ported,
-  stub methods dropped).
-- The `v0.4.0 — hosted commercial` section of
-  `docs/design/meta-build-system.md`.
-- The "Hosted (v0.4+)" row of the three-deployment-shapes table.
-- Forward-looking hub-related ROADMAP entries.
-
-`signalman-cloud` carries its own design + roadmap including the six
-2026-05-12 decisions on database topology, runner pool, API surface,
-billing model, trial path, and on-prem enterprise. See its
-`docs/design.md` and `ROADMAP.md`.
-
-The OSS↔Cloud boundary is the npm public exports of `@signalman/host`.
-Cloud is a one-way consumer of the OSS package; the OSS code has no
-knowledge of Cloud. This contract is the central organising principle
-of the split.
 
 ## Public-release status
 
@@ -70,20 +39,16 @@ Closed:
 
 Open:
 
-1. **Push v0.2.0 tag** — `git tag -a v0.2.0` + push to trigger the
-   release workflow. Workflow validates manifest version matches
-   tag, then builds and (if secrets configured) publishes artifacts.
-2. **Visibility flip** — repo is still private on GitHub. Operator
+1. **Visibility flip** — repo is still private on GitHub. Operator
    action; nothing technical blocking now.
-3. **Push `signalman-cloud` to its remote** — `signalman-cloud` has
-   two commits locally; remote is configured at
-   `github.com/ambray/signalman-cloud.git` but not pushed. Operator
-   action when the GitHub-side repo is ready.
-4. **GitHub repo secrets** for the release pipeline:
+2. **GitHub repo secrets** for the release pipeline:
    `WINDOWS_CERT_BASE64`, `WINDOWS_CERT_PASSWORD`, `NPM_TOKEN`,
    `CARGO_REGISTRY_TOKEN`. Without them the workflow builds
    artifacts but skips publishing — fine for an unsigned dry-run
    tag; not fine for an actual public release.
+
+The v0.2.0 tag was created and pushed to origin on 2026-05-12 (see
+the latest entry in `CHANGELOG.md`).
 
 ## TL;DR (one-paragraph)
 
@@ -98,9 +63,8 @@ Bearer-token auth, runner protocol + remote `release.build`,
 Postgres `StorageDriver`, Ed25519 manifest signing + `release
 verify`, and S3 `BlobDriver`. The repo was prepared for public
 release: F1–F5 security fixes landed, manifests aligned to
-Apache-2.0, the proprietary commercial layer extracted into a
-sibling `signalman-cloud` repo (open-core split), and all prior
-product-specific (Ospiri) references scrubbed from working tree
+Apache-2.0, and all prior product-specific references scrubbed
+from working tree
 **and** git history. All four manifest version pins + the in-code
 `VERSION` constant now read `0.2.0`; the release workflow validates
 the manifest matches the pushed tag before building, so the

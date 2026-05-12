@@ -7,11 +7,6 @@ webhooks, scheduling) is design-only.
 **shipped**); v0.4.0+ (post-self-hosted iteration, **future**).
 **Author**: 2026-05-10 design pass; v0.2/v0.3 implementation 2026-05-11.
 
-> The original v0.4 "hosted commercial" scope (web dashboard, SSO/OAuth,
-> RBAC, billing, multi-tenant operator surface) was extracted into the
-> separate **signalman-cloud** repository as part of an open-core
-> split (2026-05-12). This document describes the open-source surface
-> only; see signalman-cloud for the commercial design intent.
 **Locks down**: Architecture, storage interface, release-catalog shape, CLI/MCP
 surface additions, phasing.
 
@@ -33,7 +28,7 @@ surface additions, phasing.
 
 Signalman is being expanded from a scenario runner into a full release-lifecycle platform for an externally-developed product. It will deterministically **build** the product from a tag, **verify** through a tiered pipeline (test VM → test Docker → tagged release → demo deploy), **deploy** to test or demo surfaces, **roll back** atomically, and **health-check** every component, with the LLM removed from the load-bearing path.
 
-Architecturally, signalman becomes a **control plane + runner** product, modeled on GitHub Actions (control plane ↔ runner). The control plane owns the release catalog, deployment ledger, scenario library, artifact metadata, audit log, and tenant model, behind a REST API. Runners are stateless executors that talk HTTP to the control plane and gRPC/mTLS to the existing privileged host service ([service/](../../service/)). All storage is pluggable (SQLite | Postgres for relational, local FS | S3 for blobs); multi-tenant is baked in from day one (every entity carries `org_id`); single-tenant deployments pin to a default org. Two deployment shapes ship in this OSS distribution: **local** (single binary, in-process control plane, on-laptop dev loop) and **self-hosted** (separately-deployed control plane, registered runners). A managed hosted offering is out of scope for this repo — see signalman-cloud.
+Architecturally, signalman becomes a **control plane + runner** product, modeled on GitHub Actions (control plane ↔ runner). The control plane owns the release catalog, deployment ledger, scenario library, artifact metadata, audit log, and tenant model, behind a REST API. Runners are stateless executors that talk HTTP to the control plane and gRPC/mTLS to the existing privileged host service ([service/](../../service/)). All storage is pluggable (SQLite | Postgres for relational, local FS | S3 for blobs); multi-tenant is baked in from day one (every entity carries `org_id`); single-tenant deployments pin to a default org. Two deployment shapes ship in this distribution: **local** (single binary, in-process control plane, on-laptop dev loop) and **self-hosted** (separately-deployed control plane, registered runners).
 
 The `signalman.build.yaml` contract checked into the *product* repo declares how to build each component; signalman clones the product repo at a tag, executes the declared steps, captures artifacts into the catalog, and records a signed manifest. From then on, deploys, rollbacks, and health checks operate on catalog entries, not on a working tree.
 
@@ -52,13 +47,13 @@ The `signalman.build.yaml` contract checked into the *product* repo declares how
 
 ### Non-goals (v0.2 MVP)
 
-- Web dashboard UI. (Cloud-tier; see signalman-cloud.)
-- OAuth / session auth. Bearer-token API keys only on this side.
-  (Cloud-tier; see signalman-cloud.)
-- Multi-tenant operator surface (org switching, RBAC, invite flow).
-  The schema carries `org_id` so the data model is multi-tenant-ready;
-  the operator surface that exposes those operations is Cloud-tier.
-- Billing + tier enforcement. (Cloud-tier; see signalman-cloud.)
+- Web dashboard UI. (Out of scope for this distribution.)
+- OAuth / session auth. Bearer-token API keys only. (Out of scope.)
+- Operator surface for multi-tenant operations (org switching, RBAC,
+  invite flow). The schema carries `org_id` so the data model is
+  multi-tenant-ready, but exposing those operations to operators is
+  out of scope for this distribution.
+- Billing + tier enforcement. (Out of scope.)
 - Auto-promotion pipelines (tag → tier → tier with approval gates). (v0.4+.)
 - Webhooks / external notifications. (v0.4+.)
 - Replacing the existing scenario verbs. They survive and migrate behind the control-plane shim.
@@ -420,8 +415,8 @@ In `local` mode, the CLI doubles as a runner. In `submit` mode, the CLI is a thi
 - API keys are created via `signalman api-key create --name N`. Display once, hash stored.
 - Bearer token in `Authorization: Bearer sk_…` header; loopback in local mode bypasses auth.
 - One key = one org scope. Scopes (read-only, full) deferred.
-- OAuth, sessions, and the dashboard are Cloud-tier features
-  (signalman-cloud), not part of this OSS surface.
+- OAuth, sessions, and the dashboard are out of scope for this
+  surface.
 
 ---
 
@@ -487,11 +482,11 @@ Scope: control plane separable as a deployable service; runners register over HT
 2. **Staging mechanism per target kind.** For Hyper-V VM targets, checkpoints are the obvious lever for atomic deploy. For future Docker/k8s targets the answer is different. v0.2 only needs Hyper-V.
 3. **Manifest signing key management.** ~~Who holds the key? For hosted, we hold it. For self-hosted, the operator. v0.2 ships unsigned; v0.3 adds signing.~~ **Resolved in v0.3.0d**: signing is Ed25519 via Node's built-in `crypto`; keys are PEM (SPKI public / PKCS#8 private) on disk; the *operator* holds the private key in self-hosted mode. The CLI never persists keys beyond `signalman key generate --out`. The fingerprint (`signed_by` on the release row, first 16 hex chars of sha256(DER pubkey)) lets operators verify which key signed a release without storing the key in the catalog.
 4. **Build caching and parallelism.** The schema doesn't prevent parallel builds, but v0.2 runs components serially. Component-level cache keys (sha256 of inputs) are deferred.
-5. **Per-org product limits.** Quota enforcement is Cloud-tier
-   (see signalman-cloud); the schema columns to track usage live
-   here but the policy lives there.
+5. **Per-org product limits.** Quota enforcement is out of scope
+   for this distribution; the schema columns to track usage exist
+   but no policy layer evaluates them.
 6. **Migration of existing in-disk scenario state.** Today's `.signalman/recordings/<id>/last-run.json` etc. need to either move into the DB or be indexed by it. Tactical migration plan deferred to v0.2 implementation.
-7. **GitOps sync for scenarios.** Scenario library option (b) — sync from a tenant's source repo — has UX implications (which branch? which path? webhook?). Cloud-tier; out of scope for the OSS surface.
+7. **GitOps sync for scenarios.** Scenario library option (b) — sync from a tenant's source repo — has UX implications (which branch? which path? webhook?). Out of scope for this distribution.
 
 ---
 

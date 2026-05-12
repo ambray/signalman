@@ -19,8 +19,8 @@ story, or deeper VM-state control. See `docs/mac-virtualization.md`.
 distributed into existing phases. P0 and P1 confirmed merged. P3, P4, P7 re-scoped
 with concrete deliverables. New P8 added for a one-shot proto v1 freeze before
 v0.1.0 publishes. Hub component (`hub/`) was 122 LOC of TODO stubs;
-extracted on 2026-05-12 into the proprietary `signalman-cloud` sibling
-repo as part of an open-core split. UI/Browser/Verify guest RPCs remain proto
+removed on 2026-05-12 (dormant, not relied on by any other component).
+UI/Browser/Verify guest RPCs remain proto
 placeholders returning `unimplemented`. `template:` field is decorative until
 v0.2.0-2 ephemeral VM provisioning lands; documented as known. Two Critical
 security findings (mTLS authenticates the channel not the caller; cert
@@ -47,9 +47,9 @@ to **Loom**, which is the state holder and the operator console; Loom drives
 - **v0.2.0-4 Explicit Orchestrator** is largely subsumed by Loom workflows
   + `loom tui`. Signalman-side scope drops from 5-7d to ~2-3d "expose
   scenario state via Loom workflow primitives."
-- **Hub** has been extracted to the proprietary `signalman-cloud`
-  sibling repo (2026-05-12 open-core split). Loom remains the
-  effective orchestrator in the OSS-only v0.1.0 timeframe.
+- **Hub** has been removed from the tree (the stub was not relied on
+  by any other component). Loom remains the effective orchestrator
+  for the v0.1.0 timeframe.
 
 **2026-04-24 strategic shift**: Signalman is being repositioned from being
 a single product's test harness into a first-class agent-first DevOps
@@ -1048,10 +1048,8 @@ is the contract that lets Loom workflows compose Signalman scenarios:
   duplicate-scenario pain is real).
 - Proto enhancements: split `ProcessStartResponse`, `RunCommandStream`
   (carry-over from old Phase 4.1).
-- Hosted orchestration / dashboard / multi-tenant operator surface
-  are Cloud-tier features and have moved to the proprietary
-  `signalman-cloud` sibling repo (2026-05-12 open-core split).
-  Explicit non-goal in this OSS distribution.
+- Hosted orchestration, web dashboard, and multi-tenant operator
+  surface are explicit non-goals for this distribution.
 
 ---
 
@@ -1119,11 +1117,9 @@ Removed from main roadmap; revisit only with concrete evidence of need.
 ### 2026-04-25 (audit-driven)
 
 - **Hub component (`hub/`)** — was 122 LOC of TODO stubs. **Done
-  2026-05-12**: extracted into the proprietary `signalman-cloud`
-  sibling repo as part of an open-core split. Types ported
-  (`CloudConfig`, `RegisteredAgent`, `ScenarioEntry`); stub methods
-  dropped. Real registry / dashboard / fleet-management surface
-  ships as Cloud Phase 1+ (see signalman-cloud/ROADMAP.md).
+  2026-05-12**: removed from the tree (no other component relied
+  on it; the registry / dashboard / fleet-management surface it
+  envisioned is an explicit non-goal for this distribution).
 - **Aspirational README claims** — Azure VMs, AWS EC2, scenario
   marketplace, UI automation, browser automation, cross-platform guest
   agents, fleet management. Removed from README in P6 (A3); reintroduce
