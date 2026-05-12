@@ -102,7 +102,7 @@ don't depend on Loom.
 
 ## Components
 
-### Loom Plugin (`plugins/signalman-loom-plugin/`) — v0.1.0 (in progress)
+### Loom Plugin (`plugins/signalman-loom-plugin/`) — v0.2.0
 Rust crate registering `loom.signalman.list/describe/plan/run/record/status`
 MCP tools through Loom's `RegisterMcpTools` capability. Stores run handles via
 Loom's `TaskOwnership` shape (no Signalman-side persistence layer); emits

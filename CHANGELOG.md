@@ -4,21 +4,30 @@ All notable changes to Signalman will land here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 aims for [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-> **Note on versioning before the public release.** No git tags exist
-> yet. Everything below "Unreleased" reflects work that's in the
-> repository but hasn't been formally tagged or published to npm /
-> crates.io. The operator-facing manifest pins (`host/package.json`,
-> `guest/Cargo.toml`, workspace `Cargo.toml`, and the Loom plugin)
-> all currently read `0.1.0`. The version-bump strategy for the
-> first public release is still being decided — see `docs/STATUS.md`
-> for current state.
-
 ## [Unreleased]
 
-Work staged on branches above `main` that hasn't been merged or
-tagged yet. Two branches stack:
+Nothing yet.
 
-### Public-release readiness (`worktree-oss-hygiene-prep`)
+## [0.2.0] — 2026-05-12
+
+First versioned release. Bundles the original "v0.2.0 local meta
+build" + the "v0.3.0 networked control plane" scopes into one tag
+since the two were developed in lockstep on the same branch and
+neither shipped independently. Also packages the open-core split,
+the public-release security pass, and the standard OSS
+community-health files.
+
+Manifest pins bumped in lockstep: `host/package.json`,
+`guest/Cargo.toml`, root `Cargo.toml`, and
+`plugins/signalman-loom-plugin/Cargo.toml`. In-code `VERSION`
+constant in `host/src/http/app.ts` set to `0.2.0` (was
+`0.3.0-dev`). Git history was scrubbed of the prior
+product-specific (Ospiri) references via `git filter-repo`; the
+mirror backup at
+`/c/Users/ucale/source/repos/signalman-backup-pre-history-rewrite-2026-05-12/`
+preserves the pre-rewrite state.
+
+### Public-release readiness
 
 - **Added** `SECURITY.md` — vulnerability disclosure policy with GitHub
   Security Advisories as the primary channel; scope definition,
@@ -62,7 +71,28 @@ tagged yet. Two branches stack:
   `.claude/worktrees/`, `host/*.tgz`, `*.log`, control-plane local
   state (`signalman.db*`, `.signalman/{blobs,recordings}/`).
 
-### Public-release scrub + security + license (`claude/intelligent-carson-a92b80`)
+### Open-core split + history scrub
+
+- **Split** out the proprietary commercial layer into a separate
+  `signalman-cloud` sibling repo (open-core model). The OSS half
+  shipped here is fully self-hostable; the hosted SaaS surface
+  (multi-tenant operator UI, RBAC, SSO/OAuth, billing, tier
+  enforcement) lives in the private `signalman-cloud` repo and
+  consumes `@signalman/host` as an npm dependency. Deleted the
+  `hub/` directory (122 LOC of TODO stubs); ported the type
+  definitions to the new repo.
+- **Scrubbed** prior product-specific (Ospiri) references from
+  source, tests, scenarios, docs, and the entire git history
+  (`git filter-repo` rewrote 60 prior commits; mirror + literal
+  `.git` backup preserved at
+  `/c/Users/ucale/source/repos/signalman-backup-pre-history-rewrite-2026-05-12/`
+  for cherry-pick recovery if ever needed).
+- **Deleted** 10 stale WIP branches from origin (`fix/*`,
+  `worktree-agent-*`, etc.) plus the dangling
+  `loom/codex/add-scenario-orphan-cleanup-reaper` branch whose
+  Loom task was marked `cancelled` after inspection.
+
+### Security + license
 
 - **Changed** License from MIT to Apache-2.0 across `LICENSE`,
   `NOTICE`, root `Cargo.toml`, `guest/Cargo.toml`,
@@ -103,9 +133,9 @@ tagged yet. Two branches stack:
   streamBody-cap router tests
   (`host/src/__tests__/http-router-streambody-cap.test.ts`, 4 cases).
 
-### v0.3.0 — networked control plane
+### Networked control plane (HTTP serve, runners, signing, Postgres, S3)
 
-The five v0.3 PRs that landed on this branch. Tag candidates: ship
+The five v0.3-scoped PRs that landed on this branch. Tag candidates: ship
 as `v0.3.0` once the operator decides on a version-bump strategy.
 
 - **Added** `signalman serve` — HTTP control plane on `node:http`
@@ -135,7 +165,7 @@ as `v0.3.0` once the operator decides on a version-bump strategy.
   `@aws-sdk/s3-request-presigner`, and `resolveBySha(orgId, sha256)`
   for cross-driver URI reconstruction.
 
-### v0.2.0 — local in-process meta build system
+### Local in-process meta build system
 
 The PR-1-through-PR-5 work that initiated the meta-build platform.
 
