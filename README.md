@@ -1,14 +1,24 @@
 # Signalman
 
-**VM scenario runner for agent-driven security, compliance, and CI workflows on Windows.**
+**Agent-first DevOps platform: VM scenario runner + tag-driven release-lifecycle control plane.**
 
-Signalman is the runner half of an agent-first DevOps stack. LLM agents (Claude
-Code, Codex) talk MCP to **Loom** — the operator surface that holds task state,
-events, and orchestration — and Loom drives **Signalman** to execute scenario
-runs against real Hyper-V VMs. Scenarios produce a hermetic result envelope
-(scenario hash, agent version, events, duration) that Loom records as task
-evidence. CI pipelines and direct CLI consumers can also drive Signalman
-without Loom in the loop.
+Signalman is two complementary halves that share storage, auth, and CLI:
+
+1. **Scenario runner (v0.1.x)** — executes hermetic VM-backed test scenarios
+   (Hyper-V primary; Tart/VMware fallback) for security, compliance, and CI
+   workflows. LLM agents drive it through [Loom](https://github.com/ambray/loom);
+   CI pipelines drive it through the native CLI.
+2. **Meta build system (v0.2.x — v0.3.x)** — a tag-driven release pipeline for
+   an externally-developed product. Builds a deterministic release from a git
+   tag, signs the manifest with Ed25519, stages artifacts into a
+   content-addressed blob store, deploys atomically to a target VM, and
+   rolls back on demand. The control plane runs in-process for local mode or
+   as a networked HTTP service for self-hosted / shared-runner deployments.
+
+Both halves multiplex through one MCP server, one CLI, and one storage layer
+(pluggable SQLite | Postgres, pluggable local-FS | S3 blobs). Single-tenant by
+default; multi-tenant scoping (`org_id` on every row, Bearer-token API keys)
+is wired through but not surfaced operationally until v0.4.0.
 
 Website: [signalman.dev](https://signalman.dev)
 
@@ -32,33 +42,65 @@ Website: [signalman.dev](https://signalman.dev)
            |  (shells to CLI / MCP)       |
            +-------------+----------------+
                          v
-+---------------------------------------+
-|  Signalman Runner                     |
-|  - Six verbs (list/describe/plan/run/ |
-|    record/status) and CLI parity      |
-|  - Hyper-V control-plane (Rust svc,   |
-|    mTLS, MSI-installable)             |
-|  - Hypervisor plugins (Hyper-V        |
-|    primary; VMware fallback)          |
-|  - Scenario engine + result envelope  |
-+------------------+--------------------+
-                   | gRPC (mTLS)
-          +--------+--------+
-          |                 |
-  +-------v-------+ +-------v-------+
-  | Guest Agent   | | Guest Agent   |
-  | (Windows 11)  | | (Windows 11)  |
-  | - Process     | | - Process     |
-  | - Cmd exec    | | - Cmd exec    |
-  | - File ops    | | - File ops    |
-  | - Verify net/ | | - Verify net/ |
-  |   filesystem  | |   filesystem  |
-  +---------------+ +---------------+
++---------------------------------------------+
+| Signalman host (TypeScript, one process)    |
+|                                             |
+|  Verb surface (CLI + MCP, single contract)  |
+|  - Scenarios: list/describe/plan/run/       |
+|    record/status                            |
+|  - Meta build: product/release/target/      |
+|    deployment/health + key/api-key/runner   |
+|                                             |
+|  Control plane (in-process or `serve`d)     |
+|  - Release catalog, deployment ledger,      |
+|    scenario index, artifact metadata,       |
+|    audit log, tenant model                  |
+|  - HTTP API on node:http, bearer-token auth |
+|  - StorageDriver (SQLite | Postgres)        |
+|  - BlobDriver (local FS | S3)               |
+|  - Ed25519 manifest signing                 |
+|  - Job queue → release.build jobs           |
+|                                             |
+|  Runner workers (in-process or remote)      |
+|  - Poll the control plane, claim jobs       |
+|  - Clone product repo at tag, run the       |
+|    declared build steps, upload artifacts   |
+|  - Stateless; many workers per control plane|
++---------------------+-----------------------+
+                      | mTLS gRPC
+            +---------+-----------+
+            |                     |
++-----------v---------+ +---------v-----------+
+| Hyper-V service     | | Hypervisor backends |
+| (Rust, MSI-install) | | Tart (mac) /        |
+| Privileged Hyper-V  | | VMware (legacy)     |
+| cmdlets over mTLS   | +----------+----------+
++----------+----------+            |
+           |                       |
+   +-------v-------+       +-------v-------+
+   | Guest Agent   |  ...  | Guest Agent   |
+   | (per VM)      |       | (per VM)      |
+   | proc / cmd /  |       | proc / cmd /  |
+   | file / verify |       | file / verify |
+   +---------------+       +---------------+
 ```
 
-The Loom-fronted topology is the default agent surface in v0.1.0; the standalone
-`signalman.*` MCP server in `host/` keeps shipping for direct CLI/CI consumers
-and as the substrate the Loom plugin shells to.
+**Three deployment shapes** for the meta build system (see
+[docs/design/meta-build-system.md](docs/design/meta-build-system.md)):
+
+- **Local** — single binary, in-process control plane. The default; nothing
+  to deploy, no network surface, all state in `.signalman/`.
+- **Self-hosted** — `signalman serve` on a long-lived host; remote runners
+  register via `signalman runner register` and poll via HTTP. SQLite is fine
+  for small fleets; Postgres + S3 for larger ones (see
+  [docs/postgres-driver.md](docs/postgres-driver.md)).
+- **Hosted commercial** (v0.4.0+) — multi-tenant SaaS atop the same control
+  plane. The schema is already org-scoped; the surface isn't exposed yet.
+
+The Loom-fronted topology is the default agent surface in v0.1.x for the
+scenario half; the meta build verbs (`signalman release build`, `release
+deploy`, `release rollback`, `release verify`, etc.) are CLI/HTTP-first and
+don't depend on Loom.
 
 ## Components
 
@@ -116,6 +158,44 @@ Test definitions using a two-layer approach:
 The Example V2 scenarios in `examples/example-v2-*` are the reference set that
 exercise the full stack end-to-end (ETW + WFP + kernel-debug tooling).
 
+### Meta build control plane (`host/src/control-plane/`) — v0.2.0–v0.3.0
+TypeScript implementation of the release-lifecycle service. Ships
+in-process for local mode and as an HTTP service (`signalman serve`) for
+self-hosted/shared-runner deployments.
+
+- **Schema** — products, releases, artifacts, targets, deployments,
+  health checks, audit log, organisations, API keys, jobs. ULID PKs,
+  ISO-8601 timestamps, partial unique indexes for soft-deletion. Same
+  migration files run verbatim against SQLite and Postgres
+  (`host/src/control-plane/storage/migrations/`).
+- **Storage drivers** — `SqliteStorageDriver` (node:sqlite, default) and
+  `PostgresStorageDriver` (`pg`, opt-in via config). Identical repository
+  interface; the verb code never knows which is underneath. See
+  [docs/postgres-driver.md](docs/postgres-driver.md).
+- **Blob drivers** — `LocalFsBlobDriver` (content-addressed,
+  `<root>/<org_id>/<sha[0:2]>/<sha>`) and `S3BlobDriver`
+  (`@aws-sdk/client-s3`, presigned downloads). Both reject path traversal
+  and option-injection at the input boundary.
+- **Build executor** — clones the product repo at a tag, runs the
+  `signalman.build.yaml` declared by the *product*, captures artifacts
+  into the blob store, computes a canonical manifest, signs it with
+  Ed25519, and writes the release row. The same executor runs in-process
+  for local builds and over HTTP for remote runners.
+- **Job queue** — atomic claim via `BEGIN IMMEDIATE` + UPDATE-WHERE on
+  SQLite and `SELECT FOR UPDATE SKIP LOCKED` on Postgres. Powers the
+  `release.build` job kind used by remote runners.
+- **Manifest signing** — Ed25519 over the canonical manifest JSON. Uses
+  Node's built-in `crypto` (no third-party crypto dep). Verification is
+  exposed as `signalman release verify` and as the `verifyManifest`
+  helper.
+
+### Runner workers (`host/src/runner/`) — v0.3.0a
+Stateless workers that poll the control plane for `release.build` jobs,
+claim them atomically, clone the product repo at the release's tag, run
+the build executor against an `HttpControlPlane` shim, and upload the
+resulting artifacts. Started via `signalman runner start --name
+<worker>`; many workers can share one control plane.
+
 ## Quick Start
 
 > New operators: see [docs/bootstrap.md](docs/bootstrap.md) for the
@@ -164,6 +244,74 @@ claude mcp add signalman node host/dist/server.js
 # Or invoke via CLI for CI (any scenario in .signalman/scenarios/):
 node host/dist/cli.js run sandbox-enforcement
 echo $?   # standard exit codes; envelope JSON on stdout
+```
+
+### Meta build system (release lifecycle for an external product)
+
+Once installed, register a product, build a release, and deploy it. All
+verbs work against the local (in-process) control plane by default;
+point at `signalman serve` with `SIGNALMAN_API_URL` for remote mode.
+
+```bash
+# 1. Register your product (the repo whose tags you'll be building).
+signalman product add --name example \
+  --repo-url https://github.com/ambray/example.git
+
+# 2. Check in a signalman.build.yaml at the root of the product repo:
+#    components: each names a build command, a working directory, and
+#    the artifacts the build produces (path globs or image refs). See
+#    docs/design/meta-build-system.md §4.2 for the full schema.
+
+# 3. Build a release from a tag. Clones the repo, runs each component's
+#    build command, captures artifacts into the blob store, computes
+#    + signs the manifest, writes a release row.
+signalman release build --product example --tag v1.0.0 \
+  --sign --signing-key ~/.signalman/keys/release.pem
+
+# 4. Register a deploy target (a VM, a Docker host, etc.) and deploy.
+signalman target add --name win11-demo --kind vm_test \
+  --connection '{"vmName":"Win11_demo"}'
+signalman release deploy --target win11-demo --release <id>
+
+# 5. Run per-component health probes; deploy is gated on them.
+signalman health check --deployment <id>
+
+# 6. Roll back atomically if something's off.
+signalman release rollback --target win11-demo
+```
+
+For **remote operation** (control plane on one host, runners on
+others):
+
+```bash
+# On the control-plane host — pick a port and (recommended for any
+# non-loopback bind) require Bearer tokens from every client:
+signalman serve --host 0.0.0.0 --port 8765 --disable-loopback-bypass
+
+# Mint a key for each runner / CI consumer (token shown once):
+signalman api-key create --name my-runner
+# → sk_XXXXXXXX_YYYYYYYYYYYYYYYYYYYYYYYYYY
+
+# On a runner host — register + start a worker against the control plane:
+export SIGNALMAN_API_URL=http://control-plane.example.com:8765
+export SIGNALMAN_API_TOKEN=sk_...
+signalman runner register --name builder-1
+signalman runner start --name builder-1
+
+# `release build --remote` queues a release.build job for any available
+# runner instead of running it in-process:
+signalman release build --product example --tag v1.0.0 --remote
+```
+
+Ed25519 signing keys are generated and inspected with `signalman key`:
+
+```bash
+signalman key generate --out ~/.signalman/keys/release.pem
+signalman key fingerprint --key ~/.signalman/keys/release.pub.pem
+# → matches the `signed_by` field on each release row this key signs
+
+signalman release verify --release <id> \
+  --public-key ~/.signalman/keys/release.pub.pem
 ```
 
 ### Hyper-V control-plane service (Windows host)
@@ -279,4 +427,4 @@ assertions:
 
 ## License
 
-MIT
+Apache License 2.0. See [LICENSE](LICENSE) for the full text.

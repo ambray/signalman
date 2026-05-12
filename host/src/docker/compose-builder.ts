@@ -6,10 +6,23 @@
  * standard Example backend stack used in E2E testing.
  */
 
+import * as crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
+
+/**
+ * Generate a random secret suitable for use as a test-stack password or
+ * JWT secret. 32 bytes of CSPRNG output is well past anything brute-
+ * forceable, and per-call generation means no shared secret leaks
+ * across stacks or into committed files. Used to avoid hardcoded
+ * `test-password` / `test-secret-for-e2e` defaults flagged by static
+ * scanners.
+ */
+function randomSecret(): string {
+  return crypto.randomBytes(32).toString("hex");
+}
 
 /** Docker Compose service definition. */
 export interface ComposeService {
@@ -152,12 +165,30 @@ export class ComposeBuilder {
     backendPort?: number;
     dbType?: "sqlite" | "postgres";
     postgresImage?: string;
+    /**
+     * JWT signing secret for the backend service. If omitted, a fresh
+     * 32-byte random hex secret is generated per stack — no shared
+     * default leaks across runs or into static scans.
+     */
     jwtSecret?: string;
+    /**
+     * Postgres password for the bundled database container (only used
+     * when `dbType: "postgres"`). If omitted, a fresh 32-byte random
+     * hex password is generated per stack. The same value flows into
+     * the backend's DATABASE_URL.
+     */
+    postgresPassword?: string;
     extraEnv?: Record<string, string>;
   }): ComposeBuilder {
     const builder = new ComposeBuilder();
     const port = config.backendPort ?? 8443;
-    const jwtSecret = config.jwtSecret ?? "test-secret-for-e2e";
+    // Generate fresh secrets on every call by default — the historical
+    // hardcoded "test-secret-for-e2e" / "test-password" defaults were
+    // a recurring static-scanner finding even though they only existed
+    // inside ephemeral docker test stacks. Operators can still pin a
+    // value by passing `jwtSecret` / `postgresPassword` explicitly
+    // (e.g. when a test needs deterministic tokens).
+    const jwtSecret = config.jwtSecret ?? randomSecret();
     const dbType = config.dbType ?? "sqlite";
 
     const backendEnv: Record<string, string> = {
@@ -181,8 +212,9 @@ export class ComposeBuilder {
 
     if (dbType === "postgres") {
       const pgImage = config.postgresImage ?? "postgres:16";
+      const pgPassword = config.postgresPassword ?? randomSecret();
 
-      backendEnv.DATABASE_URL = "postgres://example:test-password@postgres:5432/example";
+      backendEnv.DATABASE_URL = `postgres://example:${pgPassword}@postgres:5432/example`;
 
       backendService.depends_on = ["postgres"];
       backendService.networks = ["backend"];
@@ -192,7 +224,7 @@ export class ComposeBuilder {
         environment: {
           POSTGRES_DB: "example",
           POSTGRES_USER: "example",
-          POSTGRES_PASSWORD: "test-password",
+          POSTGRES_PASSWORD: pgPassword,
         },
         healthcheck: {
           test: ["CMD-SHELL", "pg_isready -U example"],

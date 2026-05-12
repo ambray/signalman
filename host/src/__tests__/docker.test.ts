@@ -606,8 +606,12 @@ describe("ComposeBuilder", () => {
       expect(spec.services.backend.environment?.DATABASE_URL).toContain(
         "sqlite",
       );
-      expect(spec.services.backend.environment?.JWT_SECRET).toBe(
-        "test-secret-for-e2e",
+      // Default JWT secret is randomly generated per stack (32 random
+      // bytes → 64 hex chars). See F1/F2 fix in
+      // `host/src/docker/compose-builder.ts`: hardcoded defaults were
+      // replaced to avoid static-scanner findings on the public repo.
+      expect(spec.services.backend.environment?.JWT_SECRET).toMatch(
+        /^[0-9a-f]{64}$/,
       );
       expect(spec.services.backend.healthcheck).toBeDefined();
       expect(spec.volumes?.["backend-data"]).toBeDefined();
@@ -627,8 +631,28 @@ describe("ComposeBuilder", () => {
       expect(spec.services.backend.environment?.DATABASE_URL).toContain(
         "postgres",
       );
+      // Default Postgres password is randomly generated per stack.
+      // Assert format only — the literal value differs every call.
+      expect(spec.services.postgres.environment?.POSTGRES_PASSWORD).toMatch(
+        /^[0-9a-f]{64}$/,
+      );
       expect(spec.networks?.backend).toBeDefined();
       expect(spec.volumes?.["postgres-data"]).toBeDefined();
+    });
+
+    it("uses a pinned postgresPassword when one is provided", () => {
+      const builder = ComposeBuilder.exampleBackendStack({
+        backendImage: "example-backend:latest",
+        dbType: "postgres",
+        postgresPassword: "pinned-for-test",
+      });
+      const spec = builder.getSpec();
+      expect(spec.services.postgres.environment?.POSTGRES_PASSWORD).toBe(
+        "pinned-for-test",
+      );
+      expect(spec.services.backend.environment?.DATABASE_URL).toContain(
+        "pinned-for-test",
+      );
     });
 
     it("uses custom port and jwt secret", () => {

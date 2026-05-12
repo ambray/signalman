@@ -1,9 +1,26 @@
 # Meta Build System — Design
 
-**Status**: Draft, awaiting operator review
-**Target**: v0.2.0 (MVP, local mode); v0.3.0 (self-hosted); v0.4.0+ (hosted commercial)
-**Author**: 2026-05-10 design pass
-**Locks down**: Architecture, storage interface, release-catalog shape, CLI/MCP surface additions, phasing.
+**Status**: v0.2.0 + v0.3.0 implemented (PRs 1–10e on branch
+`intelligent-carson-a92b80`); v0.4.0 (hosted commercial) is design-only.
+**Target**: v0.2.0 (MVP, local mode, **shipped**); v0.3.0 (self-hosted,
+**shipped**); v0.4.0+ (hosted commercial, **future**).
+**Author**: 2026-05-10 design pass; v0.2/v0.3 implementation 2026-05-11.
+**Locks down**: Architecture, storage interface, release-catalog shape, CLI/MCP
+surface additions, phasing.
+
+> **Implementation note (2026-05-11):** what was design-only in the original
+> draft is now code. v0.2.0 ships the local in-process control plane
+> (`host/src/control-plane/`), the release-catalog schema with SQLite
+> storage and local-FS blobs, and the `release build / list / show / deploy
+> / rollback / health` verbs. v0.3.0 ships the HTTP control plane
+> (`signalman serve`, `host/src/http/`), Bearer-token API keys
+> (`host/src/http/auth.ts`), the job queue + remote runners
+> (`host/src/runner/`, `host/src/control-plane/storage/migrations/0003_jobs.sql`),
+> the Postgres storage driver (`host/src/control-plane/storage/postgres.ts`,
+> `docs/postgres-driver.md`), Ed25519 manifest signing
+> (`host/src/control-plane/build/signing.ts`), and the S3 blob driver
+> (`host/src/control-plane/blobs/s3.ts`). Sections below should be read as
+> the design intent; consult the code for the implemented contract.
 
 ## TL;DR
 
@@ -414,7 +431,7 @@ Each skill is short — it tells the LLM the verb, the expected envelope shape, 
 
 ## 12. Phasing
 
-### v0.2.0 — MVP (local mode)
+### v0.2.0 — MVP (local mode) **[SHIPPED]**
 
 Scope: single binary on a laptop, in-process control plane, SQLite, local FS blobs, default org. Enough to replace the current LLM-driven build/deploy of Example.
 
@@ -431,18 +448,18 @@ Scope: single binary on a laptop, in-process control plane, SQLite, local FS blo
 - LLM skills for build / deploy / rollback / health
 - Migration of existing scenario verbs to control-plane shim (in-process)
 
-### v0.3.0 — self-hosted
+### v0.3.0 — self-hosted **[SHIPPED]**
 
 Scope: control plane separable as a deployable service; runners register over HTTP; bearer-token auth; Postgres tested; S3 blob driver.
 
-- `signalman serve` standalone
-- HTTP API surface + bearer-token auth
-- `signalman runner register` + runner job-poll loop
-- Postgres `StorageDriver` (same migrations)
-- S3 `BlobDriver`
-- Multi-runner job dispatch
-- Audit log surface
-- Manifest signing (sigstore or minisign)
+- ✅ `signalman serve` standalone (`host/src/http/index.ts`, `cli.ts cmdServe`)
+- ✅ HTTP API surface + bearer-token auth (`host/src/http/app.ts`, `auth.ts`)
+- ✅ `signalman runner register` + runner job-poll loop (`host/src/runner/`)
+- ✅ Postgres `StorageDriver` (same migrations) (`host/src/control-plane/storage/postgres.ts`)
+- ✅ S3 `BlobDriver` (`host/src/control-plane/blobs/s3.ts`)
+- ✅ Multi-runner job dispatch (atomic claim via `SELECT FOR UPDATE SKIP LOCKED` on PG; `BEGIN IMMEDIATE` + `UPDATE … WHERE … LIMIT 1` on SQLite)
+- ✅ Audit log surface (`POST /v1/audit`, `GET /v1/audit`)
+- ✅ Manifest signing — Ed25519 via Node's built-in `crypto` (`host/src/control-plane/build/signing.ts`); `signalman key generate/fingerprint` + `release verify`
 
 ### v0.4.0 — hosted commercial
 
@@ -468,7 +485,7 @@ Scope: SaaS instance, free + paid tiers, dashboard, OAuth.
 
 1. **Where does the release catalog live in the *Example* operator's mental model?** Specifically: should annotated git tags in the Example repo carry the manifest sha256 (so the tag itself is auditable), or is the catalog purely signalman-side? Defaulting to signalman-side for now; tag annotation is a v0.3 feature.
 2. **Staging mechanism per target kind.** For Hyper-V VM targets, checkpoints are the obvious lever for atomic deploy. For future Docker/k8s targets the answer is different. v0.2 only needs Hyper-V.
-3. **Manifest signing key management.** Who holds the key? For hosted, we hold it. For self-hosted, the operator. v0.2 ships unsigned; v0.3 adds signing.
+3. **Manifest signing key management.** ~~Who holds the key? For hosted, we hold it. For self-hosted, the operator. v0.2 ships unsigned; v0.3 adds signing.~~ **Resolved in v0.3.0d**: signing is Ed25519 via Node's built-in `crypto`; keys are PEM (SPKI public / PKCS#8 private) on disk; the *operator* holds the private key in self-hosted mode. The CLI never persists keys beyond `signalman key generate --out`. The fingerprint (`signed_by` on the release row, first 16 hex chars of sha256(DER pubkey)) lets operators verify which key signed a release without storing the key in the catalog.
 4. **Build caching and parallelism.** The schema doesn't prevent parallel builds, but v0.2 runs components serially. Component-level cache keys (sha256 of inputs) are deferred.
 5. **Per-org product limits.** Free tier almost certainly has a cap on products / releases / runners. Schema supports it; enforcement deferred to v0.4.
 6. **Migration of existing in-disk scenario state.** Today's `.signalman/recordings/<id>/last-run.json` etc. need to either move into the DB or be indexed by it. Tactical migration plan deferred to v0.2 implementation.
