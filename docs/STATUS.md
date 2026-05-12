@@ -5,34 +5,22 @@
 > introduces a new TODO bucket. See [Document maintenance](#document-maintenance)
 > for the trigger rules.
 
-## Public-release prep landed on main — 2026-05-12
+## v0.2.0 release cut — 2026-05-12
 
-The public-release prep work merged. `main` is at `a7cc8e8` and is
-in sync with `origin/main`. Net effect: 15 commits from a clean
-v0.1.x baseline (`2a2cdb0`) to a public-flip-ready state.
+`main` is at the v0.2.0 bump commit and in sync with `origin/main`.
+History was rewritten via `git filter-repo` to scrub prior
+product-specific references, so commit SHAs prior to the bump differ
+from earlier snapshots of this file. See `CHANGELOG.md` for the
+detailed change log of what's in v0.2.0.
 
-What landed (oldest first):
-
-- `3d1d0c2` v0.2.0 — local in-process control plane (storage, schema,
-  build executor, deploy/rollback, health probes)
-- `d209a0a` v0.3.0a — HTTP control plane + Bearer-token auth (`signalman
-  serve`, `host/src/http/`)
-- `360b28f` v0.3.0a — job substrate + runner CLI (`host/src/runner/`,
-  jobs table, atomic claim)
-- `06af83a` v0.3.0b — remote `release.build` executor
-- `e00503a` v0.3.0c — Postgres `StorageDriver` (`pg`, same migrations)
-- `1549a9e` v0.3.0d — Ed25519 manifest signing + `release verify`
-- `6979976` v0.3.0e — S3 `BlobDriver` + `resolveBySha`
-- `618f353` security + docs: pre-public-release readiness pass — F1–F5
-- `93c4bee` license: align manifests to Apache-2.0
-- `4a58e4c` NOTICE file + LICENSE appendix copyright correction
-- `38298a7` scrub: remove product-specific references for public release
-- `300ec02` OSS-readiness hygiene + workflows fix (SECURITY.md,
-  CONTRIBUTING.md, issue + PR templates, .gitignore, Node 20→22)
-- `a6222e6` README accuracy + STATUS refresh + npm metadata + CHANGELOG
-- `5f3b648` README: drop hosted-commercial scope references
-- `a7cc8e8` open-core split — extract `hub/` + commercial scope to
-  signalman-cloud
+v0.2.0 bundles what was originally scoped as v0.2.0 (local
+in-process meta build system) + v0.3.0 (networked control plane:
+HTTP serve, runners, signing, Postgres, S3) into one tag. The two
+were developed in lockstep on the same branch and neither shipped
+independently. Also packages the open-core split (commercial layer
+extracted to `signalman-cloud`), the public-release security pass,
+the Apache-2.0 license migration, and the standard OSS
+community-health files.
 
 CODE_OF_CONDUCT.md is intentionally deferred (operator decision);
 GitHub's community-profile checklist will show one missing item.
@@ -69,71 +57,77 @@ of the split.
 
 ## Public-release status
 
-Open items before flipping the OSS repo public:
+Closed:
 
-1. **Git history rewrite to scrub Example from past commits** —
-   parked at the operator's request. The working tree (and every
-   commit from `38298a7` onward) is clean, but `git log -S "example"
-   --all` still surfaces the original text in older commits,
-   including the 14 moved scenarios.
-2. **Version-pin bump strategy** — every manifest still reads
-   `0.1.0`. Decide whether the meta-build work tags as v0.3.0
-   (carries v0.2 + v0.3 in one bump) or whether v0.2.0 ships
-   separately first.
-3. **Visibility flip** — repo is still private on GitHub. Operator
-   action, blocked on (1) and (2).
-4. **Push `signalman-cloud` to its remote** — `signalman-cloud` has
-   one commit locally; remote is configured at
+1. ✅ **Git history rewrite to scrub prior product-specific
+   references.** Done 2026-05-12 via `git filter-repo`. `git log -S
+   "ospiri" --all` returns zero. Pre-rewrite mirror + literal `.git`
+   backup at
+   `/c/Users/ucale/source/repos/signalman-backup-pre-history-rewrite-2026-05-12/`
+   preserved for recovery cherry-picks if ever needed.
+2. ✅ **Version-pin bump strategy.** v0.2.0 carries v0.2 + v0.3
+   scopes in one tag (decided 2026-05-12).
+
+Open:
+
+1. **Push v0.2.0 tag** — `git tag -a v0.2.0` + push to trigger the
+   release workflow. Workflow validates manifest version matches
+   tag, then builds and (if secrets configured) publishes artifacts.
+2. **Visibility flip** — repo is still private on GitHub. Operator
+   action; nothing technical blocking now.
+3. **Push `signalman-cloud` to its remote** — `signalman-cloud` has
+   two commits locally; remote is configured at
    `github.com/ambray/signalman-cloud.git` but not pushed. Operator
    action when the GitHub-side repo is ready.
+4. **GitHub repo secrets** for the release pipeline:
+   `WINDOWS_CERT_BASE64`, `WINDOWS_CERT_PASSWORD`, `NPM_TOKEN`,
+   `CARGO_REGISTRY_TOKEN`. Without them the workflow builds
+   artifacts but skips publishing — fine for an unsigned dry-run
+   tag; not fine for an actual public release.
 
 ## TL;DR (one-paragraph)
 
-`main` carries the v0.1.1 surface: the secure scenario runner from
-v0.1.0 (six MCP verbs, Loom-fronted plugin, mTLS guest agent, signed-MSI
-release pipeline) plus the P9 provisioning + bootstrap stack that closes
-the onboarding gap (`signalman vm provision` / `vm fetch-template` /
-`vm install-bundle` / `vm cleanup`, `signalman init`, software-bundle
-schema, idempotency contract, `docs/bootstrap.md`) and the first
-interactive user-session UI sidecar (`signalman-guest --ui-sidecar`) with
-MCP tools for screenshots, UIA snapshot/find/wait, click, keyboard input,
-and type, plus `vm_ui_open_url` / `vm_ui_navigate_url` browser primitives for
-launching and navigating `http(s)` flows through the interactive desktop.
-Browser navigation now discovers likely address/search targets from UIA
-metadata, falls back to the current Edge address-bar selectors when a
-discovered target goes stale, and reports the target/fallback metadata to
-recordings and LLM-driven workflows. The native sidecar engine now covers
-screenshot, find, click, type, key operations, wait timeouts, UIA
-Value-pattern descriptors, and the first loopback-only CDP implementation
-behind the reserved Browser* RPCs. It is covered
-by the live `Win11_test` `live-ui-sidecar-smoke`, `live-ui-browser-smoke`,
-and `live-browser-cdp-smoke.ps1` checks. Versions in every
-manifest read `0.1.0` and need to bump to `0.1.1` together with a tag push to
-ship — the release workflow validates the manifest version matches the tag
-before publishing. The four GitHub repo secrets
+`main` is ready to tag as **v0.2.0** — the first formally versioned
+release. v0.2.0 bundles the secure scenario runner (six MCP verbs,
+Loom-fronted plugin, mTLS guest agent, signed-MSI release pipeline,
+P9 provisioning + bootstrap, UI sidecar with UIA + CDP) **plus** the
+tag-driven meta build system that landed since the v0.1.x line:
+local in-process control plane (storage / schema / build executor /
+deploy + rollback / health probes), HTTP control plane with
+Bearer-token auth, runner protocol + remote `release.build`,
+Postgres `StorageDriver`, Ed25519 manifest signing + `release
+verify`, and S3 `BlobDriver`. The repo was prepared for public
+release: F1–F5 security fixes landed, manifests aligned to
+Apache-2.0, the proprietary commercial layer extracted into a
+sibling `signalman-cloud` repo (open-core split), and all prior
+product-specific (Ospiri) references scrubbed from working tree
+**and** git history. All four manifest version pins + the in-code
+`VERSION` constant now read `0.2.0`; the release workflow validates
+the manifest matches the pushed tag before building, so the
+remaining operator step is `git tag -a v0.2.0 && git push origin
+v0.2.0`. Four GitHub repo secrets
 (`WINDOWS_CERT_BASE64`, `WINDOWS_CERT_PASSWORD`, `NPM_TOKEN`,
-`CARGO_REGISTRY_TOKEN`) are the only operator setup remaining; without
-them the workflow still produces but does not publish artifacts.
-Monday-morning operator action: run `pwsh scripts/release-dry-run.ps1`,
-bump the four version pins, `git tag v0.1.1 && git push origin v0.1.1`.
+`CARGO_REGISTRY_TOKEN`) gate publishing; without them the workflow
+builds artifacts but does not publish.
 
 ## Versions
 
 | Component | Path | Current version |
 |---|---|---|
-| Host (npm) | `host/package.json` | `0.1.0` |
-| Guest (cargo) | `guest/Cargo.toml` | `0.1.0` |
-| Workspace (cargo) | `Cargo.toml` (`workspace.package.version`) | `0.1.0` |
-| Service (cargo) | `service/Cargo.toml` (`version.workspace = true`) | `0.1.0` (inherits workspace) |
-| Loom plugin | `plugins/signalman-loom-plugin/Cargo.toml` | `0.1.0` |
+| Host (npm) | `host/package.json` | `0.2.0` |
+| Guest (cargo) | `guest/Cargo.toml` | `0.2.0` |
+| Workspace (cargo) | `Cargo.toml` (`workspace.package.version`) | `0.2.0` |
+| Service (cargo) | `service/Cargo.toml` (`version.workspace = true`) | `0.2.0` (inherits workspace) |
+| Loom plugin | `plugins/signalman-loom-plugin/Cargo.toml` | `0.2.0` |
+| HTTP `/v1/healthz` `version` field | `host/src/http/app.ts` `VERSION` const | `0.2.0` |
 | Proto contract — guest | `proto/guest.proto` | `signalman.guest` package, **v1 frozen** (P8 / commit `c9e8e30`) with `oneof platform_details` |
 | Proto contract — service | `service/proto/signalman_service.proto` | `signalman.service.v1.ControlPlane` |
 
-> The version skew between manifests-on-`main` (`0.1.0`) and the *intended*
-> v0.1.1 release tag is the deliberate state — every P9 commit landed
-> against the unbumped manifest. Bump all four pins (`host/package.json`,
-> `guest/Cargo.toml`, root `Cargo.toml`, `plugins/signalman-loom-plugin/Cargo.toml`)
-> in the same commit that creates the `v0.1.1` tag.
+> The release workflow at `.github/workflows/release.yaml` validates
+> that every manifest matches the pushed tag before building.
+> Bumping for the next release: change all five entries above in
+> lockstep (the proto-contract rows are not version-pinned in the
+> same way), commit, then `git tag -a vX.Y.Z` and push the tag.
 
 ## Latest commits (top 10)
 

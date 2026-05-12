@@ -76,7 +76,7 @@ import {
   validateRepoUrl,
 } from "../control-plane/build/git.js";
 
-const VERSION = "0.3.0-dev";
+const VERSION = "0.2.0";
 
 export interface AppOptions {
   controlPlane: ControlPlane;
