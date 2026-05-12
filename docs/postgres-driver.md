@@ -3,9 +3,9 @@
 Signalman's control plane ships two relational drivers behind one
 `StorageDriver` interface: the default **SQLite** driver for local +
 self-hosted-small deployments, and the **Postgres** driver
-(`PostgresStorageDriver`) for self-hosted-large / commercial. Both
-satisfy the same interface and apply the same migration files; verb
-code never knows which is underneath.
+(`PostgresStorageDriver`) for self-hosted-large. Both satisfy the
+same interface and apply the same migration files; verb code never
+knows which is underneath.
 
 ## Configuration
 

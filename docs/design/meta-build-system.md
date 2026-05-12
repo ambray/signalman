@@ -1,10 +1,17 @@
 # Meta Build System — Design
 
 **Status**: v0.2.0 + v0.3.0 implemented (PRs 1–10e on branch
-`intelligent-carson-a92b80`); v0.4.0 (hosted commercial) is design-only.
+`intelligent-carson-a92b80`); v0.4.0+ scope (auto-promotion,
+webhooks, scheduling) is design-only.
 **Target**: v0.2.0 (MVP, local mode, **shipped**); v0.3.0 (self-hosted,
-**shipped**); v0.4.0+ (hosted commercial, **future**).
+**shipped**); v0.4.0+ (post-self-hosted iteration, **future**).
 **Author**: 2026-05-10 design pass; v0.2/v0.3 implementation 2026-05-11.
+
+> The original v0.4 "hosted commercial" scope (web dashboard, SSO/OAuth,
+> RBAC, billing, multi-tenant operator surface) was extracted into the
+> separate **signalman-cloud** repository as part of an open-core
+> split (2026-05-12). This document describes the open-source surface
+> only; see signalman-cloud for the commercial design intent.
 **Locks down**: Architecture, storage interface, release-catalog shape, CLI/MCP
 surface additions, phasing.
 
@@ -26,7 +33,7 @@ surface additions, phasing.
 
 Signalman is being expanded from a scenario runner into a full release-lifecycle platform for an externally-developed product. It will deterministically **build** the product from a tag, **verify** through a tiered pipeline (test VM → test Docker → tagged release → demo deploy), **deploy** to test or demo surfaces, **roll back** atomically, and **health-check** every component, with the LLM removed from the load-bearing path.
 
-Architecturally, signalman becomes a **control plane + runner** product, modeled on GitHub Actions (control plane ↔ runner). The control plane owns the release catalog, deployment ledger, scenario library, artifact metadata, audit log, and tenant model, behind a REST API. Runners are stateless executors that talk HTTP to the control plane and gRPC/mTLS to the existing privileged host service ([service/](../../service/)). All storage is pluggable (SQLite | Postgres for relational, local FS | S3 for blobs); multi-tenant is baked in from day one (every entity carries `org_id`); single-tenant deployments pin to a default org. Three deployment shapes are supported: **local** (single binary, in-process control plane, on-laptop dev loop), **self-hosted** (separately-deployed control plane, registered runners), **hosted commercial** (multi-tenant SaaS with free tier and dashboard).
+Architecturally, signalman becomes a **control plane + runner** product, modeled on GitHub Actions (control plane ↔ runner). The control plane owns the release catalog, deployment ledger, scenario library, artifact metadata, audit log, and tenant model, behind a REST API. Runners are stateless executors that talk HTTP to the control plane and gRPC/mTLS to the existing privileged host service ([service/](../../service/)). All storage is pluggable (SQLite | Postgres for relational, local FS | S3 for blobs); multi-tenant is baked in from day one (every entity carries `org_id`); single-tenant deployments pin to a default org. Two deployment shapes ship in this OSS distribution: **local** (single binary, in-process control plane, on-laptop dev loop) and **self-hosted** (separately-deployed control plane, registered runners). A managed hosted offering is out of scope for this repo — see signalman-cloud.
 
 The `signalman.build.yaml` contract checked into the *product* repo declares how to build each component; signalman clones the product repo at a tag, executes the declared steps, captures artifacts into the catalog, and records a signed manifest. From then on, deploys, rollbacks, and health checks operate on catalog entries, not on a working tree.
 
@@ -41,15 +48,19 @@ The `signalman.build.yaml` contract checked into the *product* repo declares how
 3. **Atomic deploy and rollback** of an entire release onto a target VM (test or demo).
 4. **Per-component health probes** with a uniform interface (agent service, driver minifilter, backend `/health`, dashboard SPA load, NMH pipe, browser extension).
 5. **LLM skills** so future Claude/Codex sessions invoke the above without re-reading the CLI surface.
-6. **Storage that scales from local laptop to commercial multi-tenant** without a rewrite.
+6. **Storage that scales from a local laptop to a multi-tenant self-hosted fleet** without a rewrite.
 
 ### Non-goals (v0.2 MVP)
 
-- Web dashboard UI. (v0.4+.)
-- OAuth / session auth. Bearer-token API keys only. (v0.4+.)
-- Real multi-tenant operations (org switching, RBAC, billing). The schema supports it; the surface does not yet expose it.
-- Auto-promotion pipelines (tag → tier → tier with approval gates). (v0.5+.)
-- Webhooks / external notifications. (v0.5+.)
+- Web dashboard UI. (Cloud-tier; see signalman-cloud.)
+- OAuth / session auth. Bearer-token API keys only on this side.
+  (Cloud-tier; see signalman-cloud.)
+- Multi-tenant operator surface (org switching, RBAC, invite flow).
+  The schema carries `org_id` so the data model is multi-tenant-ready;
+  the operator surface that exposes those operations is Cloud-tier.
+- Billing + tier enforcement. (Cloud-tier; see signalman-cloud.)
+- Auto-promotion pipelines (tag → tier → tier with approval gates). (v0.4+.)
+- Webhooks / external notifications. (v0.4+.)
 - Replacing the existing scenario verbs. They survive and migrate behind the control-plane shim.
 
 ---
@@ -75,7 +86,6 @@ The meta build system is what *operates* this model — the gates, the catalog, 
 +---------------------------------------------------------------+
 |  Operator surface                                             |
 |  - signalman CLI (existing) + new release/health verbs        |
-|  - Web dashboard (v0.4+)                                      |
 |  - LLM skills                                                 |
 +---------------------------------+-----------------------------+
                                   | HTTP (bearer token)
@@ -100,13 +110,12 @@ The meta build system is what *operates* this model — the gates, the catalog, 
 +--------------------------+   +-----------------------------+
 ```
 
-### 3.2 Three deployment shapes
+### 3.2 Two deployment shapes
 
 | Shape | Control plane | Runner | Storage | Auth | Tenancy |
 | --- | --- | --- | --- | --- | --- |
 | **Local** | in-process inside CLI, or `signalman serve` on localhost | same host | SQLite + local FS blobs under `~/.signalman/` | none (loopback only) | default org pinned |
 | **Self-hosted** | standalone deploy (Docker, MSI, or `signalman serve`) | one or many, registered | SQLite or Postgres + FS or S3 | bearer token | default org or operator-managed orgs |
-| **Hosted (v0.4+)** | Anthropic-operated | customer-registered or hosted | Postgres + S3 | bearer token (v0.4) → OAuth (v0.4+) | full multi-tenant, free + paid tiers |
 
 **Local mode is the laptop dev loop** — same binary, runs everything in-process, zero config. This is the path operators use today.
 
@@ -411,7 +420,8 @@ In `local` mode, the CLI doubles as a runner. In `submit` mode, the CLI is a thi
 - API keys are created via `signalman api-key create --name N`. Display once, hash stored.
 - Bearer token in `Authorization: Bearer sk_…` header; loopback in local mode bypasses auth.
 - One key = one org scope. Scopes (read-only, full) deferred.
-- OAuth, sessions, and the dashboard land in v0.4+.
+- OAuth, sessions, and the dashboard are Cloud-tier features
+  (signalman-cloud), not part of this OSS surface.
 
 ---
 
@@ -461,17 +471,7 @@ Scope: control plane separable as a deployable service; runners register over HT
 - ✅ Audit log surface (`POST /v1/audit`, `GET /v1/audit`)
 - ✅ Manifest signing — Ed25519 via Node's built-in `crypto` (`host/src/control-plane/build/signing.ts`); `signalman key generate/fingerprint` + `release verify`
 
-### v0.4.0 — hosted commercial
-
-Scope: SaaS instance, free + paid tiers, dashboard, OAuth.
-
-- Multi-tenant operations (org switching, RBAC)
-- Web dashboard (Next.js or similar)
-- OAuth + session auth
-- Billing hooks
-- Tier enforcement (free vs paid quotas)
-
-### v0.5.0+ — auto-promote, webhooks, scheduling
+### v0.4.0+ — auto-promote, webhooks, scheduling
 
 - Auto-promotion pipelines (build → tier → tier with approval)
 - Approval workflows
@@ -487,9 +487,11 @@ Scope: SaaS instance, free + paid tiers, dashboard, OAuth.
 2. **Staging mechanism per target kind.** For Hyper-V VM targets, checkpoints are the obvious lever for atomic deploy. For future Docker/k8s targets the answer is different. v0.2 only needs Hyper-V.
 3. **Manifest signing key management.** ~~Who holds the key? For hosted, we hold it. For self-hosted, the operator. v0.2 ships unsigned; v0.3 adds signing.~~ **Resolved in v0.3.0d**: signing is Ed25519 via Node's built-in `crypto`; keys are PEM (SPKI public / PKCS#8 private) on disk; the *operator* holds the private key in self-hosted mode. The CLI never persists keys beyond `signalman key generate --out`. The fingerprint (`signed_by` on the release row, first 16 hex chars of sha256(DER pubkey)) lets operators verify which key signed a release without storing the key in the catalog.
 4. **Build caching and parallelism.** The schema doesn't prevent parallel builds, but v0.2 runs components serially. Component-level cache keys (sha256 of inputs) are deferred.
-5. **Per-org product limits.** Free tier almost certainly has a cap on products / releases / runners. Schema supports it; enforcement deferred to v0.4.
+5. **Per-org product limits.** Quota enforcement is Cloud-tier
+   (see signalman-cloud); the schema columns to track usage live
+   here but the policy lives there.
 6. **Migration of existing in-disk scenario state.** Today's `.signalman/recordings/<id>/last-run.json` etc. need to either move into the DB or be indexed by it. Tactical migration plan deferred to v0.2 implementation.
-7. **GitOps sync for scenarios.** Scenario library option (b) — sync from a tenant's source repo — has UX implications (which branch? which path? webhook?). Defer to v0.4.
+7. **GitOps sync for scenarios.** Scenario library option (b) — sync from a tenant's source repo — has UX implications (which branch? which path? webhook?). Cloud-tier; out of scope for the OSS surface.
 
 ---
 

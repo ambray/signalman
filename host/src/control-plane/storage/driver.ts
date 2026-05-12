@@ -2,8 +2,8 @@
  * StorageDriver — relational backend interface for the control plane.
  *
  * Pluggable per docs/design/meta-build-system.md §5: SQLite for local
- * and self-hosted-small (default), Postgres for self-hosted-large and
- * hosted commercial. Drivers expose typed entity repositories rather
+ * and self-hosted-small (default), Postgres for self-hosted-large.
+ * Drivers expose typed entity repositories rather
  * than raw `query()` so callers don't hand-roll SQL and the
  * Postgres/SQLite split stays invisible to verb code.
  *
