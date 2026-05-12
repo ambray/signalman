@@ -13,19 +13,15 @@ Nothing yet.
 First versioned release. Bundles the original "v0.2.0 local meta
 build" + the "v0.3.0 networked control plane" scopes into one tag
 since the two were developed in lockstep on the same branch and
-neither shipped independently. Also packages the open-core split,
-the public-release security pass, and the standard OSS
-community-health files.
+neither shipped independently. Also packages the public-release
+security pass and the standard OSS community-health files.
 
 Manifest pins bumped in lockstep: `host/package.json`,
 `guest/Cargo.toml`, root `Cargo.toml`, and
 `plugins/signalman-loom-plugin/Cargo.toml`. In-code `VERSION`
 constant in `host/src/http/app.ts` set to `0.2.0` (was
-`0.3.0-dev`). Git history was scrubbed of the prior
-product-specific (Ospiri) references via `git filter-repo`; the
-mirror backup at
-`/c/Users/ucale/source/repos/signalman-backup-pre-history-rewrite-2026-05-12/`
-preserves the pre-rewrite state.
+`0.3.0-dev`). Git history was scrubbed of prior product-specific
+references via `git filter-repo`.
 
 ### Public-release readiness
 
@@ -71,22 +67,12 @@ preserves the pre-rewrite state.
   `.claude/worktrees/`, `host/*.tgz`, `*.log`, control-plane local
   state (`signalman.db*`, `.signalman/{blobs,recordings}/`).
 
-### Open-core split + history scrub
+### History scrub + repo cleanup
 
-- **Split** out the proprietary commercial layer into a separate
-  `signalman-cloud` sibling repo (open-core model). The OSS half
-  shipped here is fully self-hostable; the hosted SaaS surface
-  (multi-tenant operator UI, RBAC, SSO/OAuth, billing, tier
-  enforcement) lives in the private `signalman-cloud` repo and
-  consumes `@signalman/host` as an npm dependency. Deleted the
-  `hub/` directory (122 LOC of TODO stubs); ported the type
-  definitions to the new repo.
-- **Scrubbed** prior product-specific (Ospiri) references from
-  source, tests, scenarios, docs, and the entire git history
-  (`git filter-repo` rewrote 60 prior commits; mirror + literal
-  `.git` backup preserved at
-  `/c/Users/ucale/source/repos/signalman-backup-pre-history-rewrite-2026-05-12/`
-  for cherry-pick recovery if ever needed).
+- **Removed** the dormant `hub/` directory (122 LOC of TODO stubs).
+- **Scrubbed** prior product-specific references from source, tests,
+  scenarios, docs, and the entire git history (`git filter-repo`
+  rewrote 60 prior commits).
 - **Deleted** 10 stale WIP branches from origin (`fix/*`,
   `worktree-agent-*`, etc.) plus the dangling
   `loom/codex/add-scenario-orphan-cleanup-reaper` branch whose
