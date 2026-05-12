@@ -1,10 +1,18 @@
 # Signalman Development Roadmap
 
-**Last Updated**: 2026-05-04
-**Current Version**: Pre-release (v0.0.x)
-**Target**: v0.1.0 (first public release as agent-first DevOps runner)
-**Test Count**: 151 Rust (guest/service) + 769 TypeScript (host) = 920 tests
+**Last Updated**: 2026-05-12
+**Current Version**: v0.2.0 (tagged 2026-05-12; first formally versioned release — see CHANGELOG.md)
+**Target**: v0.3.0 (hermetic-replayable-unattended trio + ephemeral VM provisioning)
+**Test Count**: 1433 host (vitest) + 133 guest (cargo) tests on main
 **Repo**: https://github.com/ambray/signalman.git
+
+**2026-05-12 v0.2.0 cut**: First formally versioned release bundled
+the local in-process meta build system + the networked control plane
+(HTTP serve, runners, Ed25519 signing, Postgres, S3) into one tag.
+The ROADMAP sections previously labeled "v0.2.0" describe work that
+did NOT ship in v0.2.0 — those items moved to the v0.3.0 milestone
+below and were renamed accordingly. Similarly, "v0.3.0+ (Speculative)"
+became "v0.4.0+ (Speculative)".
 
 **2026-04-26 Mac virtualization decision**: macOS VM support starts with a
 Tart-backed host backend (`host/src/hypervisors/tart.ts`) rather than a
@@ -22,7 +30,7 @@ v0.1.0 publishes. Hub component (`hub/`) was 122 LOC of TODO stubs;
 removed on 2026-05-12 (dormant, not relied on by any other component).
 UI/Browser/Verify guest RPCs remain proto
 placeholders returning `unimplemented`. `template:` field is decorative until
-v0.2.0-2 ephemeral VM provisioning lands; documented as known. Two Critical
+v0.3.0-2 ephemeral VM provisioning lands; documented as known. Two Critical
 security findings (mTLS authenticates the channel not the caller; cert
 bundle written with default ACLs) folded into P4 with explicit sub-items.
 
@@ -44,7 +52,7 @@ to **Loom**, which is the state holder and the operator console; Loom drives
   (live event streaming → Loom `EventBus`; run-handle persistence →
   Loom `TaskOwnership` shape; trace-id → Loom `TelemetryEvent.labels`;
   structured errors → Loom `LoomError`/sync-state pattern).
-- **v0.2.0-4 Explicit Orchestrator** is largely subsumed by Loom workflows
+- **v0.3.0-4 Explicit Orchestrator** is largely subsumed by Loom workflows
   + `loom tui`. Signalman-side scope drops from 5-7d to ~2-3d "expose
   scenario state via Loom workflow primitives."
 - **Hub** has been removed from the tree (the stub was not relied on
@@ -570,7 +578,7 @@ v0.1.0`. The workflow handles the rest.
   level (unit / integration / system / smoke / E2E), how to run the gated
   E2E lane, what mock vs. real means in this repo. Closes the missing
   test-strategy artifact.
-- Document `template:` field as decorative until v0.2.0-2 ships
+- Document `template:` field as decorative until v0.3.0-2 ships
   ephemeral-VM provisioning. Today the orchestrator never calls
   `resolveTemplate` ([host/src/scenarios/templates.ts:36-74](host/src/scenarios/templates.ts:36));
   scenarios silently rely on a hand-built VM matching `vms[].name`.
@@ -945,13 +953,14 @@ material.
 
 ---
 
-## v0.2.0 Roadmap
+## v0.3.0 Roadmap
 
 These are the primitives that make "agent-first DevOps" actually new.
-Deferred from v0.1.0 per 2026-04-24 decision to keep first release
-shippable.
+Deferred from v0.1.0 per 2026-04-24 decision to keep the first release
+shippable; renamed from "v0.2.0 Roadmap" on 2026-05-12 when v0.2.0
+shipped without them.
 
-### v0.2.0-1: Record / Replay
+### v0.3.0-1: Record / Replay
 **Estimated Duration**: 5-7 days
 
 - `signalman.record` captures next N MCP calls into `.signalman/recordings/`
@@ -961,7 +970,7 @@ shippable.
   differentiator: ad-hoc agent work becomes reusable, hermetic infra.
 - **Effort**: L
 
-### v0.2.0-2: Ephemeral VM Provisioning
+### v0.3.0-2: Ephemeral VM Provisioning
 **Estimated Duration**: 5-8 days
 
 - Differencing-disk pipeline (Hyper-V `New-VHD -ParentPath`).
@@ -972,7 +981,7 @@ shippable.
   per 2026-04-24 decision; required for true repeatability).
 - **C9 — Wire `template:` field for real.** Today the orchestrator never
   calls `resolveTemplate`; the field is decorative and v0.1.0 documents
-  it as such. v0.2.0-2 makes it actually provision from
+  it as such. v0.3.0-2 makes it actually provision from
   [host/src/scenarios/templates.ts](host/src/scenarios/templates.ts) +
   the differencing-disk pipeline.
 - **C8 — Streamed `vm_copy_file` progress.** Today
@@ -986,15 +995,15 @@ shippable.
   but don't eliminate it (large artifact deploys still happen).
 - **Effort**: L
 
-### v0.2.0-3: Hermetic Envelope (full triple)
-**Estimated Duration**: 1-2 days (depends on v0.2.0-2)
+### v0.3.0-3: Hermetic Envelope (full triple)
+**Estimated Duration**: 1-2 days (depends on v0.3.0-2)
 
 - Result envelope graduates to `(scenario_hash, vm_lineage_hash,
   agent_version, network_class, result, events[], duration)`.
 - Optional cache: same triple + pass → return cached result.
 - **Effort**: S
 
-### v0.2.0-4: Explicit Orchestrator (Loom-fronted) — REVISED 2026-04-25
+### v0.3.0-4: Explicit Orchestrator (Loom-fronted) — REVISED 2026-04-25
 **Estimated Duration**: 2-3 days (was 5-7d; Loom workflows + `loom tui`
 provide the DAG, scheduler, state management, and operator console; the
 remaining Signalman-side scope is the contract surface Loom invokes)
@@ -1002,13 +1011,13 @@ remaining Signalman-side scope is the contract surface Loom invokes)
 The unattended orchestrator is **Loom**. Loom workflows already provide
 task lifecycle, ownership reconciliation, follow-through, attention
 routing, and TUI command palette. Scheduling lives in cron / GitHub
-Actions / Loom directives, not in Signalman. Signalman's v0.2.0-4 work
+Actions / Loom directives, not in Signalman. Signalman's v0.3.0-4 work
 is the contract that lets Loom workflows compose Signalman scenarios:
 
-- **Scenario composition primitive** in Loom plugin: a Loom workflow node
-  invokes `loom.signalman.run` and gates on its envelope result. Pass
-  scenario hash + lineage hash + capability declarations through the
-  Loom task brief.
+- **Scenario composition primitive** in the Loom plugin: a Loom
+  workflow node invokes `loom.signalman.run` and gates on its
+  envelope result. Pass scenario hash + lineage hash + capability
+  declarations through the Loom task brief.
 - **Result envelope → Loom task evidence.** The hermetic triple
   (`scenario_hash`, `vm_lineage_hash`, `agent_version`) becomes part of
   the Loom task evidence record so Loom's caching layer can short-circuit
@@ -1023,18 +1032,41 @@ is the contract that lets Loom workflows compose Signalman scenarios:
 
 ---
 
-## v0.3.0+ (Speculative)
+## v0.4.0+ (Speculative)
+
+### Auto-promotion pipelines + webhooks + scheduling
+
+These were tracked as v0.4+ non-goals in
+`docs/design/meta-build-system.md` but never had ROADMAP entries.
+They cover the next tier of operational features layered on top of
+the v0.2.0 release pipeline.
+
+- **Auto-promotion** (tag → tier → tier with approval gates). A tag
+  on the product repo triggers `release.build`; on green tests the
+  release promotes to the next-tier deploy target; configurable
+  approval gates between tiers. The release pipeline foundation
+  shipped in v0.2.0; the promotion ladder + approvals layer on top.
+- **Webhooks / external notifications.** Outbound HTTP hooks on
+  release / deployment / health-check state changes. Slack / email
+  / generic-webhook drivers. Pairs with auto-promotion (approval
+  notifications) and with audit-log exports.
+- **Scheduled health checks.** A periodic job that re-runs
+  `health check` against every active deployment without an
+  operator triggering it. Pairs with audit-log retention so flapping
+  health is queryable historically.
+
+### Platform + protocol expansion
 
 - **Cross-platform daemon** (libvirt on Linux, vmrun wrapper on macOS).
   Depends on P8 (proto v1 freeze with `oneof platform_details` and
-  hypervisor-contract decision) being done in v0.1.0.
+  hypervisor-contract decision) — done in v0.1.0.
 - **E3 — Linux/macOS guest agent.** Audit found the guest crate
   compiles on Linux but `ProcessInspect`/`VerifyRestriction` are Win32-only
   ([guest/src/service.rs:632-642](guest/src/service.rs:632)). Implement
   the proto-portable RPCs (Health/Register/RunCommand/TestNetwork/
   TestFileAccess) per OS; leave Windows-only RPCs `unimplemented` per
   platform. Mobile (iOS/Android emulators, real devices via USB/network)
-  is a further v0.3.0+ extension that needs a different UI proto shape
+  is a further extension that needs a different UI proto shape
   than Windows UIA.
 - **E4 — Mobile UI proto shape.** Today's UI RPCs presuppose Windows UIA
   selectors (`automation_id`, `class_name`); accommodating ADB / idb /
@@ -1047,6 +1079,18 @@ is the contract that lets Loom workflows compose Signalman scenarios:
   duplicate-scenario pain is real).
 - Proto enhancements: split `ProcessStartResponse`, `RunCommandStream`
   (carry-over from old Phase 4.1).
+
+### CLI + OSS-hygiene followups
+
+- **`signalman --version` verb.** Referenced in `SECURITY.md`,
+  `CONTRIBUTING.md`, and the bug-report issue template; currently
+  the CLI returns "unknown verb" for `--version`. Should print
+  `host/package.json` version + commit SHA. Trivial implementation;
+  unblocks the doc-references that point at it.
+- **`CODE_OF_CONDUCT.md`.** Intentionally deferred during the v0.2.0
+  OSS-hygiene pass per operator decision. GitHub's community-profile
+  checklist surfaces this as a missing item; lands when ready to
+  paste the Contributor Covenant text (or whichever variant is chosen).
 
 ---
 
@@ -1081,29 +1125,24 @@ host↔guest gRPC contract on the isolated side.
 |-------|----------|--------|------|
 | P0: MCP Surface Inversion | 4-5d | ✅ Merged 2026-04 | (closed) |
 | P1: Hyper-V Service | 5-8d | ✅ Merged 2026-04 | Closure bug A2 → P3 |
-| P2: Orchestrator Polish | 3-4d | Surgical + audit | f1c1f93 + cleanup reaper (C7 teardown guard + manifest-owned provisioning reaper + process-exit kd cleanup + recordings metadata GC closed in this branch); parallel agents wait (F1) closed in `f0bebee` |
-| P3: Agent UX Baseline | 3-5d | ~50% / re-trimmed 2026-04-25 | Orchestrator event hook (C2-residual) + retry (C5) + structured errors (C6) + trace-id header (C10-residual). C1/C2/C10 substrate moved to P5. |
-| P4: Security Baseline | 9-11d | ~30% / re-scoped 2026-04-25 | 2 Critical (B1, B2) + 4 High (B3-B6) + capability/secrets enforcement (C3, C4) |
-| **P5: Loom Plugin (Agent-Front Surface)** | **4-7d** | **PROMOTED 2026-04-25** | **v0.1.0 critical path. Plugin manifest (P5.1) + scenario↔task mapping (P5.2) + EventBus streaming (P5.3) + TUI forms (P5.4) + directives (P5.5).** |
-| P6: Packaging + Docs | 5-7d | Not started + audit | MSI, npm, crate, quickstart (Loom-fronted), README scrub (A3-A6), `docs/testing.md` (D5) |
-| P7: CI Pipeline + Test Pyramid | 6-12d | Re-scoped 2026-04-25 | Service CI re-enable (A1), proto contract test (D1), mTLS handshake (D2), gated E2E (D4) |
-| P8: Proto v1 Freeze | 2-3d | NEW 2026-04-25 | One-shot before v0.1.0 publishes (E1, E2) |
-| v0.2.0: Record/Replay | 5-7d | Deferred | The agent-first differentiator |
-| v0.2.0: Ephemeral VMs | 5-8d | Deferred | True repeatability + `template:` wiring (C9) + streamed copy (C8) |
-| v0.2.0: Hermetic Envelope | 1-2d | Deferred | Depends on Ephemeral VMs |
-| v0.2.0: Explicit Orchestrator | 2-3d | Loom-fronted (was 5-7d) | Loom workflows + `loom tui` are the orchestrator; Signalman exposes the contract |
+| P2: Orchestrator Polish | 3-4d | ✅ Closed (f1c1f93 + cleanup reaper + parallel-agents wait F1) | — |
+| P3: Agent UX Baseline | 3-5d | Re-trimmed 2026-04-25 | Orchestrator event hook + retry + structured errors + trace-id |
+| P4: Security Baseline | 9-11d | ✅ Closed in v0.2.0 security pass (F1–F5) | — |
+| P5: Loom Plugin | 4-7d | ✅ Closed (P5.1–P5.5 all merged) | — |
+| P6: Packaging + Docs | 5-7d | ✅ Closed (release workflow + MSI + npm + crate; OSS hygiene in v0.2.0) | — |
+| P7: CI Pipeline + Test Pyramid | 6-12d | ✅ Closed (service CI re-enable + proto contract + mTLS handshake + gated E2E lane) | — |
+| P8: Proto v1 Freeze | 2-3d | ✅ Closed (E1, E2 — proto v1 frozen) | — |
+| P9: Provisioning + Bootstrap | — | ✅ Closed (v0.1.1 stack) | — |
+| **v0.2.0 (shipped 2026-05-12)** | **bundle of local meta-build + networked control plane** | **✅ Tagged** | **See CHANGELOG.md** |
+| v0.3.0-1: Record/Replay | 5-7d | Next milestone | The agent-first differentiator |
+| v0.3.0-2: Ephemeral VMs | 5-8d | Next milestone | True repeatability + `template:` wiring (C9) + streamed copy (C8) |
+| v0.3.0-3: Hermetic Envelope | 1-2d | Next milestone | Depends on Ephemeral VMs |
+| v0.3.0-4: Explicit Orchestrator | 2-3d | Next milestone | Loom workflows + `loom tui` are the orchestrator; Signalman exposes the contract |
+| v0.4.0+ | tracked above under "Speculative" | — | Auto-promotion / webhooks / scheduling, platform expansion, CLI/OSS-hygiene followups |
 
-**v0.1.0 remaining effort**: ~32-50 days (P3 trimmed by ~3-4d, P5 expanded
-by ~2-3d, net roughly even; v0.2.0-4 dropped by ~3-4d)
-**v0.1.0 critical path**: **P5 (Loom plugin) → P3 (orchestrator hook +
-errors + retry) → P8 (proto freeze) → P4 (Critical/High security) → P7
-(test pyramid) → P6 (release).** P5.3 (EventBus streaming) depends on
-P3's orchestrator event-emission hook, but the rest of P5 can start
-immediately. P2 parallelizes anywhere.
-**v0.2.0 effort**: ~13-20 days (was ~16-24d; v0.2.0-4 drops by ~3-4d
-because Loom workflows + `loom tui` largely is the orchestrator)
-**v0.2.0 critical path**: Ephemeral VMs → Hermetic Envelope; Record/Replay
-and the Loom-fronted orchestrator contract parallelize.
+**v0.3.0 effort**: ~13-20 days. Critical path: Ephemeral VMs →
+Hermetic Envelope; Record/Replay and the Loom-fronted orchestrator
+contract parallelize.
 
 ---
 
@@ -1134,7 +1173,7 @@ Removed from main roadmap; revisit only with concrete evidence of need.
 - **`template:` field is decorative for v0.1.0.** Orchestrator never
   calls `resolveTemplate`; scenarios silently rely on a hand-built VM
   matching `vms[].name` literally and a hand-named checkpoint. Documented
-  as known in P6; wired for real in v0.2.0-2 (C9). Acceptable for v0.1.0
+  as known in P6; wired for real in v0.3.0-2 (C9). Acceptable for v0.1.0
   because the existing product scenarios already work this way.
 - **Cross-platform claims** in README — removed until P8 (proto split)
   + E3 (Linux/macOS guest implementation) ship. Today the guest crate
