@@ -24,8 +24,8 @@ Params: `tag?: string`, `pattern?: string` (glob on id).
 Return:
 ```json
 { "scenarios": [
-  { "id": "example-v2-network-egress",
-    "path": ".signalman/scenarios/example-v2-network-egress",
+  { "id": "mygroup-v2-network-egress",
+    "path": ".signalman/scenarios/mygroup-v2-network-egress",
     "name": "Example v2 Network Egress IOCTL Surface",
     "tags": ["driver","kernel","network"],
     "scenario_hash": "sha256:7e1c…",
@@ -44,7 +44,7 @@ Params: `id: string`.
 
 Return:
 ```json
-{ "id":"example-v2-network-egress", "scenario_hash":"sha256:7e1c…",
+{ "id":"mygroup-v2-network-egress", "scenario_hash":"sha256:7e1c…",
   "setup": {/*parsed setup.yaml*/}, "assertions": {/*parsed assertions.yaml*/},
   "workflow_markdown": "## Step 1 — Load driver\n\n```tool\ndriver_load:\n  …\n```\n…",
   "capabilities": {"hosts":[], "networks":[]} }
@@ -62,11 +62,11 @@ Params: `id: string`, `parameters?: object`.
 
 Return:
 ```json
-{ "id":"example-v2-network-egress", "scenario_hash":"sha256:7e1c…",
+{ "id":"mygroup-v2-network-egress", "scenario_hash":"sha256:7e1c…",
   "vms":[{"name":"endpoint-1","template":"windows-11-clean","checkpoint_restore":"test-signing-warm"}],
   "steps":[
     {"kind":"vm.restore","vm":"endpoint-1","checkpoint":"test-signing-warm"},
-    {"kind":"vm.copy_file","vm":"endpoint-1","src":"…drv.sys","dest":"C:\\Example\\drv\\example.sys"},
+    {"kind":"vm.copy_file","vm":"endpoint-1","src":"…drv.sys","dest":"C:\\drivers\\example-driver.sys"},
     {"kind":"tool.driver_load","vm":"endpoint-1","params":{}}],
   "affected_resources":{"vms":["endpoint-1"],"networks":["RevnTestSwitch"],
     "host_paths_read":["E:\\…\\drv\\…"],"host_paths_written":[]},
@@ -85,7 +85,7 @@ Params: `id: string`, `parameters?: object`, `network_class?: "isolated"|"nat"|"
 
 Return (immediate):
 ```json
-{ "run_id":"run_2026-04-24T18-02-11Z_a3f2","scenario_id":"example-v2-network-egress",
+{ "run_id":"run_2026-04-24T18-02-11Z_a3f2","scenario_id":"mygroup-v2-network-egress",
   "scenario_hash":"sha256:7e1c…","started_at":"2026-04-24T18:02:11Z","status":"running" }
 ```
 
@@ -171,7 +171,7 @@ Mirrors `.github/workflows/` — discoverable, in-tree, version-controlled.
 **Migration plan** (no code in this PR):
 1. Loader honors **both** locations during v0.1.0: `.signalman/scenarios/` first, fall back to `scenarios/` with a deprecation warning. `.signalman/config.yaml` similarly preempts `signalman.yaml`.
 2. **Scenario relocation** (separate PR per ROADMAP "Examples" section):
-   - `scenarios/example-*`, `scenarios/silo-validation`, `scenarios/sandbox-enforcement` → `examples/` (Example-owned).
+   - Product-specific scenarios (kernel-driver suites, silo-validation, sandbox-enforcement, etc.) live in the consuming product's repo, not here.
    - Add 1–2 minimal in-tree scenarios under `.signalman/scenarios/` (e.g. `smoke/`) so the default project ships runnable.
 3. `signalman init` subcommand scaffolds `.signalman/` with a default `config.yaml` and `scenarios/.gitkeep`.
 
@@ -228,7 +228,7 @@ Emitted identically by `signalman.run` (terminal) and the CLI (stdout, `--format
 ```json
 { "envelope_version":"0.1.0",
   "run_id":"run_2026-04-24T18-02-11Z_a3f2",
-  "scenario_id":"example-v2-network-egress",
+  "scenario_id":"mygroup-v2-network-egress",
   "scenario_hash":"sha256:7e1c0a…",
   "agent_version":"signalman/0.1.0+abc1234",
   "network_class":"isolated",
@@ -239,7 +239,7 @@ Emitted identically by `signalman.run` (terminal) and the CLI (stdout, `--format
   "assertions":{ "total":14, "passed":14, "failed":0,
     "results":[{"id":"etw-net-rule-matched-fired","passed":true,"severity":"critical","duration_ms":41}] },
   "events":[
-    {"seq":0,"ts":"…014Z","type":"run.started","scenario_id":"example-v2-network-egress"},
+    {"seq":0,"ts":"…014Z","type":"run.started","scenario_id":"mygroup-v2-network-egress"},
     {"seq":1,"ts":"…118Z","type":"vm.state_changed","vm":"endpoint-1","from":"Off","to":"Running"},
     {"seq":2,"ts":"…204Z","type":"step.started","step_index":0,"kind":"vm.restore"},
     {"seq":3,"ts":"…312Z","type":"step.completed","step_index":0,"duration_ms":108},
@@ -358,13 +358,13 @@ Items unresolved from code + ROADMAP. Ordered by blocking-impact.
 
 2. **(BLOCKING) Parameter passing.** Per-invocation parameters: (a) `parameters:` section in setup.yaml declares names + defaults; run-time overrides from `--param k=v` or MCP `parameters` arg — strict, gives `describe` something to surface to the agent; (b) free-form `${param:X}` resolved from run-time bag — loose, no doc surface. **Recommend (a)**.
 
-3. **(BLOCKING) Sub-directory scenario ids.** `.signalman/scenarios/smoke/setup.yaml` → id `smoke`. But `.signalman/scenarios/example/v2/network-egress/setup.yaml` — id `example/v2/network-egress`, `example-v2-network-egress`, or forbid nesting? **Recommend**: id = relative path with `/` retained; forbid only when a directory has both `setup.yaml` and a child with `setup.yaml`.
+3. **(BLOCKING) Sub-directory scenario ids.** `.signalman/scenarios/smoke/setup.yaml` → id `smoke`. But `.signalman/scenarios/mygroup/v2/scenario-a/setup.yaml` — id `mygroup/v2/scenario-a`, `mygroup-v2-scenario-a`, or forbid nesting? **Recommend**: id = relative path with `/` retained; forbid only when a directory has both `setup.yaml` and a child with `setup.yaml`.
 
 4. Event buffer cap on `signalman.status`. Long scenarios emit thousands of events. `since_event_seq` paginates; pick a per-call cap (suggest 1000) and document.
 
 5. `signalman.plan` — purely static, or probe backend cheaply (backend reachable, VM name resolves, checkpoint exists)? Static is faster; probing surfaces real failures earlier. Recommend cheap probe, no state mutation.
 
-6. Allow scenarios outside `.signalman/scenarios/`? CI may want `--scenario ./examples/example-v2-network-egress`. The traversal check at [`runner.ts:222`](../../host/src/scenarios/runner.ts) would need a configurable root.
+6. Allow scenarios outside `.signalman/scenarios/`? CI may want `--scenario ./examples/mygroup-v2-network-egress`. The traversal check at [`runner.ts:222`](../../host/src/scenarios/runner.ts) would need a configurable root.
 
 7. Loom + advanced namespace. P5 says sibling-MCP / decoupled lifecycle. Confirm Loom registers only the six verbs, never the advanced ones (so the Loom-surfaced agent loop is inverted by default).
 

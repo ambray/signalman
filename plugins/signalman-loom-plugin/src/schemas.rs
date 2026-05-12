@@ -23,7 +23,7 @@ pub fn list_input() -> Value {
         "type": "object",
         "properties": {
             "tag": { "type": "string", "description": "Filter scenarios by tag." },
-            "pattern": { "type": "string", "description": "Glob pattern over scenario id (e.g. 'example/**')." }
+            "pattern": { "type": "string", "description": "Glob pattern over scenario id (e.g. 'mygroup/**')." }
         },
         "additionalProperties": false
     })
@@ -57,7 +57,7 @@ pub fn describe_input() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "id": { "type": "string", "description": "Scenario id (e.g. 'example/v2/network-egress')." }
+            "id": { "type": "string", "description": "Scenario id (e.g. 'mygroup/v2/scenario-a')." }
         },
         "required": ["id"],
         "additionalProperties": false
@@ -196,7 +196,7 @@ pub fn form_descriptor_input() -> Value {
         "properties": {
             "scenario": {
                 "type": "string",
-                "description": "Scenario id whose form to describe (e.g. 'example/v2/network-egress')."
+                "description": "Scenario id whose form to describe (e.g. 'mygroup/v2/scenario-a')."
             }
         },
         "required": ["scenario"],

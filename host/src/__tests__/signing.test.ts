@@ -17,7 +17,7 @@ import { buildManifest } from "../control-plane/build/manifest.js";
 
 function makeManifest() {
   return buildManifest({
-    product: "example",
+    product: "example-product",
     tag: "v1.2.3",
     commitSha: "abc1234deadbeef",
     entries: [
@@ -72,7 +72,7 @@ describe("signManifest + verifyManifest round trip", () => {
     const manifest = makeManifest();
     const signed = signManifest(manifest, kp.privateKeyPem);
     const tampered = buildManifest({
-      product: "example",
+      product: "example-product",
       tag: "v1.2.3",
       commitSha: "abc1234deadbeef",
       entries: [

@@ -97,7 +97,7 @@ export interface KdSessionOptions {
    */
   defaultCommandTimeoutMs?: number;
   /**
-   * Modules to break on as they load, e.g. `['example.sys']`. Sent as
+   * Modules to break on as they load, e.g. `['my-driver.sys']`. Sent as
    * `sxe ld <module>` immediately after kd attaches.
    */
   breakOnLoad?: string[];
@@ -190,7 +190,7 @@ export const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
  *
  *     const session = new KdSession({
  *       kdArgs: ['-k', 'com:pipe,port=\\\\.\\pipe\\kd-vm,baud=115200,reconnect'],
- *       breakOnLoad: ['example.sys'],
+ *       breakOnLoad: ['my-driver.sys'],
  *     });
  *     session.on('break', (ev) => console.log('broke:', ev));
  *     await session.start();

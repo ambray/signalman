@@ -3,7 +3,8 @@
  *
  * Provides a builder API for constructing Docker Compose specifications
  * and serializing them to YAML. Includes a factory method for the
- * standard Example backend stack used in E2E testing.
+ * standard backend-stack shape (web service + optional Postgres) used
+ * in E2E testing.
  */
 
 import * as crypto from "node:crypto";
@@ -151,16 +152,19 @@ export class ComposeBuilder {
   }
 
   /**
-   * Create a standard Example backend stack for E2E testing.
+   * Create a standard backend-stack spec for E2E testing — a web
+   * service container with an optional Postgres sidecar. Defaults to
+   * SQLite for lightweight testing.
    *
-   * Generates a ready-to-go compose spec with the Example backend server
-   * and optional PostgreSQL database. Defaults to SQLite for lightweight
-   * testing.
+   * The shape (single web service + optional Postgres) covers the
+   * common case product repos hit when scaffolding their E2E
+   * scenarios; operators with more exotic topologies can compose
+   * services manually via `addService`.
    *
    * @param config - Backend stack configuration.
    * @returns A configured ComposeBuilder instance.
    */
-  static exampleBackendStack(config: {
+  static backendStack(config: {
     backendImage: string;
     backendPort?: number;
     dbType?: "sqlite" | "postgres";
@@ -214,7 +218,7 @@ export class ComposeBuilder {
       const pgImage = config.postgresImage ?? "postgres:16";
       const pgPassword = config.postgresPassword ?? randomSecret();
 
-      backendEnv.DATABASE_URL = `postgres://example:${pgPassword}@postgres:5432/example`;
+      backendEnv.DATABASE_URL = `postgres://app:${pgPassword}@postgres:5432/app`;
 
       backendService.depends_on = ["postgres"];
       backendService.networks = ["backend"];
@@ -222,12 +226,12 @@ export class ComposeBuilder {
       builder.addService("postgres", {
         image: pgImage,
         environment: {
-          POSTGRES_DB: "example",
-          POSTGRES_USER: "example",
+          POSTGRES_DB: "app",
+          POSTGRES_USER: "app",
           POSTGRES_PASSWORD: pgPassword,
         },
         healthcheck: {
-          test: ["CMD-SHELL", "pg_isready -U example"],
+          test: ["CMD-SHELL", "pg_isready -U app"],
           interval: "5s",
           timeout: "3s",
           retries: 5,
@@ -241,7 +245,7 @@ export class ComposeBuilder {
       builder.addNetwork("backend");
     } else {
       // SQLite: mount a volume for the database file
-      backendEnv.DATABASE_URL = "sqlite:///data/example.db";
+      backendEnv.DATABASE_URL = "sqlite:///data/app.db";
       backendService.volumes = ["backend-data:/data"];
       builder.addVolume("backend-data");
     }

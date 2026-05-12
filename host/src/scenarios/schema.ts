@@ -10,8 +10,8 @@
  * - A typo'd field (`kernerl_debug`, `vms.check_point_restore`)
  *   silently becomes `undefined` and the scenario runs with the
  *   wrong settings.
- * - Wrong types (`break_on_load: "example.sys"` instead of
- *   `break_on_load: ["example.sys"]`) produce cryptic runtime errors
+ * - Wrong types (`break_on_load: "my-driver.sys"` instead of
+ *   `break_on_load: ["my-driver.sys"]`) produce cryptic runtime errors
  *   from deep in the orchestrator.
  * - Missing required fields blow up inconsistently — sometimes at
  *   parse, sometimes mid-scenario.

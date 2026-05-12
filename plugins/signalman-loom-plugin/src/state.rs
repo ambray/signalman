@@ -595,10 +595,10 @@ mod tests {
     fn record_started_writes_initial_state() {
         let (store, _dir) = store();
         let state = store
-            .record_started("run-abc", Some("example/v2"), None)
+            .record_started("run-abc", Some("mygroup/v2"), None)
             .unwrap();
         assert_eq!(state.run_id, "run-abc");
-        assert_eq!(state.scenario_id.as_deref(), Some("example/v2"));
+        assert_eq!(state.scenario_id.as_deref(), Some("mygroup/v2"));
         assert_eq!(state.status, RunStatus::Started);
         assert_eq!(state.last_event_seq, 0);
         assert!(state.envelope.is_none());

@@ -409,7 +409,7 @@ describe("DockerClient", () => {
   describe("composePs", () => {
     it("parses compose ps JSON output", async () => {
       const jsonLines = [
-        '{"ID":"abc","Name":"backend","Image":"example:latest","State":"running","Ports":"8443","Health":"healthy"}',
+        '{"ID":"abc","Name":"backend","Image":"example-product:latest","State":"running","Ports":"8443","Health":"healthy"}',
       ].join("\n");
       mockExecSuccess(jsonLines);
 
@@ -593,9 +593,9 @@ describe("ComposeBuilder", () => {
     });
   });
 
-  describe("exampleBackendStack", () => {
+  describe("backendStack", () => {
     it("creates a sqlite backend stack by default", () => {
-      const builder = ComposeBuilder.exampleBackendStack({
+      const builder = ComposeBuilder.backendStack({
         backendImage: "example-backend:latest",
       });
       const spec = builder.getSpec();
@@ -618,7 +618,7 @@ describe("ComposeBuilder", () => {
     });
 
     it("creates a postgres backend stack when requested", () => {
-      const builder = ComposeBuilder.exampleBackendStack({
+      const builder = ComposeBuilder.backendStack({
         backendImage: "example-backend:latest",
         dbType: "postgres",
       });
@@ -641,7 +641,7 @@ describe("ComposeBuilder", () => {
     });
 
     it("uses a pinned postgresPassword when one is provided", () => {
-      const builder = ComposeBuilder.exampleBackendStack({
+      const builder = ComposeBuilder.backendStack({
         backendImage: "example-backend:latest",
         dbType: "postgres",
         postgresPassword: "pinned-for-test",
@@ -656,7 +656,7 @@ describe("ComposeBuilder", () => {
     });
 
     it("uses custom port and jwt secret", () => {
-      const builder = ComposeBuilder.exampleBackendStack({
+      const builder = ComposeBuilder.backendStack({
         backendImage: "example-backend:v2",
         backendPort: 9090,
         jwtSecret: "custom-secret",
@@ -670,7 +670,7 @@ describe("ComposeBuilder", () => {
     });
 
     it("includes extra environment variables", () => {
-      const builder = ComposeBuilder.exampleBackendStack({
+      const builder = ComposeBuilder.backendStack({
         backendImage: "example-backend:latest",
         extraEnv: { CUSTOM_VAR: "hello" },
       });
@@ -679,7 +679,7 @@ describe("ComposeBuilder", () => {
     });
 
     it("uses custom postgres image", () => {
-      const builder = ComposeBuilder.exampleBackendStack({
+      const builder = ComposeBuilder.backendStack({
         backendImage: "example-backend:latest",
         dbType: "postgres",
         postgresImage: "postgres:15-alpine",

@@ -67,7 +67,7 @@ function makeCtx(client: FakeGuestClient): DriverHandlerContext {
 describe("parseScQueryState", () => {
   it("extracts RUNNING state", () => {
     const out = `
-SERVICE_NAME: example
+SERVICE_NAME: example-product
         TYPE               : 1  KERNEL_DRIVER
         STATE              : 4  RUNNING
         WIN32_EXIT_CODE    : 0  (0x0)
@@ -135,12 +135,12 @@ describe("handleDriverLoad", () => {
     }); // query
 
     const result = await handleDriverLoad(makeCtx(client), {
-      service: "example",
+      service: "example-product",
     });
 
     expect(client.calls[0].command).toBe("sc.exe");
-    expect(client.calls[0].args).toEqual(["start", "example"]);
-    expect(client.calls[1].args).toEqual(["query", "example"]);
+    expect(client.calls[0].args).toEqual(["start", "example-product"]);
+    expect(client.calls[1].args).toEqual(["query", "example-product"]);
     expect(result.status).toBe(0);
     expect(result.service_state).toBe("Running");
   });
@@ -149,7 +149,7 @@ describe("handleDriverLoad", () => {
     client.queueSuccess();
     client.queueSuccess({ stdout: "        STATE              : 1  STOPPED" });
     await handleDriverLoad(makeCtx(client), {
-      service: "example",
+      service: "example-product",
       timeout_ms: 30_000,
     });
     expect(client.calls[0].options).toMatchObject({ timeoutMs: 30_000 });
@@ -158,7 +158,7 @@ describe("handleDriverLoad", () => {
   it("defaults timeout to 10 s when not specified", async () => {
     client.queueSuccess();
     client.queueSuccess();
-    await handleDriverLoad(makeCtx(client), { service: "example" });
+    await handleDriverLoad(makeCtx(client), { service: "example-product" });
     expect(client.calls[0].options).toMatchObject({ timeoutMs: 10_000 });
   });
 
@@ -166,7 +166,7 @@ describe("handleDriverLoad", () => {
     client.queueSuccess({ exitCode: 1072, stderr: "something broke" });
     await expect(
       handleDriverLoad(makeCtx(client), {
-        service: "example",
+        service: "example-product",
         expect_status: 0,
       }),
     ).rejects.toThrow(/exited 1072, expected 0/);
@@ -176,7 +176,7 @@ describe("handleDriverLoad", () => {
     client.queueSuccess({ exitCode: 1056, stdout: "already running" });
     client.queueSuccess({ stdout: "        STATE              : 4  RUNNING" });
     const result = await handleDriverLoad(makeCtx(client), {
-      service: "example",
+      service: "example-product",
     });
     expect(result.status).toBe(1056);
     expect(result.service_state).toBe("Running");
@@ -186,7 +186,7 @@ describe("handleDriverLoad", () => {
     client.queueSuccess({ exitCode: 1056 });
     client.queueSuccess({ stdout: "        STATE              : 4  RUNNING" });
     const result = await handleDriverLoad(makeCtx(client), {
-      service: "example",
+      service: "example-product",
       expect_status: 1056,
     });
     expect(result.status).toBe(1056);
@@ -199,7 +199,7 @@ describe("handleDriverLoad", () => {
     });
     await expect(
       handleDriverLoad(makeCtx(client), {
-        service: "example",
+        service: "example-product",
         expect_status: 0,
       }),
     ).rejects.toThrow(/Access is denied/);
@@ -208,7 +208,7 @@ describe("handleDriverLoad", () => {
   it("does not suppress RPC errors from the guest client", async () => {
     client.queue(new Error("grpc: unavailable"));
     await expect(
-      handleDriverLoad(makeCtx(client), { service: "example" }),
+      handleDriverLoad(makeCtx(client), { service: "example-product" }),
     ).rejects.toThrow(/grpc: unavailable/);
   });
 
@@ -216,7 +216,7 @@ describe("handleDriverLoad", () => {
     client.queueSuccess();
     client.queueSuccess({ stdout: "garbled output" });
     const result = await handleDriverLoad(makeCtx(client), {
-      service: "example",
+      service: "example-product",
     });
     expect(result.service_state).toBe("Unknown");
   });
@@ -234,10 +234,10 @@ describe("handleDriverUnload", () => {
     client.queueSuccess();
     client.queueSuccess({ stdout: "        STATE              : 1  STOPPED" });
     const result = await handleDriverUnload(makeCtx(client), {
-      service: "example",
+      service: "example-product",
     });
-    expect(client.calls[0].args).toEqual(["stop", "example"]);
-    expect(client.calls[1].args).toEqual(["query", "example"]);
+    expect(client.calls[0].args).toEqual(["stop", "example-product"]);
+    expect(client.calls[1].args).toEqual(["query", "example-product"]);
     expect(result.service_state).toBe("Stopped");
   });
 
@@ -245,7 +245,7 @@ describe("handleDriverUnload", () => {
     client.queueSuccess({ exitCode: 5, stderr: "denied" });
     await expect(
       handleDriverUnload(makeCtx(client), {
-        service: "example",
+        service: "example-product",
         expect_status: 0,
       }),
     ).rejects.toThrow(/exited 5, expected 0/);
@@ -255,7 +255,7 @@ describe("handleDriverUnload", () => {
     client.queueSuccess({ exitCode: 1062 });
     client.queueSuccess({ stdout: "        STATE              : 1  STOPPED" });
     const result = await handleDriverUnload(makeCtx(client), {
-      service: "example",
+      service: "example-product",
       expect_status: 1062,
     });
     expect(result.status).toBe(1062);
@@ -264,7 +264,7 @@ describe("handleDriverUnload", () => {
   it("default timeout is 10 s", async () => {
     client.queueSuccess();
     client.queueSuccess();
-    await handleDriverUnload(makeCtx(client), { service: "example" });
+    await handleDriverUnload(makeCtx(client), { service: "example-product" });
     expect(client.calls[0].options).toMatchObject({ timeoutMs: 10_000 });
   });
 });
@@ -291,18 +291,18 @@ describe("handleDriverIoctl", () => {
   it("invokes the default harness path", async () => {
     client.queueSuccess({ stdout: harnessJson() });
     await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220000,
     });
     expect(client.calls[0].command).toBe(
-      "C:\\Example\\silo-test-harness.exe",
+      "C:\\Signalman\\test-harness.exe",
     );
   });
 
   it("respects harness_path override", async () => {
     client.queueSuccess({ stdout: harnessJson() });
     await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220000,
       harness_path: "D:\\dev\\harness.exe",
     });
@@ -312,12 +312,12 @@ describe("handleDriverIoctl", () => {
   it("passes --device and --ioctl as canonical args", async () => {
     client.queueSuccess({ stdout: harnessJson() });
     await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220004,
     });
     const args = client.calls[0].args;
     expect(args).toContain("--device");
-    expect(args[args.indexOf("--device") + 1]).toBe("\\\\.\\example");
+    expect(args[args.indexOf("--device") + 1]).toBe("\\\\.\\example-product");
     expect(args).toContain("--ioctl");
     expect(args[args.indexOf("--ioctl") + 1]).toBe("0x220004");
   });
@@ -325,7 +325,7 @@ describe("handleDriverIoctl", () => {
   it("forwards --input-hex when provided", async () => {
     client.queueSuccess({ stdout: harnessJson() });
     await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220004,
       input_hex: "DE AD BE EF",
     });
@@ -337,7 +337,7 @@ describe("handleDriverIoctl", () => {
   it("forwards --input-file when provided", async () => {
     client.queueSuccess({ stdout: harnessJson() });
     await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220004,
       input_file: "C:\\tmp\\payload.bin",
     });
@@ -349,7 +349,7 @@ describe("handleDriverIoctl", () => {
   it("throws when input_hex and input_file are both set", async () => {
     await expect(
       handleDriverIoctl(makeCtx(client), {
-        device: "\\\\.\\example",
+        device: "\\\\.\\example-product",
         control_code: 0x220004,
         input_hex: "00",
         input_file: "C:\\tmp\\x.bin",
@@ -360,7 +360,7 @@ describe("handleDriverIoctl", () => {
   it("forwards --expect-status", async () => {
     client.queueSuccess({ stdout: harnessJson() });
     await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220004,
       expect_status: "STATUS_SUCCESS",
     });
@@ -371,7 +371,7 @@ describe("handleDriverIoctl", () => {
   it("forwards --expect-output-hex", async () => {
     client.queueSuccess({ stdout: harnessJson() });
     await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220004,
       expect_output_hex: "01 00 00 00",
     });
@@ -382,7 +382,7 @@ describe("handleDriverIoctl", () => {
   it("forwards --expect-output-size-min as a string", async () => {
     client.queueSuccess({ stdout: harnessJson() });
     await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220004,
       expect_output_size_min: 16,
     });
@@ -393,7 +393,7 @@ describe("handleDriverIoctl", () => {
   it("always includes --json-output", async () => {
     client.queueSuccess({ stdout: harnessJson() });
     await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220000,
     });
     expect(client.calls[0].args).toContain("--json-output");
@@ -404,7 +404,7 @@ describe("handleDriverIoctl", () => {
       stdout: harnessJson({ status: "STATUS_SUCCESS", output_size: 8 }),
     });
     const r = await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220000,
     });
     expect(r.status).toBe("STATUS_SUCCESS");
@@ -419,7 +419,7 @@ describe("handleDriverIoctl", () => {
       stdout: harnessJson({ match: false, status: "STATUS_BUFFER_TOO_SMALL" }),
     });
     const r = await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220000,
     });
     expect(r.match).toBe(false);
@@ -438,7 +438,7 @@ describe("handleDriverIoctl", () => {
       }),
     });
     const r = await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220000,
     });
     expect(r.match).toBe(true);
@@ -450,7 +450,7 @@ describe("handleDriverIoctl", () => {
       stdout: JSON.stringify({ status: "UNKNOWN", output_hex: "", output_size: 0 }),
     });
     const r = await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220000,
     });
     expect(r.match).toBe(false);
@@ -468,7 +468,7 @@ describe("handleDriverIoctl", () => {
       }),
     });
     const r = await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220000,
     });
     expect(r.status).toBe("0x0");
@@ -481,7 +481,7 @@ describe("handleDriverIoctl", () => {
     });
     await expect(
       handleDriverIoctl(makeCtx(client), {
-        device: "\\\\.\\example",
+        device: "\\\\.\\example-product",
         control_code: 0x220000,
       }),
     ).rejects.toThrow(/non-JSON output/);
@@ -491,7 +491,7 @@ describe("handleDriverIoctl", () => {
     client.queueSuccess({ stdout: JSON.stringify(["array"]) });
     // Arrays pass typeof checks but fail our shape check.
     const result = await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220000,
     });
     // Arrays are typeof "object" but don't have our expected keys —
@@ -504,7 +504,7 @@ describe("handleDriverIoctl", () => {
     client.queueSuccess({ stdout: "null" });
     await expect(
       handleDriverIoctl(makeCtx(client), {
-        device: "\\\\.\\example",
+        device: "\\\\.\\example-product",
         control_code: 0x220000,
       }),
     ).rejects.toThrow(/JSON must be an object/);
@@ -513,7 +513,7 @@ describe("handleDriverIoctl", () => {
   it("defaults timeout to 5 s", async () => {
     client.queueSuccess({ stdout: harnessJson() });
     await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220000,
     });
     expect(client.calls[0].options).toMatchObject({ timeoutMs: 5_000 });
@@ -522,7 +522,7 @@ describe("handleDriverIoctl", () => {
   it("respects explicit timeout_ms", async () => {
     client.queueSuccess({ stdout: harnessJson() });
     await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220000,
       timeout_ms: 30_000,
     });
@@ -533,7 +533,7 @@ describe("handleDriverIoctl", () => {
     // JS numbers are fine up to 2^53; CTL_CODE values fit comfortably.
     client.queueSuccess({ stdout: harnessJson() });
     await handleDriverIoctl(makeCtx(client), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x22abcd,
     });
     expect(client.calls[0].args[client.calls[0].args.indexOf("--ioctl") + 1])
@@ -544,7 +544,7 @@ describe("handleDriverIoctl", () => {
     client.queue(new Error("spawn EACCES"));
     await expect(
       handleDriverIoctl(makeCtx(client), {
-        device: "\\\\.\\example",
+        device: "\\\\.\\example-product",
         control_code: 0x220000,
       }),
     ).rejects.toThrow(/spawn EACCES/);
@@ -645,7 +645,7 @@ describe("ScenarioOrchestrator — driver_* dispatch", () => {
     const { orchestrator, vmMap } = await makeOrchestrator(client);
     const out = await orchestrator.executeToolBlock(
       "driver_load",
-      { vm: "endpoint-1", service: "example" },
+      { vm: "endpoint-1", service: "example-product" },
       vmMap as never,
     );
     const parsed = JSON.parse(out);
@@ -662,7 +662,7 @@ describe("ScenarioOrchestrator — driver_* dispatch", () => {
     const { orchestrator, vmMap } = await makeOrchestrator(client);
     const out = await orchestrator.executeToolBlock(
       "driver_unload",
-      { vm: "endpoint-1", service: "example" },
+      { vm: "endpoint-1", service: "example-product" },
       vmMap as never,
     );
     const parsed = JSON.parse(out);
@@ -684,7 +684,7 @@ describe("ScenarioOrchestrator — driver_* dispatch", () => {
       "driver_ioctl",
       {
         vm: "endpoint-1",
-        device: "\\\\.\\example",
+        device: "\\\\.\\example-product",
         control_code: 0x220000,
       },
       vmMap as never,
@@ -701,7 +701,7 @@ describe("ScenarioOrchestrator — driver_* dispatch", () => {
     await expect(
       orchestrator.executeToolBlock(
         "driver_load",
-        { vm: "unregistered-vm", service: "example" },
+        { vm: "unregistered-vm", service: "example-product" },
         vmMap as never,
       ),
     ).rejects.toThrow(/No guest client/);
@@ -714,7 +714,7 @@ describe("ScenarioOrchestrator — driver_* dispatch", () => {
     await expect(
       orchestrator.executeToolBlock(
         "driver_unload",
-        { vm: "unregistered-vm", service: "example" },
+        { vm: "unregistered-vm", service: "example-product" },
         vmMap as never,
       ),
     ).rejects.toThrow(/No guest client/);
@@ -779,7 +779,7 @@ describe("handler + vi.fn integration", () => {
       guestClient: { runCommand } as unknown as GuestAgentClient,
       vmName: "endpoint-1",
     };
-    const r = await handleDriverLoad(ctx, { service: "example" });
+    const r = await handleDriverLoad(ctx, { service: "example-product" });
     expect(r.service_state).toBe("Running");
     expect(runCommand).toHaveBeenCalledTimes(2);
   });

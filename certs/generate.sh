@@ -25,7 +25,7 @@ echo "[1/3] Generating CA certificate..."
 openssl req -x509 -newkey "rsa:${KEY_BITS}" -nodes \
   -keyout ca.key -out ca.pem \
   -days "$DAYS" \
-  -subj "/CN=Signalman CA/O=Example Contributors"
+  -subj "/CN=Signalman CA/O=Signalman Contributors"
 
 # --- Host (server) ---
 echo "[2/3] Generating host server certificate..."
@@ -37,7 +37,7 @@ prompt = no
 
 [req_dn]
 CN = signalman-host
-O  = Example Contributors
+O  = Signalman Contributors
 
 [v3_req]
 basicConstraints = CA:FALSE
@@ -77,7 +77,7 @@ prompt = no
 
 [req_dn]
 CN = signalman-guest
-O  = Example Contributors
+O  = Signalman Contributors
 
 [v3_req]
 basicConstraints = CA:FALSE

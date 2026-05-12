@@ -55,7 +55,7 @@ async function api(
 describe("products write surface", () => {
   it("POST → 201, GET, PATCH, DELETE → 204, GET → 404", async () => {
     const created = await api("POST", "/v1/products", {
-      name: "example",
+      name: "example-product",
       repo_url: "https://example.invalid/example.git",
     });
     expect(created.status).toBe(201);

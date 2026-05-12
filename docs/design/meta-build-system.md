@@ -24,11 +24,11 @@ surface additions, phasing.
 
 ## TL;DR
 
-Signalman is being expanded from a scenario runner into a full release-lifecycle platform for an externally-developed product (initially Example). It will deterministically **build** the product from a tag, **verify** through a tiered pipeline (test VM → test Docker → tagged release → demo deploy), **deploy** to test or demo surfaces, **roll back** atomically, and **health-check** every component, with the LLM removed from the load-bearing path.
+Signalman is being expanded from a scenario runner into a full release-lifecycle platform for an externally-developed product. It will deterministically **build** the product from a tag, **verify** through a tiered pipeline (test VM → test Docker → tagged release → demo deploy), **deploy** to test or demo surfaces, **roll back** atomically, and **health-check** every component, with the LLM removed from the load-bearing path.
 
 Architecturally, signalman becomes a **control plane + runner** product, modeled on GitHub Actions (control plane ↔ runner). The control plane owns the release catalog, deployment ledger, scenario library, artifact metadata, audit log, and tenant model, behind a REST API. Runners are stateless executors that talk HTTP to the control plane and gRPC/mTLS to the existing privileged host service ([service/](../../service/)). All storage is pluggable (SQLite | Postgres for relational, local FS | S3 for blobs); multi-tenant is baked in from day one (every entity carries `org_id`); single-tenant deployments pin to a default org. Three deployment shapes are supported: **local** (single binary, in-process control plane, on-laptop dev loop), **self-hosted** (separately-deployed control plane, registered runners), **hosted commercial** (multi-tenant SaaS with free tier and dashboard).
 
-The `signalman.build.yaml` contract checked into the *product* repo (Example) declares how to build each component; signalman clones the product repo at a tag, executes the declared steps, captures artifacts into the catalog, and records a signed manifest. From then on, deploys, rollbacks, and health checks operate on catalog entries, not on a working tree.
+The `signalman.build.yaml` contract checked into the *product* repo declares how to build each component; signalman clones the product repo at a tag, executes the declared steps, captures artifacts into the catalog, and records a signed manifest. From then on, deploys, rollbacks, and health checks operate on catalog entries, not on a working tree.
 
 ---
 
@@ -36,7 +36,7 @@ The `signalman.build.yaml` contract checked into the *product* repo (Example) de
 
 ### Goals (v0.2 MVP)
 
-1. **Deterministic whole-stack build** for a given Example revision. Catches the "forgot to build the dashboard" / "shipped stale driver" failure class by making artifact production declarative and verified.
+1. **Deterministic whole-stack build** for a given product revision. Catches the "forgot to build the dashboard" / "shipped stale driver" failure class by making artifact production declarative and verified.
 2. **Tiered verification** with explicit gates: local 4-lens (in product repo) → test VM smoke + torture → test Docker E2E → tag → demo deploy.
 3. **Atomic deploy and rollback** of an entire release onto a target VM (test or demo).
 4. **Per-component health probes** with a uniform interface (agent service, driver minifilter, backend `/health`, dashboard SPA load, NMH pipe, browser extension).
@@ -108,7 +108,7 @@ The meta build system is what *operates* this model — the gates, the catalog, 
 | **Self-hosted** | standalone deploy (Docker, MSI, or `signalman serve`) | one or many, registered | SQLite or Postgres + FS or S3 | bearer token | default org or operator-managed orgs |
 | **Hosted (v0.4+)** | Anthropic-operated | customer-registered or hosted | Postgres + S3 | bearer token (v0.4) → OAuth (v0.4+) | full multi-tenant, free + paid tiers |
 
-**Local mode is the laptop dev loop** — same binary, runs everything in-process, zero config. This is the path the Example operator uses today.
+**Local mode is the laptop dev loop** — same binary, runs everything in-process, zero config. This is the path operators use today.
 
 ### 3.3 Boundaries
 
@@ -129,7 +129,7 @@ All entities carry `org_id` and `created_at` / `updated_at`. IDs are ULID string
 | --- | --- | --- |
 | `org` | Tenant boundary. Default org (`org_default`) auto-created on first boot. | `id`, `name`, `tier` (free/paid) |
 | `api_key` | Bearer token. Scoped to org. | `id`, `org_id`, `prefix`, `hash`, `name`, `expires_at` |
-| `product` | A product signalman can build. (Initially: Example.) | `id`, `org_id`, `name`, `repo_url`, `build_yaml_path` |
+| `product` | A product signalman can build. | `id`, `org_id`, `name`, `repo_url`, `build_yaml_path` |
 | `release` | A built, immutable artifact set for a product at a revision. | `id`, `org_id`, `product_id`, `tag`, `commit_sha`, `manifest_sha256`, `signed_by`, `built_at`, `built_by_runner_id`, `status` (`building`/`ready`/`failed`) |
 | `artifact` | A single blob produced by a release build (MSI, dashboard tarball, backend image ref, NMH binary, extension zip). | `id`, `release_id`, `component`, `kind` (`blob`/`image_ref`), `sha256`, `size_bytes`, `blob_uri`, `image_ref` |
 | `target` | A deployable surface (a VM, a Docker stack). | `id`, `org_id`, `name`, `kind` (`vm_test`/`vm_demo`/`docker_test`/`docker_demo`), `connection` (JSON: backend, vm_name, host) |
@@ -216,10 +216,10 @@ These are the tiers from question 2 in the design conversation. Each maps onto a
 
 ### 6.1 The product-repo build contract
 
-The Example repo declares its build to signalman via a checked-in file (path declared on the `product` row, default `signalman.build.yaml`). Signalman never inspects product source beyond this file.
+The product repo declares its build to signalman via a checked-in file (path declared on the `product` row, default `signalman.build.yaml`). Signalman never inspects product source beyond this file.
 
 ```yaml
-# Example repo: signalman.build.yaml
+# Product repo: signalman.build.yaml
 schema_version: 1
 components:
   - name: agent_service
@@ -229,7 +229,7 @@ components:
       args: [build, --release]
     artifacts:
       - kind: blob
-        path: agent/target/release/example-agent.exe
+        path: agent/target/release/myagent.exe
   - name: driver_msi
     build:
       cwd: installer
@@ -237,7 +237,7 @@ components:
       args: [-File, Build-Msi.ps1]
     artifacts:
       - kind: blob
-        path: installer/dist/example-driver.msi
+        path: installer/dist/driver.msi
   - name: dashboard
     build:
       cwd: dashboard
@@ -251,10 +251,10 @@ components:
     build:
       cwd: backend
       command: docker
-      args: [build, -t, "example-backend:${TAG}", .]
+      args: [build, -t, "myapp-backend:${TAG}", .]
     artifacts:
       - kind: image_ref
-        ref: "example-backend:${TAG}"
+        ref: "myapp-backend:${TAG}"
   # …nmh, extension, etc.
 verification:
   smoke:    [example-v2-network-egress, example-agent-service]
@@ -269,7 +269,7 @@ The `verification` block names scenarios (existing) that signalman will run at e
 ### 6.2 Build execution
 
 ```
-signalman release build --product example --tag v1.4.0
+signalman release build --product myapp --tag v1.4.0
   ↓
 control plane: insert release(status=building, tag=v1.4.0)
   ↓
@@ -344,7 +344,7 @@ Initial probes (one per known component):
 | Probe | What it checks |
 | --- | --- |
 | `agent_service` | Service is running, responsive on its named pipe |
-| `driver_minifilter` | `fltmc filters` lists the Example minifilter |
+| `driver_minifilter` | `fltmc filters` lists the product's minifilter |
 | `backend_health` | HTTP GET `/health` returns 200 |
 | `dashboard_load` | SPA bundle loads, returns expected app shell |
 | `nmh_pipe` | NMH host responds on its pipe |
@@ -433,7 +433,7 @@ Each skill is short — it tells the LLM the verb, the expected envelope shape, 
 
 ### v0.2.0 — MVP (local mode) **[SHIPPED]**
 
-Scope: single binary on a laptop, in-process control plane, SQLite, local FS blobs, default org. Enough to replace the current LLM-driven build/deploy of Example.
+Scope: single binary on a laptop, in-process control plane, SQLite, local FS blobs, default org. Enough to replace the current LLM-driven build/deploy of the product.
 
 - Control plane skeleton (in-process), Drizzle schema, SQLite migrations
 - `BlobDriver` interface + local FS impl
@@ -483,7 +483,7 @@ Scope: SaaS instance, free + paid tiers, dashboard, OAuth.
 
 ## 13. Open questions
 
-1. **Where does the release catalog live in the *Example* operator's mental model?** Specifically: should annotated git tags in the Example repo carry the manifest sha256 (so the tag itself is auditable), or is the catalog purely signalman-side? Defaulting to signalman-side for now; tag annotation is a v0.3 feature.
+1. **Where does the release catalog live in the operator's mental model?** Specifically: should annotated git tags in the product repo carry the manifest sha256 (so the tag itself is auditable), or is the catalog purely signalman-side? Defaulting to signalman-side for now; tag annotation is a v0.3 feature.
 2. **Staging mechanism per target kind.** For Hyper-V VM targets, checkpoints are the obvious lever for atomic deploy. For future Docker/k8s targets the answer is different. v0.2 only needs Hyper-V.
 3. **Manifest signing key management.** ~~Who holds the key? For hosted, we hold it. For self-hosted, the operator. v0.2 ships unsigned; v0.3 adds signing.~~ **Resolved in v0.3.0d**: signing is Ed25519 via Node's built-in `crypto`; keys are PEM (SPKI public / PKCS#8 private) on disk; the *operator* holds the private key in self-hosted mode. The CLI never persists keys beyond `signalman key generate --out`. The fingerprint (`signed_by` on the release row, first 16 hex chars of sha256(DER pubkey)) lets operators verify which key signed a release without storing the key in the catalog.
 4. **Build caching and parallelism.** The schema doesn't prevent parallel builds, but v0.2 runs components serially. Component-level cache keys (sha256 of inputs) are deferred.
@@ -495,7 +495,7 @@ Scope: SaaS instance, free + paid tiers, dashboard, OAuth.
 
 ## 14. Glossary
 
-- **Product** — an external codebase signalman builds, tests, and deploys (initially Example).
+- **Product** — an external codebase signalman builds, tests, and deploys.
 - **Release** — an immutable artifact set built from a product at a specific revision, identified by tag.
 - **Target** — a deployable surface (a VM, a Docker stack).
 - **Deployment** — an instance of a release on a target, with status and health.

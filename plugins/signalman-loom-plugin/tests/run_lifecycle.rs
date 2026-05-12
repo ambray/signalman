@@ -19,7 +19,7 @@ fn full_lifecycle_started_streaming_finished() {
     let store = RunStateStore::new(dir.path()).unwrap();
 
     // 1. Agent invokes loom.signalman.run; subprocess returns just a handle.
-    let run_args = json!({ "id": "example/v2/network-egress" });
+    let run_args = json!({ "id": "mygroup/v2/scenario-a" });
     let run_resp = json!({ "run_id": "lifecycle-1", "started_at": "now" });
     let returned = finalize_run_start(&run_args, run_resp, &store).unwrap();
     assert_eq!(returned["run_id"], "lifecycle-1");

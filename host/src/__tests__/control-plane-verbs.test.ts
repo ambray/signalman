@@ -49,16 +49,16 @@ const silentSink: NodeJS.WritableStream = Object.assign(
 describe("product verbs", () => {
   it("add → list → remove cycle", async () => {
     const p = await runProductAdd(cp, {
-      name: "example",
+      name: "example-product",
       repoUrl: "https://example.invalid/example.git",
     });
-    expect(p.name).toBe("example");
+    expect(p.name).toBe("example-product");
     expect(p.buildYamlPath).toBe("signalman.build.yaml");
 
     const list1 = await runProductList(cp);
-    expect(list1.map((x) => x.name)).toEqual(["example"]);
+    expect(list1.map((x) => x.name)).toEqual(["example-product"]);
 
-    await runProductRemove(cp, { name: "example" });
+    await runProductRemove(cp, { name: "example-product" });
     const list2 = await runProductList(cp);
     expect(list2).toEqual([]);
   });

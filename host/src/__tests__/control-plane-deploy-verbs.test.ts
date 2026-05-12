@@ -109,7 +109,7 @@ describe("target verbs", () => {
 
 describe("deploy verb — release resolution", () => {
   it("resolves release by product + tag", async () => {
-    const product = await runProductAdd(cp, { name: "example", repoUrl: "u" });
+    const product = await runProductAdd(cp, { name: "example-product", repoUrl: "u" });
     const release = await cp.releases.create({
       orgId: product.orgId,
       productId: product.id,
@@ -125,7 +125,7 @@ describe("deploy verb — release resolution", () => {
 
     const result = await runReleaseDeploy(
       cp,
-      { productName: "example", tag: "v1", targetName: "win11-demo" },
+      { productName: "example-product", tag: "v1", targetName: "win11-demo" },
       { backend: makeFakeBackend(), out: silentSink },
     );
     expect(result.deployment.status).toBe("active");
@@ -133,7 +133,7 @@ describe("deploy verb — release resolution", () => {
   });
 
   it("resolves release by explicit releaseId", async () => {
-    const product = await runProductAdd(cp, { name: "example", repoUrl: "u" });
+    const product = await runProductAdd(cp, { name: "example-product", repoUrl: "u" });
     const release = await cp.releases.create({
       orgId: product.orgId,
       productId: product.id,

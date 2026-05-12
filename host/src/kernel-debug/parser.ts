@@ -22,7 +22,7 @@
  *
  * - **Module loads** — lines of the form `ModLoad: <range>   <path>`.
  *   Used in combination with `sxe ld <module>` to break when a specific
- *   module (e.g. `example.sys`) loads, so we can set breakpoints inside
+ *   module (e.g. `my-driver.sys`) loads, so we can set breakpoints inside
  *   `DriverEntry` before any driver code runs.
  *
  * - **Break instruction** — `Break instruction exception`, typically
@@ -81,7 +81,7 @@ const BUGCHECK_ANALYZE_RE =
 /**
  * Module-load line emitted during kernel debugging. Example:
  *
- *     ModLoad: fffff807`b3a00000 fffff807`b3a16000   example.sys
+ *     ModLoad: fffff807`b3a00000 fffff807`b3a16000   my-driver.sys
  *
  * The range is optional — some kd builds omit the addresses when symbols
  * are unavailable.

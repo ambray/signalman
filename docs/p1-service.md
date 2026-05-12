@@ -240,8 +240,8 @@ the named checkpoint still exists afterward.
 
 The initial P1 merge passed unit tests but the first end-to-end run
 against a real Hyper-V VM surfaced three integration issues. All three
-are fixed and validated by an `example-driver-v3-fs-10l-etw` scenario
-run that takes ~9.5 min from `signalman run` to `result: pass`.
+are fixed and validated by a representative driver-trace scenario run
+that takes ~9.5 min from `signalman run` to `result: pass`.
 
 ### 1. ServiceBackend not wired into the run executor
 

@@ -45,7 +45,7 @@ describe("indexListResult", () => {
           id: "example-v2-network-egress",
           path: ".signalman/scenarios/example-v2-network-egress",
           name: "Example v2 Network Egress",
-          tags: ["smoke", "example"],
+          tags: ["smoke", "example-product"],
           scenario_hash: "sha256:abc",
         },
         {
@@ -71,7 +71,7 @@ describe("indexListResult", () => {
         r.path.endsWith("example-v2-network-egress"),
       )!;
       expect(egress.name).toBe("Example v2 Network Egress");
-      expect(egress.tags).toEqual(["smoke", "example"]);
+      expect(egress.tags).toEqual(["smoke", "example-product"]);
       expect(egress.source).toBe("disk");
     } finally {
       await cp.close();

@@ -175,7 +175,7 @@ export async function handleKernelExpectBugcheck(
 export interface KernelBreakOnParams {
   /**
    * Symbol or address to break on. Passed verbatim to kd as
-   * `bp <symbol>`. Example: `"example!HandleIoctl"`,
+   * `bp <symbol>`. Example: `"my-driver!HandleIoctl"`,
    * `"0xfffff807'abcdef00"`.
    */
   symbol: string;

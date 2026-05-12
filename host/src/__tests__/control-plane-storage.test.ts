@@ -105,7 +105,7 @@ describe("products", () => {
   it("creates and lists per-org", async () => {
     const p = await driver.products.create({
       orgId: org.id,
-      name: "example",
+      name: "example-product",
       repoUrl: "https://example.com/example.git",
     });
     expect(p.buildYamlPath).toBe("signalman.build.yaml");

@@ -66,7 +66,7 @@ describe("products", () => {
     const { defaultOrg } = await cp.init();
     p = await cp.products.create({
       orgId: defaultOrg.id,
-      name: "example",
+      name: "example-product",
       repoUrl: "https://example.invalid/example.git",
     });
   });
@@ -75,11 +75,11 @@ describe("products", () => {
     const r = await get("/v1/products");
     expect(r.status).toBe(200);
     const body = r.body as { products: Product[] };
-    expect(body.products.map((x) => x.name)).toEqual(["example"]);
+    expect(body.products.map((x) => x.name)).toEqual(["example-product"]);
   });
 
   it("GET /v1/products/by-name/:name finds it", async () => {
-    const r = await get("/v1/products/by-name/example");
+    const r = await get("/v1/products/by-name/example-product");
     expect(r.status).toBe(200);
     expect((r.body as { product: Product }).product.id).toBe(p.id);
   });
@@ -92,7 +92,7 @@ describe("products", () => {
   it("GET /v1/products/:id returns the row", async () => {
     const r = await get(`/v1/products/${p.id}`);
     expect(r.status).toBe(200);
-    expect((r.body as { product: Product }).product.name).toBe("example");
+    expect((r.body as { product: Product }).product.name).toBe("example-product");
   });
 
   it("GET /v1/products/:id 404s on unknown id", async () => {

@@ -49,29 +49,30 @@ to **Loom**, which is the state holder and the operator console; Loom drives
 - **Hub** continues as a sibling-repo extraction (Loom is effectively the
   hub for the v0.1.0 timeframe).
 
-**2026-04-24 strategic shift**: Signalman is being repositioned from "Example
-test harness" to a first-class agent-first DevOps platform — orchestrator +
-runner for security, compliance, and CI/CD workflows that agents can author
-and that humans/CI can run unattended. The differentiator is **hermetic**
-(cacheable runner outputs), **replayable** (agent ad-hoc work captured as
-reusable scenarios), and **unattended** (orchestrator decoupled from any
-agent in the loop). Example V1–V3 scenarios move to `examples/` and no longer
-gate Signalman releases.
+**2026-04-24 strategic shift**: Signalman is being repositioned from being
+a single product's test harness into a first-class agent-first DevOps
+platform — orchestrator + runner for security, compliance, and CI/CD
+workflows that agents can author and that humans/CI can run unattended.
+The differentiator is **hermetic** (cacheable runner outputs),
+**replayable** (agent ad-hoc work captured as reusable scenarios), and
+**unattended** (orchestrator decoupled from any agent in the loop).
+Product-specific scenarios live in their respective consuming products'
+repos and no longer gate Signalman releases.
 
-**2026-04-24 change**: Phase 6.2 V2 "Gated Silo" scenarios have landed ahead of
-schedule. `example-v2-registry-deny` ships with ETW assertions, and
-`example-v2-network-egress` ships with WFP-live assertions against the ExampleNet
-classify callback. A bonus `example-v2-network-torture` scenario was added for
-WFP stress coverage. Supporting infra also landed: kernel-debug tooling
-(kd.exe session, driver_load/unload/ioctl, BreakLog, kernel_expect_bugcheck),
-`kernel_etw_start/stop` MCP tools, event-driven VM orchestration with warm
-checkpoint, Zod schema validation for setup.yaml/assertions.yaml, and an
-ESLint flat config.
+**2026-04-24 change**: Phase 6.2 V2 "Gated Silo" supporting infra landed
+ahead of schedule — kernel-debug tooling (kd.exe session,
+driver_load/unload/ioctl, BreakLog, kernel_expect_bugcheck),
+`kernel_etw_start/stop` MCP tools, event-driven VM orchestration with
+warm checkpoint, Zod schema validation for setup.yaml/assertions.yaml,
+and an ESLint flat config. The product-specific scenarios that exercise
+this infra (kernel-driver registry/network/silo workflows) live in the
+consuming product's repo.
 
 **2026-04-17 change**: Hyper-V is now the primary hypervisor backend (was VMware).
 VMware Workstation remains a working fallback but is no longer the default in
-`buildBackendList` or `signalman.yaml`. This aligns with the Example correlator's
-production deployment target, which assumes Hyper-V integration services.
+`buildBackendList` or `signalman.yaml`. This aligns with production deployment
+targets that need agent-side SYSTEM privileges, which Hyper-V integration
+services expose cleanly.
 
 ---
 
@@ -132,7 +133,7 @@ in from day one (v0.1.0).
 - **VM Cache** (`vm-cache.ts`) — Shared singleton cache eliminating 4 duplicate instances
 - **Docker Integration** (`docker/`):
   - `client.ts` — Full Docker client: container lifecycle, compose, health, network, images. Health check command sanitization, protected env keys.
-  - `compose-builder.ts` — Fluent API with `exampleBackendStack()` factory for correlator E2E
+  - `compose-builder.ts` — Fluent API with `backendStack()` factory for product E2E stacks
 - **Scenario Engine** (`scenarios/`):
   - `assertions.ts` — 10 assertion types, JSON path resolution, 7 comparison operators, ReDoS-guarded regex
   - `orchestrator.ts` — Full lifecycle: resolve VMs → wait agents → setup → assertions → teardown
@@ -555,9 +556,10 @@ v0.1.0`. The workflow handles the rest.
 - **A4 — Replace cursor-restrict as the lead README scenario.** Today's
   lead is broken: missing `restrict-ai.rego`, missing `test-config.yaml`,
   uses `vm_screenshot` 5× (the RPC is a stub), and `screenshot_check`
-  assertions are no-ops. Replace with `silo-validation` or a pared
-  `example-v2-network-egress`. Or ship the missing files plus real
-  screenshot capture, but only if UI/browser placeholders graduate.
+  assertions are no-ops. Replace with a smaller in-tree smoke (e.g.
+  `service-backend-smoke` or one of the `live-*` scenarios). Or ship
+  the missing files plus real screenshot capture, but only if
+  UI/browser placeholders graduate.
 - **A5 — Hide or complete `.signalman/scenarios/codex-sandbox/`** (ships
   `setup.yaml` only; no workflow.md, no assertions.yaml; `signalman.list`
   surfaces it as a discoverable broken entry).
@@ -1053,83 +1055,28 @@ is the contract that lets Loom workflows compose Signalman scenarios:
 
 ---
 
-## Examples (no longer gate releases)
+## Product-specific scenarios (out of scope for this repo)
 
-These live in `examples/` and consume Signalman as a public dependency.
-Their delivery cadence is decoupled from Signalman semvers — Example team
-owns the schedule.
+Scenarios that exercise a specific product's behavior (kernel-driver
+test suites, registry/network/silo policy validation, agent-service
+smoke tests, etc.) live in the consuming product's own repo's
+`.signalman/scenarios/` directory, not here. They consume Signalman as
+a public dependency; their delivery cadence is decoupled from Signalman
+semvers and they don't gate Signalman releases.
 
-### Network prerequisite (captured 2026-04-17)
-The initial silo-promotion and agent-service validation scenarios run on
-`RevnTestSwitch` (isolated, static `172.30.0.10`) because the agent under
-test does not need external connectivity. **Tool-detection and sandbox /
-restrict scenarios require internet access** — winget for tool installation,
-real AI endpoint reachability for DNS + TLS fingerprint capture, real
-policy enforcement against live endpoints.
+Signalman ships only a handful of generic in-tree scenarios under
+`.signalman/scenarios/` (`live-*`, `service-backend-smoke`) that
+exercise the platform itself, not any one product.
 
-Options when reaching those scenarios:
-- **(b)** Move the VM to `Default Switch` (NAT, DHCP) and update affected
-  scenarios' `switch:` + `static_ip:` to DHCP.
-- **(c)** Give the VM a second NIC: `RevnTestSwitch` for agent↔host
-  telemetry + `Default Switch` for outbound internet.
+### Network topology note (captured 2026-04-17)
 
-Option (c) is preferred because it preserves the existing host↔guest
-static-IP contract for Signalman gRPC while allowing the guest outbound
-traffic for tool installs.
-
-### Example Correlator V1–V3 Isolation Scenarios
-
-Reference: `correlator/docs/silo-research/kernel-deep-dive/09-isolation-architecture-design.md`.
-Each V-level maps to a set of Signalman scenarios that validate the
-correlator agent's behaviour on a real Hyper-V endpoint.
-
-#### V1 "Observable Silo" (not started)
-- `examples/example-v1-silo-isolation/` — agent launches a monitored AI
-  tool, promotes it to a silo, validates `\BaseNamedObjects` isolation +
-  ETW visibility.
-- `examples/example-v1-appcontainer-compose/` — confirms silo composes with
-  existing AppContainer token restriction without breaking renderer
-  sandboxes.
-- **Assertions**: silo ID queryable; mutex isolation verified; telemetry
-  batch delivered to backend; enforcement record shows `Silo` mode.
-
-#### V2 "Gated Silo" — ✅ DONE (2026-04-22 → 2026-04-24)
-- `examples/example-v2-registry-deny/` — landed with real ETW assertions
-  (commits `1c57ff5`, `7073372`); driver-last-path-captured assertion
-  retired in `72debe6` after Sprint 60.11 DIAG removal.
-- `examples/example-v2-network-egress/` — landed pre-WFP (`8df8736`), then
-  upgraded to WFP-live classify-callback assertions (`9308530`), renamed
-  to reflect post-dispatcher-fix state (`277b046`), audit-cleaned
-  (`2600333`).
-- `examples/example-v2-network-torture/` — bonus scenario added in
-  `9308530` for WFP stress coverage.
-- **Outstanding**: JA4 fingerprint capture (carved out of network-egress;
-  awaits correlator JA4 hashing path).
-- **Note**: scenarios currently live under `scenarios/` and will be moved
-  to `examples/` as part of P0 surface inversion.
-
-#### V3 "Sandboxed Silo" (not started)
-- `examples/example-v3-fs-isolation/` — ExampleFs minifilter denies read of
-  secret paths (`%LOCALAPPDATA%\Microsoft\Vault`, browser credential caches).
-- `examples/example-v3-handle-filter/` — ExampleObj denies cross-silo handle
-  opens.
-- `examples/example-v3-complex-app/` — contained Claude Cowork scenario:
-  Electron main + child processes + WebView2 + terminal + MCP server
-  spawns all stay within the silo; policy violations fire expected denials.
-- **Assertions**: secret path reads return ENOENT; child processes inherit
-  silo; breakaway attempts denied; observability coverage ≥ 95%.
-
-### Correlator Silo PoC (not started)
-- `examples/example-silo-poc/` — VM `endpoint-1` (Win11 24H2, Containers
-  feature **disabled**); copy `silo_poc.exe`, launch via `psexec -s` as
-  SYSTEM. All 5 silo-build steps return `STATUS_SUCCESS`; helper process's
-  `Global\ExampleSiloPocMutex_<pid>` invisible from outside the silo;
-  exit code = 0.
-- `examples/example-silo-poc-containers-on/` — same template with
-  Containers feature **enabled** (control). Confirms behaviour is
-  identical → feature-gate hypothesis falsified.
-- References: correlator `docs/silo-research/kernel-deep-dive/07-summary-report.md`,
-  `docs/silo-research/kernel-deep-dive/poc-usermode/README.md`.
+Setting product-specific scenarios aside: scenarios that need internet
+access (winget for tool installation, live endpoint reachability for
+DNS + TLS fingerprint capture, real-policy enforcement against live
+endpoints) should give the VM either a NAT-style switch (e.g.
+`Default Switch`) or a second NIC alongside an isolated control switch.
+A second-NIC layout is preferred for scenarios that also need a stable
+host↔guest gRPC contract on the isolated side.
 
 ---
 
@@ -1195,16 +1142,16 @@ Removed from main roadmap; revisit only with concrete evidence of need.
   calls `resolveTemplate`; scenarios silently rely on a hand-built VM
   matching `vms[].name` literally and a hand-named checkpoint. Documented
   as known in P6; wired for real in v0.2.0-2 (C9). Acceptable for v0.1.0
-  because Example V2 scenarios already work this way.
+  because the existing product scenarios already work this way.
 - **Cross-platform claims** in README — removed until P8 (proto split)
   + E3 (Linux/macOS guest implementation) ship. Today the guest crate
   compiles on Linux but Win32-only RPCs return `unimplemented`.
 
 ### 2026-04-24 (original)
 
-- **Old Phase 1.3 (E2E test migration from correlator)**: now an
-  `examples/` task tracked by the Example team, not by Signalman.
-- **Old Phase 1.5 (Silo PoC)**: same — moved to `examples/`.
+- **Old Phase 1.3 (E2E test migration from a consuming product)**: now
+  tracked by the consuming product's team, not by Signalman.
+- **Old Phase 1.5 (Silo PoC)**: same — moved out of Signalman's roadmap.
 - **Old Phase 2.1–2.3 (Docker E2E)**: absorbed into P0/P3 — Docker becomes
   a scenario primitive alongside VMs. No standalone phase.
 - **Old Phase 4.1 (proto split, RunCommandStream)**: deferred to v0.3.0+

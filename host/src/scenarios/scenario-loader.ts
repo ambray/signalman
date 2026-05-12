@@ -4,7 +4,7 @@
  * Per design doc §2 + resolved Question 3 (sub-directory IDs):
  *   - Every directory containing a `setup.yaml` is a scenario.
  *   - Its id is the relative path from the scenarios root, with
- *     forward-slash separators retained (so `example/v2/network-egress`
+ *     forward-slash separators retained (so `mygroup/v2/scenario-name`
  *     stays as a slash-delimited id, never collapsed to dashes).
  *   - Nesting is rejected: a directory cannot have both a `setup.yaml`
  *     and a child directory that also has a `setup.yaml`. The recursive
