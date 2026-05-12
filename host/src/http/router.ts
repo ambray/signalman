@@ -16,10 +16,18 @@
  */
 
 import * as http from "node:http";
+import { PassThrough, type Readable } from "node:stream";
 import { URL } from "node:url";
 import { mapError } from "./errors.js";
 
 const MAX_BODY_BYTES = 1024 * 1024;
+/**
+ * Default cap on streamBody routes (currently `POST /v1/blobs`). 1 GiB
+ * lets typical MSI / tarball artifacts through while putting a hard
+ * ceiling on the DoS surface. Override per-route via
+ * `RouteOptions.maxBodyBytes`.
+ */
+const DEFAULT_STREAM_BODY_MAX = 1024 * 1024 * 1024;
 
 export type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
 
@@ -44,8 +52,13 @@ export interface RequestContext {
    * `{ streamBody: true }` (PR 8b — blob upload endpoint). When set,
    * `body` is undefined and the handler is responsible for consuming
    * the stream.
+   *
+   * In v0.3.0e+ this is a byte-counting `PassThrough` wrapping the
+   * raw `IncomingMessage`; consuming all of it never reads more than
+   * `RouteOptions.maxBodyBytes` (default 1 GiB). On cap-exceed the
+   * stream emits an error and the request socket is destroyed.
    */
-  bodyStream?: http.IncomingMessage;
+  bodyStream?: Readable;
   /**
    * Raw response object. Only populated for routes registered with
    * `{ rawResponse: true }`. Handler MUST write the response itself
@@ -68,6 +81,16 @@ export interface RouteOptions {
    * accept artifact uploads without buffering them.
    */
   streamBody?: boolean;
+  /**
+   * Hard ceiling on the bytes a streamBody handler is allowed to
+   * consume from the request. Defaults to 1 GiB for streamBody routes
+   * and is ignored for JSON-body routes (those use the global 1 MiB
+   * cap in `readBody`). When the cap is hit the request socket is
+   * destroyed and a 413 is returned. Operators bumping this above the
+   * default should ensure the underlying blob driver can absorb the
+   * load (S3 driver in v0.3.0 buffers-then-PUTs).
+   */
+  maxBodyBytes?: number;
   /**
    * Don't wrap the handler's return value in JSON. Instead, the
    * handler receives the raw `ServerResponse` (`ctx.res`) and is
@@ -183,13 +206,25 @@ export class Router {
         }
       }
       const body = r.options.streamBody ? undefined : await readBody(req);
+      // Per-route byte cap on raw uploads. Bypassing the JSON cap is
+      // intentional (artifacts are large); allowing unbounded uploads
+      // is not. See `RouteOptions.maxBodyBytes`. The wrapper is a
+      // PassThrough so the handler can consume it via async iteration
+      // / pipeline without fighting with our byte counter.
+      const bodyStream = r.options.streamBody
+        ? capStreamBody(
+            req,
+            res,
+            r.options.maxBodyBytes ?? DEFAULT_STREAM_BODY_MAX,
+          )
+        : undefined;
       const preAuth: PreAuthContext = {
         method,
         path: url.pathname,
         params,
         query,
         body,
-        bodyStream: r.options.streamBody ? req : undefined,
+        bodyStream,
         res: r.options.rawResponse ? res : undefined,
         headers: req.headers,
         remoteAddress: req.socket?.remoteAddress,
@@ -273,6 +308,65 @@ function readBody(req: http.IncomingMessage): Promise<unknown> {
     });
     req.on("error", reject);
   });
+}
+
+/**
+ * Wrap a streamBody request in a byte-counting PassThrough. Returns
+ * the PassThrough as the handler's `bodyStream`. If the cap is hit
+ * (either Content-Length up front, or running total during piping)
+ * we write a 413 to `res` (when headers haven't gone out), destroy
+ * the request socket, and surface an error on the PassThrough so the
+ * blob driver's consumer rejects cleanly.
+ */
+function capStreamBody(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  cap: number,
+): Readable {
+  const out = new PassThrough();
+  // Honor Content-Length when present — reject before reading a byte.
+  const declared = Number(req.headers["content-length"]);
+  if (Number.isFinite(declared) && declared > cap) {
+    if (!res.headersSent) {
+      writeJson(res, 413, {
+        error: {
+          code: "request_too_large",
+          message: `request body too large (max ${cap} bytes, declared ${declared})`,
+        },
+      });
+    }
+    out.destroy(new Error("request body too large"));
+    req.destroy();
+    return out;
+  }
+  let received = 0;
+  let tripped = false;
+  req.on("data", (chunk: Buffer) => {
+    if (tripped) return;
+    received += chunk.length;
+    if (received > cap) {
+      tripped = true;
+      if (!res.headersSent) {
+        writeJson(res, 413, {
+          error: {
+            code: "request_too_large",
+            message: `request body exceeded max ${cap} bytes`,
+          },
+        });
+      }
+      out.destroy(new Error("request body too large"));
+      req.destroy();
+      return;
+    }
+    out.write(chunk);
+  });
+  req.on("end", () => {
+    if (!tripped) out.end();
+  });
+  req.on("error", (err) => {
+    if (!tripped) out.destroy(err);
+  });
+  return out;
 }
 
 function writeJson(res: http.ServerResponse, status: number, body: unknown): void {

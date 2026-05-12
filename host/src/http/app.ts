@@ -71,6 +71,10 @@ import type {
 import { generateApiKey, makeAuthenticator, type AuthOptions } from "./auth.js";
 import { badRequest, notFound } from "./errors.js";
 import { Router, type RequestContext } from "./router.js";
+import {
+  validateGitRef,
+  validateRepoUrl,
+} from "../control-plane/build/git.js";
 
 const VERSION = "0.3.0-dev";
 
@@ -103,6 +107,10 @@ export function buildApp(opts: AppOptions): Router {
     const body = asObject(ctx.body, "request body");
     const name = readString(body, "name");
     const repoUrl = readString(body, "repo_url");
+    // Reject option-injection URLs and other malformed values up front;
+    // `validateRepoUrl` throws a `RepoUrlValidationError` which maps to
+    // HTTP 400. See `host/src/control-plane/build/git.ts` for the rules.
+    validateRepoUrl(repoUrl);
     const buildYamlPath = readOptionalString(body, "build_yaml_path");
     const product = await cp.products.create({
       orgId: ctx.auth.orgId,
@@ -138,6 +146,9 @@ export function buildApp(opts: AppOptions): Router {
       repoUrl: readOptionalString(body, "repo_url"),
       buildYamlPath: readOptionalString(body, "build_yaml_path"),
     };
+    if (patch.repoUrl !== undefined) {
+      validateRepoUrl(patch.repoUrl);
+    }
     const product = await cp.products.update(existing.id, patch);
     return { product };
   });
@@ -183,6 +194,10 @@ export function buildApp(opts: AppOptions): Router {
     const body = asObject(ctx.body, "request body");
     const productId = readString(body, "product_id");
     const tag = readString(body, "tag");
+    // Same option-injection guard we apply to the build job's tag.
+    // Rejecting at the release-row layer means downstream `release.build`
+    // jobs can trust the tag they pull off the release row.
+    validateGitRef(tag);
     const commitSha = readString(body, "commit_sha");
     const product = await cp.products.get(productId);
     if (!product || product.orgId !== ctx.auth.orgId) {
@@ -465,6 +480,15 @@ export function buildApp(opts: AppOptions): Router {
     const kind = readString(body, "kind");
     const inputObj =
       body.input !== undefined ? asObject(body.input, "input") : undefined;
+    // Per-kind input validation. `release.build` flows `input.tag`
+    // through to `git clone --branch <tag>` on the runner side; reject
+    // option-injection values up front so the runner doesn't have to.
+    if (kind === "release.build" && inputObj) {
+      const tag = inputObj.tag;
+      if (typeof tag === "string") {
+        validateGitRef(tag);
+      }
+    }
     const job = await cp.jobs.create({
       orgId: ctx.auth.orgId,
       kind,
@@ -605,7 +629,11 @@ function registerBlobEndpoints(router: Router, cp: ControlPlane): void {
       });
       return { status: 201, body: meta };
     },
-    { streamBody: true },
+    // 1 GiB cap (default for streamBody routes). Operators uploading
+    // larger artifacts should raise this knowing the v0.3.0 S3 driver
+    // buffers-then-PUTs (RAM-bound) — a streaming PUT path is on the
+    // v0.3.x roadmap.
+    { streamBody: true, maxBodyBytes: 1024 * 1024 * 1024 },
   );
 
   router.get(

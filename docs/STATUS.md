@@ -1,9 +1,41 @@
 # Signalman — Status & Resume Context
 
-> Last updated: 2026-05-10. Living document — update on every commit
+> Last updated: 2026-05-11. Living document — update on every commit
 > that changes scope, ships a feature, closes an audit finding, or
 > introduces a new TODO bucket. See [Document maintenance](#document-maintenance)
 > for the trigger rules.
+
+## Branch in flight: `intelligent-carson-a92b80` (meta build system) — 2026-05-11
+
+This branch carries v0.2.0 + v0.3.0 of the **meta build system** (a tag-driven
+release pipeline that sits alongside the v0.1.x scenario runner). Not yet
+merged to `main`. Implemented in 7 ordered commits (see
+`docs/design/meta-build-system.md` for the design):
+
+- `3d1d0c2` v0.2.0 — local in-process control plane (storage, schema,
+  build executor, deploy/rollback, health probes)
+- `d209a0a` v0.3.0a — HTTP control plane + Bearer-token auth (`signalman
+  serve`, `host/src/http/`)
+- `360b28f` v0.3.0a — job substrate + runner CLI (`host/src/runner/`,
+  jobs table, atomic claim)
+- `06af83a` v0.3.0b — remote `release.build` executor (worker clones repo,
+  runs build via HttpControlPlane, uploads artifacts)
+- `e00503a` v0.3.0c — Postgres `StorageDriver` (`pg`, same migrations;
+  see `docs/postgres-driver.md`)
+- `1549a9e` v0.3.0d — Ed25519 manifest signing + `release verify`
+- `6979976` v0.3.0e — S3 `BlobDriver` + `resolveBySha`
+
+On top of those: a public-release-readiness security pass closed F1–F5
+(git-clone argument-injection guard at intake, `--disable-loopback-bypass`
+serve flag, `streamBody` byte cap, test-stack hardcoded-credential
+defaults replaced with per-stack CSPRNG). README updated to cover both
+workstreams and to correct the previous MIT → Apache-2.0 license
+mismatch.
+
+Versions on this branch still read `0.1.0` everywhere — the meta-build
+work isn't release-tagged. Decide the version-bump strategy
+(v0.2.0/v0.3.0 in lockstep, vs. cumulative bump to v0.2.0 when merging
+to main) at merge time.
 
 ## TL;DR (one-paragraph)
 

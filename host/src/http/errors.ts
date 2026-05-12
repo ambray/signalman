@@ -76,6 +76,8 @@ export function mapError(err: unknown): { status: number; body: HttpErrorBody } 
   if (e.name) {
     switch (e.name) {
       case "BuildYamlValidationError":
+      case "RepoUrlValidationError":
+      case "GitRefValidationError":
         return {
           status: 400,
           body: { error: { code: "validation_error", message: e.message } },

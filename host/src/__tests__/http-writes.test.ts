@@ -86,9 +86,43 @@ describe("products write surface", () => {
   });
 
   it("POST with duplicate name → 409", async () => {
-    await api("POST", "/v1/products", { name: "x", repo_url: "u" });
-    const dup = await api("POST", "/v1/products", { name: "x", repo_url: "u" });
+    await api("POST", "/v1/products", { name: "x", repo_url: "https://example.invalid/r.git" });
+    const dup = await api("POST", "/v1/products", { name: "x", repo_url: "https://example.invalid/r.git" });
     expect(dup.status).toBe(409);
+  });
+
+  // F4 regression: option-injection in `repo_url` must be rejected
+  // before it can reach a `git clone` argument list. See
+  // `host/src/control-plane/build/git.ts` for the validation rules.
+  it("POST with leading-`-` repo_url → 400 (option-injection guard)", async () => {
+    const r = await api("POST", "/v1/products", {
+      name: "evil",
+      repo_url: "--upload-pack=evil",
+    });
+    expect(r.status).toBe(400);
+    expect((r.body as { error: { code: string } }).error.code).toBe(
+      "validation_error",
+    );
+  });
+
+  it("POST with unknown-scheme repo_url → 400", async () => {
+    const r = await api("POST", "/v1/products", {
+      name: "weird",
+      repo_url: "javascript:alert(1)",
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it("PATCH cannot bypass the validator on repo_url", async () => {
+    const created = await api("POST", "/v1/products", {
+      name: "patch-target",
+      repo_url: "https://example.invalid/r.git",
+    });
+    const id = (created.body as { product: { id: string } }).product.id;
+    const patched = await api("PATCH", `/v1/products/${id}`, {
+      repo_url: "--upload-pack=evil",
+    });
+    expect(patched.status).toBe(400);
   });
 });
 
@@ -97,7 +131,7 @@ describe("releases + artifacts write surface", () => {
   beforeEach(async () => {
     const r = await api("POST", "/v1/products", {
       name: "p",
-      repo_url: "u",
+      repo_url: "https://example.invalid/r.git",
     });
     productId = (r.body as { product: { id: string } }).product.id;
   });
@@ -159,6 +193,17 @@ describe("releases + artifacts write surface", () => {
     expect(arts.map((a) => a.component).sort()).toEqual(["agent", "backend"]);
   });
 
+  // F4 regression: option-injection in the release `tag` must be
+  // rejected before it can reach `git clone --branch <tag>`.
+  it("POST /v1/releases with leading-`-` tag → 400", async () => {
+    const r = await api("POST", "/v1/releases", {
+      product_id: productId,
+      tag: "--upload-pack=evil",
+      commit_sha: "c",
+    });
+    expect(r.status).toBe(400);
+  });
+
   it("POST artifact with invalid kind → 400", async () => {
     const created = await api("POST", "/v1/releases", {
       product_id: productId,
@@ -190,7 +235,7 @@ describe("targets + deployments write surface", () => {
   });
 
   it("POST /v1/deployments + PATCH status + POST health", async () => {
-    const product = await api("POST", "/v1/products", { name: "p", repo_url: "u" });
+    const product = await api("POST", "/v1/products", { name: "p", repo_url: "https://example.invalid/r.git" });
     const productId = (product.body as { product: { id: string } }).product.id;
     const release = await api("POST", "/v1/releases", {
       product_id: productId,
@@ -242,7 +287,7 @@ describe("targets + deployments write surface", () => {
         await cp.products.create({
           orgId: otherOrg.id,
           name: "p",
-          repoUrl: "u",
+          repoUrl: "https://example.invalid/r.git",
         })
       ).id,
       tag: "v1",

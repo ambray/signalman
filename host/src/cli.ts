@@ -1911,6 +1911,11 @@ async function cmdServe(args: ParsedArgs): Promise<number> {
     usageError(`serve: invalid --port '${portRaw}'`);
   }
   const host = args.options.get("host") ?? "127.0.0.1";
+  // F3: operators binding to a non-loopback interface (shared runners,
+  // hosted deployments) can require Bearer tokens from every client
+  // — including co-located processes — by passing this flag. Default
+  // is off so single-host CLI workflows keep working.
+  const disableLoopbackBypass = args.flags.has("disable-loopback-bypass");
 
   const config = loadConfig();
   const controlPlane = ControlPlane.fromConfig(config.controlPlane);
@@ -1924,7 +1929,12 @@ async function cmdServe(args: ParsedArgs): Promise<number> {
 
   let server;
   try {
-    server = await startServer({ controlPlane, port, host });
+    server = await startServer({
+      controlPlane,
+      port,
+      host,
+      disableLoopbackBypass,
+    });
   } catch (err) {
     console.error(`signalman serve: failed to bind ${host}:${port}: ${(err as Error).message}`);
     await controlPlane.close();
@@ -1932,12 +1942,15 @@ async function cmdServe(args: ParsedArgs): Promise<number> {
   }
 
   process.stdout.write(`signalman serve: listening on ${server.url}\n`);
-  if (host !== "127.0.0.1") {
-    // PR 7 lands bearer-token auth. Until then, the operator owns the
-    // network exposure decision; warn loudly on non-loopback binds.
+  if (host !== "127.0.0.1" && !disableLoopbackBypass) {
+    // Reachable from the network *and* loopback bypass is active —
+    // co-located processes inherit the default org's auth. Defense-in-
+    // depth: bind to loopback only, or pass --disable-loopback-bypass
+    // so every client must present a Bearer token.
     process.stderr.write(
-      `signalman serve: WARNING: bound to ${host} without auth. ` +
-        `Bind to 127.0.0.1 until PR 7 lands bearer-token middleware.\n`,
+      `signalman serve: WARNING: bound to ${host} with loopback-bypass enabled. ` +
+        `Local processes on the same host can authenticate as the default org without a Bearer token. ` +
+        `Pass --disable-loopback-bypass to require Bearer tokens from every client.\n`,
     );
   }
 
@@ -2311,7 +2324,8 @@ function printHelp(): void {
       "  release <subcommand>   (build, list, show, deploy, rollback)",
       "  target <subcommand>    (add, list, remove)",
       "  health <subcommand>    (check, history)",
-      "  serve [--port P] [--host H]   (start the control-plane HTTP server)",
+      "  serve [--port P] [--host H] [--disable-loopback-bypass]",
+      "                              (start the control-plane HTTP server)",
       "  api-key <subcommand>   (create, list, revoke)",
       "  runner <subcommand>    (register, start)",
       "  key <subcommand>       (generate, fingerprint — Ed25519 release signing)",
