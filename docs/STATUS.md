@@ -1,16 +1,21 @@
 # Signalman — Status & Resume Context
 
-> Last updated: 2026-05-11. Living document — update on every commit
+> Last updated: 2026-05-12. Living document — update on every commit
 > that changes scope, ships a feature, closes an audit finding, or
 > introduces a new TODO bucket. See [Document maintenance](#document-maintenance)
 > for the trigger rules.
 
-## Branch in flight: `intelligent-carson-a92b80` (meta build system) — 2026-05-11
+## Branches in flight: public-release preparation — 2026-05-12
 
-This branch carries v0.2.0 + v0.3.0 of the **meta build system** (a tag-driven
-release pipeline that sits alongside the v0.1.x scenario runner). Not yet
-merged to `main`. Implemented in 7 ordered commits (see
-`docs/design/meta-build-system.md` for the design):
+Two stacked branches carry the public-release prep work; neither is
+merged to `main` yet. Together they accomplish the v0.2.0 + v0.3.0
+meta build system, the security audit, the license migration to
+Apache-2.0, the product-specific-content scrub, and the standard
+OSS community-health files.
+
+### `claude/intelligent-carson-a92b80` (11 commits ahead of main)
+
+The meta-build implementation + security audit + license + scrub:
 
 - `3d1d0c2` v0.2.0 — local in-process control plane (storage, schema,
   build executor, deploy/rollback, health probes)
@@ -24,18 +29,52 @@ merged to `main`. Implemented in 7 ordered commits (see
   see `docs/postgres-driver.md`)
 - `1549a9e` v0.3.0d — Ed25519 manifest signing + `release verify`
 - `6979976` v0.3.0e — S3 `BlobDriver` + `resolveBySha`
+- `618f353` security + docs: pre-public-release readiness pass —
+  closes F1–F5 (git-clone argument-injection guard at intake,
+  `--disable-loopback-bypass` serve flag, `streamBody` byte cap,
+  test-stack hardcoded-credential defaults replaced with per-stack
+  CSPRNG; `rustls-webpki` bump for the cargo-audit CVE).
+- `93c4bee` license: align manifests to Apache-2.0 (workspace +
+  guest + service + loom plugin + host npm).
+- `4a58e4c` NOTICE file + LICENSE appendix copyright correction.
+- `38298a7` scrub: remove product-specific references for public
+  release — 14 scenario directories moved out of repo, source/tests/
+  docs/scenarios genericized, no Example tokens remain in the working
+  tree.
 
-On top of those: a public-release-readiness security pass closed F1–F5
-(git-clone argument-injection guard at intake, `--disable-loopback-bypass`
-serve flag, `streamBody` byte cap, test-stack hardcoded-credential
-defaults replaced with per-stack CSPRNG). README updated to cover both
-workstreams and to correct the previous MIT → Apache-2.0 license
-mismatch.
+### `worktree-oss-hygiene-prep` (12 commits ahead of main, builds on the above)
 
-Versions on this branch still read `0.1.0` everywhere — the meta-build
-work isn't release-tagged. Decide the version-bump strategy
-(v0.2.0/v0.3.0 in lockstep, vs. cumulative bump to v0.2.0 when merging
-to main) at merge time.
+Standard OSS community-health files + a real CI-workflow bug fix:
+
+- `300ec02` chore: OSS-readiness hygiene + workflows fix —
+  SECURITY.md, CONTRIBUTING.md, issue + PR templates,
+  `.gitignore` tightening, and a Node 20 → 22 fix in `ci.yaml` +
+  `release.yaml` (required for the built-in `node:sqlite` module
+  the v0.2+ control plane uses).
+- `<next>` chore: README accuracy + docs polish — Quick-Start
+  commands corrected against the actual CLI, `signalman --version`
+  references replaced with paths that work, `docs/bootstrap.md`
+  Node-version row bumped to 22.5+, `package.json` public-package
+  metadata, `CHANGELOG.md` first cut.
+
+CODE_OF_CONDUCT.md is intentionally deferred (operator decision);
+GitHub's community-profile checklist will show one missing item.
+
+### Public-release status
+
+Open items before flipping the repo public:
+
+1. **Git history rewrite to scrub Example from past commits** —
+   parked at the operator's request. The working tree is clean
+   (commit `38298a7` onward) but `git log -S "example" --all` still
+   surfaces the original text in older commits, including the 14
+   moved scenarios.
+2. **Version-pin bump strategy** — every manifest still reads
+   `0.1.0`. Decide whether the meta-build work tags as v0.3.0
+   (carries v0.2 + v0.3 in one bump) or whether v0.2.0 ships
+   separately first.
+3. **Merge to `main` + push to remote + flip visibility** —
+   operator action, blocked on (1) and (2).
 
 ## TL;DR (one-paragraph)
 
