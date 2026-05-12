@@ -1,0 +1,222 @@
+# Changelog
+
+All notable changes to Signalman will land here. Format loosely follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
+aims for [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+> **Note on versioning before the public release.** No git tags exist
+> yet. Everything below "Unreleased" reflects work that's in the
+> repository but hasn't been formally tagged or published to npm /
+> crates.io. The operator-facing manifest pins (`host/package.json`,
+> `guest/Cargo.toml`, workspace `Cargo.toml`, and the Loom plugin)
+> all currently read `0.1.0`. The version-bump strategy for the
+> first public release is still being decided — see `docs/STATUS.md`
+> for current state.
+
+## [Unreleased]
+
+Work staged on branches above `main` that hasn't been merged or
+tagged yet. Two branches stack:
+
+### Public-release readiness (`worktree-oss-hygiene-prep`)
+
+- **Added** `SECURITY.md` — vulnerability disclosure policy with GitHub
+  Security Advisories as the primary channel; scope definition,
+  supported-versions table, 72h-ack / 90d-fix commitment for high/
+  critical findings.
+- **Added** `CONTRIBUTING.md` — dev environment setup (Node 22.5+,
+  Rust stable, protoc), per-stack test commands, PR expectations,
+  release-day version-pin checklist.
+- **Added** `.github/ISSUE_TEMPLATE/{bug_report,feature_request}.md`
+  plus `config.yml` — structured forms; blank issues disabled;
+  security-advisory + discussions paths surfaced in the picker.
+- **Added** `.github/PULL_REQUEST_TEMPLATE.md` — change-type checklist
+  and test-plan checklist.
+- **Added** `NOTICE` at the repo root — Apache-2.0 conventional
+  attribution alongside `LICENSE`.
+- **Added** `CHANGELOG.md` (this file).
+- **Fixed** `.github/workflows/{ci,release}.yaml` — bumped Node
+  from 20 to 22 (required for the built-in `node:sqlite` module the
+  v0.2+ control plane uses). The mismatch would have silently broken
+  CI and the release pipeline once the meta-build commits landed on
+  main.
+- **Fixed** README quickstart commands so they actually match the
+  CLI: `--repo` (not `--repo-url` only), `--key` (not `--signing-key`),
+  `runner register --control-plane --token` (not `--name`),
+  `health check --target` (not `--deployment`),
+  `key generate` (no `--out` file form; default lands keys in
+  `~/.signalman/keys/signing.{pub,key}`),
+  `key fingerprint <path>` (positional, not `--key`).
+- **Fixed** `docs/bootstrap.md` Node prerequisite row (20 LTS → 22.5+).
+- **Fixed** `SECURITY.md` + `CONTRIBUTING.md` + bug-report template:
+  replaced `signalman --version` references (the CLI doesn't have
+  that flag) with paths that actually work
+  (`npm ls @signalman/host` / `git rev-parse HEAD`).
+- **Fixed** `host/package.json` + new `host/.npmignore` — the npm
+  tarball was shipping `src/` + tests + configs (627 files / 4.9 MB
+  unpacked) instead of the compiled `dist/` output. Now ships
+  `dist/` + `package.json` (417 files / 2.5 MB), with proper
+  `repository`, `bugs`, `homepage`, expanded `description`, and
+  expanded `keywords` for npm-registry discoverability.
+- **Tightened** `.gitignore` — added `.claude/settings.local.json`,
+  `.claude/worktrees/`, `host/*.tgz`, `*.log`, control-plane local
+  state (`signalman.db*`, `.signalman/{blobs,recordings}/`).
+
+### Public-release scrub + security + license (`claude/intelligent-carson-a92b80`)
+
+- **Changed** License from MIT to Apache-2.0 across `LICENSE`,
+  `NOTICE`, root `Cargo.toml`, `guest/Cargo.toml`,
+  `plugins/signalman-loom-plugin/Cargo.toml`, `host/package.json`,
+  and the README footer. All four package manifests now agree.
+- **Removed** 14 product-specific scenario directories
+  (`.signalman/scenarios/example-driver-v3-*`, `cursor-restrict`,
+  `sandbox-enforcement`, `silo-validation*`; `examples/example/`).
+  They moved to the consuming product's own repository.
+- **Changed** Source code, tests, scenarios, and docs to remove
+  all references to the original consuming product:
+  `ComposeBuilder.exampleBackendStack()` → `backendStack()`,
+  ETW session-name defaults, kernel-driver path defaults, test
+  fixture product names, design-doc examples, ROADMAP narrative.
+- **Security: fixed F4 (high)** — git-clone argument-injection guard
+  at HTTP intake (`POST /v1/products`, `PATCH /v1/products/:id`,
+  `POST /v1/releases`, `POST /v1/jobs` when `kind=release.build`).
+  Adds `validateRepoUrl` + `validateGitRef` for option-injection
+  defense (CVE-2017-1000117 family) and a `--` separator before
+  positional args in every `git clone` invocation.
+- **Security: fixed F3 (med-high)** — `signalman serve
+  --disable-loopback-bypass` flag wired through the CLI; stale
+  "until PR 7 lands" warning replaced with current-state guidance
+  that mentions the new flag.
+- **Security: fixed F5 (medium)** — `streamBody` HTTP routes now
+  honor a `maxBodyBytes` route option (default 1 GiB, blob upload
+  pinned at 1 GiB). Content-Length and running-total enforcement
+  via a byte-counting `PassThrough` wrapping the raw
+  `IncomingMessage`; returns 413 on cap exceed.
+- **Security: fixed F1/F2 (low)** — docker compose-builder test-stack
+  defaults (`test-password`, `test-secret-for-e2e`) replaced with
+  per-call `crypto.randomBytes(32).toString("hex")` secrets.
+- **Security: dependency bumps** — `rustls-webpki` 0.103.11 →
+  0.103.13 (RUSTSEC-2024-0399); `@modelcontextprotocol/sdk`
+  transitive bumps via `npm audit fix` (4 vulns).
+- **Added** new validator unit tests
+  (`host/src/__tests__/git-validation.test.ts`, 42 cases) and
+  streamBody-cap router tests
+  (`host/src/__tests__/http-router-streambody-cap.test.ts`, 4 cases).
+
+### v0.3.0 — networked control plane
+
+The five v0.3 PRs that landed on this branch. Tag candidates: ship
+as `v0.3.0` once the operator decides on a version-bump strategy.
+
+- **Added** `signalman serve` — HTTP control plane on `node:http`
+  with bearer-token auth (`Authorization: Bearer sk_...`) and
+  loopback bypass for local-mode workflows. Routes the full v0.2
+  control-plane surface plus `/v1/api-keys`, `/v1/jobs`, `/v1/blobs`.
+- **Added** `signalman runner register / start` — stateless runner
+  workers that poll the control plane for `release.build` jobs,
+  claim them atomically, clone the product repo at the release's
+  tag, run the build executor against an `HttpControlPlane` shim,
+  and upload the resulting artifacts.
+- **Added** `signalman release build --remote` — submit-mode build
+  that queues a `release.build` job onto the remote control plane
+  instead of running in-process.
+- **Added** `PostgresStorageDriver` — `pg`-backed implementation
+  of the storage interface. Same migration files as SQLite (
+  `host/src/control-plane/storage/migrations/`) run verbatim.
+  Atomic job-claim via `SELECT FOR UPDATE SKIP LOCKED`. See
+  `docs/postgres-driver.md` for the setup guide.
+- **Added** Ed25519 manifest signing — `signalman key generate /
+  fingerprint`, `signalman release build --sign --key <path>`,
+  `signalman release verify <id> --public-key <path>`. Signs the
+  canonical manifest JSON; verification checks the public-key
+  fingerprint before the crypto verify so a wrong key fails fast.
+- **Added** `S3BlobDriver` — `@aws-sdk/client-s3` implementation
+  with content-addressed keys, presigned downloads via
+  `@aws-sdk/s3-request-presigner`, and `resolveBySha(orgId, sha256)`
+  for cross-driver URI reconstruction.
+
+### v0.2.0 — local in-process meta build system
+
+The PR-1-through-PR-5 work that initiated the meta-build platform.
+
+- **Added** Control-plane data model: products, releases, artifacts,
+  targets, deployments, health checks, audit log, organisations, API
+  keys, jobs. ULID PKs, ISO-8601 timestamps, partial unique indexes
+  for soft-deletion. Same migration files run against SQLite +
+  Postgres.
+- **Added** `SqliteStorageDriver` — `node:sqlite` (built-in, no
+  `better-sqlite3` dependency). Requires Node 22.5+.
+- **Added** `LocalFsBlobDriver` — content-addressed,
+  `<root>/<org_id>/<sha[0:2]>/<sha>` layout. Rejects path traversal
+  via `..`/`/`/`\` in `orgId`; enforces hex-64 on sha256.
+- **Added** `release build` verb — clones a product repo at a tag,
+  runs each component's declared build command, captures artifacts
+  into the blob store, computes a canonical manifest, writes the
+  release row.
+- **Added** `release deploy / rollback / list / show / verify` verbs.
+- **Added** `target add / list / remove` verbs.
+- **Added** `health check / history` verbs with the
+  `vm_reachable` floor plus per-product declared probes from
+  `signalman.build.yaml`.
+- **Added** Design doc (`docs/design/meta-build-system.md`) — full
+  architecture, schema, CLI surface, phasing.
+
+## [0.1.x] — pre-public scenario-runner platform
+
+The original Signalman surface that exists on `main` today. No
+formal v0.1.0 / v0.1.1 tags shipped; the version was set in
+manifests but no public release happened. STATUS.md describes the
+operationally-frozen surface.
+
+### Highlights
+
+- **MCP surface (P0)** — six high-level verbs that constitute the
+  agent contract: `list`, `describe`, `plan`, `run`, `record`,
+  `status`. Hermetic result envelopes (scenario hash, agent version,
+  events, duration). `signalman.advanced.*` namespace for direct
+  VM/Docker tools behind an explicit opt-in.
+- **Hyper-V control-plane service (P1)** — Rust crate
+  (`service/`) that brokers privileged Hyper-V cmdlets via mTLS gRPC,
+  eliminating per-call gsudo prompts. MSI-installable; runs under a
+  dedicated service account with minimum Hyper-V Admin privileges.
+  Named-pipe + localhost TCP transports.
+- **Guest agent** — Rust agent (`guest/`) that runs inside each VM
+  and exposes process control, command execution, file operations,
+  and network / filesystem verification primitives over gRPC with
+  bearer-token + optional mTLS.
+- **Hypervisor backends** — Hyper-V (primary, Windows),
+  Tart (macOS on Apple Silicon, `docs/mac-virtualization.md`),
+  VMware Workstation (fallback, deprioritised).
+- **Loom plugin** (`plugins/signalman-loom-plugin/`) — Rust crate
+  registering `loom.signalman.*` MCP tools through Loom's
+  trusted-plugin contract. State persists via Loom's
+  `TaskOwnership`; events stream through Loom's `EventBus`;
+  scenarios surface as descriptor-backed forms in `loom tui`.
+- **Provisioning + bootstrap (P9)** — `signalman vm provision`,
+  `signalman vm fetch-template`, `signalman vm install-bundle`,
+  `signalman vm cleanup`, `signalman init`, software-bundle schema,
+  end-to-end onboarding guide at `docs/bootstrap.md`.
+- **UI sidecar** — `signalman-guest --ui-sidecar` interactive
+  user-session sidecar with MCP tools for screenshots, UIA
+  snapshot/find/wait, click, keyboard input, type;
+  `vm_ui_open_url` / `vm_ui_navigate_url` browser primitives;
+  loopback-only CDP implementation behind reserved `Browser*`
+  RPCs.
+- **Release pipeline** — signed-MSI release workflow at
+  `.github/workflows/release.yaml`. Cert signing via
+  `WINDOWS_CERT_BASE64` / `WINDOWS_CERT_PASSWORD` repo secrets;
+  npm publish via `NPM_TOKEN`; crates.io publish via
+  `CARGO_REGISTRY_TOKEN`. Tag-triggered (`v*.*.*`) with
+  manifest-version-matches-tag validation.
+
+### Audit closures
+
+The April 2026 four-lens audit (QA / Architecture / PM / Security)
+documented in `docs/STATUS.md` closed 8 of the original 13
+findings: cert ACL hardening, client-cert pinning, loopback
+enforcement, denylist parity, drop `cmd.exe /C` on SYSTEM path,
+named-pipe SDDL, constant-time bearer-token compare, TLS 1.3
+pin. The remaining findings either rolled forward into v0.2 / v0.3
+work or remain documented limitations.
+
+[Unreleased]: https://github.com/ambray/signalman/compare/HEAD

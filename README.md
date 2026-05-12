@@ -244,7 +244,7 @@ cd host && npm install && npm run build
 claude mcp add signalman node host/dist/server.js
 
 # Or invoke via CLI for CI (any scenario in .signalman/scenarios/):
-node host/dist/cli.js run sandbox-enforcement
+node host/dist/cli.js run service-backend-smoke
 echo $?   # standard exit codes; envelope JSON on stdout
 ```
 
@@ -257,28 +257,35 @@ point at `signalman serve` with `SIGNALMAN_API_URL` for remote mode.
 ```bash
 # 1. Register your product (the repo whose tags you'll be building).
 signalman product add --name myapp \
-  --repo-url https://github.com/myorg/myapp.git
+  --repo https://github.com/myorg/myapp.git
 
 # 2. Check in a signalman.build.yaml at the root of the product repo:
 #    components: each names a build command, a working directory, and
 #    the artifacts the build produces (path globs or image refs). See
 #    docs/design/meta-build-system.md §4.2 for the full schema.
 
-# 3. Build a release from a tag. Clones the repo, runs each component's
+# 3. Generate an Ed25519 signing keypair (one-time, per operator).
+#    Default output is ~/.signalman/keys/signing.{pub,key}; --name
+#    overrides the filename stem if you want multiple keys.
+signalman key generate
+
+# 4. Build a release from a tag. Clones the repo, runs each component's
 #    build command, captures artifacts into the blob store, computes
 #    + signs the manifest, writes a release row.
 signalman release build --product myapp --tag v1.0.0 \
-  --sign --signing-key ~/.signalman/keys/release.pem
+  --sign --key ~/.signalman/keys/signing.key
 
-# 4. Register a deploy target (a VM, a Docker host, etc.) and deploy.
+# 5. Register a deploy target (a VM, a Docker host, etc.) and deploy.
 signalman target add --name win11-demo --kind vm_test \
   --connection '{"vmName":"Win11_demo"}'
 signalman release deploy --target win11-demo --release <id>
 
-# 5. Run per-component health probes; deploy is gated on them.
-signalman health check --deployment <id>
+# 6. Run per-component health probes against the active deployment
+#    on a target. (Deploy already gates on these; this verb re-runs
+#    them on demand.)
+signalman health check --target win11-demo
 
-# 6. Roll back atomically if something's off.
+# 7. Roll back atomically if something's off.
 signalman release rollback --target win11-demo
 ```
 
@@ -295,25 +302,29 @@ signalman api-key create --name my-runner
 # → sk_XXXXXXXX_YYYYYYYYYYYYYYYYYYYYYYYYYY
 
 # On a runner host — register + start a worker against the control plane:
-export SIGNALMAN_API_URL=http://control-plane.example.com:8765
-export SIGNALMAN_API_TOKEN=sk_...
-signalman runner register --name builder-1
-signalman runner start --name builder-1
+signalman runner register \
+  --control-plane http://control-plane.example.com:8765 \
+  --token sk_XXXXXXXX_YYYYYYYYYYYYYYYYYYYYYYYYYY \
+  --worker-name builder-1
+signalman runner start
 
 # `release build --remote` queues a release.build job for any available
 # runner instead of running it in-process:
 signalman release build --product myapp --tag v1.0.0 --remote
 ```
 
-Ed25519 signing keys are generated and inspected with `signalman key`:
+Inspecting and verifying signing keys:
 
 ```bash
-signalman key generate --out ~/.signalman/keys/release.pem
-signalman key fingerprint --key ~/.signalman/keys/release.pub.pem
-# → matches the `signed_by` field on each release row this key signs
+# Print the fingerprint of an existing public key. The fingerprint
+# (first 16 hex chars of sha256(DER pubkey)) matches the `signed_by`
+# column on every release this key signs.
+signalman key fingerprint ~/.signalman/keys/signing.pub
 
-signalman release verify --release <id> \
-  --public-key ~/.signalman/keys/release.pub.pem
+# Verify a release's manifest against a public key. Exits non-zero
+# if the fingerprint or signature don't match.
+signalman release verify <release-id> \
+  --public-key ~/.signalman/keys/signing.pub
 ```
 
 ### Hyper-V control-plane service (Windows host)

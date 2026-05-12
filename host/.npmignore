@@ -1,0 +1,43 @@
+# What to exclude from the npm tarball.
+#
+# Without this file, npm falls back to .gitignore — which excludes
+# `host/dist/` (built output) and would publish the source tree.
+# That's the opposite of what we want: ship the built artifact,
+# not the .ts sources or the test suite.
+#
+# `package.json` itself, plus anything explicitly listed in a
+# top-level `files` field, are always included. Everything else
+# goes through this file.
+
+# Source — published as the compiled `dist/` only
+src/
+
+# Test infrastructure
+**/__tests__/
+**/*.test.ts
+**/*.test.js
+coverage/
+vitest.config.ts
+
+# Build / dev tooling
+tsconfig.json
+eslint.config.js
+scripts/
+.eslintrc*
+
+# Worktree / IDE / OS noise
+.claude/
+.loom/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# npm/git internals
+.npmignore
+.gitignore
+
+# Misc
+output/
+*.log
+*.tgz

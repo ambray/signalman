@@ -43,7 +43,8 @@ it, say so — that's the most useful baseline.
 
 ## Environment
 
-- `signalman --version` output:
+- Signalman version (`npm ls @signalman/host` for an install, or
+  `git rev-parse HEAD` if you built from source):
 - OS + version:
 - Node version (`node -v`):
 - Rust version (`rustc -V`) — only if you built from source:

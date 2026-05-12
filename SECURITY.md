@@ -22,8 +22,8 @@ When reporting, please include:
 1. A description of the issue and the impact you think it has.
 2. Reproduction steps — concrete enough that we can confirm the bug
    without guessing about your environment.
-3. The affected version (`signalman --version` output, or commit SHA if
-   you're on a development branch).
+3. The affected version. For an npm install: `npm ls @signalman/host`.
+   For a source build: the commit SHA you built from (`git rev-parse HEAD`).
 4. Any proof-of-concept code, log snippets, or screenshots that help.
 
 You do not need a fix in hand to report. A clear bug report is enough.

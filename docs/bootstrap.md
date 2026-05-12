@@ -21,7 +21,7 @@ Confirm everything below before running any Signalman command.
 | Item | Required | Verify |
 |---|---|---|
 | Windows 11 22H2+ or Windows Server 2022 with the Hyper-V role enabled | yes | `Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All` returns `Enabled` |
-| Node 20 LTS or newer (the host package targets ESM + Node 18+ `fetch`) | yes | `node --version` reports `v20.x` or higher |
+| Node 22.5 or newer (the v0.2+ control plane uses the built-in `node:sqlite` module that landed in 22.5) | yes | `node --version` reports `v22.5` or higher |
 | PowerShell 7 (`pwsh`) — the cert script and `scripts/release-dry-run.ps1` use it | yes | `pwsh --version` |
 | Rust stable toolchain | only when building from source | `rustc --version` |
 | `cargo-wix` 0.3.9 | only when building MSI packages locally | `cargo install cargo-wix --locked --version 0.3.9` |

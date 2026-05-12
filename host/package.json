@@ -1,11 +1,20 @@
 {
   "name": "@signalman/host",
   "version": "0.1.0",
-  "description": "Signalman Host MCP Server — VM test orchestration for AI-driven workflow testing",
+  "description": "Signalman host: agent-first VM scenario runner + tag-driven release-lifecycle control plane. Hyper-V/Tart/VMware backends; in-process or HTTP control plane; SQLite or Postgres storage; local-FS or S3 blob driver.",
   "type": "module",
   "main": "dist/server.js",
   "bin": {
     "signalman": "dist/cli.js"
+  },
+  "homepage": "https://signalman.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ambray/signalman.git",
+    "directory": "host"
+  },
+  "bugs": {
+    "url": "https://github.com/ambray/signalman/issues"
   },
   "scripts": {
     "build": "tsc && node scripts/copy-assets.mjs",
@@ -21,7 +30,16 @@
     "testing",
     "vm",
     "orchestration",
-    "automation"
+    "automation",
+    "hyper-v",
+    "scenario-runner",
+    "release-pipeline",
+    "control-plane",
+    "build-system",
+    "ed25519",
+    "signed-releases",
+    "devops",
+    "ci"
   ],
   "author": "Signalman Contributors",
   "license": "Apache-2.0",

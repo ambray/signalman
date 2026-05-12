@@ -38,8 +38,9 @@ For bugs, please include:
 2. What you expected.
 3. What actually happened, including the full error output and the
    first 20-or-so lines of any stack trace.
-4. Your environment — `signalman --version`, OS, Node version
-   (`node -v`), Rust version (`rustc -V`) if you built from source.
+4. Your environment — installed version (`npm ls @signalman/host`) or
+   commit SHA (`git rev-parse HEAD`) if you built from source; OS;
+   Node version (`node -v`); Rust version (`rustc -V`) if relevant.
 
 ## Dev environment
 
