@@ -1,11 +1,9 @@
 # Dependencies
 node_modules/
 host/node_modules/
-hub/node_modules/
 
 # Build output
 host/dist/
-hub/dist/
 guest/target/
 # Cargo workspace target (P1 service crate)
 target/

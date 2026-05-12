@@ -2,8 +2,8 @@
  * Storage driver factory and re-exports.
  *
  * The factory selects a driver from `controlPlane.storage` config.
- * v0.2 ships SQLite; v0.3 adds Postgres for self-hosted-large /
- * commercial deployments — see docs/design/meta-build-system.md §12.
+ * v0.2 ships SQLite; v0.3 adds Postgres for self-hosted-large
+ * deployments — see docs/design/meta-build-system.md §12.
  */
 
 import { PostgresStorageDriver } from "./postgres.js";
