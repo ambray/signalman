@@ -23,6 +23,12 @@ Thumbs.db
 
 # Agent-local settings
 .claude/settings.json
+# Per-user Claude Code overrides (project convention: *.local.json is
+# never committed). We caught this leaking in once; pin it explicitly.
+.claude/settings.local.json
+# EnterWorktree-managed working trees (each is its own nested git
+# checkout — definitely not a tracked artifact).
+.claude/worktrees/
 
 # Environment
 .env
@@ -32,6 +38,22 @@ Thumbs.db
 /output/
 *.png
 !scenarios/**/*.png
+
+# Release-packaging artifacts
+host/*.tgz
+*.tar.gz
+
+# Local logs from dev / scenario runs
+*.log
+
+# Control-plane local state (default paths when an operator runs
+# `signalman serve` from the repo root). The SQLite WAL/SHM
+# variants get created automatically and are noisy in `git status`.
+signalman.db
+signalman.db-shm
+signalman.db-wal
+.signalman/blobs/
+.signalman/recordings/
 
 # Certificates (generated, not committed)
 certs/*.pem
