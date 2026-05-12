@@ -7,7 +7,7 @@
 name = "signalman-loom-plugin"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "Apache-2.0"
 description = "Loom trusted-plugin that registers loom.signalman.* MCP tools backed by the Signalman scenario runner."
 repository = "https://github.com/ambray/signalman"
 

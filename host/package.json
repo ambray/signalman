@@ -24,7 +24,7 @@
     "automation"
   ],
   "author": "Signalman Contributors",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=22.5.0"
   },
