@@ -5,17 +5,13 @@
 > introduces a new TODO bucket. See [Document maintenance](#document-maintenance)
 > for the trigger rules.
 
-## Branches in flight: public-release preparation — 2026-05-12
+## Public-release prep landed on main — 2026-05-12
 
-Two stacked branches carry the public-release prep work; neither is
-merged to `main` yet. Together they accomplish the v0.2.0 + v0.3.0
-meta build system, the security audit, the license migration to
-Apache-2.0, the product-specific-content scrub, and the standard
-OSS community-health files.
+The public-release prep work merged. `main` is at `a7cc8e8` and is
+in sync with `origin/main`. Net effect: 15 commits from a clean
+v0.1.x baseline (`2a2cdb0`) to a public-flip-ready state.
 
-### `claude/intelligent-carson-a92b80` (11 commits ahead of main)
-
-The meta-build implementation + security audit + license + scrub:
+What landed (oldest first):
 
 - `3d1d0c2` v0.2.0 — local in-process control plane (storage, schema,
   build executor, deploy/rollback, health probes)
@@ -23,58 +19,73 @@ The meta-build implementation + security audit + license + scrub:
   serve`, `host/src/http/`)
 - `360b28f` v0.3.0a — job substrate + runner CLI (`host/src/runner/`,
   jobs table, atomic claim)
-- `06af83a` v0.3.0b — remote `release.build` executor (worker clones repo,
-  runs build via HttpControlPlane, uploads artifacts)
-- `e00503a` v0.3.0c — Postgres `StorageDriver` (`pg`, same migrations;
-  see `docs/postgres-driver.md`)
+- `06af83a` v0.3.0b — remote `release.build` executor
+- `e00503a` v0.3.0c — Postgres `StorageDriver` (`pg`, same migrations)
 - `1549a9e` v0.3.0d — Ed25519 manifest signing + `release verify`
 - `6979976` v0.3.0e — S3 `BlobDriver` + `resolveBySha`
-- `618f353` security + docs: pre-public-release readiness pass —
-  closes F1–F5 (git-clone argument-injection guard at intake,
-  `--disable-loopback-bypass` serve flag, `streamBody` byte cap,
-  test-stack hardcoded-credential defaults replaced with per-stack
-  CSPRNG; `rustls-webpki` bump for the cargo-audit CVE).
-- `93c4bee` license: align manifests to Apache-2.0 (workspace +
-  guest + service + loom plugin + host npm).
-- `4a58e4c` NOTICE file + LICENSE appendix copyright correction.
-- `38298a7` scrub: remove product-specific references for public
-  release — 14 scenario directories moved out of repo, source/tests/
-  docs/scenarios genericized, no Example tokens remain in the working
-  tree.
-
-### `worktree-oss-hygiene-prep` (12 commits ahead of main, builds on the above)
-
-Standard OSS community-health files + a real CI-workflow bug fix:
-
-- `300ec02` chore: OSS-readiness hygiene + workflows fix —
-  SECURITY.md, CONTRIBUTING.md, issue + PR templates,
-  `.gitignore` tightening, and a Node 20 → 22 fix in `ci.yaml` +
-  `release.yaml` (required for the built-in `node:sqlite` module
-  the v0.2+ control plane uses).
-- `<next>` chore: README accuracy + docs polish — Quick-Start
-  commands corrected against the actual CLI, `signalman --version`
-  references replaced with paths that work, `docs/bootstrap.md`
-  Node-version row bumped to 22.5+, `package.json` public-package
-  metadata, `CHANGELOG.md` first cut.
+- `618f353` security + docs: pre-public-release readiness pass — F1–F5
+- `93c4bee` license: align manifests to Apache-2.0
+- `4a58e4c` NOTICE file + LICENSE appendix copyright correction
+- `38298a7` scrub: remove product-specific references for public release
+- `300ec02` OSS-readiness hygiene + workflows fix (SECURITY.md,
+  CONTRIBUTING.md, issue + PR templates, .gitignore, Node 20→22)
+- `a6222e6` README accuracy + STATUS refresh + npm metadata + CHANGELOG
+- `5f3b648` README: drop hosted-commercial scope references
+- `a7cc8e8` open-core split — extract `hub/` + commercial scope to
+  signalman-cloud
 
 CODE_OF_CONDUCT.md is intentionally deferred (operator decision);
 GitHub's community-profile checklist will show one missing item.
 
-### Public-release status
+## Cross-repo: open-core split — 2026-05-12
 
-Open items before flipping the repo public:
+Signalman is now open-core. Three product lines (see
+[signalman-cloud/docs/design.md](../../signalman-cloud/docs/design.md) §D6):
+
+| Product | Repo | License | Distribution |
+| --- | --- | --- | --- |
+| `signalman` | [github.com/ambray/signalman](https://github.com/ambray/signalman) | Apache-2.0 | npm + crates.io + MSI |
+| `signalman-cloud` | [github.com/ambray/signalman-cloud](https://github.com/ambray/signalman-cloud) (not pushed yet) | Proprietary | Hosted SaaS |
+| `signalman-enterprise` | Future build-flag on signalman-cloud; may extract later | Proprietary | On-prem installer |
+
+What moved out of this repo (now in `signalman-cloud/`):
+
+- `hub/` directory (was 122 LOC of TODO stubs; type definitions ported,
+  stub methods dropped).
+- The `v0.4.0 — hosted commercial` section of
+  `docs/design/meta-build-system.md`.
+- The "Hosted (v0.4+)" row of the three-deployment-shapes table.
+- Forward-looking hub-related ROADMAP entries.
+
+`signalman-cloud` carries its own design + roadmap including the six
+2026-05-12 decisions on database topology, runner pool, API surface,
+billing model, trial path, and on-prem enterprise. See its
+`docs/design.md` and `ROADMAP.md`.
+
+The OSS↔Cloud boundary is the npm public exports of `@signalman/host`.
+Cloud is a one-way consumer of the OSS package; the OSS code has no
+knowledge of Cloud. This contract is the central organising principle
+of the split.
+
+## Public-release status
+
+Open items before flipping the OSS repo public:
 
 1. **Git history rewrite to scrub Example from past commits** —
-   parked at the operator's request. The working tree is clean
-   (commit `38298a7` onward) but `git log -S "example" --all` still
-   surfaces the original text in older commits, including the 14
-   moved scenarios.
+   parked at the operator's request. The working tree (and every
+   commit from `38298a7` onward) is clean, but `git log -S "example"
+   --all` still surfaces the original text in older commits,
+   including the 14 moved scenarios.
 2. **Version-pin bump strategy** — every manifest still reads
    `0.1.0`. Decide whether the meta-build work tags as v0.3.0
    (carries v0.2 + v0.3 in one bump) or whether v0.2.0 ships
    separately first.
-3. **Merge to `main` + push to remote + flip visibility** —
-   operator action, blocked on (1) and (2).
+3. **Visibility flip** — repo is still private on GitHub. Operator
+   action, blocked on (1) and (2).
+4. **Push `signalman-cloud` to its remote** — `signalman-cloud` has
+   one commit locally; remote is configured at
+   `github.com/ambray/signalman-cloud.git` but not pushed. Operator
+   action when the GitHub-side repo is ready.
 
 ## TL;DR (one-paragraph)
 
