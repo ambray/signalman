@@ -1,0 +1,19 @@
+# Issue-template chooser configuration.
+# Disables the blank "open a new issue" link so all issues route
+# through the structured templates, and surfaces the security
+# disclosure channel directly in the picker.
+
+blank_issues_enabled: false
+
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/ambray/signalman/security/advisories/new
+    about: >-
+      DO NOT file a public issue for security bugs. Use GitHub's
+      private vulnerability reporting — see SECURITY.md for the
+      full disclosure policy.
+  - name: Question or discussion
+    url: https://github.com/ambray/signalman/discussions
+    about: >-
+      Not sure if it's a bug? Want to talk through a design choice?
+      Start a discussion instead of an issue.
