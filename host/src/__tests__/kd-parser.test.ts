@@ -101,20 +101,20 @@ describe("parseLine — bugcheck (BUGCHECK_CODE:)", () => {
 describe("parseLine — module load", () => {
   it("parses canonical ModLoad line with address range", () => {
     const r = parseLine(
-      "ModLoad: fffff807`b3a00000 fffff807`b3a16000   example.sys",
+      "ModLoad: fffff807`b3a00000 fffff807`b3a16000   my-driver.sys",
     );
     expect(r).toEqual({
       kind: "module-load",
-      module: "example.sys",
+      module: "my-driver.sys",
       range: "fffff807`b3a00000-fffff807`b3a16000",
     });
   });
 
   it("parses ModLoad without address range", () => {
-    const r = parseLine("ModLoad: example.sys");
+    const r = parseLine("ModLoad: my-driver.sys");
     expect(r).toEqual({
       kind: "module-load",
-      module: "example.sys",
+      module: "my-driver.sys",
       range: undefined,
     });
   });
@@ -191,7 +191,7 @@ describe("parseLine — disconnect", () => {
 describe("parseLine — no match", () => {
   it("returns none for random stack-trace-looking lines", () => {
     const r = parseLine(
-      "00 ffffb001`abcde000 fffff807`12345678     example!HandleIoctl+0x3a",
+      "00 ffffb001`abcde000 fffff807`12345678     example-product!HandleIoctl+0x3a",
     );
     expect(r.kind).toBe("none");
   });

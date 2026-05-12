@@ -699,11 +699,11 @@ mod tests {
 
     #[test]
     fn list_args_pass_tag_and_pattern_through() {
-        let a = build_list_args(&json!({ "tag": "smoke", "pattern": "example/**" }));
+        let a = build_list_args(&json!({ "tag": "smoke", "pattern": "mygroup/**" }));
         assert!(a.contains(&"--tag".to_string()));
         assert!(a.contains(&"smoke".to_string()));
         assert!(a.contains(&"--pattern".to_string()));
-        assert!(a.contains(&"example/**".to_string()));
+        assert!(a.contains(&"mygroup/**".to_string()));
     }
 
     // ── describe ──────────────────────────────────────────────────
@@ -715,10 +715,10 @@ mod tests {
 
     #[test]
     fn describe_args_carry_id_and_json_format() {
-        let a = build_describe_args(&json!({ "id": "example/v2/network-egress" })).unwrap();
+        let a = build_describe_args(&json!({ "id": "mygroup/v2/scenario-a" })).unwrap();
         assert_eq!(
             a,
-            vec!["describe", "example/v2/network-egress", "--format", "json"]
+            vec!["describe", "mygroup/v2/scenario-a", "--format", "json"]
         );
     }
 
@@ -877,7 +877,7 @@ mod tests {
     #[test]
     fn finalize_run_start_persists_initial_state() {
         let (store, _dir) = store();
-        let args = json!({ "id": "example/v2/network-egress" });
+        let args = json!({ "id": "mygroup/v2/scenario-a" });
         let response = json!({ "run_id": "abc-123", "started_at": "now" });
         let returned = finalize_run_start(&args, response.clone(), &store).unwrap();
         assert_eq!(returned, response, "response must pass through unchanged");
@@ -885,7 +885,7 @@ mod tests {
         let state = store.load("abc-123").unwrap().unwrap();
         assert_eq!(
             state.scenario_id.as_deref(),
-            Some("example/v2/network-egress")
+            Some("mygroup/v2/scenario-a")
         );
         assert_eq!(state.status, RunStatus::Started);
     }
@@ -1245,7 +1245,7 @@ mod tests {
             "workflow_md": "Validate the VM can reach external HTTPS endpoints.\n\n## Steps\n\n1. Setup",
             "tags": ["smoke"],
         });
-        let d = descriptor_from_describe_response("example/v2/network-egress", &resp);
+        let d = descriptor_from_describe_response("mygroup/v2/scenario-a", &resp);
         assert_eq!(d.label, "Network egress");
         assert_eq!(
             d.description,

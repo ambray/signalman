@@ -21,7 +21,7 @@ export interface ManifestEntry {
   kind: "blob" | "image_ref";
   /** sha256 hex (kind=blob only). */
   sha256?: string;
-  /** Image reference, e.g. "example-backend:v1.0.0" (kind=image_ref only). */
+  /** Image reference, e.g. "myapp-backend:v1.0.0" (kind=image_ref only). */
   image_ref?: string;
 }
 

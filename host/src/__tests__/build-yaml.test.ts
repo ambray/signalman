@@ -20,7 +20,7 @@ const validYaml = {
     {
       name: "agent_service",
       build: { cwd: "agent", command: "cargo", args: ["build", "--release"] },
-      artifacts: [{ kind: "blob", path: "agent/target/release/example-agent.exe" }],
+      artifacts: [{ kind: "blob", path: "agent/target/release/exampleagent.exe" }],
     },
     {
       name: "backend",
@@ -161,7 +161,7 @@ describe("substituteComponent", () => {
 describe("buildManifest + hashManifest", () => {
   it("is deterministic across runs with the same inputs", () => {
     const m1 = buildManifest({
-      product: "example",
+      product: "example-product",
       tag: "v1",
       commitSha: "abc",
       entries: [
@@ -170,7 +170,7 @@ describe("buildManifest + hashManifest", () => {
       ],
     });
     const m2 = buildManifest({
-      product: "example",
+      product: "example-product",
       tag: "v1",
       commitSha: "abc",
       // Different declaration order — should still produce the same hash.

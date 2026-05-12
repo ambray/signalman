@@ -147,10 +147,10 @@ describe("KdSession — start()", () => {
     const s = new KdSession({
       kdArgs: ["-k"],
       spawnFn: makeFakeSpawn(cap),
-      breakOnLoad: ["example.sys", "silo.sys"],
+      breakOnLoad: ["my-driver.sys", "silo.sys"],
     });
     await s.start();
-    expect(cap.proc!.stdinLines).toContain("sxe ld example.sys");
+    expect(cap.proc!.stdinLines).toContain("sxe ld my-driver.sys");
     expect(cap.proc!.stdinLines).toContain("sxe ld silo.sys");
   });
 
@@ -216,11 +216,11 @@ describe("KdSession — run()", () => {
 
     // Simulate kd echoing some output then the sentinel.
     cap.proc!.emitStdout(
-      `example!HandleIoctl+0x3a\nnt!IofCallDriver+0x56\nSIGNALMAN-${uuid}-END\n`,
+      `example-product!HandleIoctl+0x3a\nnt!IofCallDriver+0x56\nSIGNALMAN-${uuid}-END\n`,
     );
     await flush();
     const output = await pending;
-    expect(output).toContain("example!HandleIoctl");
+    expect(output).toContain("example-product!HandleIoctl");
     expect(output).toContain("IofCallDriver");
     expect(output).not.toContain("SIGNALMAN-");
   });
@@ -385,12 +385,12 @@ describe("KdSession — break event emission", () => {
     s.on("module-load", (ev) => loads.push(ev));
     await s.start();
     cap.proc!.emitStdout(
-      "ModLoad: fffff807`b3a00000 fffff807`b3a16000   example.sys\n",
+      "ModLoad: fffff807`b3a00000 fffff807`b3a16000   my-driver.sys\n",
     );
     await flush();
     expect(loads[0]).toMatchObject({
       type: "module-load",
-      module: "example.sys",
+      module: "my-driver.sys",
     });
   });
 

@@ -117,7 +117,7 @@ message VmConfig {
 }
 
 // Hyper-V provisioning hints. Empty in v0.1.0 — Hyper-V is the default
-// and the agnostic fields are sufficient for our smoke and Example
+// and the agnostic fields are sufficient for our smoke + product
 // scenarios. Future fields (generation = 1 | 2, secure_boot,
 // dynamic_memory, vlan_id, integration_services) land here without
 // a proto bump.

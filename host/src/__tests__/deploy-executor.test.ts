@@ -131,7 +131,7 @@ async function setup(): Promise<Harness> {
   const { defaultOrg } = await cp.init();
   const product = await cp.products.create({
     orgId: defaultOrg.id,
-    name: "example",
+    name: "example-product",
     repoUrl: "u",
   });
   const release = await cp.releases.create({

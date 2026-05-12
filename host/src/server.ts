@@ -274,7 +274,7 @@ server.tool(
   "List all scenarios under .signalman/scenarios/. Returns id, name, tags, scenario_hash, and last_run if available.",
   {
     tag: z.string().optional().describe("Filter by tag."),
-    pattern: z.string().optional().describe("Glob pattern matching the scenario id (e.g. 'example/**')."),
+    pattern: z.string().optional().describe("Glob pattern matching the scenario id (e.g. 'mygroup/**')."),
   },
   async (params) =>
     withRecording("signalman_list", params, () =>
@@ -286,7 +286,7 @@ server.tool(
   "signalman_describe",
   "Return the contents of a scenario without executing it. Returns parsed setup, assertions, and workflow markdown.",
   {
-    id: z.string().describe("Scenario id (e.g. 'example/v2/network-egress')."),
+    id: z.string().describe("Scenario id (e.g. 'mygroup/v2/scenario-name')."),
   },
   async (params) =>
     withRecording("signalman_describe", params, () =>

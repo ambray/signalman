@@ -271,7 +271,7 @@ describe("handleKernelEtwStart", () => {
     expect(client.calls).toHaveLength(3);
     // 1. Idempotent cleanup of any leftover session.
     expect(client.calls[0].command).toBe("logman.exe");
-    expect(client.calls[0].args).toEqual(["stop", "ExampleScenarioEtw", "-ets"]);
+    expect(client.calls[0].args).toEqual(["stop", "SignalmanScenarioEtw", "-ets"]);
     // 2. PowerShell: ensure ETL dir exists + scrub stale ETL.
     expect(client.calls[1].command).toBe("powershell.exe");
     expect(client.calls[1].args.join(" ")).toContain("Remove-Item");
@@ -280,7 +280,7 @@ describe("handleKernelEtwStart", () => {
     expect(client.calls[2].command).toBe("logman.exe");
     expect(client.calls[2].args[0]).toBe("create");
     expect(client.calls[2].args[1]).toBe("trace");
-    expect(client.calls[2].args[2]).toBe("ExampleScenarioEtw");
+    expect(client.calls[2].args[2]).toBe("SignalmanScenarioEtw");
     expect(client.calls[2].args).toContain("-p");
     // GUID must arrive wrapped in curly braces — logman requires it.
     expect(client.calls[2].args).toContain("{5b7e6a1c-9f42-4d8b-a8b9-3e5c2d7f4a10}");
@@ -456,7 +456,7 @@ describe("handleKernelEtwStop", () => {
 
     expect(client.calls).toHaveLength(2);
     expect(client.calls[0].command).toBe("logman.exe");
-    expect(client.calls[0].args).toEqual(["stop", "ExampleScenarioEtw", "-ets"]);
+    expect(client.calls[0].args).toEqual(["stop", "SignalmanScenarioEtw", "-ets"]);
     expect(client.calls[1].command).toBe("powershell.exe");
     // Must reference our GUID in the Where-Object filter.
     expect(client.calls[1].args.join(" ")).toContain("5b7e6a1c-9f42-4d8b-a8b9-3e5c2d7f4a10");

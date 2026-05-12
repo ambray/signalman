@@ -43,9 +43,10 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * Example sandbox enforcement modes. Sprint 60 Phase 5 scenarios run once
- * per declared mode and the orchestrator compares sandboxed results
- * against the `none` baseline to surface regressions.
+ * Sandbox-enforcement modes that multi-mode scenarios cycle through.
+ * Each declared mode triggers a fresh scenario run, and the
+ * orchestrator compares sandboxed results against the `none` baseline
+ * to surface regressions.
  */
 export type SandboxMode = "none" | "legacy" | "appcontainer" | "silo";
 
@@ -170,7 +171,7 @@ export interface KernelDebugConfig {
    */
   symbol_path?: string;
   /**
-   * Modules to break on as they load, e.g. `["example.sys"]`. Sent to
+   * Modules to break on as they load, e.g. `["my-driver.sys"]`. Sent to
    * kd as `sxe ld <module>` during session startup.
    */
   break_on_load?: string[];

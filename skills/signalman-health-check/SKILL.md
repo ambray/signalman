@@ -9,7 +9,7 @@ allowed-tools: Bash
 Two layers always run:
 
 1. **`vm_reachable`** floor — is the VM running and reachable from the host service.
-2. **Declared probes** — every entry from `probes:` in the active release's `signalman.build.yaml`. For Example today that's `agent_service`, `driver_minifilter`, `backend_health`, `dashboard_load`, `nmh_pipe`, `browser_extension` (or whatever the operator has declared).
+2. **Declared probes** — every entry from `probes:` in the active release's `signalman.build.yaml`. Typical entries include service-status checks (`agent_service`), kernel-component checks (`driver_minifilter`), HTTP health endpoints (`backend_health`), and any other operator-declared probes.
 
 Each probe result becomes a `health_check` row attached to the target's current active deployment.
 

@@ -84,11 +84,11 @@ const VerificationSchema = z
 // ── Probes (PR 4) ───────────────────────────────────────────────────
 // Probes execute against a deployed target to verify a release is
 // healthy. signalman ships three primitive shapes (command,
-// http_in_guest, file_in_guest); product repos compose Example-specific
-// probes from those (e.g. "agent_service" is a windows-service check
-// modelled as a `sc.exe query` command probe). The design doc §8 names
-// six initial probes for Example — those live in the Example repo's
-// signalman.build.yaml, not hardcoded here.
+// http_in_guest, file_in_guest); product repos compose their own
+// product-specific probes from those (e.g. "agent_service" is a
+// windows-service check modelled as a `sc.exe query` command probe).
+// The design doc §8 names example probes — those live in the
+// product repo's signalman.build.yaml, not hardcoded here.
 
 const ProbeNameSchema = z
   .string()

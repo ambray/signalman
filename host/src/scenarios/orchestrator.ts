@@ -1320,7 +1320,7 @@ export class ScenarioOrchestrator {
    * Each setup step parameter and tool block parameter has
    * `${SANDBOX_MODE}` substituted with the active mode name, so the
    * same scenario file can parameterize per-mode behavior (e.g.
-   * `example-cli set-mode ${SANDBOX_MODE}`).
+   * `product-cli set-mode ${SANDBOX_MODE}`).
    *
    * # Sprint Reference
    * Sprint 60, Phase 5, Story 5.2.
@@ -2021,7 +2021,7 @@ export class ScenarioOrchestrator {
           try {
             // Multiline mode by default — existing scenarios assume
             // `^` / `$` match line boundaries within multi-line
-            // command output (e.g., `^example\s+\d+\s+370000` against
+            // command output (e.g., `^my-driver\s+\d+\s+370000` against
             // a `fltmc filters` table). Without `m`, `^` only matches
             // start-of-string and silently fails for any line past
             // the first.
@@ -2044,7 +2044,7 @@ export class ScenarioOrchestrator {
           try {
             // Multiline mode by default — existing scenarios assume
             // `^` / `$` match line boundaries within multi-line
-            // command output (e.g., `^example\s+\d+\s+370000` against
+            // command output (e.g., `^my-driver\s+\d+\s+370000` against
             // a `fltmc filters` table). Without `m`, `^` only matches
             // start-of-string and silently fails for any line past
             // the first.

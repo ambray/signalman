@@ -11,7 +11,7 @@
 //! like:
 //!
 //! ```ignore
-//! { "id": "example/v2/network-egress",
+//! { "id": "mygroup/v2/scenario-name",
 //!   "parameters": { "vm": "endpoint-1", "verbose": true },
 //!   "network_class": "isolated" }
 //! ```
@@ -200,7 +200,7 @@ pub enum BadgeColor {
 /// without first parsing the full Signalman response.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ScenarioMeta<'a> {
-    /// Scenario id (e.g. `example/v2/network-egress`).
+    /// Scenario id (e.g. `mygroup/v2/scenario-name`).
     pub id: &'a str,
     /// Optional human-friendly name (`describe.name`).
     pub name: Option<&'a str>,
@@ -446,13 +446,13 @@ mod tests {
     #[test]
     fn descriptor_for_scenario_with_no_parameters_emits_three_top_level_fields() {
         let d = descriptor_for_scenario(
-            "example/v2/network-egress",
+            "mygroup/v2/scenario-a",
             &ScenarioMeta {
-                id: "example/v2/network-egress",
+                id: "mygroup/v2/scenario-a",
                 ..Default::default()
             },
         );
-        assert_eq!(d.id, "loom.signalman.run.example/v2/network-egress");
+        assert_eq!(d.id, "loom.signalman.run.mygroup/v2/scenario-a");
         assert_eq!(d.submit_tool, "loom.signalman.run");
         let names: Vec<&str> = d.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, vec!["id", "network_class", "trace_id"]);
@@ -535,18 +535,18 @@ mod tests {
             },
         ];
         let d = descriptor_for_scenario(
-            "example/v2/full",
+            "mygroup/v2/full",
             &ScenarioMeta {
-                id: "example/v2/full",
-                name: Some("Example v2 — full sweep"),
-                description: Some("Runs the full example v2 assertion battery."),
+                id: "mygroup/v2/full",
+                name: Some("Mygroup v2 — full sweep"),
+                description: Some("Runs the full v2 assertion battery."),
                 parameters: params,
-                tags: vec!["smoke", "example"],
+                tags: vec!["smoke", "mygroup"],
             },
         );
 
-        assert_eq!(d.label, "Example v2 — full sweep");
-        assert_eq!(d.description, "Runs the full example v2 assertion battery.");
+        assert_eq!(d.label, "Mygroup v2 — full sweep");
+        assert_eq!(d.description, "Runs the full v2 assertion battery.");
 
         let names: Vec<&str> = d.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(

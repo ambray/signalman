@@ -52,11 +52,11 @@ describe("signalman.list", () => {
   it("enumerates scenarios", () => {
     const root = makeProject({
       smoke: { "setup.yaml": minimalSetup },
-      "example/v2/network": { "setup.yaml": minimalSetup },
+      "mygroup/v2/scenario-b": { "setup.yaml": minimalSetup },
     });
     const out = runList({}, root);
     expect(out.scenarios.map((s) => s.id).sort()).toEqual([
-      "example/v2/network",
+      "mygroup/v2/scenario-b",
       "smoke",
     ]);
     for (const s of out.scenarios) {
@@ -67,10 +67,10 @@ describe("signalman.list", () => {
 
   it("retains sub-directory ids with forward slashes", () => {
     const root = makeProject({
-      "example/v2/network-egress": { "setup.yaml": minimalSetup },
+      "mygroup/v2/scenario-a": { "setup.yaml": minimalSetup },
     });
     const out = runList({}, root);
-    expect(out.scenarios[0].id).toBe("example/v2/network-egress");
+    expect(out.scenarios[0].id).toBe("mygroup/v2/scenario-a");
   });
 
   it("filters by tag", () => {
@@ -85,12 +85,12 @@ describe("signalman.list", () => {
 
   it("filters by glob pattern", () => {
     const root = makeProject({
-      "example/v2/a": { "setup.yaml": minimalSetup },
-      "example/v2/b": { "setup.yaml": minimalSetup },
+      "mygroup/v2/a": { "setup.yaml": minimalSetup },
+      "mygroup/v2/b": { "setup.yaml": minimalSetup },
       "smoke": { "setup.yaml": minimalSetup },
     });
-    const out = runList({ pattern: "example/**" }, root);
-    expect(out.scenarios.map((s) => s.id).sort()).toEqual(["example/v2/a", "example/v2/b"]);
+    const out = runList({ pattern: "mygroup/**" }, root);
+    expect(out.scenarios.map((s) => s.id).sort()).toEqual(["mygroup/v2/a", "mygroup/v2/b"]);
   });
 
   it("surfaces YAML parse errors per-entry without failing the whole call", () => {

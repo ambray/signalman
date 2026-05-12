@@ -311,13 +311,13 @@ describe("kernel-debug tools — dependency lookup", () => {
       durationMs: 1,
     };
     const out = await registry.execute("driver_load", makeCtx(view), {
-      service: "example",
+      service: "example-product",
     });
     const parsed = JSON.parse(out);
     // Service state comes from the fake's stdout parsed by handler.
     expect(parsed.service_state).toBe("Running");
     expect(client.calls[0].cmd).toBe("sc.exe");
-    expect(client.calls[0].args).toEqual(["start", "example"]);
+    expect(client.calls[0].args).toEqual(["start", "example-product"]);
   });
 
   it("driver_unload uses the guest client", async () => {
@@ -331,7 +331,7 @@ describe("kernel-debug tools — dependency lookup", () => {
     const view = makeView({ guestClient: client });
     const registry = createKernelDebugToolRegistry();
     const out = await registry.execute("driver_unload", makeCtx(view), {
-      service: "example",
+      service: "example-product",
     });
     expect(JSON.parse(out).service_state).toBe("Stopped");
   });
@@ -352,7 +352,7 @@ describe("kernel-debug tools — dependency lookup", () => {
     const view = makeView({ guestClient: client });
     const registry = createKernelDebugToolRegistry();
     const out = await registry.execute("driver_ioctl", makeCtx(view), {
-      device: "\\\\.\\example",
+      device: "\\\\.\\example-product",
       control_code: 0x220000,
     });
     expect(JSON.parse(out).status).toBe("STATUS_SUCCESS");

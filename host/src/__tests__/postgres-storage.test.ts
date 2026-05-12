@@ -115,18 +115,18 @@ describe("products / releases / artifacts", () => {
   beforeEach(async () => {
     product = await driver.products.create({
       orgId: org.id,
-      name: "example",
+      name: "example-product",
       repoUrl: "https://example.invalid/example.git",
     });
   });
 
   it("products: list + duplicate-name conflict", async () => {
     const list = await driver.products.listForOrg(org.id);
-    expect(list.map((p) => p.name)).toEqual(["example"]);
+    expect(list.map((p) => p.name)).toEqual(["example-product"]);
     await expect(
       driver.products.create({
         orgId: org.id,
-        name: "example",
+        name: "example-product",
         repoUrl: "u",
       }),
     ).rejects.toBeInstanceOf(StorageConflictError);

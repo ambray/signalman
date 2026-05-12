@@ -1,6 +1,7 @@
 //! Restriction verification module.
 //!
-//! Checks whether a process is properly restricted by the Example agent:
+//! Checks whether a process is properly restricted by an enforcement
+//! agent / driver:
 //! - AppContainer token present
 //! - Low integrity level
 //! - Job object membership

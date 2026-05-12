@@ -73,9 +73,8 @@ export interface EtwHandlerContext {
 
 export interface KernelEtwStartParams {
   /**
-   * Provider GUID (hex, with or without braces). The driver's
-   * `Example.Driver` provider is
-   * `{5B7E6A1C-9F42-4D8B-A8B9-3E5C2D7F4A10}`.
+   * Provider GUID (hex, with or without braces). Operator-supplied;
+   * the scenario knows the GUID of the driver it's tracing.
    */
   provider_guid: string;
   /**
@@ -92,7 +91,7 @@ export interface KernelEtwStartParams {
   level?: number;
   /**
    * Optional session name override. Default is a stable name
-   * `ExampleScenarioEtw` so cleanup after a crashed scenario is
+   * `SignalmanScenarioEtw` so cleanup after a crashed scenario is
    * predictable. Changing this per scenario would fragment leftover-
    * session cleanup. Whatever name `_start` uses MUST be passed
    * verbatim to `_stop`.
@@ -100,7 +99,7 @@ export interface KernelEtwStartParams {
   session_name?: string;
   /**
    * Guest path for the output ETL. Default lands it under
-   * `C:\Example\logs\` which every scenario creates in setup.
+   * `C:\Signalman\logs\` (which scenarios may need to create in setup).
    * MUST end in `.etl`; logman refuses other extensions.
    */
   etl_path?: string;
@@ -135,8 +134,8 @@ export interface KernelEtwStartResult {
   stderr: string;
 }
 
-const DEFAULT_SESSION_NAME = "ExampleScenarioEtw";
-const DEFAULT_ETL_PATH = "C:\\Example\\logs\\example-etw-capture.etl";
+const DEFAULT_SESSION_NAME = "SignalmanScenarioEtw";
+const DEFAULT_ETL_PATH = "C:\\Signalman\\logs\\etw-capture.etl";
 
 /**
  * Start an ETW recording session targeting the given provider.
@@ -260,7 +259,7 @@ export interface KernelEtwStopParams {
    *  was opened for a specific provider) get filtered out by this. */
   provider_guid: string;
   /** ETW session name. Must match what `_start` used (defaults to
-   *  `ExampleScenarioEtw`). */
+   *  `SignalmanScenarioEtw`). */
   session_name?: string;
   /** Guest path to write the ETL to. Should match `_start`'s
    *  `etl_path` return field verbatim. */
@@ -481,7 +480,7 @@ export function buildWprProfile(opts: {
   const collectorId = `EC_${opts.sessionName}`;
   const providerId = `EP_${opts.sessionName}`;
   return `<?xml version="1.0" encoding="utf-8"?>
-<WindowsPerformanceRecorder Version="1.0" Author="Example" Company="">
+<WindowsPerformanceRecorder Version="1.0" Author="Signalman" Company="">
   <Profiles>
     <EventCollector Id="${collectorId}" Name="${opts.sessionName}">
       <BufferSize Value="64" />
@@ -492,7 +491,7 @@ export function buildWprProfile(opts: {
         <Keyword Value="${opts.keywordHex}" />
       </Keywords>
     </EventProvider>
-    <Profile Id="${opts.sessionName}.Verbose.File" Name="${opts.sessionName}" Description="Example scenario ETW capture" LoggingMode="File" DetailLevel="Verbose">
+    <Profile Id="${opts.sessionName}.Verbose.File" Name="${opts.sessionName}" Description="Signalman scenario ETW capture" LoggingMode="File" DetailLevel="Verbose">
       <Collectors>
         <EventCollectorId Value="${collectorId}">
           <EventProviders>

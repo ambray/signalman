@@ -164,7 +164,7 @@ export async function handleDriverUnload(
 // ── driver_ioctl ───────────────────────────────────────────────────
 
 export interface DriverIoctlParams {
-  /** Device path to open, e.g. "\\\\.\\example". */
+  /** Device path to open, e.g. "\\\\.\\my-driver". */
   device: string;
   /** IOCTL control code as a number. Generator emits these as named consts. */
   control_code: number;
@@ -187,9 +187,9 @@ export interface DriverIoctlParams {
   expect_output_size_min?: number;
   timeout_ms?: number;
   /**
-   * Path to `silo-test-harness.exe` on the guest. Defaults to the
-   * Example install location; overridable for dev scenarios that keep
-   * the harness elsewhere.
+   * Path to the IOCTL test harness on the guest. Defaults to
+   * `C:\Signalman\test-harness.exe`; scenarios that ship their own
+   * harness override this.
    */
   harness_path?: string;
 }
@@ -234,7 +234,7 @@ export async function handleDriverIoctl(
     );
   }
 
-  const harness = params.harness_path ?? "C:\\Example\\silo-test-harness.exe";
+  const harness = params.harness_path ?? "C:\\Signalman\\test-harness.exe";
   const timeoutMs = params.timeout_ms ?? 5_000;
 
   const args: string[] = [
@@ -293,7 +293,7 @@ export async function handleDriverIoctl(
  *
  * Example output:
  *
- *     SERVICE_NAME: example
+ *     SERVICE_NAME: my-driver
  *             TYPE               : 1  KERNEL_DRIVER
  *             STATE              : 4  RUNNING
  *             WIN32_EXIT_CODE    : 0  (0x0)

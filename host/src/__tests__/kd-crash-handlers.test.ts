@@ -511,12 +511,12 @@ describe("handleKernelBreakOn", () => {
     // Fire the break event shortly after the handler arms.
     setTimeout(() => s.emitBreak("break-instruction"), 10);
     const r = await handleKernelBreakOn(ctx, {
-      symbol: "example!HandleIoctl",
+      symbol: "example-product!HandleIoctl",
       timeout_ms: 1_000,
     });
     expect(r.matched).toBe(true);
     expect(r.capture_output).toBe("kn-output");
-    expect(s.runCalls[0]).toBe("bp example!HandleIoctl");
+    expect(s.runCalls[0]).toBe("bp example-product!HandleIoctl");
   });
 
   it("uses custom capture command when provided", async () => {

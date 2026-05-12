@@ -119,9 +119,10 @@ by CI pipelines, custom MCP clients, and the Loom plugin's subprocess path.
 Includes pluggable hypervisor backends.
 
 **Supported Hypervisors:**
-- **Hyper-V** (Windows) — primary backend since 2026-04; required for Example
-  correlator silo validation (agent runs as SYSTEM with `SeTcbPrivilege`,
-  which Hyper-V integration services expose cleanly)
+- **Hyper-V** (Windows) — primary backend since 2026-04; required when
+  the guest agent needs to run as SYSTEM with `SeTcbPrivilege` (Hyper-V
+  integration services expose this cleanly, where VMware's tooling
+  pipes through a less-privileged service account)
 - **Tart** (macOS on Apple Silicon) — first Mac runner backend for macOS VM
   lifecycle and command execution through Apple's Virtualization.framework;
   see [docs/mac-virtualization.md](docs/mac-virtualization.md). macOS guests run
@@ -155,8 +156,9 @@ Test definitions using a two-layer approach:
 - **YAML DSL** — VM configuration, setup steps, assertions
 - **Markdown narratives** — natural-language workflow for LLM drivers
 
-The Example V2 scenarios in `examples/example-v2-*` are the reference set that
-exercise the full stack end-to-end (ETW + WFP + kernel-debug tooling).
+Scenarios that exercise the full kernel-side stack (ETW + WFP + kernel-debug
+tooling) typically live in the consuming product's repo's `.signalman/scenarios/`
+directory rather than here — they're product-specific by nature.
 
 ### Meta build control plane (`host/src/control-plane/`) — v0.2.0–v0.3.0
 TypeScript implementation of the release-lifecycle service. Ships
@@ -254,8 +256,8 @@ point at `signalman serve` with `SIGNALMAN_API_URL` for remote mode.
 
 ```bash
 # 1. Register your product (the repo whose tags you'll be building).
-signalman product add --name example \
-  --repo-url https://github.com/ambray/example.git
+signalman product add --name myapp \
+  --repo-url https://github.com/myorg/myapp.git
 
 # 2. Check in a signalman.build.yaml at the root of the product repo:
 #    components: each names a build command, a working directory, and
@@ -265,7 +267,7 @@ signalman product add --name example \
 # 3. Build a release from a tag. Clones the repo, runs each component's
 #    build command, captures artifacts into the blob store, computes
 #    + signs the manifest, writes a release row.
-signalman release build --product example --tag v1.0.0 \
+signalman release build --product myapp --tag v1.0.0 \
   --sign --signing-key ~/.signalman/keys/release.pem
 
 # 4. Register a deploy target (a VM, a Docker host, etc.) and deploy.
@@ -300,7 +302,7 @@ signalman runner start --name builder-1
 
 # `release build --remote` queues a release.build job for any available
 # runner instead of running it in-process:
-signalman release build --product example --tag v1.0.0 --remote
+signalman release build --product myapp --tag v1.0.0 --remote
 ```
 
 Ed25519 signing keys are generated and inspected with `signalman key`:
@@ -370,9 +372,10 @@ scenarios/<name>/
 ### Setup DSL (`setup.yaml`)
 
 Minimal, illustrative example — runs a process listing in a Hyper-V VM
-that already has the guest agent installed. Real scenarios live in
-`examples/example/` (full driver + WFP stack) and `.signalman/scenarios/`
-(short-form smoke tests):
+that already has the guest agent installed. The four scenarios shipped
+with this repo (`.signalman/scenarios/live-*` and `service-backend-smoke`)
+are short smoke tests; product-specific scenarios live in the product's
+own repo's `.signalman/scenarios/` directory.
 
 ```yaml
 name: "smoke: hyperv basic"
@@ -420,10 +423,10 @@ assertions:
     pattern: "ProcessName"
 ```
 
-> Older cursor-restrict / `restrict-ai.rego` examples in earlier docs
-> referenced an Example policy bundle and a `vm_screenshot` RPC that
-> ships as a proto stub in v0.1.0. Use the smoke example above as the
-> starting template instead.
+> Older `cursor-restrict` / `restrict-ai.rego` examples in earlier docs
+> referenced a product-specific policy bundle and a `vm_screenshot` RPC
+> that ships as a proto stub in v0.1.0. Use the smoke example above as
+> the starting template instead.
 
 ## License
 

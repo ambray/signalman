@@ -27,11 +27,11 @@ describe("scenarios", () => {
       path: ".signalman/scenarios/foo",
       scenarioHash: "h1",
       name: "Foo Scenario",
-      tags: ["smoke", "example"],
+      tags: ["smoke", "example-product"],
     });
     expect(s.id).toMatch(/^[0-9A-Z]{26}$/);
     expect(s.source).toBe("disk");
-    expect(s.tags).toEqual(["smoke", "example"]);
+    expect(s.tags).toEqual(["smoke", "example-product"]);
   });
 
   it("upsertFromDisk updates in place on second sighting (same path)", async () => {

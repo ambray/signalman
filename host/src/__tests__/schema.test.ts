@@ -106,7 +106,7 @@ describe("validateScenarioConfig — happy paths", () => {
               enabled: true,
               transport: "serial",
               pipe: "\\\\.\\pipe\\kd-{vm_name}",
-              break_on_load: ["example.sys"],
+              break_on_load: ["my-driver.sys"],
               break_on_bugcheck: true,
               symbol_path: "srv*C:\\Symbols",
             },
@@ -116,7 +116,7 @@ describe("validateScenarioConfig — happy paths", () => {
       "setup.yaml",
     );
     expect(r.vms[0].kernel_debug?.enabled).toBe(true);
-    expect(r.vms[0].kernel_debug?.break_on_load).toEqual(["example.sys"]);
+    expect(r.vms[0].kernel_debug?.break_on_load).toEqual(["my-driver.sys"]);
   });
 
   it("accepts kernel_debug: enabled alone", () => {
@@ -318,7 +318,7 @@ describe("validateScenarioConfig — validation errors", () => {
           name: "endpoint-1",
           template: "win11",
           guest_agent_port: 50051,
-          kernel_debug: { enabled: true, break_on_load: "example.sys" },
+          kernel_debug: { enabled: true, break_on_load: "my-driver.sys" },
         },
       ],
     };

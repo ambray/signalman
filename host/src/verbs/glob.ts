@@ -9,7 +9,7 @@
  *
  * Anything more sophisticated (brace expansion, character classes)
  * isn't needed yet — the agent surface uses ids like
- * `example/v2/network-egress`, and `example/**` plus `*-egress` are the
+ * `mygroup/v2/scenario-name`, and `mygroup/**` plus `*-smoke` are the
  * only patterns we expect in the wild.
  */
 

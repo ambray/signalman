@@ -182,7 +182,7 @@ function defaultTemplates(): Map<string, VmTemplate> {
     networkSwitch: "Default Switch",
     checkpoints: {
       clean: "Windows 11 with development tools",
-      "with-agent": "Windows 11 with Example agent installed",
+      "with-agent": "Windows 11 with the Signalman guest agent installed",
     },
   });
 

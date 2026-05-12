@@ -14,8 +14,8 @@ tracks what is ready to migrate now versus what needs new Signalman capability.
 |------|-----------|----------|-------------|
 | `Invoke-AgentServiceValidation.Tests.ps1` | ~25 | Script validation | Validates the agent validation script structure, checks coverage (10 checks), cleanup, VM config |
 | `Invoke-FullE2EValidation.Tests.ps1` | ~35 | Script validation | Validates full E2E script structure: 18-tool catalog, 8 phases, dashboard verification, reporting, stub strategy |
-| `Invoke-RealWorldValidation.Tests.ps1` | ~15 | Module/prereq validation | Validates Confirm-AgentDetection and ExampleTestVMs module exports, script syntax, prerequisites |
-| `ExampleTestVMs.Tests.ps1` | ~10 | Module validation | Validates ExampleTestVMs module exports (6 functions), tool catalog (26 tools) |
+| `Invoke-RealWorldValidation.Tests.ps1` | ~15 | Module/prereq validation | Validates Confirm-AgentDetection and TestVMs module exports, script syntax, prerequisites |
+| `TestVMs.Tests.ps1` | ~10 | Module validation | Validates TestVMs module exports (6 functions), tool catalog (26 tools) |
 
 ### Orchestrator Scripts (4 primary, ~15 helper scripts)
 
@@ -23,7 +23,7 @@ tracks what is ready to migrate now versus what needs new Signalman capability.
 |--------|------|-------------|
 | `Invoke-AgentServiceValidation.ps1` | Core | 10-check validation: service exists/running, ETW session, logs, process detection, DNS detection, backend registration, heartbeat, telemetry upload, service lifecycle |
 | `Invoke-FullE2EValidation.ps1` | Master | 8-phase orchestration: build, backend, VM setup, agent validation, tool detection (18 tools), dashboard verification (Playwright), reporting, cleanup |
-| `Invoke-ExampleFullTestSuite.ps1` | Parallel | 26-tool parallel batch testing across multiple VMs with HTML/JSON reporting |
+| `Invoke-FullTestSuite.ps1` | Parallel | 26-tool parallel batch testing across multiple VMs with HTML/JSON reporting |
 | `Invoke-TierAValidation.ps1` | Signal matrix | Per-signal detection validation across all registered agents |
 | `Invoke-ToolTest.ps1` (in tools/) | Per-tool | 5-step flow: install (winget), launch (real or stub), DNS traffic, wait, verify detection |
 | 10x `Test-*.ps1` (in tools/) | Wrappers | Per-tool configs delegating to Invoke-ToolTest.ps1 |
@@ -39,9 +39,9 @@ directly to Signalman scenario steps + assertions.
 
 | Pester Check | PowerShell Command | Signalman Action | Signalman Assertion |
 |---|---|---|---|
-| ServiceExists | `Get-Service -Name "ExampleAgent"` | `vm_run_command` (powershell) | `stdout_contains: "Running"` or `json_field` |
+| ServiceExists | `Get-Service -Name "MyAgent"` | `vm_run_command` (powershell) | `stdout_contains: "Running"` or `json_field` |
 | ServiceRunning | `Get-Service` + Status check | `vm_run_command` | `stdout_contains: "Running"` |
-| EtwSessionActive | `logman query -ets` + log grep | `vm_run_command` | `stdout_matches: "example\|ETW"` |
+| EtwSessionActive | `logman query -ets` + log grep | `vm_run_command` | `stdout_matches: "myagent\|ETW"` |
 | AgentLogs | `Get-WinEvent` + file search | `vm_run_command` | `json_field` on structured output |
 | ProcessDetection | Copy stub exe, launch, query backend | `vm_copy_file` + `vm_run_command` + `vm_run_command` | `stdout_contains` or `json_field` |
 | DnsDetection | `[System.Net.Dns]::GetHostAddresses` + backend query | `vm_run_command` + `vm_run_command` | `json_field` |
@@ -125,9 +125,9 @@ are redundant. They do not need to migrate.
 | `logman query -ets` | `vm_run_command` | `ExecuteCommand` gRPC |
 | `Invoke-RestMethod` (from VM) | `vm_run_command` (powershell) | `ExecuteCommand` gRPC |
 | `Start-Sleep -Seconds N` | `wait` (duration_ms) | N/A (host-side delay) |
-| `New-ExampleTestVM` | `vms:` in setup.yaml | Hypervisor backend (Hyper-V/VMware) |
-| `Remove-ExampleTestVM` | `teardown: vm_restore` | Hypervisor backend |
-| `Restore-ExampleTestVM` | Checkpoint restore | Hypervisor backend |
+| `New-TestVM` | `vms:` in setup.yaml | Hypervisor backend (Hyper-V/VMware) |
+| `Remove-TestVM` | `teardown: vm_restore` | Hypervisor backend |
+| `Restore-TestVM` | Checkpoint restore | Hypervisor backend |
 
 ---
 
@@ -136,7 +136,7 @@ are redundant. They do not need to migrate.
 ### Phase 1: Agent Service Validation (this PR)
 
 Migrate the 10 core checks from `Invoke-AgentServiceValidation.ps1` into a
-single Signalman scenario: `scenarios/example-agent-service/`.
+single Signalman scenario: `scenarios/agent-service/`.
 
 - setup.yaml: VM config, agent installation checkpoint
 - workflow.md: 10-step narrative
@@ -145,7 +145,7 @@ single Signalman scenario: `scenarios/example-agent-service/`.
 ### Phase 2: Single Tool Detection (this PR, sample)
 
 Migrate one tool test (Claude Desktop) as a template scenario:
-`scenarios/example-tool-detection/`. This demonstrates the 5-step pattern
+`scenarios/tool-detection/`. This demonstrates the 5-step pattern
 that all 26 tools follow.
 
 ### Phase 3: Full Tool Catalog (future)
@@ -154,7 +154,7 @@ Create a parameterized scenario generator (or 26 scenario directories) for
 the complete tool catalog. Consider a YAML anchor/template approach:
 
 ```yaml
-# scenarios/example-tool-detection/tools.yaml
+# scenarios/tool-detection/tools.yaml
 tools:
   - id: claude-desktop
     process: claude.exe
@@ -175,7 +175,7 @@ This requires a "parameterized scenario" feature in the Signalman runner.
 
 The Pester suite runs 8 VMs in parallel via PowerShell jobs. Signalman's
 orchestrator currently runs one scenario at a time. To match the correlator's
-`Invoke-ExampleFullTestSuite.ps1` parallel strategy, Signalman needs:
+`Invoke-FullTestSuite.ps1` parallel strategy, Signalman needs:
 
 - Multi-scenario batch execution
 - Parallel VM provisioning (already supported by hypervisor backend)
