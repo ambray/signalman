@@ -405,8 +405,7 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
 
 v0.3.0+ speculative: cross-platform daemon (libvirt, vmrun wrapper),
 Linux/macOS guest agent (E3), mobile UI proto shape (E4), per-user
-identity certs and per-method capability tokens, hub component
-resurrection, hosted orchestration.
+identity certs and per-method capability tokens.
 
 ## Outstanding TODOs in code
 

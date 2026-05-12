@@ -82,8 +82,7 @@ services expose cleanly.
 
 ### Vision
 Agents author hermetic, replayable security/compliance/CI workflows. Humans
-and CI run them unattended. Local-first; hosted orchestration is explicitly
-out of scope until v0.3.0+.
+and CI run them unattended. Local-first.
 
 ### Orchestrator / Runner duality
 
@@ -1048,12 +1047,10 @@ is the contract that lets Loom workflows compose Signalman scenarios:
   duplicate-scenario pain is real).
 - Proto enhancements: split `ProcessStartResponse`, `RunCommandStream`
   (carry-over from old Phase 4.1).
-- Hosted orchestration, web dashboard, and multi-tenant operator
-  surface are explicit non-goals for this distribution.
 
 ---
 
-## Product-specific scenarios (out of scope for this repo)
+## Product-specific scenarios
 
 Scenarios that exercise a specific product's behavior (kernel-driver
 test suites, registry/network/silo policy validation, agent-service
@@ -1117,9 +1114,8 @@ Removed from main roadmap; revisit only with concrete evidence of need.
 ### 2026-04-25 (audit-driven)
 
 - **Hub component (`hub/`)** — was 122 LOC of TODO stubs. **Done
-  2026-05-12**: removed from the tree (no other component relied
-  on it; the registry / dashboard / fleet-management surface it
-  envisioned is an explicit non-goal for this distribution).
+  2026-05-12**: removed from the tree; no other component relied
+  on it.
 - **Aspirational README claims** — Azure VMs, AWS EC2, scenario
   marketplace, UI automation, browser automation, cross-platform guest
   agents, fleet management. Removed from README in P6 (A3); reintroduce
