@@ -19,6 +19,7 @@ import * as yaml from "yaml";
 
 const __dirname = import.meta.dirname ?? path.dirname(fileURLToPath(import.meta.url));
 import { parseNarrative } from "./narrative.js";
+import { resolveLayout } from "./project-layout.js";
 import {
   validateScenarioConfig,
   validateAssertionConfig,
@@ -262,15 +263,30 @@ export function loadScenario(scenarioDir: string): {
   narrative: Narrative | null;
 } {
   // Resolve to absolute path and prevent path traversal outside the
-  // project's scenarios root. v0.1.0 supports both the canonical
-  // `.signalman/scenarios/` layout and the legacy top-level
-  // `scenarios/` directory (via project-layout.ts). Either root is
-  // acceptable; anything else is rejected as path traversal.
-  const projectRoot = path.resolve(__dirname, "..", "..", "..");
-  const candidateRoots = [
-    path.join(projectRoot, ".signalman", "scenarios"),
-    path.join(projectRoot, "scenarios"),
-  ];
+  // project's scenarios root. The allowed root is derived from the
+  // CWD-discovered project layout (`resolveLayout(process.cwd())`) —
+  // NOT the signalman install directory — so consumer projects can
+  // own their own `.signalman/scenarios/` per the consumer-owns-recipe
+  // principle (see collector/memory/feedback_consumer_owns_recipe.md,
+  // 2026-05-12). Without this, scenarios under e.g.
+  // `collector/.signalman/scenarios/` would be discoverable by
+  // `signalman list` (which uses findProjectRoot) but rejected by
+  // `signalman run` (which previously hardcoded the install dir).
+  //
+  // Both the canonical `.signalman/scenarios/` layout and the legacy
+  // top-level `scenarios/` directory are supported via the
+  // ProjectLayout returned by resolveLayout.
+  const layout = resolveLayout(process.cwd());
+  const candidateRoots: string[] = [layout.scenariosDir];
+  // Belt-and-suspenders for the cross-layout case: if `.signalman/` is
+  // present, also accept the legacy top-level `scenarios/` sibling so
+  // mixed-layout repos (mid-migration) don't break.
+  if (!layout.legacy) {
+    const legacySibling = path.join(layout.root, "scenarios");
+    if (fs.existsSync(legacySibling)) {
+      candidateRoots.push(legacySibling);
+    }
+  }
   const resolvedDir = path.resolve(scenarioDir);
 
   // Normalize both paths so that trailing separators and case (on
