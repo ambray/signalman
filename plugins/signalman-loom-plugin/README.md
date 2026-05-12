@@ -66,4 +66,5 @@ The `signalman.advanced.*` tools (raw VM/Docker ops, the `signalman_advanced_*` 
 
 ## License
 
-MIT. Same as Signalman.
+Apache License 2.0. Same as Signalman; see the repo-root
+[LICENSE](../../LICENSE).
