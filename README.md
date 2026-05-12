@@ -18,7 +18,7 @@ Signalman is two complementary halves that share storage, auth, and CLI:
 Both halves multiplex through one MCP server, one CLI, and one storage layer
 (pluggable SQLite | Postgres, pluggable local-FS | S3 blobs). Single-tenant by
 default; multi-tenant scoping (`org_id` on every row, Bearer-token API keys)
-is wired through but not surfaced operationally until v0.4.0.
+is wired through the schema but not surfaced operationally.
 
 Website: [signalman.dev](https://signalman.dev)
 
@@ -85,7 +85,7 @@ Website: [signalman.dev](https://signalman.dev)
    +---------------+       +---------------+
 ```
 
-**Three deployment shapes** for the meta build system (see
+**Two deployment shapes** for the meta build system (see
 [docs/design/meta-build-system.md](docs/design/meta-build-system.md)):
 
 - **Local** — single binary, in-process control plane. The default; nothing
@@ -94,8 +94,6 @@ Website: [signalman.dev](https://signalman.dev)
   register via `signalman runner register` and poll via HTTP. SQLite is fine
   for small fleets; Postgres + S3 for larger ones (see
   [docs/postgres-driver.md](docs/postgres-driver.md)).
-- **Hosted commercial** (v0.4.0+) — multi-tenant SaaS atop the same control
-  plane. The schema is already org-scoped; the surface isn't exposed yet.
 
 The Loom-fronted topology is the default agent surface in v0.1.x for the
 scenario half; the meta build verbs (`signalman release build`, `release
