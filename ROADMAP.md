@@ -1,9 +1,9 @@
 # Signalman Development Roadmap
 
-**Last Updated**: 2026-05-12
-**Current Version**: v0.2.0 (tagged 2026-05-12; first formally versioned release — see CHANGELOG.md)
-**Target**: v0.3.0 (hermetic-replayable-unattended trio + ephemeral VM provisioning)
-**Test Count**: 1433 host (vitest) + 133 guest (cargo) tests on main
+**Last Updated**: 2026-05-13
+**Current Version**: v0.2.1 (tagged 2026-05-13; capability-surface scrub — see CHANGELOG.md)
+**Target**: v0.3.0 (hermetic-replayable-unattended trio + ephemeral VM provisioning + cloud provider support + Kubernetes)
+**Test Count**: 1428 host (vitest) + 130 guest (cargo) tests on main
 **Repo**: https://github.com/ambray/signalman.git
 
 **2026-05-12 v0.2.0 cut**: First formally versioned release bundled
@@ -1021,6 +1021,73 @@ is the contract that lets Loom workflows compose Signalman scenarios:
   control-plane reporting. Loom owns those.
 - **Effort**: S
 
+### v0.3.0-5: Cloud provider support (AWS + Azure)
+**Estimated Duration**: 10-15 days
+
+Full design in [`docs/design/meta-build-system.md` §13](docs/design/meta-build-system.md).
+Three workload classes split across two driver paths:
+
+- **Ephemeral test VMs** (`cloud_vm_test` target kind) use the vendor
+  SDK directly (boto3 / Azure SDK). Lifecycle is wall-clock-TTL'd and
+  budget-gated; created per scenario, destroyed at teardown.
+- **Cloud runners** use the vendor SDK directly. Two auth modes shipping:
+  (a) bearer token derived from IAM role on the runner host
+  (the default, simplest), and (b) native vendor identity
+  (IAM role-on-EC2 / managed identity-on-Azure-VM) for enterprise
+  consumers who require it.
+- **Deploy targets** (`cloud_stack_test` target kind) compose via
+  OpenTofu HCL (MPL-2.0; subprocess-safe for both Apache-2.0 OSS and
+  commercial-fork use). Out-of-the-box starter library:
+  `aws-simple-vm`, `aws-three-tier`, `aws-eks-cluster`,
+  `azure-windows-vm`, `azure-linux-vm`, `azure-aks-cluster`.
+
+Cross-cutting concerns:
+
+- **Cost guardrails**: per-org budget, per-target wall-clock TTL,
+  pre-flight `tofu plan` cost estimate surfaced in CI envelope.
+- **Networking default**: public IP + mTLS, with the auth material
+  the guest agent needs delivered through the same per-org credential
+  layer (per-org default → per-target override → per-runtime override).
+- **Pipeline-built golden images**: Packer-based build in-tree, signed
+  with the release-signing key, manifest recorded in the artifact
+  catalog. `vm_lineage_hash` (added in v0.3.0-3) abstracts over
+  cloud-specific image IDs (AMI vs Azure managed image) via
+  `{template_name, version, os, installed[]}`.
+- **OpenTofu state backend**: S3 + DynamoDB lock for self-hosted;
+  local disk for local-mode.
+
+Depends on v0.3.0-2 (ephemeral VM provisioning patterns, especially
+`vm_lineage_hash`) and v0.3.0-3 (hermetic envelope). Parallelizable
+with v0.3.0-1 and v0.3.0-4.
+
+- **Effort**: XL
+
+### v0.3.0-6: Kubernetes (deploy target + runner substrate)
+**Estimated Duration**: 6-10 days
+
+Full design in [`docs/design/meta-build-system.md` §14](docs/design/meta-build-system.md).
+
+- **`k8s_test` target kind**: manifests-first deploy target driver.
+  Apply scenario-declared manifests to a configured cluster context,
+  wait for ready, expose pod IPs to the scenario's assertion layer.
+- **Runner substrate via K8s Jobs**: an alternative to the docker-
+  compose substrate. A Job spawns one runner pod per scenario run;
+  the runner reports status back to the control plane the same way
+  the local/docker-compose runner does.
+- **Cluster auth**: kubeconfig path + context, with optional service-
+  account-token override for in-cluster workloads.
+- **Cross-cloud matrix**: the same `k8s_test` driver works against
+  AKS, EKS, and self-managed clusters; differences live in the
+  starter-library HCL stanzas (aws-eks-cluster, azure-aks-cluster).
+- **Operator pattern**: custom-operator path for tighter scenario ↔
+  Kubernetes integration is deferred to v0.3.x once the manifests-
+  first contract is proven.
+
+Depends on v0.3.0-5 cloud-credential plumbing for cloud-managed
+clusters; works standalone against locally-configured clusters.
+
+- **Effort**: L
+
 ---
 
 ## v0.4.0+ (Speculative)
@@ -1045,6 +1112,36 @@ the v0.2.0 release pipeline.
   `health check` against every active deployment without an
   operator triggering it. Pairs with audit-log retention so flapping
   health is queryable historically.
+
+### Artifact registry as standalone OSS product
+
+Full design in [`docs/design/meta-build-system.md` §15](docs/design/meta-build-system.md).
+
+Promote the v0.3.0 in-tree artifact catalog (which already stores
+content-addressed blobs + the cloud-image manifests landed in
+v0.3.0-5) into a standalone OSS product. Competitive wedge vs.
+JFrog Artifactory and Sonatype Nexus, which are commercial-only in
+this niche (signed-manifest CI artifact storage with deterministic
+replay).
+
+- **Standalone deploy**: ships as a separate binary + service, with
+  the existing `@signalman/host` consuming it over a stable HTTP
+  contract (the same contract the in-tree catalog currently
+  implements internally).
+- **OCI distribution spec compliance**: speak the OCI v2 manifest
+  + blob protocol so `docker pull` / `crane copy` / `oras` interop
+  works out of the box.
+- **Scope**: signed manifests, content-addressed blob store, blob
+  pruning / GC, retention policies, per-org access control. Out of
+  scope: P2P distribution, geographic replication (revisit if real
+  consumer demand surfaces).
+
+Interim v0.3.0 home: cloud-image manifests live in the existing
+artifact catalog (no schema change, just additional content kinds).
+The standalone-product promotion lands when the OSS surface is
+stable enough to commit to a wire contract.
+
+- **Effort**: XL
 
 ### Platform + protocol expansion
 
@@ -1125,15 +1222,19 @@ host↔guest gRPC contract on the isolated side.
 | P8: Proto v1 Freeze | 2-3d | ✅ Closed (E1, E2 — proto v1 frozen) | — |
 | P9: Provisioning + Bootstrap | — | ✅ Closed (v0.1.1 stack) | — |
 | **v0.2.0 (shipped 2026-05-12)** | **bundle of local meta-build + networked control plane** | **✅ Tagged** | **See CHANGELOG.md** |
+| **v0.2.1 (shipped 2026-05-13)** | **capability-surface scrub — wire-breaking patch** | **✅ Tagged** | **See CHANGELOG.md §0.2.1** |
 | v0.3.0-1: Record/Replay | 5-7d | Next milestone | The agent-first differentiator |
-| v0.3.0-2: Ephemeral VMs | 5-8d | Next milestone | True repeatability + `template:` wiring (C9) + streamed copy (C8) |
+| v0.3.0-2: Ephemeral VMs | 5-8d | Next milestone (in progress) | True repeatability + `template:` wiring (C9) + streamed copy (C8) |
 | v0.3.0-3: Hermetic Envelope | 1-2d | Next milestone | Depends on Ephemeral VMs |
 | v0.3.0-4: Explicit Orchestrator | 2-3d | Next milestone | Loom workflows + `loom tui` are the orchestrator; Signalman exposes the contract |
-| v0.4.0+ | tracked above under "Speculative" | — | Auto-promotion / webhooks / scheduling, platform expansion, CLI/OSS-hygiene followups |
+| v0.3.0-5: Cloud provider support | 10-15d | Next milestone | AWS + Azure: ephemeral test VMs + cloud runners (direct SDK), deploy targets (OpenTofu). Depends on -2 + -3 |
+| v0.3.0-6: Kubernetes | 6-10d | Next milestone | `k8s_test` deploy target + Job-based runner substrate. Depends on -5 cloud-credential plumbing |
+| v0.4.0+ | tracked above under "Speculative" | — | Auto-promotion / webhooks / scheduling, **artifact registry as standalone OSS product**, platform expansion, CLI/OSS-hygiene followups |
 
-**v0.3.0 effort**: ~13-20 days. Critical path: Ephemeral VMs →
-Hermetic Envelope; Record/Replay and the Loom-fronted orchestrator
-contract parallelize.
+**v0.3.0 effort**: ~29-45 days. Critical path: Ephemeral VMs →
+Hermetic Envelope → Cloud provider support → Kubernetes;
+Record/Replay and the Loom-fronted orchestrator contract parallelize
+with the cloud track.
 
 ---
 
