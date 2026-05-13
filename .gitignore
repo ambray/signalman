@@ -5,8 +5,11 @@ host/node_modules/
 # Build output
 host/dist/
 guest/target/
-# Cargo workspace target (P1 service crate)
+# Cargo workspace target (P1 service crate). The `target-*/` glob
+# catches CARGO_TARGET_DIR overrides (e.g. `target-codex-check/`)
+# that some local toolchains drop alongside the default target dir.
 target/
+target-*/
 
 # Coverage reports (vitest v8 provider)
 host/coverage/
