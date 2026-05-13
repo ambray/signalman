@@ -1,6 +1,6 @@
 {
   "name": "@signalman/host",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Signalman host: agent-first VM scenario runner + tag-driven release-lifecycle control plane. Hyper-V/Tart/VMware backends; in-process or HTTP control plane; SQLite or Postgres storage; local-FS or S3 blob driver.",
   "type": "module",
   "main": "dist/server.js",

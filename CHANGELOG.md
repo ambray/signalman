@@ -8,6 +8,96 @@ aims for [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Nothing yet.
 
+## [0.2.1] — 2026-05-13
+
+Capability-surface scrub: removes the AI-restriction / sandbox
+machinery that came from the prior consuming product. Scenarios
+that test a specific product's behavior live in the consuming
+product's repo; signalman ships the orchestrator and a thin set of
+generic probes.
+
+This release adjusts the `signalman.guest.v1` wire contract. The
+v1 freeze in v0.2.0 (P8) was tagged on a public release but no
+package was actually published to npm/crates.io before this scrub
+landed (release-workflow gate was held), so no external consumer
+relies on the dropped surface. If you have a fork on a private
+registry, treat this as a wire-breaking change.
+
+### Removed (proto v1, wire-breaking)
+
+- `VerifyRestriction` RPC and its `VerifyRestrictionRequest` /
+  `VerifyRestrictionResponse` messages.
+- `WindowsRestrictionDetails`, `LinuxRestrictionDetails`,
+  `MacOsRestrictionDetails` (the `platform_details` oneof variants
+  on the dropped response).
+- "Restriction Verification" section header in `proto/guest.proto`
+  — renamed to "Network / File-access probes". `TestNetwork` and
+  `TestFileAccess` RPCs remain unchanged.
+
+### Removed (host scenario surface)
+
+- `SandboxMode` TypeScript union type.
+- `sandbox_modes:` scenario-config field (Zod schema + runner type).
+- `sandbox_mode` field on `ScenarioResult`.
+- `runScenarioMultiMode` orchestrator method + `MultiModeResult`
+  return type.
+- `substituteSandboxMode`, `currentSandboxMode`, and
+  `revertVmsToCheckpoints` orchestrator helpers.
+- `${SANDBOX_MODE}` template placeholder. `${param:NAME}` /
+  `${param:NAME:-default}` / `${secret:NAME}` are unchanged.
+- `verifyRestriction` host-side client wrapper, `RestrictionVerdict` /
+  `WindowsRestrictionDetails` interfaces, and the
+  `getWindowsRestrictionDetails` accessor in
+  `host/src/guest/client.ts`.
+
+### Removed (guest crate)
+
+- `RestrictionVerdict`, `RestrictionMode`, `Verdict`, and
+  `RestrictionCheck` types in the guest crate.
+- `verify_restriction` RPC handler stub.
+- The `guest/src/verification.rs` module is renamed to
+  `guest/src/probes.rs` and now only carries the generic
+  `test_network_connectivity`, `test_file_access`, and
+  `verify_software_installed` helpers.
+
+### Renamed (no semantic change)
+
+- `silo-test-harness` → `test-harness` in `host/src/kernel-debug/`
+  tool descriptions and test fixtures. The actual binary name in
+  the consuming product's repo is unaffected by this rename.
+- Test fixtures: `silo-validation` → `example-torture`,
+  `silo_apis_available` → `api_available`, `P2-terminate-silo` →
+  `P2-terminate-process`, `P1-appcontainer-silo-compose` →
+  `P1-compose-smoke`, `silo.sys` → `helper.sys`.
+
+### Kept (deliberately)
+
+- `is_appcontainer`, `appcontainer_sid` on `WindowsProcessDetails`
+  and the AppContainer fields on `WindowsInspectDetails`.
+  AppContainer is a real Windows OS concept the guest can inspect
+  generically; signalman has no internal use for these fields today
+  but they're cheap to keep alongside `is_low_integrity` and
+  `is_in_job` for symmetry.
+- `substituteVarsDeep` orchestrator helper. No callers in v0.2.1;
+  preserved as a generic utility for future matrix-style scenario
+  substitution.
+
+### Docs
+
+- README, ROADMAP, design docs, gated-E2E workflow comment, and
+  service smoke-test runbook scrubbed of references to product-
+  specific scenario names (`silo-validation`, `sandbox-enforcement`,
+  `cursor-restrict`) and Ospiri-niche positioning framing
+  ("Windows kernel-driver / ETW / WFP / silo CI"). v0.2.0 release
+  notes (this file at §0.2.0) are deliberately preserved as a
+  historical record.
+
+### Repo hygiene
+
+- `.gitignore`: added `target-*/` glob to catch `CARGO_TARGET_DIR`
+  overrides (e.g. `target-codex-check/`) alongside the existing
+  `target/` rule.
+
 ## [0.2.0] — 2026-05-12
 
 First versioned release. Bundles the original "v0.2.0 local meta
