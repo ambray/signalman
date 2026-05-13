@@ -144,19 +144,20 @@ gRPC with bearer-token authentication and optional mTLS.
 Scenario file transfer uses this agent in chunks, so Mac/Tart runs do not depend
 on hypervisor-specific shared folders.
 
-UI automation, browser automation, and `VerifyRestriction` RPCs ship as proto
-placeholders returning `unimplemented` in v0.1.0. They will graduate when a
-real consumer needs them; until then, scenarios should rely on
-command-output assertions, ETW captures, and network/file-access tests.
+UI automation and browser automation RPCs ship as proto placeholders
+returning `unimplemented` in v0.1.0 — they graduate when a real
+consumer needs them. Scenarios in the meantime rely on command-output
+assertions and the network/file-access probes the agent already
+implements.
 
 ### Scenarios (`.signalman/scenarios/`, `examples/`)
 Test definitions using a two-layer approach:
 - **YAML DSL** — VM configuration, setup steps, assertions
 - **Markdown narratives** — natural-language workflow for LLM drivers
 
-Scenarios that exercise the full kernel-side stack (ETW + WFP + kernel-debug
-tooling) typically live in the consuming product's repo's `.signalman/scenarios/`
-directory rather than here — they're product-specific by nature.
+Product-specific scenarios live in the consuming product's repo under
+its own `.signalman/scenarios/` directory; this repo only ships a
+handful of minimal smoke scenarios as runnable examples.
 
 ### Meta build control plane (`host/src/control-plane/`) — v0.2.0–v0.3.0
 TypeScript implementation of the release-lifecycle service. Ships
@@ -431,11 +432,6 @@ assertions:
     step: 0
     pattern: "ProcessName"
 ```
-
-> Older `cursor-restrict` / `restrict-ai.rego` examples in earlier docs
-> referenced a product-specific policy bundle and a `vm_screenshot` RPC
-> that ships as a proto stub in v0.1.0. Use the smoke example above as
-> the starting template instead.
 
 ## License
 

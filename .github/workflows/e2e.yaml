@@ -21,7 +21,7 @@
 #      - apply the `e2e` label to a PR (the lane fires on `labeled`).
 #
 # When P7 D4 is fully implemented, this lane will:
-#   - restore a known checkpoint (silo-validation or a `smoke` scenario),
+#   - restore a known checkpoint (`service-backend-smoke` or similar),
 #   - start the service, install/start the guest agent in the VM,
 #   - run `signalman run smoke` and assert envelope.result == "pass",
 #   - upload the run envelope + service/guest logs as artifacts.

@@ -256,7 +256,7 @@ components:
 verification:
   smoke:    [example-v2-network-egress, example-agent-service]
   torture:  [example-v2-network-torture]
-  e2e:      [example-v2-registry-deny, silo-validation]
+  e2e:      [example-v2-registry-deny, example-e2e-full-stack]
 ```
 
 The schema is intentionally narrow: a list of components, each with a build invocation and the artifacts it produces. Signalman validates that every declared artifact exists post-build (the explicit fix for the "forgot the dashboard" failure class). Components run in declaration order; parallelism comes later.

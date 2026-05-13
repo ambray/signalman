@@ -171,7 +171,7 @@ Mirrors `.github/workflows/` — discoverable, in-tree, version-controlled.
 **Migration plan** (no code in this PR):
 1. Loader honors **both** locations during v0.1.0: `.signalman/scenarios/` first, fall back to `scenarios/` with a deprecation warning. `.signalman/config.yaml` similarly preempts `signalman.yaml`.
 2. **Scenario relocation** (separate PR per ROADMAP "Examples" section):
-   - Product-specific scenarios (kernel-driver suites, silo-validation, sandbox-enforcement, etc.) live in the consuming product's repo, not here.
+   - Product-specific scenarios (kernel-driver suites, registry/network policy validation, etc.) live in the consuming product's repo, not here.
    - Add 1–2 minimal in-tree scenarios under `.signalman/scenarios/` (e.g. `smoke/`) so the default project ships runnable.
 3. `signalman init` subcommand scaffolds `.signalman/` with a default `config.yaml` and `scenarios/.gitkeep`.
 
@@ -179,7 +179,7 @@ Mirrors `.github/workflows/` — discoverable, in-tree, version-controlled.
 
 ## 3. Scenario YAML schema (v0.1.0 baseline)
 
-The existing Zod schema in [`host/src/scenarios/schema.ts`](../../host/src/scenarios/schema.ts) (with `.passthrough()`) is the v0.1.0 baseline. Below are the **new** top-level fields P0 reserves; everything else (vms, setup, teardown, checkpoints, kernel_debug, sandbox_modes) carries forward unchanged.
+The existing Zod schema in [`host/src/scenarios/schema.ts`](../../host/src/scenarios/schema.ts) (with `.passthrough()`) is the v0.1.0 baseline. Below are the **new** top-level fields P0 reserves; everything else (vms, setup, teardown, checkpoints, kernel_debug) carries forward unchanged.
 
 ```yaml
 name: "Smoke — agent reachable"
@@ -209,7 +209,6 @@ vms: [...]
 setup: [...]
 teardown: [...]
 checkpoints: {...}
-sandbox_modes: [...]    # optional, existing
 ```
 
 Reservation rules for v0.1.0:
@@ -217,7 +216,7 @@ Reservation rules for v0.1.0:
 - `${secret:NAME}` strings are tokenized but not resolved; if a scenario references one, `plan` returns a warning.
 - `${param:NAME}` and `${param:NAME:-default}` are resolved at run time from `signalman.run`'s `parameters` arg.
 
-The substitution implementation lives in the same scope as today's `${SANDBOX_MODE}` substitution ([`runner.ts:60-69`](../../host/src/scenarios/runner.ts)).
+The substitution implementation lives alongside the scenario loader in [`host/src/scenarios/`](../../host/src/scenarios/).
 
 ---
 
