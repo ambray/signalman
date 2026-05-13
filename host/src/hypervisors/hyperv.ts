@@ -32,6 +32,7 @@ import {
   sanitizeTimeout,
 } from "../sanitize.js";
 import type { TlsOptions } from "../guest/client.js";
+import { runCopyWithProgress } from "../provisioning/copy-file-progress.js";
 
 const exec = promisify(execFile);
 
@@ -534,15 +535,27 @@ SELECT * FROM __InstanceModificationEvent WITHIN 1
     handle: VMHandle,
     hostPath: string,
     guestPath: string,
-    _progress?: ProgressCallback,
+    progress?: ProgressCallback,
   ): Promise<void> {
     const safeName = escapePowerShellArg(sanitizeVmName(handle.name));
     const safeHostPath = escapePowerShellArg(sanitizePath(hostPath));
     const safeGuestPath = escapePowerShellArg(sanitizePath(guestPath));
-    // Copy-VMFile requires the VM to be running and have integration services
-    await ps(`
-      Copy-VMFile -Name '${safeName}' -SourcePath '${safeHostPath}' -DestinationPath '${safeGuestPath}' -FileSource Host -Force
-    `);
+    // Copy-VMFile requires the VM to be running and have integration services.
+    // The cmdlet has no native progress hook, so for files past the heartbeat
+    // threshold we emit a "still working" event every N seconds via
+    // runCopyWithProgress (v0.3.0-2 / C8). Heartbeats keep the operator from
+    // thinking a multi-GB copy is hung; true byte-level progress requires the
+    // service-backed path (HyperVServiceBackend.copyFileToVM) which consumes
+    // the streaming VmCopyFile RPC.
+    await runCopyWithProgress({
+      hostPath,
+      progress,
+      runCopy: async () => {
+        await ps(`
+          Copy-VMFile -Name '${safeName}' -SourcePath '${safeHostPath}' -DestinationPath '${safeGuestPath}' -FileSource Host -Force
+        `);
+      },
+    });
   }
 
   async copyFileFromVM(
