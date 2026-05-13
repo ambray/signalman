@@ -4,7 +4,7 @@ package signalman.guest;
 
 // Guest Agent gRPC service — runs inside each VM.
 // The host MCP server calls these RPCs to control processes,
-// automate UI, and verify restrictions.
+// automate UI, and run network / file-access probes.
 //
 // ── v1 freeze (P8, 2026-04-26) ─────────────────────────────────────
 // This file is the v1 contract. Field numbers are STABLE; renames
@@ -54,8 +54,7 @@ service GuestAgent {
   rpc BrowserEvaluate(BrowserEvaluateRequest) returns (BrowserEvaluateResponse);
   rpc BrowserScreenshot(BrowserScreenshotRequest) returns (BrowserScreenshotResponse);
 
-  // ── Restriction Verification ────────────────────────────────
-  rpc VerifyRestriction(VerifyRestrictionRequest) returns (VerifyRestrictionResponse);
+  // ── Network / File-access probes ────────────────────────────
   rpc TestNetwork(TestNetworkRequest) returns (TestNetworkResponse);
   rpc TestFileAccess(TestFileAccessRequest) returns (TestFileAccessResponse);
 
@@ -409,65 +408,7 @@ message BrowserScreenshotResponse {
   uint32 height = 4;
 }
 
-// ── Restriction Verification ──────────────────────────────────────
-
-message VerifyRestrictionRequest {
-  uint32 pid = 1;
-  string process_name = 2;  // Alternative: find by name
-}
-
-// Restriction verdict — cross-platform top-level result + per-platform
-// evidence in the platform_details oneof.
-message VerifyRestrictionResponse {
-  // Cross-platform top-level fields:
-  bool is_restricted = 1;
-  // Free-form verdict label. Recognised values today:
-  //   "fully_restricted" | "partially_restricted" | "not_restricted"
-  string verdict = 12;
-  repeated string issues = 13;
-  // Network-egress observations (cross-platform).
-  bool has_firewall_rules = 8;
-  repeated string blocked_domains = 9;
-
-  // P8: tags 2–7, 10–11 previously held flat Windows-specific evidence
-  // (restriction_mode, has_appcontainer_token, appcontainer_sid,
-  // is_low_integrity, is_in_job, job_name, has_restrict_dll,
-  // restrict_dll_path). They moved into WindowsRestrictionDetails.
-  reserved 2, 3, 4, 5, 6, 7, 10, 11;
-  reserved "restriction_mode", "has_appcontainer_token",
-           "appcontainer_sid", "is_low_integrity", "is_in_job",
-           "job_name", "has_restrict_dll", "restrict_dll_path";
-
-  oneof platform_details {
-    WindowsRestrictionDetails windows = 100;
-    LinuxRestrictionDetails linux = 101;
-    MacOsRestrictionDetails macos = 102;
-  }
-}
-
-message WindowsRestrictionDetails {
-  // Restriction mode the agent observed.
-  // Values: "AppContainer" | "Legacy" | "None"
-  string restriction_mode = 1;
-  // AppContainer-token observations.
-  bool has_appcontainer_token = 2;
-  string appcontainer_sid = 3;
-  bool is_low_integrity = 4;
-  // Job-object observations.
-  bool is_in_job = 5;
-  string job_name = 6;
-  // DLL-injection-based restriction observations (e.g. RestrictDll).
-  bool has_restrict_dll = 7;
-  string restrict_dll_path = 8;
-}
-
-message LinuxRestrictionDetails {
-  // Reserved for future use; empty for now.
-}
-
-message MacOsRestrictionDetails {
-  // Reserved for future use; empty for now.
-}
+// ── Network / File-access probes ──────────────────────────────────
 
 message TestNetworkRequest {
   string host = 1;

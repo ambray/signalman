@@ -53,7 +53,7 @@ describe("resolveJsonPath", () => {
     const obj = {
       results: [
         { test_id: "P1-assign-suspended", result: "pass" },
-        { test_id: "P2-terminate-silo", result: "fail" },
+        { test_id: "P2-terminate-process", result: "fail" },
       ],
     };
     expect(
@@ -93,8 +93,8 @@ describe("resolveJsonPath", () => {
   });
 
   it("handles boolean values", () => {
-    const obj = { summary: { silo_apis_available: true } };
-    expect(resolveJsonPath(obj, "summary.silo_apis_available")).toBe(true);
+    const obj = { summary: { api_available: true } };
+    expect(resolveJsonPath(obj, "summary.api_available")).toBe(true);
   });
 });
 
@@ -188,7 +188,7 @@ describe("json_field assertions", () => {
   it("evaluates nested boolean field", async () => {
     const ctx = makeCtx({
       commandResults: new Map([
-        ["step-1", makeCmd('{"summary":{"silo_apis_available":true}}')],
+        ["step-1", makeCmd('{"summary":{"api_available":true}}')],
       ]),
     });
     const evaluator = new AssertionEvaluator(ctx);
@@ -196,7 +196,7 @@ describe("json_field assertions", () => {
       id: "test-2",
       type: "json_field",
       source: "step-1",
-      field: "summary.silo_apis_available",
+      field: "summary.api_available",
       expected: true,
     });
     expect(result.passed).toBe(true);
@@ -558,7 +558,7 @@ describe("stdout_contains assertions", () => {
   it("passes when stdout contains expected string", async () => {
     const ctx = makeCtx({
       commandResults: new Map([
-        ["s1", makeCmd("P1-appcontainer-silo-compose passed")],
+        ["s1", makeCmd("P1-compose-smoke passed")],
       ]),
     });
     const evaluator = new AssertionEvaluator(ctx);
@@ -566,7 +566,7 @@ describe("stdout_contains assertions", () => {
       id: "sc-1",
       type: "stdout_contains",
       source: "s1",
-      expected: "P1-appcontainer-silo-compose",
+      expected: "P1-compose-smoke",
     });
     expect(result.passed).toBe(true);
   });

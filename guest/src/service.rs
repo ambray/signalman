@@ -1,10 +1,10 @@
 //! GuestAgent gRPC service implementation.
 //!
 //! Implements the GuestAgent service defined in proto/guest.proto.
-//! Core RPCs (health, process control, command execution, verification) are
+//! Core RPCs (health, process control, command execution, probes) are
 //! implemented here. Interactive UI and browser-contract RPCs proxy to the
 //! user-session sidecar so service-session isolation does not block desktop
-//! automation; deep restriction inspection remains a future slot.
+//! automation.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -15,7 +15,7 @@ use tracing::{info, warn};
 
 use crate::guest_proto::guest_agent_server::GuestAgent;
 use crate::guest_proto::*;
-use crate::{process, ui_sidecar, verification};
+use crate::{probes, process, ui_sidecar};
 
 #[allow(dead_code)]
 #[path = "file_ops.rs"]
@@ -1190,16 +1190,7 @@ impl GuestAgent for GuestAgentService {
         }))
     }
 
-    // ── Restriction Verification ────────────────────────────────
-
-    async fn verify_restriction(
-        &self,
-        _request: Request<VerifyRestrictionRequest>,
-    ) -> Result<Response<VerifyRestrictionResponse>, Status> {
-        Err(Status::unimplemented(
-            "VerifyRestriction requires Win32 token inspection — not yet implemented",
-        ))
-    }
+    // ── Network / File-access probes ────────────────────────────
 
     async fn test_network(
         &self,
@@ -1218,7 +1209,7 @@ impl GuestAgent for GuestAgentService {
             Duration::from_secs(5)
         };
 
-        let result = verification::test_network_connectivity(&req.host, port, timeout);
+        let result = probes::test_network_connectivity(&req.host, port, timeout);
 
         Ok(Response::new(TestNetworkResponse {
             reachable: result.reachable,
@@ -1244,7 +1235,7 @@ impl GuestAgent for GuestAgentService {
             &req.operation
         };
 
-        let result = verification::test_file_access(&req.path, operation);
+        let result = probes::test_file_access(&req.path, operation);
 
         Ok(Response::new(TestFileAccessResponse {
             allowed: result.allowed,
@@ -2129,16 +2120,6 @@ mod tests {
         assert!(list.entries.iter().any(|entry| entry.name == "payload.txt"));
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn test_unimplemented_rpcs() {
-        let svc = make_service();
-
-        let r = svc
-            .verify_restriction(Request::new(VerifyRestrictionRequest::default()))
-            .await;
-        assert_eq!(r.unwrap_err().code(), tonic::Code::Unimplemented);
     }
 
     #[tokio::test]

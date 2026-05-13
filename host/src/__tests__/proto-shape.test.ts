@@ -8,21 +8,19 @@
  * Windows-only call sites.
  *
  * Why this matters at fleet scale: when Linux/macOS guest agents ship,
- * the same `loom.signalman.run` invocation will return ProcessInfo /
- * RestrictionVerdict with `platformDetails.linux` / `platformDetails.
- * macos` instead of `platformDetails.windows`. Helpers like
- * `getWindowsProcessDetails` must return `undefined` cleanly in that
- * case so scenario authors don't accidentally treat zero-defaulted
- * Windows fields as real evidence. These tests pin that contract.
+ * the same `loom.signalman.run` invocation will return ProcessInfo with
+ * `platformDetails.linux` / `platformDetails.macos` instead of
+ * `platformDetails.windows`. Helpers like `getWindowsProcessDetails`
+ * must return `undefined` cleanly in that case so scenario authors
+ * don't accidentally treat zero-defaulted Windows fields as real
+ * evidence. These tests pin that contract.
  */
 
 import { describe, it, expect } from "vitest";
 
 import {
   getWindowsProcessDetails,
-  getWindowsRestrictionDetails,
   type ProcessInfo,
-  type RestrictionVerdict,
 } from "../guest/client.js";
 
 describe("ProcessInfo platform_details oneof (P8)", () => {
@@ -83,61 +81,6 @@ describe("ProcessInfo platform_details oneof (P8)", () => {
       user: "",
     };
     expect(getWindowsProcessDetails(info)).toBeUndefined();
-  });
-});
-
-describe("RestrictionVerdict platform_details oneof (P8)", () => {
-  it("getWindowsRestrictionDetails returns the Windows variant when present", () => {
-    const verdict: RestrictionVerdict = {
-      isRestricted: true,
-      hasFirewallRules: true,
-      blockedDomains: ["api.openai.com"],
-      verdict: "fully_restricted",
-      issues: [],
-      platformDetails: {
-        windows: {
-          restrictionMode: "AppContainer",
-          hasAppcontainerToken: true,
-          appcontainerSid: "S-1-15-2-...",
-          isLowIntegrity: false,
-          isInJob: true,
-          jobName: "example-restrict",
-          hasRestrictDll: true,
-          restrictDllPath: "C:\\Example\\restrict.dll",
-        },
-      },
-    };
-    const win = getWindowsRestrictionDetails(verdict);
-    expect(win).toBeDefined();
-    expect(win!.restrictionMode).toBe("AppContainer");
-    expect(win!.hasAppcontainerToken).toBe(true);
-    expect(win!.jobName).toBe("example-restrict");
-  });
-
-  it("getWindowsRestrictionDetails returns undefined when no platform variant set", () => {
-    const verdict: RestrictionVerdict = {
-      isRestricted: false,
-      hasFirewallRules: false,
-      blockedDomains: [],
-      verdict: "unrestricted",
-      issues: [],
-    };
-    expect(getWindowsRestrictionDetails(verdict)).toBeUndefined();
-  });
-
-  it("cross-platform top-level fields (verdict, issues, blockedDomains) work without platform variant", () => {
-    // Scenario authors targeting both Windows and Linux guests can
-    // assert on the agnostic verdict + issues without unwrapping.
-    const verdict: RestrictionVerdict = {
-      isRestricted: true,
-      hasFirewallRules: true,
-      blockedDomains: ["evil.example.com"],
-      verdict: "partially_restricted",
-      issues: ["network leak detected"],
-    };
-    expect(verdict.verdict).toBe("partially_restricted");
-    expect(verdict.blockedDomains).toContain("evil.example.com");
-    expect(verdict.issues).toHaveLength(1);
   });
 });
 

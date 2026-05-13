@@ -165,14 +165,6 @@ describe("validateScenarioConfig — happy paths", () => {
     expect(r.vms.length).toBe(2);
   });
 
-  it("accepts sandbox_modes when present", () => {
-    const r = validateScenarioConfig(
-      { ...validScenario(), sandbox_modes: ["v1", "v2"] },
-      "setup.yaml",
-    );
-    expect(r.sandbox_modes).toEqual(["v1", "v2"]);
-  });
-
   // Runtime guard blocks: schema accepts the declarative shape; the
   // orchestrator tests pin enforcement behavior.
   it("accepts the capabilities block", () => {

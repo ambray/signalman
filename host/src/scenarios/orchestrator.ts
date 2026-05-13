@@ -32,10 +32,7 @@ import {
   evaluateAssertionsV2,
   extractToolBlocks,
 } from "./runner.js";
-import type {
-  SetupStep,
-  SandboxMode,
-} from "./runner.js";
+import type { SetupStep } from "./runner.js";
 import type { ValidatedRetryPolicy } from "./schema.js";
 import type { EnvelopeEventEmitter } from "../output/envelope.js";
 import { runWithTrace, type TraceContext } from "../output/trace.js";
@@ -271,45 +268,17 @@ export interface ScenarioResult {
   assertion_results: AssertionResult[];
   teardown_results: StepResult[];
   error?: string;
-  /**
-   * Sandbox enforcement mode this run executed under.
-   *
-   * Populated when the scenario's `sandbox_modes:` list is used (Sprint
-   * 60 Phase 5, Story 5.2). Absent for single-mode runs.
-   */
-  sandbox_mode?: SandboxMode;
 }
 
-/**
- * Aggregated results from running a scenario across multiple sandbox modes.
- *
- * Produced by `ScenarioOrchestrator.runScenarioMultiMode` when the
- * scenario's `setup.yaml` declares a `sandbox_modes:` list. The Phase 5
- * regression detector consumes this shape to diff sandboxed runs against
- * the `none` baseline.
- *
- * # Sprint Reference
- * Sprint 60, Phase 5, Story 5.2.
- */
-export interface MultiModeResult {
-  scenario: string;
-  /** One entry per mode in the order declared by the scenario config. */
-  runs: Array<{
-    mode: SandboxMode;
-    result: ScenarioResult;
-  }>;
-  total_duration_ms: number;
-}
-
-// ── Template variable substitution (Story 5.2) ────────────────────
+// ── Template variable substitution ────────────────────────────────
 
 /**
  * Substitute `${VAR_NAME}` tokens in a value recursively.
  *
  * Walks strings (replace), arrays (map), and plain objects (clone keys).
- * Non-string primitives pass through unchanged. Used by the multi-mode
- * scenario runner to stamp `${SANDBOX_MODE}` into setup steps and tool
- * block parameters.
+ * Non-string primitives pass through unchanged. Currently unused in
+ * v0.2.0 — preserved as a generic helper for future matrix-style
+ * scenario substitution.
  */
 export function substituteVarsDeep(
   value: unknown,
@@ -1306,119 +1275,6 @@ export class ScenarioOrchestrator {
   }
 
   /**
-   * Execute a scenario across multiple sandbox enforcement modes.
-   *
-   * Reads the `sandbox_modes:` list from the scenario's `setup.yaml`. If
-   * absent or empty, falls back to a single `runScenario` invocation
-   * wrapped in a `MultiModeResult` (preserves backward compatibility).
-   *
-   * Between modes the orchestrator reverts every VM to the checkpoint
-   * declared by `VmConfig.checkpoint_restore` before the next run. If a
-   * VM has no checkpoint declared, revert is skipped with a warning —
-   * the run will still execute but state may leak between modes.
-   *
-   * Each setup step parameter and tool block parameter has
-   * `${SANDBOX_MODE}` substituted with the active mode name, so the
-   * same scenario file can parameterize per-mode behavior (e.g.
-   * `product-cli set-mode ${SANDBOX_MODE}`).
-   *
-   * # Sprint Reference
-   * Sprint 60, Phase 5, Story 5.2.
-   */
-  async runScenarioMultiMode(scenarioPath: string): Promise<MultiModeResult> {
-    const startTime = Date.now();
-
-    let declaredModes: SandboxMode[] | undefined;
-    let scenarioName = "unknown";
-    try {
-      const loaded = loadScenario(scenarioPath);
-      declaredModes = loaded.config.sandbox_modes;
-      scenarioName = loaded.config.name;
-    } catch {
-      // If scenario fails to load we still want runScenario's error handling
-      // to produce the failure record, so fall through to a single run.
-    }
-
-    const modes: SandboxMode[] =
-      declaredModes && declaredModes.length > 0 ? declaredModes : (["none"] as SandboxMode[]);
-
-    const runs: Array<{ mode: SandboxMode; result: ScenarioResult }> = [];
-    for (let i = 0; i < modes.length; i++) {
-      const mode = modes[i];
-      if (i > 0) {
-        // Between modes: revert every VM to its declared checkpoint so
-        // the next run starts from the same state as the first.
-        await this.revertVmsToCheckpoints(scenarioPath);
-      }
-
-      // Set the mode context so that setup/workflow steps can substitute
-      // `${SANDBOX_MODE}` before execution.
-      this.currentSandboxMode = mode;
-      try {
-        const result = await this.runScenario(scenarioPath);
-        result.sandbox_mode = mode;
-        runs.push({ mode, result });
-      } finally {
-        this.currentSandboxMode = undefined;
-      }
-    }
-
-    return {
-      scenario: scenarioName,
-      runs,
-      total_duration_ms: Date.now() - startTime,
-    };
-  }
-
-  /**
-   * The mode currently being executed by `runScenarioMultiMode`, if any.
-   * Read by `substituteSandboxMode` at step-dispatch time.
-   */
-  private currentSandboxMode: SandboxMode | undefined;
-
-  /**
-   * Recursively substitute `${SANDBOX_MODE}` in all string values of a
-   * setup step or tool block parameter map. Returns a new object; the
-   * input is not mutated.
-   */
-  protected substituteSandboxMode<T>(value: T): T {
-    const mode = this.currentSandboxMode;
-    if (mode === undefined) return value;
-    return substituteVarsDeep(value, { SANDBOX_MODE: mode }) as T;
-  }
-
-  /**
-   * Revert every VM declared by the scenario to its `checkpoint_restore`
-   * label. Used between sandbox-mode runs.
-   */
-  private async revertVmsToCheckpoints(scenarioPath: string): Promise<void> {
-    const { config } = loadScenario(scenarioPath);
-    for (const vm of config.vms) {
-      if (!vm.checkpoint_restore) {
-        console.warn(
-          `[orchestrator] VM '${vm.name}' has no checkpoint_restore declared — ` +
-            `state may leak between sandbox modes`,
-        );
-        continue;
-      }
-      const handle = await this.backend
-        .listVMs()
-        .then((vms) => vms.find((v) => v.name === vm.template));
-      if (!handle) {
-        console.warn(
-          `[orchestrator] could not resolve VM '${vm.template}' for revert; skipping`,
-        );
-        continue;
-      }
-      await this.backend.restoreCheckpoint({
-        id: "",
-        vmHandle: handle,
-        label: vm.checkpoint_restore,
-      });
-    }
-  }
-
-  /**
    * P9.2 — Read + parse a bundle.yaml from disk and apply it to a VM.
    *
    * Used by both the `install_bundle` setup-action and the top-level
@@ -1570,10 +1426,7 @@ export class ScenarioOrchestrator {
     const results: StepResult[] = [];
 
     for (let stepIndex = 0; stepIndex < steps.length; stepIndex++) {
-      const rawStep = steps[stepIndex];
-      // Story 5.2: substitute ${SANDBOX_MODE} etc. before dispatch so the
-      // existing per-action handlers see the resolved values.
-      const step = this.substituteSandboxMode(rawStep) as SetupStep;
+      const step = steps[stepIndex];
       const vmName = (step.vm as string) ?? "";
       const startTime = Date.now();
 
@@ -1937,12 +1790,9 @@ export class ScenarioOrchestrator {
    */
   async executeToolBlock(
     tool: string,
-    rawParams: Record<string, unknown>,
+    params: Record<string, unknown>,
     vmMap: Map<string, VMHandle>,
   ): Promise<string> {
-    // Story 5.2: substitute ${SANDBOX_MODE} across tool block parameters
-    // before any handler reads them.
-    const params = this.substituteSandboxMode(rawParams) as Record<string, unknown>;
     const vmName = (params.vm as string) ?? vmMap.keys().next().value;
 
     switch (tool) {

@@ -44,14 +44,6 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * Sandbox-enforcement modes that multi-mode scenarios cycle through.
- * Each declared mode triggers a fresh scenario run, and the
- * orchestrator compares sandboxed results against the `none` baseline
- * to surface regressions.
- */
-export type SandboxMode = "none" | "legacy" | "appcontainer" | "silo";
-
-/**
  * Bundle reference inside a scenario's `software:` list. Either a bare
  * path string or an object identifying the path + target VM. Resolved by
  * the orchestrator before `setup:` runs (P9.2).
@@ -85,17 +77,6 @@ export interface ScenarioConfig {
   setup: SetupStep[];
   teardown: SetupStep[];
   checkpoints: CheckpointConfig;
-  /**
-   * Sprint 60 Phase 5, Story 5.2 — list of sandbox enforcement modes to
-   * run this scenario under. If omitted or empty, the scenario runs once
-   * without a mode context (legacy behavior). When present, the
-   * orchestrator runs setup → workflow → assertions once per mode with
-   * snapshot revert between runs.
-   *
-   * Each setup step and tool block parameter string has `${SANDBOX_MODE}`
-   * substituted with the active mode name before execution.
-   */
-  sandbox_modes?: SandboxMode[];
 }
 
 export interface VmConfig {

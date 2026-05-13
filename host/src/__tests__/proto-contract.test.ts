@@ -76,14 +76,6 @@ describe("proto/guest.proto v1 freeze invariants", () => {
     expect(block).toMatch(/oneof\s+platform_details\s*\{/);
   });
 
-  it("VerifyRestrictionResponse reserves Windows-only field tags", () => {
-    const block = extractMessageBlock(source, "VerifyRestrictionResponse");
-    // Tags 2-7 + 10, 11 — the audit-flagged Windows fields
-    // (restriction_mode, has_appcontainer_token, etc.).
-    expect(block).toContain("reserved 2, 3, 4, 5, 6, 7, 10, 11");
-    expect(block).toMatch(/oneof\s+platform_details\s*\{/);
-  });
-
   it("StreamReadiness RPC is reserved as a server-streaming slot", () => {
     expect(source).toMatch(
       /rpc\s+StreamReadiness\s*\(\s*StreamReadinessRequest\s*\)\s+returns\s*\(\s*stream\s+ReadinessUpdate\s*\)/,

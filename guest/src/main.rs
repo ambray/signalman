@@ -4,7 +4,7 @@
 //! - Process control (start, stop, inspect)
 //! - UI automation (Windows UI Automation API)
 //! - Browser automation (Chrome DevTools Protocol)
-//! - Restriction verification (AppContainer, firewall, ACL)
+//! - Network and file-access probes (TCP reach, ACL access checks)
 //! - Software installation (winget, choco, direct)
 //! - Screenshot capture
 //!
@@ -26,12 +26,12 @@ pub mod guest_proto {
 }
 
 pub mod cert_pin;
+pub mod probes;
 pub mod process;
 mod service;
 pub mod tls;
 pub mod trace;
 mod ui_sidecar;
-pub mod verification;
 
 /// Default gRPC listen address (loopback only for security).
 const DEFAULT_BIND: &str = "127.0.0.1:50051";
