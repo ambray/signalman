@@ -427,11 +427,16 @@ Each skill is short — it tells the LLM the verb, the expected envelope shape, 
 
 ## 12. Phasing
 
-### v0.2.0 — MVP (local mode) **[SHIPPED]**
+### v0.2.0 — local + self-hosted meta build system **[SHIPPED 2026-05-12]**
 
-Scope: single binary on a laptop, in-process control plane, SQLite, local FS blobs, default org. Enough to replace the current LLM-driven build/deploy of the product.
+First formally versioned release. Bundles the originally-scoped
+v0.2.0 (local in-process) and v0.3.0 (networked control plane)
+into one tag since they were developed in lockstep on the same
+branch.
 
-- Control plane skeleton (in-process), Drizzle schema, SQLite migrations
+Local in-process meta build system:
+
+- Control plane skeleton (in-process), schema, SQLite migrations
 - `BlobDriver` interface + local FS impl
 - `signalman.build.yaml` parser + validator
 - `release build` with artifact verification
@@ -444,9 +449,7 @@ Scope: single binary on a laptop, in-process control plane, SQLite, local FS blo
 - LLM skills for build / deploy / rollback / health
 - Migration of existing scenario verbs to control-plane shim (in-process)
 
-### v0.3.0 — self-hosted **[SHIPPED]**
-
-Scope: control plane separable as a deployable service; runners register over HTTP; bearer-token auth; Postgres tested; S3 blob driver.
+Networked control plane:
 
 - ✅ `signalman serve` standalone (`host/src/http/index.ts`, `cli.ts cmdServe`)
 - ✅ HTTP API surface + bearer-token auth (`host/src/http/app.ts`, `auth.ts`)
@@ -457,17 +460,541 @@ Scope: control plane separable as a deployable service; runners register over HT
 - ✅ Audit log surface (`POST /v1/audit`, `GET /v1/audit`)
 - ✅ Manifest signing — Ed25519 via Node's built-in `crypto` (`host/src/control-plane/build/signing.ts`); `signalman key generate/fingerprint` + `release verify`
 
-### v0.4.0+ — auto-promote, webhooks, scheduling
+### v0.3.0 — cloud provider support + Kubernetes + image pipeline
+
+Scope: expand the substrate. Ship cloud-provider hypervisor
+backends, deploy-target drivers (OpenTofu + Kubernetes manifests),
+cloud runners, pipeline-built golden images, and cost guardrails.
+Also lands the four originally-scoped v0.3.0 epics
+(Record/Replay, Ephemeral VMs, Hermetic Envelope, Explicit
+Orchestrator) — see `ROADMAP.md`.
+
+Cloud provider work is the substantive new design surface;
+see §13 (Cloud provider support) for the full design.
+Kubernetes work is §14. Artifact registry as a separate OSS
+product line lands in v0.4.0+ — see §15.
+
+### v0.4.0+ — auto-promote, webhooks, scheduling, artifact registry
 
 - Auto-promotion pipelines (build → tier → tier with approval)
 - Approval workflows
 - Webhooks / Slack / email notifications
 - Scheduled health checks
 - Cross-product release coordination
+- Artifact registry as a separate OSS product (§15)
 
 ---
 
-## 13. Open questions
+## 13. Cloud provider support (v0.3.0)
+
+Expand the platform's substrate so scenarios run, deploys land,
+and runners execute against major cloud providers — not just local
+hypervisors. v0.3.0 ships **AWS** and **Azure**; both **Windows
+and Linux** are first-class.
+
+### 13.1 The workload split
+
+Cloud provider support is three distinct workloads with very
+different optimal tooling. The single biggest architectural
+decision is to acknowledge that split rather than force them
+through a single abstraction.
+
+| Workload | Lifetime | Tool | Why |
+|---|---|---|---|
+| **Ephemeral test VM** (hypervisor backend) | minutes to hours; one job per VM, destroy after | Direct SDK (`@aws-sdk/client-ec2`, `@azure/arm-compute`) | Speed and minimal overhead matter; no need for declarative state on a single ephemeral resource |
+| **Cloud runner** (registered worker) | days to weeks; warm pool, reused | Direct SDK | Persistent but simple lifecycle; SDK call to provision/destroy + the runner registers via standard registration |
+| **Cloud deploy target** (staging / demo / prod environment) | indefinite; evolves over time | OpenTofu via subprocess | Declarative model, state file, drift detection, dependency ordering between resources (VPC → subnet → EC2 → ALB → cert → DNS) |
+
+The ephemeral and runner paths share one set of code (`host/src/hypervisors/{aws-ec2,azure-vm}.ts`); the deploy-target
+path is a new pluggable driver layer alongside the existing
+docker-compose driver.
+
+### 13.2 New target kinds
+
+The `Target.kind` enum gains:
+
+- `cloud_vm_test` / `cloud_vm_demo` — single VM, direct SDK provisioning. Uses the hypervisor abstraction; suitable for smoke tests on a real cloud VM.
+- `cloud_stack_test` / `cloud_stack_demo` — OpenTofu-managed environment of arbitrary complexity. Target row carries `bundle_uri` pointing at the HCL bundle.
+- `k8s_test` / `k8s_demo` — Kubernetes-managed deploy (see §14).
+
+The existing `vm_test`/`vm_demo`/`docker_test`/`docker_demo` kinds
+continue to work unchanged.
+
+### 13.3 OpenTofu as the deploy-target driver
+
+OpenTofu (MPL-2.0, Linux Foundation governance, fork of Terraform
+1.5.x) is the IaC subprocess we ship behind. Reasons:
+
+- The provider ecosystem (AWS, Azure, k8s, …) is already MPL-2.0 and shared with OpenTofu out of the box.
+- Subprocess-only integration: no Go-library imports, no source bundling. Pure "use" of MPL-2.0 software — zero copyleft trigger. (Compare with Terraform 1.6+, which is BSL and would block SaaS embedding.)
+- The HCL we generate and the bundles we ship are our work; we license them under Apache-2.0 to match the rest of `host/`.
+- Pulumi remains a viable alternate driver; we make the driver layer pluggable so a `pulumi` driver can land later if customer demand emerges.
+
+#### State management
+
+For self-hosted, OpenTofu state lives in **S3 + DynamoDB lock**:
+- State URI: `s3://<configured-bucket>/<org_id>/<target_id>/terraform.tfstate`
+- Lock table: a DynamoDB table the operator pre-provisions, or one we create on first use.
+- This mirrors the blob-driver pattern (S3 already required for self-hosted).
+
+For local-mode, OpenTofu state lives in `~/.signalman/tf-state/<target-id>/`. Single-operator, single-machine — no need for remote state coordination.
+
+Signalman does **not** proxy or wrap OpenTofu state; OpenTofu owns its own state-storage protocol and we let it.
+
+#### HCL starter library
+
+In-tree directory `host/src/control-plane/deploy/tofu-bundles/`
+ships vetted bundles for common cases:
+
+- `aws-simple-vm` — single EC2 instance + security group + key pair
+- `aws-three-tier` — VPC + ALB + EC2 + RDS + IAM role
+- `aws-eks-cluster` — managed Kubernetes (EKS) with worker node group
+- `azure-windows-vm` — Windows VM with Bastion + WinRM
+- `azure-linux-vm` — Linux VM with public IP + SSH
+- `azure-aks-cluster` — managed Kubernetes (AKS)
+
+Operators can also bring their own HCL directory; `Target.bundle_uri` points at either an in-tree starter or an operator-authored bundle (local path, S3 URI, or `git+https://...`).
+
+Bundles ship under **Apache-2.0**, same as the rest of the host
+package. License compatibility with OpenTofu's MPL-2.0 runtime is
+unaffected — we license the data we produce, OpenTofu licenses its
+runtime, no overlap.
+
+### 13.4 Cloud hypervisor backends
+
+`host/src/hypervisors/aws-ec2.ts` and `host/src/hypervisors/azure-vm.ts`
+implement the existing `Hypervisor` interface. Operations:
+
+- `provision(template, options)` — `RunInstances` (AWS) / VM
+  creation (Azure) with the template's image ID, instance type,
+  network config. Tags include `signalman.org_id`, `signalman.run_id`, `signalman.ttl_expires_at`.
+- `start(handle)` / `stop(handle)` — `StartInstances` /
+  `StopInstances` (cloud-equivalents).
+- `destroy(handle)` — `TerminateInstances` / VM delete.
+- `get_address(handle)` — returns the public or private IP plus
+  the auth material the guest agent needs (see §13.7).
+
+Cloud-specific knobs that hang off `Target.connection`:
+
+- `region`
+- `vpc_id` / `subnet_id` (AWS) or `virtual_network_id` /
+  `subnet_id` (Azure)
+- `instance_type` / `vm_size`
+- `image_id` — AMI (AWS) or managed-image ID (Azure)
+- `iam_role` / `managed_identity` — what the VM runs as
+
+### 13.5 Cost guardrails (must-have)
+
+The first cloud-provider bug-report on a public repo will be "I
+forgot to clean up and got a $400 bill" unless we ship guardrails
+in v0.3.0. Three controls, all must-have:
+
+1. **Wall-clock TTL on ephemeral VMs.** Default 1h, configurable
+   per-scenario via `setup.yaml` (`ttl_seconds: <int>`). A
+   background reaper job (runs every 5 minutes) destroys any
+   tagged VM whose `ttl_expires_at` is in the past.
+2. **Per-org cloud-spend budget.** Soft warning at 80%, hard
+   refusal-to-spawn at 100%. Budget configured per-org; usage
+   tracked in `cloud.org_cloud_usage` (Postgres rows, joinable
+   with audit log). Counter increments on `provision` from cost
+   estimates derived from instance type + region + duration.
+3. **Pre-flight cost estimate on `release deploy`.** When the
+   target is `cloud_stack_*`, `signalman release deploy` runs
+   `tofu plan` first, extracts the cost-affecting resource
+   diffs, and surfaces "Deploying this target costs ~$84/month
+   at AWS list prices. Continue? [y/N]" (or `--no-confirm` to
+   bypass for CI).
+
+Quota counters live in Postgres (existing `@signalman/host`
+schema). Redis is unnecessary at v0.3.0 scale.
+
+### 13.6 Networking — guest-agent reachability
+
+How does the control plane reach the guest agent running on a
+cloud VM?
+
+v0.3.0 default: **public IP + mTLS**. Cloud VM gets a public IP
+(or NAT-fronted equivalent); security group restricts inbound to
+the gRPC port from the control-plane host's IP; the guest agent
+authenticates the caller via mutual TLS using the operator's
+cert bundle.
+
+v0.3.x followups for stricter security:
+- **AWS SSM Session Manager** — zero public surface; gRPC tunneled through SSM. Requires SSM agent in the AMI.
+- **Azure Bastion** — equivalent for Azure VMs.
+
+The choice is per-target via `Target.connection.network_mode`:
+`"public_mtls"` (default), `"aws_ssm"`, `"azure_bastion"`.
+
+### 13.7 Credentials — layered model
+
+Cloud credentials follow a layered model:
+
+1. **Per-org defaults**, stored encrypted in the control-plane
+   DB. Encrypted with an org-scoped key derived from the
+   operator's KMS root (operator chooses KMS provider:
+   `aws-kms`, `azure-key-vault`, `age-encrypted-file`).
+2. **Per-target overrides** — a `Target` row can carry its own
+   credential reference, overriding the org default.
+3. **Per-runtime overrides** — `signalman release deploy
+   --aws-profile staging` or `--azure-credentials path/to/sp.json`
+   overrides both, for one operation.
+
+The control plane never logs credentials and never returns them
+on read endpoints. They flow into OpenTofu runs as env vars and
+into SDK clients as the AWS/Azure SDK's default credential chain.
+
+### 13.8 Pipeline-built golden images
+
+Test VMs need *images*, not just VMs. Cloud equivalents of the
+existing VHDX templates need to be built, stamped with a version,
+and registered as known artifacts.
+
+Approach: **build all template flavors (VHDX + AMI + Azure
+managed image) in lockstep** from a single Packer manifest. Each
+build run produces:
+
+- A VHDX for Hyper-V testing
+- An AMI in each AWS region we support
+- An Azure managed image in each Azure region
+- A manifest record describing all three, signed with the
+  release-signing key, stored in the configured artifact catalog
+  location (S3 for self-hosted, local FS for local-mode)
+
+The build pipeline lives **in-tree** under `golden-images/`,
+runs in CI (with credentials for AWS + Azure release accounts),
+and emits the manifest into the same blob store as release
+artifacts. Images are versioned (e.g. `win11-test@2026.04.0`)
+and addressable by version + cloud + region.
+
+`Target.connection.image_id` accepts either a raw cloud-vendor
+ID (AMI / Azure managed image ID) or a versioned reference
+(`win11-test@2026.04.0` — control plane resolves to the right
+cloud-vendor ID at deploy time).
+
+### 13.9 The `vm_lineage_hash` (hermetic envelope)
+
+The hermetic envelope (v0.3.0 — see ROADMAP) needs a
+content-addressed identity for the VM lineage that the scenario
+ran against. Cloud-vendor image IDs (AMIs, managed images) are
+*not* directly comparable to VHDX content hashes. The lineage
+needs to abstract over the cloud.
+
+`vm_lineage_hash` is the sha256 of a canonical JSON object:
+
+```json
+{
+  "template_name": "win11-test",
+  "template_version": "2026.04.0",
+  "os": "windows-11-22h2",
+  "installed": [
+    "signalman-guest@0.2.0",
+    "powershell@7.4.0",
+    "dev-toolchain@2026.04"
+  ]
+}
+```
+
+Two scenarios running on the same `template_name@template_version`
+on AWS vs. Azure get the **same** `vm_lineage_hash` (because
+they're functionally the same test environment), even though
+their cloud-vendor image IDs differ. The `installed` array
+captures what the manifest says ships in the image, not what's
+sitting on top.
+
+The Packer pipeline emits this manifest as the source of truth;
+the hermetic-envelope code reads from it.
+
+### 13.10 Cloud runners
+
+Runners that live in the cloud and pick up jobs from the control
+plane. Two flavors:
+
+- **BYOR (bring-your-own-runner) on a cloud VM** — operator
+  manually provisions a cloud VM, runs `signalman runner
+  register`, and the runner registers with the existing
+  Bearer-token flow. Already works today; cloud is just one more
+  place a runner can live.
+- **Cloud-native runner pool** — control plane provisions
+  worker VMs via the hypervisor backend, runners auto-register
+  using cloud-vendor instance identity rather than a
+  pre-provisioned Bearer token.
+
+For the cloud-native pool, **two auth flows are supported**:
+
+1. **Bearer-derived-from-IAM** (ships first). Operator pre-provisions
+   a Bearer token, attaches it to the IAM role / managed identity
+   the worker VM assumes, runner fetches at boot via instance
+   metadata service. Control plane sees a normal Bearer
+   registration. Simpler to implement; reuses the v0.2.0 auth path.
+2. **Native vendor identity** (ships second). Runner presents a
+   vendor-signed token (AWS sigv4-signed request, Azure
+   managed-identity JWT). Control plane verifies with the vendor
+   and creates a session bound to the role. No bearer tokens to
+   manage on the operator side. **Hard requirement for
+   enterprise adoption** — many large-org security teams won't
+   permit static Bearer tokens.
+
+Both auth flows feed the same downstream `runner_id` —
+control plane doesn't care how the runner authenticated, only
+that it did. Audit log records the auth method per registration.
+
+### 13.11 Open questions specific to cloud-provider work
+
+- **Pulumi as alternate driver** — do we ship one in v0.3.x, or
+  only on customer demand? Default: only on demand.
+- **Spot / preemptible instances** for ephemeral test VMs — big
+  cost savings but adds interruption-handling complexity. Defer
+  to v0.3.x.
+- **Multi-region deploys** — `Target.connection.region` is a
+  single value today; multi-region setups need multi-region
+  HCL bundles. Defer until a real consumer asks.
+- **Air-gapped operation** — some customers can't reach AWS/Azure
+  public endpoints. AWS GovCloud and Azure Government endpoints
+  are configurable via SDK, but air-gapped (private cloud only)
+  is a separate design pass. Out of scope for v0.3.0.
+
+---
+
+## 14. Kubernetes (v0.3.0)
+
+Kubernetes lands as **two surfaces** in v0.3.0, both driven by
+operator-authored manifests (rather than custom CRDs / operator
+pattern, which lands in v0.3.x).
+
+### 14.1 Kubernetes as a deploy target
+
+New target kinds `k8s_test` / `k8s_demo`. The deploy driver is
+`kubectl apply` (or `helm install` / `helm upgrade` if the bundle
+is a Helm chart) against a manifest bundle attached to the
+target.
+
+- `Target.connection.cluster_context` — kubectl context name or
+  kubeconfig path; defaults to the operator's `KUBECONFIG`.
+- `Target.bundle_uri` — points at a directory of YAML manifests
+  or a Helm chart (local path, S3 URI, or `git+https://...`).
+- Deploy lifecycle:
+  - `release deploy` → `kubectl apply -k <bundle>` (or `helm
+    upgrade --install`) with `--namespace=<target.namespace>`.
+  - `release rollback` → `kubectl rollout undo` / `helm rollback`.
+  - Health probes already work via `kubectl get pods` /
+    `kubectl wait --for=condition=ready`.
+
+Status surface: `kubectl get -o json` parsed into the
+`Deployment.status` field. Same flow as docker-compose targets.
+
+### 14.2 Kubernetes as a runner substrate
+
+Alternative to docker-compose for hosting scenario runners. Each
+runner is a Kubernetes `Job` (one-shot) or part of a `Deployment`
+(warm-pool). Operator authors the manifests; signalman documents
+the contract.
+
+Manifest pattern (operator copies + customizes):
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: signalman-runner-
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: signalman-runner
+      containers:
+        - name: runner
+          image: ghcr.io/.../signalman-runner:0.3.0
+          env:
+            - name: SIGNALMAN_CONTROL_PLANE_URL
+              value: https://control-plane.example.com
+            - name: SIGNALMAN_RUNNER_TOKEN
+              valueFrom:
+                secretKeyRef: { name: signalman-runner, key: token }
+            - name: SIGNALMAN_TENANT_ID
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+```
+
+Cluster prerequisites:
+- A `ServiceAccount` with permissions to spawn worker pods (for
+  the deploy-target flow).
+- A `Secret` holding the runner Bearer token.
+- A namespace per tenant if multi-tenant on a shared cluster.
+
+### 14.3 Kubernetes as a runner substrate — operator pattern (v0.3.x)
+
+Followup work that lands after v0.3.0 manifest-driven runners
+have user signal:
+
+- Custom resources `SignalmanRunner`, `SignalmanRunnerPool`,
+  `SignalmanScenarioRun`.
+- Operator deployed via Helm chart.
+- Operator reconciles `SignalmanRunnerPool` against current
+  pending-job count from the control plane; scales pods up/down
+  via standard k8s autoscaling primitives.
+
+Deferred until we see what operators actually struggle with on
+the manifest-driven path.
+
+### 14.4 Cluster auth
+
+K8s clusters expect either kubeconfig credentials (long-lived
+client certs / OIDC tokens) or in-cluster service account
+tokens. Layered model from §13.7 applies: per-org default
+kubeconfig → per-target override → per-runtime override.
+
+Inside the cluster (runner pods, deploy-target pods), service
+account tokens flow naturally via the standard `automountServiceAccountToken: true` mechanism. No additional auth
+plumbing needed.
+
+### 14.5 Cross-cloud + cross-platform matrix
+
+Scenario matrix support (a v0.4.0+ epic per `ROADMAP.md`) needs
+cloud and platform as matrix dimensions, not just OS. Example:
+
+```yaml
+# scenario.matrix
+matrix:
+  - { cloud: aws,   region: us-east-1, os: windows-11 }
+  - { cloud: aws,   region: us-west-2, os: linux-22.04 }
+  - { cloud: azure, region: eastus,    os: windows-11 }
+  - { cloud: azure, region: westeu,    os: linux-22.04 }
+```
+
+Each matrix entry runs as a separate scenario invocation; results
+aggregate into a single matrix-level envelope. The matrix
+dimensions feed the target-selection logic — entry 1 might use
+`Target name=aws-win-east`, entry 2 `aws-linux-west`, etc.
+
+This composes cleanly with cloud-provider hypervisor backends:
+the `cloud` and `region` matrix dimensions resolve to a
+`Target.kind=cloud_vm_test` with the right `connection.region`,
+runtime-provisioned per entry.
+
+---
+
+## 15. Artifact registry (v0.4.0+, OSS product)
+
+The meta-build system's content-addressed blob store (S3 +
+local-FS) is the seed of a larger artifact registry product. v0.4.0+
+lifts it to a **standalone OSS product** competing in the same
+space as JFrog Artifactory / GitHub Packages / Sonatype Nexus.
+
+### 15.1 Why standalone, why OSS
+
+**Standalone (not embedded in `@signalman/host`)** because:
+- It's a different scaling axis — registries handle blob reads from
+  every CI run in an org, not just signalman-issued reads.
+- It's a different protocol surface — OCI distribution spec,
+  npm registry protocol, maven, crates.io-compatible, Helm chart
+  spec. Each is a sustained engineering investment.
+- It's a different deploy story — registries are typically
+  fronted by CDNs, sit behind authn proxies, integrate with
+  vulnerability scanners, support replication.
+
+**Open-source** because:
+- It's a **competitive wedge against the commercial-only
+  registries** (JFrog, Sonatype). A free Apache-2.0 registry that
+  plays well with the signalman release pipeline is a
+  better-funded customer's first reason to look at signalman.
+- It composes with signalman's existing OSS positioning. A
+  proprietary registry would create a confusing product story
+  ("the meta build system is open source, but the artifacts it
+  stores are not").
+
+### 15.2 Relationship with `@signalman/host`
+
+Two boundaries, one direction:
+
+- The host package's `BlobDriver` interface stays as-is. v0.2.0's
+  local-FS + S3 drivers continue to work for the
+  release-pipeline use case.
+- A **new driver** (`signalman-registry` driver) lets
+  `@signalman/host` use the registry product as a blob backend.
+  Drop-in for S3.
+- The registry product itself is a **separate npm package /
+  binary** (`@signalman/registry`), with its own release
+  pipeline, deploy story, and config surface.
+
+This means signalman-the-meta-build-system can use any backing
+store (FS / S3 / signalman-registry / other-vendor-registry), and
+the registry product can be deployed standalone for users who
+don't use the meta build system at all.
+
+### 15.3 v0.3.0 interim home for cloud images
+
+Cloud-image artifacts (AMIs, Azure managed images, VHDX) need
+somewhere to live in v0.3.0 — before the artifact registry
+product ships. Approach: **per-org S3 / Azure-blob folders,
+indexed by signalman's existing artifact catalog**. Specifically:
+- AMIs live in their cloud-vendor catalog (AWS account's owned
+  AMIs); a manifest record in `@signalman/host`'s artifact table
+  references the AMI ID.
+- Azure managed images same pattern.
+- VHDX templates live in the configured blob store.
+
+When the artifact registry product lands, the migration path is
+"import from cloud catalog + blob store into the registry."
+Manifest records carry forward; only the storage backend
+changes. No throwaway work.
+
+### 15.4 Scope and phasing (v0.4.0+)
+
+Initial scope (v0.4.0 if ambitious, v0.4.x more likely):
+
+- Generic blob format (sha256-addressable, signed manifests) —
+  port the existing format.
+- OCI distribution spec compliance — push/pull container images
+  via `docker push` / `oras push`. Most common ask.
+- Mutable tags — `latest`, `staging`, `production` pointing at
+  immutable content addresses.
+- Retention + GC — auto-expire by age, count, or tag policy.
+- Discovery API — search by name + version + tag.
+- RBAC — read / write / admin per repository, mapping cleanly to
+  the existing org / API-key model.
+
+Followups (v0.4.x — v0.5.x):
+
+- npm registry protocol — publish + install with `npm`.
+- crates.io-compatible — publish + install with `cargo`.
+- maven / pip / Helm repos — same pattern, separate workstreams.
+- Vulnerability scanning — Trivy / Grype integration.
+- Mirroring + caching — sit between consumers and upstream
+  public registries.
+
+### 15.5 Architecture sketch
+
+- **Storage** — same `BlobDriver` interface as `@signalman/host`.
+  Default: local FS or S3.
+- **Index** — Postgres (small deployments) or a real search
+  index (OpenSearch / Tantivy) for larger.
+- **API** — separate HTTP service, deployable independently.
+  Auth federates with `@signalman/host` API keys (same
+  `sk_<prefix>_<secret>` token shape).
+- **Garbage collection** — reference-counted from manifests;
+  unreferenced blobs collected after configurable grace period.
+- **Mirror behavior** — falls back to upstream public registries
+  when a name+version isn't local; caches the result.
+
+### 15.6 Open questions specific to artifact registry
+
+- **First protocol** — OCI is the most-asked but also the
+  largest scope. Should v0.4.0 ship OCI alone, or the generic
+  blob format alone (with OCI as v0.4.x)?
+- **Compatibility scope for OCI** — distribution-spec v1.1 baseline,
+  but the OCI ecosystem has fragmented around referrers,
+  artifacts, and signing extensions (cosign, notation). Pick one
+  signing path; my lean is cosign because the Ed25519
+  release-signing infrastructure we already have aligns more
+  cleanly with cosign's keypair model than with notation's PKI.
+- **Multi-tenant isolation model** — same `org_id` scoping as
+  `@signalman/host`? Or registry-scoped namespaces (closer to
+  Docker Hub's `<user>/<image>` model)? Probably both, with the
+  namespace acting as a registry-side concept on top of org.
+
+---
+
+## 16. Open questions
 
 1. **Where does the release catalog live in the operator's mental model?** Specifically: should annotated git tags in the product repo carry the manifest sha256 (so the tag itself is auditable), or is the catalog purely signalman-side? Defaulting to signalman-side for now; tag annotation is a v0.3 feature.
 2. **Staging mechanism per target kind.** For Hyper-V VM targets, checkpoints are the obvious lever for atomic deploy. For future Docker/k8s targets the answer is different. v0.2 only needs Hyper-V.
@@ -481,7 +1008,7 @@ Scope: control plane separable as a deployable service; runners register over HT
 
 ---
 
-## 14. Glossary
+## 17. Glossary
 
 - **Product** — an external codebase signalman builds, tests, and deploys.
 - **Release** — an immutable artifact set built from a product at a specific revision, identified by tag.
