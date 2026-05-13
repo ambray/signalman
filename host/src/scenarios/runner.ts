@@ -19,6 +19,7 @@ import * as yaml from "yaml";
 
 const __dirname = import.meta.dirname ?? path.dirname(fileURLToPath(import.meta.url));
 import { parseNarrative } from "./narrative.js";
+import { resolveLayout } from "./project-layout.js";
 import {
   validateScenarioConfig,
   validateAssertionConfig,
@@ -255,15 +256,20 @@ export function loadScenario(scenarioDir: string): {
   narrative: Narrative | null;
 } {
   // Resolve to absolute path and prevent path traversal outside the
-  // project's scenarios root. v0.1.0 supports both the canonical
-  // `.signalman/scenarios/` layout and the legacy top-level
-  // `scenarios/` directory (via project-layout.ts). Either root is
-  // acceptable; anything else is rejected as path traversal.
-  const projectRoot = path.resolve(__dirname, "..", "..", "..");
-  const candidateRoots = [
-    path.join(projectRoot, ".signalman", "scenarios"),
-    path.join(projectRoot, "scenarios"),
-  ];
+  // project's scenarios root. The allowed root is derived from the
+  // CWD-discovered project layout — NOT the signalman install dir —
+  // so consumer projects can own their own `.signalman/scenarios/`
+  // (consumer-owns-recipe). Without this, scenarios under e.g.
+  // `collector/.signalman/scenarios/` are discoverable by
+  // `signalman list` (findProjectRoot) but rejected by `signalman run`.
+  const layout = resolveLayout(process.cwd());
+  const candidateRoots: string[] = [layout.scenariosDir];
+  if (!layout.legacy) {
+    const legacySibling = path.join(layout.root, "scenarios");
+    if (fs.existsSync(legacySibling)) {
+      candidateRoots.push(legacySibling);
+    }
+  }
   const resolvedDir = path.resolve(scenarioDir);
 
   // Normalize both paths so that trailing separators and case (on
