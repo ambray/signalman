@@ -163,7 +163,7 @@ binary, executes a real scenario, and asserts on the resulting
 envelope. Reserved for **P7.3 D4**: a single E2E gated by
 `SIGNALMAN_E2E=1`, run nightly on a self-hosted Windows runner, **not**
 on PR. Restores a known checkpoint, runs `signalman.run` against
-`silo-validation` (or a purpose-built `smoke` scenario), asserts pass.
+a smoke scenario (e.g. `service-backend-smoke`), asserts pass.
 
 When this lands, the section will document:
 
@@ -331,8 +331,8 @@ Properties of the lane:
 - Runs nightly on a self-hosted Windows runner. **Not** PR-gated.
   Failures surface in the CI dashboard as a separate workflow.
 - Each test restores a known Hyper-V checkpoint, runs `signalman.run`
-  against a real scenario (`silo-validation` or a purpose-built
-  `smoke`), and asserts on the envelope.
+  against a real scenario (e.g. `service-backend-smoke`), and asserts
+  on the envelope.
 - Test wall-clock budget: 5–30 minutes per test.
 - Re-run via `workflow_dispatch` when triaging a PR-suspect failure.
 

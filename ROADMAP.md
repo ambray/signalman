@@ -69,13 +69,12 @@ The differentiator is **hermetic** (cacheable runner outputs),
 Product-specific scenarios live in their respective consuming products'
 repos and no longer gate Signalman releases.
 
-**2026-04-24 change**: Phase 6.2 V2 "Gated Silo" supporting infra landed
-ahead of schedule — kernel-debug tooling (kd.exe session,
-driver_load/unload/ioctl, BreakLog, kernel_expect_bugcheck),
-`kernel_etw_start/stop` MCP tools, event-driven VM orchestration with
-warm checkpoint, Zod schema validation for setup.yaml/assertions.yaml,
-and an ESLint flat config. The product-specific scenarios that exercise
-this infra (kernel-driver registry/network/silo workflows) live in the
+**2026-04-24 change**: kernel-debug supporting infra landed ahead of
+schedule — kd.exe session, driver_load/unload/ioctl, BreakLog,
+kernel_expect_bugcheck, `kernel_etw_start/stop` MCP tools,
+event-driven VM orchestration with warm checkpoint, Zod schema
+validation for setup.yaml/assertions.yaml, and an ESLint flat config.
+The product-specific scenarios that exercise this infra live in the
 consuming product's repo.
 
 **2026-04-17 change**: Hyper-V is now the primary hypervisor backend (was VMware).
@@ -560,15 +559,8 @@ v0.1.0`. The workflow handles the rest.
   Linux/macOS guest agents. They are not built and they distort
   positioning. Reframe as Windows-first; move aspirational items to a
   "v0.3.0+ non-promise" section. Sharpen positioning to **Windows
-  kernel-driver / ETW / WFP / silo CI for security products** — the niche
+  kernel-driver / ETW / WFP CI for security products** — the niche
   the kernel-debug + ETW tooling actually serves.
-- **A4 — Replace cursor-restrict as the lead README scenario.** Today's
-  lead is broken: missing `restrict-ai.rego`, missing `test-config.yaml`,
-  uses `vm_screenshot` 5× (the RPC is a stub), and `screenshot_check`
-  assertions are no-ops. Replace with a smaller in-tree smoke (e.g.
-  `service-backend-smoke` or one of the `live-*` scenarios). Or ship
-  the missing files plus real screenshot capture, but only if
-  UI/browser placeholders graduate.
 - **A5 — Hide or complete `.signalman/scenarios/codex-sandbox/`** (ships
   `setup.yaml` only; no workflow.md, no assertions.yaml; `signalman.list`
   surfaces it as a discoverable broken entry).
@@ -668,8 +660,7 @@ One-shot opportunity. Parallelizes with P3/P4/P6/P7.
 - **E1 — Split Windows-only fields into `oneof platform_details`.**
   [proto/guest.proto:111-149](proto/guest.proto:111) bakes
   `is_appcontainer`, `appcontainer_sid`, `is_low_integrity`, `is_in_job`,
-  `integrity_level`, and `restriction_mode: "AppContainer"` as first-class
-  fields. Move these into:
+  and `integrity_level` as first-class fields. Move these into:
   ```proto
   oneof platform_details {
     WindowsProcessDetails win = 100;
@@ -677,10 +668,10 @@ One-shot opportunity. Parallelizes with P3/P4/P6/P7.
     MacOsProcessDetails   mac = 102;   // reserved
   }
   ```
-  Same treatment for restriction-mode taxonomy. Linux/macOS guest agents
-  do not have to ship to claim the slot; reserving it now is the breaking
-  change to avoid later. Keeps `TestNetwork`/`TestFileAccess`/`Health`/
-  `Register`/`RunCommand` portable as today.
+  Linux/macOS guest agents do not have to ship to claim the slot;
+  reserving it now is the breaking change to avoid later. Keeps
+  `TestNetwork`/`TestFileAccess`/`Health`/`Register`/`RunCommand`
+  portable as today.
 - **E2 — Decide hypervisor contract truth.** [service/src/backend.rs:181-237](service/src/backend.rs:181)
   is named `Backend` but every method assumes Hyper-V semantics
   (`Copy-VMFile`, `Msvm_ComputerSystem`, two-step Off+Apply on
@@ -1061,8 +1052,8 @@ the v0.2.0 release pipeline.
   Depends on P8 (proto v1 freeze with `oneof platform_details` and
   hypervisor-contract decision) — done in v0.1.0.
 - **E3 — Linux/macOS guest agent.** Audit found the guest crate
-  compiles on Linux but `ProcessInspect`/`VerifyRestriction` are Win32-only
-  ([guest/src/service.rs:632-642](guest/src/service.rs:632)). Implement
+  compiles on Linux but `ProcessInspect` is Win32-only
+  ([guest/src/service.rs](guest/src/service.rs)). Implement
   the proto-portable RPCs (Health/Register/RunCommand/TestNetwork/
   TestFileAccess) per OS; leave Windows-only RPCs `unimplemented` per
   platform. Mobile (iOS/Android emulators, real devices via USB/network)
@@ -1097,8 +1088,8 @@ the v0.2.0 release pipeline.
 ## Product-specific scenarios
 
 Scenarios that exercise a specific product's behavior (kernel-driver
-test suites, registry/network/silo policy validation, agent-service
-smoke tests, etc.) live in the consuming product's own repo's
+test suites, registry/network policy validation, agent-service smoke
+tests, etc.) live in the consuming product's own repo's
 `.signalman/scenarios/` directory, not here. They consume Signalman as
 a public dependency; their delivery cadence is decoupled from Signalman
 semvers and they don't gate Signalman releases.
@@ -1159,12 +1150,11 @@ Removed from main roadmap; revisit only with concrete evidence of need.
   marketplace, UI automation, browser automation, cross-platform guest
   agents, fleet management. Removed from README in P6 (A3); reintroduce
   only when implemented. Sharpens v0.1.0 positioning to **Windows
-  kernel-driver / ETW / WFP / silo CI for security products** — the niche
+  kernel-driver / ETW / WFP CI for security products** — the niche
   the kernel-debug + ETW tooling actually serves today.
-- **Browser / Verify guest RPCs** ([proto/guest.proto](proto/guest.proto)
-  — `BrowserNavigate`, `BrowserClick`, `BrowserScreenshot`,
-  `VerifyRestriction`) stay deferred
-  until a real consumer needs them. Windows UIA RPCs have graduated from
+- **Browser guest RPCs** ([proto/guest.proto](proto/guest.proto)
+  — `BrowserNavigate`, `BrowserClick`, `BrowserScreenshot`)
+  stay deferred until a real consumer needs them. Windows UIA RPCs have graduated from
   placeholders: `UIClick`, `UIType`, `UIKey`, `UIFind`, and `UIScreenshot`
   proxy to the interactive user-session sidecar and are covered by the
   `live-ui-sidecar-smoke` scenario. The remaining UI follow-up is
@@ -1183,7 +1173,6 @@ Removed from main roadmap; revisit only with concrete evidence of need.
 
 - **Old Phase 1.3 (E2E test migration from a consuming product)**: now
   tracked by the consuming product's team, not by Signalman.
-- **Old Phase 1.5 (Silo PoC)**: same — moved out of Signalman's roadmap.
 - **Old Phase 2.1–2.3 (Docker E2E)**: absorbed into P0/P3 — Docker becomes
   a scenario primitive alongside VMs. No standalone phase.
 - **Old Phase 4.1 (proto split, RunCommandStream)**: deferred to v0.3.0+

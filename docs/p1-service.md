@@ -224,7 +224,7 @@ the named checkpoint still exists afterward.
    ```powershell
    cd host
    $env:SIGNALMAN_BACKEND = "service"
-   npm run cli -- run-scenario silo-validation
+   npm run cli -- run-scenario service-backend-smoke
    ```
 5. Watch for the host log line:
    ```
