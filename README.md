@@ -404,6 +404,54 @@ setup:
     args: ["-Command", "Get-Process | Select-Object -First 5"]
 ```
 
+#### Ephemeral VMs (v0.3.0+)
+
+Scenarios that want a fresh VM per run — no shared state between
+scenarios, no hand-pinned hostname — set `ephemeral: true`. The
+orchestrator branches a [differencing
+disk](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/manage/manage-virtual-hard-disks)
+off the resolved template's base VHDX, creates the VM, runs the
+scenario, then stops + deletes the VM and unlinks the child VHDX at
+teardown:
+
+```yaml
+name: "smoke: ephemeral hyperv"
+version: "1.0"
+
+vms:
+  - name: fresh-vm
+    template: win11-base    # template MUST be pre-baked (agent installed)
+    ephemeral: true         # per-scenario disposable VM
+    guest_agent_port: 50051
+
+setup:
+  - action: vm_run_command
+    vm: fresh-vm
+    command: powershell.exe
+    args: ["-Command", "hostname"]
+```
+
+Constraints:
+
+- **Hyper-V backend only** in v0.3.0; Tart / VMware support arrives
+  when those backends grow a differencing-disk equivalent.
+- **Pre-baked template required** — the base VHDX must already have
+  the guest agent installed. v0.3.0-5 ships the Packer pipeline that
+  builds baked templates from scratch; until then, operators build
+  the baked VHDX manually and point `base_image_path` at it.
+- **Mutually exclusive with `provision_if_missing`** — the latter is
+  the long-lived "create VM + install agent + take checkpoint" path
+  (P9.4); ephemeral is per-scenario. Declaring both is a
+  schema-load-time error.
+- `checkpoint_restore` is silently ignored on ephemeral VMs (no
+  checkpoint exists yet — they start fresh from the base).
+
+A stable `vm_lineage_hash` is computed at provision time from
+`{template_name, template_version, os, installed[]}` and recorded
+on the scenario-run record. v0.3.0-3 graduates this through the
+public result envelope so caching layers (Loom workflow evidence)
+can short-circuit identical inputs.
+
 ### Workflow Narrative (`workflow.md`)
 Natural language instructions that an LLM driver reads and translates into tool calls:
 
