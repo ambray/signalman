@@ -136,6 +136,20 @@ export const vmConfigSchema = z
      */
     pre_started: z.boolean().optional(),
     /**
+     * v0.3.0-2 — ephemeral VM provisioning.
+     *
+     * When `true`, the orchestrator provisions a per-scenario
+     * disposable VM by branching a differencing disk off the
+     * resolved template's base VHDX. The VM is destroyed at scenario
+     * teardown. Requires the template to be PRE-BAKED (guest agent
+     * already installed); v0.3.0-5 ships the Packer pipeline that
+     * produces baked templates.
+     *
+     * When set, `checkpoint_restore` is ignored. Mutually exclusive
+     * with `provision_if_missing` (long-lived install pipeline).
+     */
+    ephemeral: z.boolean().optional(),
+    /**
      * Whether the orchestrator should wait for the hypervisor's VM
      * heartbeat integration service after restore/start. Defaults to
      * true for lifecycle-managed VMs. Set false for backend-only smoke
@@ -157,7 +171,18 @@ export const vmConfigSchema = z
       .optional(),
     kernel_debug: kernelDebugConfigSchema.optional(),
   })
-  .passthrough();
+  .passthrough()
+  .refine(
+    (vm) => !(vm.ephemeral === true && vm.provision_if_missing === true),
+    {
+      message:
+        "ephemeral: true and provision_if_missing: true are mutually exclusive. " +
+        "Use `ephemeral` for per-scenario disposable VMs branched off a baked " +
+        "template; use `provision_if_missing` for the long-lived agent-install " +
+        "pipeline (P9.1).",
+      path: ["ephemeral"],
+    },
+  );
 
 // ── retry policy (P3.b — closes audit C5) ─────────────────────────
 

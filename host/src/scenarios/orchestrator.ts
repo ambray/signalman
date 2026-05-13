@@ -47,6 +47,13 @@ import {
   createRealKdSession,
   type KdSessionFactory,
 } from "../kernel-debug/factory.js";
+import {
+  provisionEphemeralVm,
+  teardownEphemeralVm,
+  type EphemeralVmRecord,
+} from "../provisioning/ephemeral-vm.js";
+import { hyperVPsExec } from "../hypervisors/hyperv.js";
+import { resolveLayout } from "./project-layout.js";
 
 // ── P3.b retry helpers ────────────────────────────────────────────
 
@@ -63,6 +70,26 @@ function resolveStepRetry(
 ): ValidatedRetryPolicy | undefined {
   if (step.retry) return step.retry;
   return scenarioRetry;
+}
+
+/**
+ * Slugify a scenario name into a Hyper-V-safe segment for ephemeral
+ * VM naming (v0.3.0-2).
+ *
+ * The scenario's display name may include spaces, colons, em-dashes,
+ * etc.  Ephemeral VM names go through `sanitizeNameSegment` later,
+ * which would replace those characters with hyphens — but doing the
+ * collapse here gives operators a clearer name to read in the
+ * Hyper-V Manager.  e.g. `"Smoke — agent reachable"` →
+ * `"smoke-agent-reachable"`.
+ */
+function slugifyScenarioName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    || "scenario";
 }
 
 /**
@@ -199,6 +226,16 @@ export interface VmDefinition {
    * is a hard fail with a remediation hint pointing at this flag.
    */
   provision_if_missing?: boolean;
+  /**
+   * v0.3.0-2 — ephemeral VM provisioning. When true, the orchestrator
+   * provisions a per-scenario disposable VM by branching a
+   * differencing disk off the resolved template's base VHDX. The VM
+   * is destroyed at scenario teardown. See
+   * `host/src/scenarios/schema.ts` `vmConfigSchema.ephemeral` and
+   * `host/src/provisioning/ephemeral-vm.ts` for the locked design.
+   * Hyper-V backend only.
+   */
+  ephemeral?: boolean;
   /**
    * When true, skip ALL Hyper-V/VMware management for this VM
    * (`listVMs`, `restoreCheckpoint`, `startVM`, `waitForHeartbeat`).
@@ -891,6 +928,12 @@ export class ScenarioOrchestrator {
     let resolvedVmMap: Map<string, VMHandle> | undefined;
     let teardownSteps: SetupStep[] = [];
     let scenarioRetry: ValidatedRetryPolicy | undefined;
+    // v0.3.0-2 — ephemeral VMs created by resolveVms get their teardown
+    // records collected here so the `finally` block can destroy them
+    // after the declared scenario teardown runs but before the run
+    // result is returned. One entry per ephemeral VM the scenario
+    // declared; no entries when no scenario VM had `ephemeral: true`.
+    const ephemeralRecords: EphemeralVmRecord[] = [];
     // Hoisted so the post-run JUnit/report block (after the outer try)
     // can snapshot workflow step outputs into workflow-outputs.json for
     // post-mortem when assertions fail.
@@ -925,12 +968,17 @@ export class ScenarioOrchestrator {
         warm_checkpoint: vm.warm_checkpoint ?? true,
         wait_for_heartbeat: vm.wait_for_heartbeat ?? true,
         provision_if_missing: vm.provision_if_missing,
+        ephemeral: vm.ephemeral,
         pre_started: vm.pre_started,
         guest_agent_port: vm.guest_agent_port,
         network: vm.network,
         kernel_debug: vm.kernel_debug,
       }));
-      const vmMap = await this.resolveVms(vmDefs);
+      const vmMap = await this.resolveVms(vmDefs, {
+        scenarioSlug: slugifyScenarioName(scenarioName),
+        runId: trace?.runId,
+        ephemeralRecords,
+      });
       resolvedVmMap = vmMap;
       teardownSteps = scenarioConfig.teardown ?? [];
 
@@ -1201,6 +1249,31 @@ export class ScenarioOrchestrator {
         // scenario error.
         if (!error && process.env.SIGNALMAN_DEBUG === "1") {
           error = `kd teardown failed: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
+
+      // v0.3.0-2 — destroy ephemeral VMs created by resolveVms. Runs
+      // AFTER the scenario's declared teardown so teardown actions
+      // (vm_stop / log harvest / etc.) see a live VM. Each ephemeral
+      // VM is best-effort: a failure on one doesn't prevent the
+      // others from being reaped. The first error surfaces in the
+      // scenario error message; subsequent errors are logged but
+      // suppressed so a single sticky VM doesn't mask a different
+      // root cause.
+      for (const record of ephemeralRecords) {
+        try {
+          await teardownEphemeralVm(this.backend, record);
+        } catch (e) {
+          const msg = `ephemeral VM teardown failed for '${record.ephemeralName}': ` +
+            (e instanceof Error ? e.message : String(e));
+          if (!error) {
+            // First failure becomes the scenario error so operators
+            // see it without enabling SIGNALMAN_DEBUG.
+            error = msg;
+            if (status === "passed") status = "error";
+          } else if (process.env.SIGNALMAN_DEBUG === "1") {
+            console.warn(`[orchestrator] ${msg}`);
+          }
         }
       }
     }
@@ -2419,6 +2492,26 @@ export class ScenarioOrchestrator {
    */
   async resolveVms(
     vmDefs: VmDefinition[],
+    opts: {
+      /**
+       * Scenario slug, used by ephemeral VM naming. Required when
+       * any vmDef has `ephemeral: true`. Falls back to "scenario"
+       * when omitted.
+       */
+      scenarioSlug?: string;
+      /**
+       * Run identifier (from trace), used for ephemeral name
+       * uniqueness. Falls back to a random suffix when omitted.
+       */
+      runId?: string;
+      /**
+       * Output collector: ephemeral VM records get appended here so
+       * the caller can teardown after the scenario finishes. Required
+       * when any vmDef has `ephemeral: true` (omitting it would leak
+       * VMs + child VHDXs).
+       */
+      ephemeralRecords?: EphemeralVmRecord[];
+    } = {},
   ): Promise<Map<string, VMHandle>> {
     const vmMap = new Map<string, VMHandle>();
 
@@ -2428,6 +2521,10 @@ export class ScenarioOrchestrator {
     // Hyper-V (Get-VM enumerates the management OS) and would hang
     // the scenario behind a UAC prompt under unattended runs.
     const allPreStarted = vmDefs.length > 0 && vmDefs.every((d) => d.pre_started);
+    // v0.3.0-2 — ephemeral VMs don't exist on the host yet, so the
+    // listVMs call should not gate ephemeral resolution.  However,
+    // mixed scenarios (some legacy + some ephemeral) still need the
+    // list for the legacy VMs.
     const allVms = allPreStarted ? [] : await this.backend.listVMs();
 
     for (const def of vmDefs) {
@@ -2443,6 +2540,89 @@ export class ScenarioOrchestrator {
           name: physicalName,
           backend: this.backend.name,
         });
+        continue;
+      }
+
+      // v0.3.0-2 — ephemeral VM provisioning. Branches a differencing
+      // disk off the resolved template's base VHDX and creates a
+      // disposable per-scenario VM. Skips checkpoint restore (no
+      // checkpoint exists yet) and skips the "listVMs" lookup
+      // entirely. The teardown happens in `runScenario`'s `finally`
+      // via the collected record.
+      if (def.ephemeral) {
+        if (this.backend.name !== "hyperv") {
+          throw new Error(
+            `VM '${def.name}' declares ephemeral: true but the active ` +
+              `hypervisor backend is '${this.backend.name}'. Ephemeral ` +
+              `provisioning is Hyper-V-only in v0.3.0-2. Either run ` +
+              `against the Hyper-V backend or remove the ephemeral flag.`,
+          );
+        }
+        if (!opts.ephemeralRecords) {
+          throw new Error(
+            `VM '${def.name}' declares ephemeral: true but resolveVms was ` +
+              `called without an ephemeralRecords output collector. The ` +
+              `caller must supply one so created VMs can be torn down. ` +
+              `(If you're invoking resolveVms() from a test, pass ` +
+              `\`{ ephemeralRecords: [] }\`.)`,
+          );
+        }
+
+        // Materialise the ephemeral-disks directory on first ephemeral
+        // VM in the scenario. We lazy-create rather than failing so
+        // operators don't have to pre-create the folder structure.
+        const layout = resolveLayout();
+        const ephemeralDisksDir = path.join(
+          layout.root,
+          ".signalman",
+          "ephemeral-disks",
+        );
+        if (!fs.existsSync(ephemeralDisksDir)) {
+          fs.mkdirSync(ephemeralDisksDir, { recursive: true });
+        }
+
+        const record = await provisionEphemeralVm(
+          this.backend,
+          {
+            scenarioSlug: opts.scenarioSlug ?? "scenario",
+            vmName: def.name,
+            runId: opts.runId,
+            templateName: def.template,
+            ephemeralDisksDir,
+          },
+          { psExec: hyperVPsExec },
+        );
+        opts.ephemeralRecords.push(record);
+        vmMap.set(def.name, record.vmHandle);
+
+        // Boot the ephemeral VM and wait for it to reach running
+        // state, matching the legacy branch's ensure-running step.
+        // No checkpoint to restore; the base VHDX is the starting
+        // state.
+        const status = await this.backend.getStatus(record.vmHandle);
+        if (status.state !== "running") {
+          await this.backend.startVM(record.vmHandle);
+          const deadline = Date.now() + 60_000;
+          let running = false;
+          while (Date.now() < deadline) {
+            const current = await this.backend.getStatus(record.vmHandle);
+            if (current.state === "running") {
+              running = true;
+              break;
+            }
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) break;
+            await new Promise((resolve) =>
+              setTimeout(resolve, Math.min(1_000, remaining)),
+            );
+          }
+          if (!running) {
+            throw new Error(
+              `Ephemeral VM '${record.ephemeralName}' did not reach ` +
+                `running state within 60000ms`,
+            );
+          }
+        }
         continue;
       }
 

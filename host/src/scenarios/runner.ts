@@ -84,6 +84,33 @@ export interface VmConfig {
   template: string;
   checkpoint_restore?: string;
   provision_if_missing?: boolean;
+  /**
+   * v0.3.0-2 — ephemeral VM provisioning.
+   *
+   * When `true`, the orchestrator provisions a per-scenario disposable
+   * VM by branching a differencing disk off the resolved template's
+   * base VHDX. The VM is destroyed (stop → delete → unlink child
+   * VHDX) when the scenario finishes.
+   *
+   * Mutually exclusive with `provision_if_missing` — the latter is a
+   * long-lived "install agent + take checkpoint" pipeline (P9.1);
+   * ephemeral is per-run. The schema layer rejects scenarios that
+   * declare both.
+   *
+   * Requires:
+   *   - A Hyper-V backend (other backends will surface
+   *     `ephemeral_backend_unsupported` at runtime).
+   *   - A template with a concrete base VHDX (either `base_image_path:`
+   *     or `base_image_url:` + sha256).
+   *   - The template's base VHDX MUST be pre-baked — guest agent
+   *     installed and ready. v0.3.0-5 will ship the Packer-based
+   *     pipeline that produces baked templates; for v0.3.0-2 the
+   *     operator builds the baked VHDX.
+   *
+   * When set, `checkpoint_restore` is ignored (ephemeral VMs start
+   * fresh from the base; there is no per-run checkpoint).
+   */
+  ephemeral?: boolean;
   pre_started?: boolean;
   /**
    * Whether `checkpoint_restore` names a warm-state (Running-state)

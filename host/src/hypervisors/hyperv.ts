@@ -150,7 +150,14 @@ async function psJson<T>(script: string, timeoutMs = 30_000): Promise<T> {
   }
 }
 
-/** Execute a PowerShell command, return raw stdout. */
+/**
+ * Execute a PowerShell command, return raw stdout.
+ *
+ * Exported as {@link hyperVPsExec} below for callers outside this
+ * module (e.g. the v0.3.0-2 ephemeral-VM pipeline). Internally we
+ * keep using the short `ps` name to avoid touching every existing
+ * call site.
+ */
 async function ps(script: string, timeoutMs = 30_000): Promise<string> {
   const { cmd, prefixArgs } = resolvePsCommand();
   const args = buildPsArgs(prefixArgs, script);
@@ -169,6 +176,17 @@ async function ps(script: string, timeoutMs = 30_000): Promise<string> {
     );
   }
 }
+
+/**
+ * Hyper-V-specific PowerShell exec for callers outside this module.
+ *
+ * Used by the v0.3.0-2 ephemeral-VM pipeline (provisionEphemeralVm)
+ * to invoke `New-VHD -Differencing` via the same PS exec the rest
+ * of the Hyper-V backend uses. Other backends (Tart, future libvirt)
+ * don't have an analogous primitive yet — ephemeral provisioning is
+ * Hyper-V-only in v0.3.0-2.
+ */
+export const hyperVPsExec = ps;
 
 /** Map Hyper-V VM state integer to our VMState type. */
 function mapState(hypervState: number | string): VMState {
