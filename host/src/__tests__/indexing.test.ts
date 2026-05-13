@@ -49,9 +49,9 @@ describe("indexListResult", () => {
           scenario_hash: "sha256:abc",
         },
         {
-          id: "silo-validation",
-          path: ".signalman/scenarios/silo-validation",
-          name: "Silo Validation",
+          id: "example-torture",
+          path: ".signalman/scenarios/example-torture",
+          name: "Example Torture",
           tags: ["torture"],
           scenario_hash: "sha256:def",
         },
@@ -64,8 +64,8 @@ describe("indexListResult", () => {
       const { defaultOrg } = await cp.init();
       const rows = await cp.scenarios.listForOrg(defaultOrg.id);
       expect(rows.map((r) => r.path).sort()).toEqual([
+        ".signalman/scenarios/example-torture",
         ".signalman/scenarios/example-v2-network-egress",
-        ".signalman/scenarios/silo-validation",
       ]);
       const egress = rows.find((r) =>
         r.path.endsWith("example-v2-network-egress"),

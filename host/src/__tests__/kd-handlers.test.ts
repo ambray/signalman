@@ -476,7 +476,7 @@ describe("handleDriverIoctl", () => {
 
   it("throws a useful error when harness emits non-JSON", async () => {
     client.queueSuccess({
-      stdout: "Usage: silo-test-harness --device ...",
+      stdout: "Usage: test-harness --device ...",
       stderr: "invalid argument",
     });
     await expect(

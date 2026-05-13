@@ -136,51 +136,6 @@ export interface CommandResult {
   durationMs: number;
 }
 
-/** Windows-specific restriction evidence (P8). */
-export interface WindowsRestrictionDetails {
-  /** "AppContainer" | "Legacy" | "None" */
-  restrictionMode: string;
-  hasAppcontainerToken: boolean;
-  appcontainerSid: string;
-  isLowIntegrity: boolean;
-  isInJob: boolean;
-  jobName: string;
-  hasRestrictDll: boolean;
-  restrictDllPath: string;
-}
-
-/**
- * Restriction verification verdict for a process. Cross-platform
- * top-level outcome + per-platform evidence under `platformDetails`.
- *
- * The Windows-specific fields previously hoisted onto this interface
- * (restrictionMode, hasAppcontainerToken, appcontainerSid, etc.) now
- * live under `platformDetails.windows` after the P8 freeze. Use
- * [`getWindowsRestrictionDetails`] to unwrap on the Windows-only path.
- */
-export interface RestrictionVerdict {
-  isRestricted: boolean;
-  hasFirewallRules: boolean;
-  blockedDomains: string[];
-  verdict: string;
-  issues: string[];
-  /** P8 oneof platform_details; exactly one variant present. */
-  platformDetails?: {
-    windows?: WindowsRestrictionDetails;
-  };
-}
-
-/**
- * Convenience accessor for the Windows variant of `RestrictionVerdict.
- * platformDetails`. Returns `undefined` when the verdict came from a
- * non-Windows guest.
- */
-export function getWindowsRestrictionDetails(
-  v: RestrictionVerdict,
-): WindowsRestrictionDetails | undefined {
-  return v.platformDetails?.windows;
-}
-
 /** Result of a network connectivity test. */
 export interface NetworkTestResult {
   reachable: boolean;
@@ -1035,26 +990,6 @@ export class GuestAgentClient {
       this.noteFailure(err);
       throw err;
     }
-  }
-
-  /**
-   * Verify restriction enforcement on a process.
-   *
-   * @param pid - Process ID to inspect.
-   * @param timeoutMs - Per-RPC timeout in milliseconds.
-   */
-  async verifyRestriction(pid: number, timeoutMs?: number): Promise<RestrictionVerdict> {
-    const deadline = timeoutMs ?? this.options.defaultTimeoutMs;
-    return withRetry(
-      () =>
-        unaryCall(this.client, "verifyRestriction", {
-          pid,
-          processName: "",
-        }, deadline, this.options.authToken),
-      this.options.maxRetries,
-      this.options.initialRetryDelayMs,
-      this.options.maxRetryDelayMs,
-    );
   }
 
   /**

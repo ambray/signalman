@@ -32,7 +32,7 @@ export {
 
 export type { KdSignal } from "./parser.js";
 
-// User-mode driver handlers (sc.exe start/stop + silo-test-harness).
+// User-mode driver handlers (sc.exe start/stop + test-harness).
 export {
   handleDriverLoad,
   handleDriverUnload,

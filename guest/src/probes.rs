@@ -1,66 +1,17 @@
-//! Restriction verification module.
+//! Network and file-access probe helpers used by guest-agent RPCs.
 //!
-//! Checks whether a process is properly restricted by an enforcement
-//! agent / driver:
-//! - AppContainer token present
-//! - Low integrity level
-//! - Job object membership
-//! - Network restrictions (firewall rules)
-//! - File access restrictions (ACLs)
-//! - DLL injection (restrict hook loaded)
+//! Generic primitives the host can call into a VM to verify the
+//! environment behaves the way a scenario expects:
+//! - TCP connectivity to a host:port
+//! - File access (read / write / list) at a path
+//! - Whether a named software package is installed
+//!
+//! These are intentionally simple checks; richer probes graduate when a
+//! real consumer needs them.
 
 use std::fs::OpenOptions;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
-
-/// Restriction verification result.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct RestrictionVerdict {
-    /// Whether any restriction is active.
-    pub is_restricted: bool,
-    /// Restriction mode detected.
-    pub mode: RestrictionMode,
-    /// Individual check results.
-    pub checks: Vec<RestrictionCheck>,
-    /// Overall verdict.
-    pub verdict: Verdict,
-    /// Issues found (empty if fully restricted).
-    pub issues: Vec<String>,
-}
-
-/// Detected restriction mode.
-#[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
-pub enum RestrictionMode {
-    /// AppContainer kernel sandbox (Phase 2+).
-    AppContainer { sid: String },
-    /// Legacy 4-layer enforcement.
-    Legacy,
-    /// No restriction detected.
-    None,
-}
-
-/// Overall verdict.
-#[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code, clippy::enum_variant_names)]
-pub enum Verdict {
-    /// All expected restrictions are active.
-    FullyRestricted,
-    /// Some restrictions are active but gaps exist.
-    PartiallyRestricted,
-    /// No restrictions detected.
-    NotRestricted,
-}
-
-/// A single restriction check result.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct RestrictionCheck {
-    pub name: String,
-    pub passed: bool,
-    pub detail: String,
-}
 
 /// Test TCP connectivity to a host:port.
 ///
@@ -349,19 +300,6 @@ mod tests {
         let result = test_file_access(".", "unknown");
         assert!(!result.allowed);
         assert!(result.error.unwrap().contains("Unknown operation"));
-    }
-
-    #[test]
-    fn test_restriction_mode_equality() {
-        assert_eq!(RestrictionMode::None, RestrictionMode::None);
-        assert_eq!(RestrictionMode::Legacy, RestrictionMode::Legacy);
-        assert_ne!(RestrictionMode::None, RestrictionMode::Legacy);
-    }
-
-    #[test]
-    fn test_verdict_equality() {
-        assert_eq!(Verdict::FullyRestricted, Verdict::FullyRestricted);
-        assert_ne!(Verdict::FullyRestricted, Verdict::NotRestricted);
     }
 
     #[test]

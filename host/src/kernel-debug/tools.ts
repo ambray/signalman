@@ -72,7 +72,7 @@ export function kernelDebugToolDefinitions(): ToolDefinition[] {
     },
     {
       name: "driver_ioctl",
-      description: "Send an IOCTL via the guest-side silo-test-harness",
+      description: "Send an IOCTL via the guest-side test-harness",
       handler: driverIoctlHandler,
     },
     {

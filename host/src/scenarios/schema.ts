@@ -317,7 +317,6 @@ export const scenarioConfigSchema = z
     setup: z.array(setupStepSchema).default([]),
     teardown: z.array(setupStepSchema).default([]),
     checkpoints: checkpointConfigSchema.default({}),
-    sandbox_modes: z.array(z.string()).optional(),
     /** Runtime capability gate — see {@link capabilitiesSchema}. */
     capabilities: capabilitiesSchema.optional(),
     /** Runtime parameter/default declarations — see {@link parametersSchema}. */

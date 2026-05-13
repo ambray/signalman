@@ -1,9 +1,9 @@
 /**
  * `signalman.plan` — dry-run a scenario.
  *
- * Per design doc §1.3. Loads, validates, expands `${param:NAME}` and
- * `${SANDBOX_MODE}` placeholders, and reports the resolved step plan
- * + affected resources. Does not mutate state.
+ * Per design doc §1.3. Loads, validates, expands `${param:NAME}`
+ * placeholders, and reports the resolved step plan + affected
+ * resources. Does not mutate state.
  *
  * Reserved-but-not-resolved tokens (`${secret:NAME}`) surface as
  * `warnings[]` so callers know the run will require a P4-resolvable

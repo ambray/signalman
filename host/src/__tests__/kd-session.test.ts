@@ -147,11 +147,11 @@ describe("KdSession — start()", () => {
     const s = new KdSession({
       kdArgs: ["-k"],
       spawnFn: makeFakeSpawn(cap),
-      breakOnLoad: ["my-driver.sys", "silo.sys"],
+      breakOnLoad: ["my-driver.sys", "helper.sys"],
     });
     await s.start();
     expect(cap.proc!.stdinLines).toContain("sxe ld my-driver.sys");
-    expect(cap.proc!.stdinLines).toContain("sxe ld silo.sys");
+    expect(cap.proc!.stdinLines).toContain("sxe ld helper.sys");
   });
 
   it("passes kdArgs through to spawn", async () => {

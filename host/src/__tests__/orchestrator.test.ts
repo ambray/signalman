@@ -147,26 +147,6 @@ function makeMockClient(
     }),
     stopProcess: vi.fn().mockResolvedValue({ stopped: true, error: "" }),
     listProcesses: vi.fn().mockResolvedValue([]),
-    verifyRestriction: vi.fn().mockResolvedValue({
-      isRestricted: false,
-      hasFirewallRules: false,
-      blockedDomains: [],
-      verdict: "unrestricted",
-      issues: [],
-      // P8: Windows-specific evidence under platformDetails.windows.
-      platformDetails: {
-        windows: {
-          restrictionMode: "none",
-          hasAppcontainerToken: false,
-          appcontainerSid: "",
-          isLowIntegrity: false,
-          isInJob: false,
-          jobName: "",
-          hasRestrictDll: false,
-          restrictDllPath: "",
-        },
-      },
-    }),
     testNetwork: vi.fn().mockResolvedValue({
       reachable: true,
       latencyMs: 10,

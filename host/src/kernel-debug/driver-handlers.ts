@@ -4,7 +4,7 @@
  * Handlers for `driver_load` / `driver_unload` / `driver_ioctl` —
  * every operation in here goes through the VM's guest agent
  * (`GuestAgentClient.runCommand`) to invoke `sc.exe` or the
- * `silo-test-harness.exe` IOCTL runner. Nothing in this file opens a
+ * `test-harness.exe` IOCTL runner. Nothing in this file opens a
  * kernel debugger; those paths live in `./kernel-handlers.ts`.
  *
  * See module docstring on `./handlers.ts` for why we split handlers
@@ -212,7 +212,7 @@ export interface DriverIoctlResult {
 }
 
 /**
- * Send an IOCTL via the guest-side `silo-test-harness.exe`.
+ * Send an IOCTL via the guest-side `test-harness.exe`.
  *
  * The harness is a Rust user-mode binary (drv/test-harness/ — Phase 1d
  * of this sprint); this handler only knows its CLI surface and JSON

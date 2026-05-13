@@ -209,12 +209,12 @@ describe("spawnKernelDebugSessions — enabled path", () => {
         guest_agent_port: 50051,
         kernel_debug: {
           enabled: true,
-          break_on_load: ["my-driver.sys", "silo.sys"],
+          break_on_load: ["my-driver.sys", "helper.sys"],
           break_on_bugcheck: false,
         },
       },
     ]);
-    expect(sessions[0].opts.breakOnLoad).toEqual(["my-driver.sys", "silo.sys"]);
+    expect(sessions[0].opts.breakOnLoad).toEqual(["my-driver.sys", "helper.sys"]);
     expect(sessions[0].opts.breakOnBugcheck).toBe(false);
   });
 
