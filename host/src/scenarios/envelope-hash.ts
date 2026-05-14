@@ -254,31 +254,47 @@ export function aggregateVmLineageHashes(hashes: readonly string[]): string {
   return sha256Hex(canonicalJson(sorted));
 }
 
-// ── agent_version aggregation ─────────────────────────────────────
+// ── Sorted-unique-comma-join aggregation ──────────────────────────
+
+/**
+ * Combine an array of string labels into a single envelope-level
+ * string. Generic primitive used for `agent_version`, `network_class`,
+ * and future per-VM-label envelope fields that follow the same
+ * "stable label set → one envelope string" pattern.
+ *
+ * Behaviour:
+ *   - Empty / all-undefined / all-empty-string input → `undefined`.
+ *     Caller leaves the envelope field undefined.
+ *   - One unique label → that label verbatim.
+ *   - Multiple unique labels → comma-joined sorted-unique list
+ *     (e.g. `"0.1.5,0.2.1"` for agent versions; `"default,isolated-lab"`
+ *     for network classes).
+ *
+ * `undefined`/empty entries are filtered before aggregation so a
+ * single failed VM (e.g. no health response) doesn't pollute the
+ * envelope with falsy values.
+ */
+export function aggregateUniqueStrings(
+  labels: ReadonlyArray<string | undefined>,
+): string | undefined {
+  const real = labels.filter(
+    (v): v is string => typeof v === "string" && v.length > 0,
+  );
+  if (real.length === 0) return undefined;
+  const unique = Array.from(new Set(real)).sort();
+  return unique.join(",");
+}
 
 /**
  * Combine per-VM agent-version strings into a single envelope-level
- * string.
- *
- * Behaviour:
- *   - Empty / all-undefined input → `undefined`. Caller leaves the
- *     envelope field undefined.
- *   - One unique version → that version verbatim.
- *   - Multiple unique versions → comma-joined sorted-unique list
- *     (e.g. `"0.1.5,0.2.1"`).
- *
- * `undefined`/empty entries are ignored before aggregation so a
- * single failed VM (no health response) doesn't pollute the
- * envelope with falsy values.
+ * string. Thin wrapper over {@link aggregateUniqueStrings} preserved
+ * for API clarity — the call site reads more clearly than the
+ * generic name. Identical semantics.
  */
 export function aggregateAgentVersions(
   versions: ReadonlyArray<string | undefined>,
 ): string | undefined {
-  const real = versions
-    .filter((v): v is string => typeof v === "string" && v.length > 0);
-  if (real.length === 0) return undefined;
-  const unique = Array.from(new Set(real)).sort();
-  return unique.join(",");
+  return aggregateUniqueStrings(versions);
 }
 
 // ── Internal SHA-256 helper ────────────────────────────────────────

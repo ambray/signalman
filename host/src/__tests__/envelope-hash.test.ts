@@ -12,6 +12,7 @@ import * as crypto from "node:crypto";
 
 import {
   aggregateAgentVersions,
+  aggregateUniqueStrings,
   aggregateVmLineageHashes,
   canonicalJson,
   classifyNetwork,
@@ -397,6 +398,52 @@ describe("aggregateAgentVersions", () => {
     expect(
       aggregateAgentVersions([undefined, "0.2.1", undefined, "0.1.5"]),
     ).toBe("0.1.5,0.2.1");
+  });
+});
+
+// ── aggregateUniqueStrings (generic primitive) ────────────────────
+
+describe("aggregateUniqueStrings", () => {
+  it("returns undefined for empty input", () => {
+    expect(aggregateUniqueStrings([])).toBeUndefined();
+  });
+
+  it("returns undefined when all entries are undefined or empty", () => {
+    expect(aggregateUniqueStrings([undefined, undefined])).toBeUndefined();
+    expect(aggregateUniqueStrings(["", ""])).toBeUndefined();
+    expect(aggregateUniqueStrings([undefined, ""])).toBeUndefined();
+  });
+
+  it("returns single label verbatim", () => {
+    expect(aggregateUniqueStrings(["default"])).toBe("default");
+  });
+
+  it("dedupes and sorts multiple labels", () => {
+    expect(
+      aggregateUniqueStrings(["b", "a", "c", "a", "b"]),
+    ).toBe("a,b,c");
+  });
+
+  it("filters empty/undefined entries before aggregating", () => {
+    expect(
+      aggregateUniqueStrings([
+        undefined,
+        "isolated",
+        "",
+        "default",
+        undefined,
+      ]),
+    ).toBe("default,isolated");
+  });
+
+  it("aggregateAgentVersions delegates to aggregateUniqueStrings", () => {
+    // Behavioural equivalence — refactor commit should keep this pinned.
+    const same = (xs: ReadonlyArray<string | undefined>) =>
+      expect(aggregateAgentVersions(xs)).toBe(aggregateUniqueStrings(xs));
+    same([]);
+    same(["0.2.1"]);
+    same(["0.2.1", "0.1.5", "0.2.1"]);
+    same([undefined, "0.2.1"]);
   });
 });
 

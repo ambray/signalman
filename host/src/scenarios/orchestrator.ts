@@ -56,6 +56,7 @@ import { hyperVPsExec } from "../hypervisors/hyperv.js";
 import { resolveLayout } from "./project-layout.js";
 import {
   aggregateAgentVersions,
+  aggregateUniqueStrings,
   aggregateVmLineageHashes,
   classifyNetwork,
   computeScenarioHash,
@@ -1389,10 +1390,7 @@ export class ScenarioOrchestrator {
     const envelopeAgentVersion = aggregateAgentVersions(
       Array.from(agentVersionsByVm.values()),
     );
-    const envelopeNetworkClass = aggregateAgentVersions(
-      // Reuse the same sorted-unique-comma-joined aggregation; the
-      // semantics match (set of stable string labels → one envelope
-      // string).
+    const envelopeNetworkClass = aggregateUniqueStrings(
       Array.from(networkClassesByVm.values()),
     );
     const result: ScenarioResult = {
