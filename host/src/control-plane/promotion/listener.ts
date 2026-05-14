@@ -98,6 +98,34 @@ export async function onReleaseBuilt(
 }
 
 /**
+ * Fire the tier-to-tier listener for a release that just deployed
+ * successfully to `sourceTargetId`. Walks every active policy whose
+ * `source_target_id` matches and creates / triggers each.
+ *
+ * Caller is responsible for ensuring the deploy's status is `active`
+ * (i.e., health probes passed). Failed / rolled-back deploys MUST NOT
+ * invoke this — promotion across tiers should only fire when the
+ * source tier is verified.
+ */
+export async function onReleaseDeployed(
+  opts: PromotionListenerOptions,
+  release: Release,
+  sourceTargetId: string,
+): Promise<PromotionListenerOutcome[]> {
+  const matching = await opts.controlPlane.promotionPolicies.listMatchingForProduct(
+    {
+      productId: release.productId,
+      sourceTargetId,
+    },
+  );
+  const outcomes: PromotionListenerOutcome[] = [];
+  for (const policy of matching) {
+    outcomes.push(await firePolicy(opts, policy, release));
+  }
+  return outcomes;
+}
+
+/**
  * Apply a single policy. Exposed so v0.5+ can add a "promote a
  * previously-built release through this policy" path without the
  * listener fire-on-build dance.

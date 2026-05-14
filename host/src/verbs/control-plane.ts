@@ -68,6 +68,7 @@ import {
 } from "../control-plane/events/index.js";
 import {
   onReleaseBuilt,
+  onReleaseDeployed,
   runPromotionTick,
   type DeployInvoker,
   type PromotionListenerOutcome,
@@ -582,7 +583,42 @@ export async function runReleaseDeploy(
       fail: result.healthSummary.fail,
     },
   });
+  // Tier-to-tier promotion: only fire when the deploy lands as
+  // active (health probes passed). Failed / rolled-back / pending
+  // deploys must NOT trigger downstream promotion — the source tier
+  // hasn't been verified. Promotion is intentionally NOT fired by
+  // rollback paths (per operator policy: rollback is recovery, not
+  // a promotion event).
+  if (result.deployment.status === "active") {
+    await fireTierToTierPromotionBestEffort(controlPlane, result.release, target.id);
+  }
   return result;
+}
+
+async function fireTierToTierPromotionBestEffort(
+  controlPlane: ControlPlane,
+  release: Release,
+  sourceTargetId: string,
+): Promise<PromotionListenerOutcome[]> {
+  try {
+    const deploy = createDefaultPromotionDeployInvoker(controlPlane);
+    return await onReleaseDeployed(
+      { controlPlane, deploy },
+      release,
+      sourceTargetId,
+    );
+  } catch (err) {
+    process.stderr.write(
+      JSON.stringify({
+        source: "signalman-promotion",
+        kind: "tier-listener-error",
+        releaseId: release.id,
+        sourceTargetId,
+        error: (err as Error).message,
+      }) + "\n",
+    );
+    return [];
+  }
 }
 
 export interface ReleaseRollbackInput {
@@ -1701,6 +1737,14 @@ export async function runPromotionApprove(
   if (!policy) throw new Error(`approval references missing policy ${existing.policyId}`);
   const release = await controlPlane.releases.get(existing.releaseId);
   if (!release) throw new Error(`approval references missing release ${existing.releaseId}`);
+  // Enforce the per-policy approver allow-list when configured.
+  // Honour-system check: --decided-by is caller-supplied, not
+  // authenticated. Surfaces accidental self-approval; does not block
+  // a malicious operator who already has CLI access (they could
+  // bypass promotion entirely with `release deploy`). The audit-log
+  // row preserves whatever the caller passed.
+  const allowlistError = checkApproverAllowlist(policy, input.decidedBy);
+  if (allowlistError) throw new Error(allowlistError);
   const nowIsoStr = new Date().toISOString();
   await controlPlane.approvals.update(existing.id, {
     status: "approved",
@@ -1840,6 +1884,34 @@ export function createDefaultPromotionDeployInvoker(
       };
     }
   };
+}
+
+/**
+ * Read the approver allow-list from a policy's gate_config. Returns
+ * an error message when `decidedBy` is set but isn't allowed; null
+ * when there's no allow-list or the caller is allowed.
+ *
+ * Exported for unit tests. The check is honour-system only — see
+ * the security note in `.workstream-status.md`.
+ */
+export function checkApproverAllowlist(
+  policy: PromotionPolicy,
+  decidedBy: string | undefined,
+): string | null {
+  const raw = (policy.gateConfig as { approvers?: unknown }).approvers;
+  if (raw === undefined || raw === null) return null;
+  if (!Array.isArray(raw)) {
+    return `promotion policy ${policy.id} has malformed gate_config.approvers (expected array of strings)`;
+  }
+  const approvers = raw.filter((s): s is string => typeof s === "string");
+  if (approvers.length === 0) return null;
+  if (!decidedBy || decidedBy.length === 0) {
+    return `promotion policy ${policy.id} requires --decided-by; allowed approvers: ${approvers.join(", ")}`;
+  }
+  if (!approvers.includes(decidedBy)) {
+    return `'${decidedBy}' is not in the approver allow-list for promotion policy ${policy.id}: ${approvers.join(", ")}`;
+  }
+  return null;
 }
 
 /**

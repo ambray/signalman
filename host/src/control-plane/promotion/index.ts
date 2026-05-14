@@ -7,6 +7,7 @@ export {
   decideGate,
   firePolicy,
   onReleaseBuilt,
+  onReleaseDeployed,
   readDelaySeconds,
   runPromotionTick,
 } from "./listener.js";

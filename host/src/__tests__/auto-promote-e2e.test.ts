@@ -17,15 +17,18 @@ import {
   approvalsDueForAutoApprove,
   firePolicy,
   onReleaseBuilt,
+  onReleaseDeployed,
   runPromotionTick,
   type DeployInvoker,
   type PromotionListenerOutcome,
 } from "../control-plane/promotion/index.js";
 import {
+  checkApproverAllowlist,
   runPromotionApprove,
   runPromotionPolicyAdd,
   runPromotionReject,
 } from "../verbs/control-plane.js";
+import type { PromotionPolicy } from "../control-plane/types.js";
 import type {
   Org,
   Product,
@@ -394,5 +397,227 @@ describe("verb-layer approve / reject", () => {
     const pureView = approvalsDueForAutoApprove(allPending, Date.parse("2026-05-14T12:02:00Z"));
     const repoView = await cp.approvals.listPendingAutoApprove("2026-05-14T12:02:00.000Z");
     expect(pureView.map((a) => a.id).sort()).toEqual(repoView.map((a) => a.id).sort());
+  });
+});
+
+describe("approver allow-list", () => {
+  const baseStub: PromotionPolicy = {
+    id: "pol",
+    orgId: "org",
+    productId: "p",
+    sourceTargetId: null,
+    destTargetId: "t",
+    gateKind: "manual",
+    gateConfig: {},
+    active: true,
+    description: null,
+    createdAt: "x",
+    updatedAt: "x",
+    deletedAt: null,
+  };
+
+  describe("checkApproverAllowlist (pure)", () => {
+    it("returns null when no allow-list is set", () => {
+      expect(checkApproverAllowlist(baseStub, "alice")).toBeNull();
+    });
+
+    it("returns null when allow-list is empty", () => {
+      const policy = { ...baseStub, gateConfig: { approvers: [] } };
+      expect(checkApproverAllowlist(policy, "alice")).toBeNull();
+    });
+
+    it("requires decided_by when allow-list is non-empty", () => {
+      const policy = { ...baseStub, gateConfig: { approvers: ["alice"] } };
+      expect(checkApproverAllowlist(policy, undefined)).toMatch(/requires --decided-by/);
+    });
+
+    it("rejects a decided_by outside the allow-list", () => {
+      const policy = { ...baseStub, gateConfig: { approvers: ["alice", "bob"] } };
+      expect(checkApproverAllowlist(policy, "mallory")).toMatch(
+        /'mallory' is not in the approver allow-list/,
+      );
+    });
+
+    it("accepts a decided_by inside the allow-list", () => {
+      const policy = { ...baseStub, gateConfig: { approvers: ["alice", "bob"] } };
+      expect(checkApproverAllowlist(policy, "bob")).toBeNull();
+    });
+
+    it("rejects a malformed allow-list (not an array)", () => {
+      const policy = {
+        ...baseStub,
+        gateConfig: { approvers: "alice" } as unknown as Record<string, unknown>,
+      };
+      expect(checkApproverAllowlist(policy, "alice")).toMatch(/malformed gate_config.approvers/);
+    });
+  });
+
+  it("runPromotionApprove honours the allow-list", async () => {
+    const entry = await runPromotionPolicyAdd(cp, {
+      productName: "p",
+      destTargetName: "demo",
+      gateKind: "manual",
+      gateConfig: { approvers: ["alice", "bob"] },
+    });
+    const release = await makeReadyRelease("v0.0.1");
+    await firePolicy(
+      { controlPlane: cp, deploy: async () => ({ deploymentId: null, outcome: "success" }) },
+      entry.policy,
+      release,
+    );
+    const [pending] = await cp.approvals.listForOrg(org.id, { status: "pending" });
+
+    // Mallory is not in the list — refused.
+    await expect(
+      runPromotionApprove(cp, { id: pending.id, decidedBy: "mallory" }, {
+        deploy: async () => ({ deploymentId: null, outcome: "success" }),
+      }),
+    ).rejects.toThrow(/approver allow-list/);
+
+    // Approval row stays pending.
+    const stillPending = await cp.approvals.get(pending.id);
+    expect(stillPending?.status).toBe("pending");
+
+    // Alice is in the list — allowed.
+    const result = await runPromotionApprove(
+      cp,
+      { id: pending.id, decidedBy: "alice", reason: "ok" },
+      { deploy: async () => ({ deploymentId: null, outcome: "success" }) },
+    );
+    expect(result.approval.status).toBe("approved");
+    expect(result.approval.decidedBy).toBe("alice");
+  });
+
+  it("runPromotionApprove requires --decided-by when allow-list is non-empty", async () => {
+    const entry = await runPromotionPolicyAdd(cp, {
+      productName: "p",
+      destTargetName: "demo",
+      gateKind: "manual",
+      gateConfig: { approvers: ["alice"] },
+    });
+    const release = await makeReadyRelease("v0.0.1");
+    await firePolicy(
+      { controlPlane: cp, deploy: async () => ({ deploymentId: null, outcome: "success" }) },
+      entry.policy,
+      release,
+    );
+    const [pending] = await cp.approvals.listForOrg(org.id, { status: "pending" });
+    await expect(
+      runPromotionApprove(cp, { id: pending.id }, {
+        deploy: async () => ({ deploymentId: null, outcome: "success" }),
+      }),
+    ).rejects.toThrow(/requires --decided-by/);
+  });
+});
+
+describe("tier-to-tier promotion (onReleaseDeployed)", () => {
+  it("fires policies whose source matches the just-deployed target", async () => {
+    const testTarget = target; // 'demo' — re-using as the source.
+    const prodTarget = await cp.targets.create({
+      orgId: org.id,
+      name: "prod",
+      kind: "vm_demo",
+      connection: { vmName: "vm-prod" },
+    });
+    await cp.promotionPolicies.create({
+      orgId: org.id,
+      productId: product.id,
+      sourceTargetId: testTarget.id,
+      destTargetId: prodTarget.id,
+      gateKind: "auto",
+    });
+    const { invoker, calls } = recordingInvoker();
+    const release = await makeReadyRelease("v0.0.1");
+    const outcomes = await onReleaseDeployed(
+      { controlPlane: cp, deploy: invoker },
+      release,
+      testTarget.id,
+    );
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0].action).toBe("auto_deployed");
+    expect(calls).toEqual([{ releaseId: release.id, destTargetId: prodTarget.id }]);
+  });
+
+  it("skips policies whose source doesn't match the deployed target", async () => {
+    const otherSource = await cp.targets.create({
+      orgId: org.id,
+      name: "test",
+      kind: "vm_test",
+      connection: { vmName: "vm-test" },
+    });
+    const prodTarget = await cp.targets.create({
+      orgId: org.id,
+      name: "prod",
+      kind: "vm_demo",
+      connection: { vmName: "vm-prod" },
+    });
+    // Policy fires on test → prod.
+    await cp.promotionPolicies.create({
+      orgId: org.id,
+      productId: product.id,
+      sourceTargetId: otherSource.id,
+      destTargetId: prodTarget.id,
+      gateKind: "auto",
+    });
+    const { invoker, calls } = recordingInvoker();
+    const release = await makeReadyRelease("v0.0.1");
+    // Demo just got deployed, but the policy wants `test` as source.
+    const outcomes = await onReleaseDeployed(
+      { controlPlane: cp, deploy: invoker },
+      release,
+      target.id, // 'demo'
+    );
+    expect(outcomes).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  it("does not fire initial-tier policies (source IS NULL) on deploy", async () => {
+    // Initial-tier policy: source is null, dest=demo.
+    await cp.promotionPolicies.create({
+      orgId: org.id,
+      productId: product.id,
+      destTargetId: target.id,
+      gateKind: "auto",
+    });
+    const { invoker, calls } = recordingInvoker();
+    const release = await makeReadyRelease("v0.0.1");
+    const outcomes = await onReleaseDeployed(
+      { controlPlane: cp, deploy: invoker },
+      release,
+      target.id,
+    );
+    expect(outcomes).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  it("re-fire on same (release, dest) is idempotent", async () => {
+    const prodTarget = await cp.targets.create({
+      orgId: org.id,
+      name: "prod",
+      kind: "vm_demo",
+      connection: { vmName: "vm-prod" },
+    });
+    await cp.promotionPolicies.create({
+      orgId: org.id,
+      productId: product.id,
+      sourceTargetId: target.id,
+      destTargetId: prodTarget.id,
+      gateKind: "manual",
+    });
+    const { invoker } = recordingInvoker();
+    const release = await makeReadyRelease("v0.0.1");
+    const first = await onReleaseDeployed(
+      { controlPlane: cp, deploy: invoker },
+      release,
+      target.id,
+    );
+    const second = await onReleaseDeployed(
+      { controlPlane: cp, deploy: invoker },
+      release,
+      target.id,
+    );
+    expect(first[0].action).toBe("queued_manual");
+    expect(second[0].action).toBe("duplicate");
+    expect(second[0].approvalId).toBe(first[0].approvalId);
   });
 });

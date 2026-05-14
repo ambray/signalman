@@ -60,10 +60,23 @@ signalman promotion tick
 
 ## Expected behaviour
 
-- `signalman release build` lands a release as `ready` → the listener walks active policies for that product and either deploys (auto) or queues an approval (manual / time_delay).
+- `signalman release build` lands a release as `ready` → the listener walks active policies for that product (matching `source IS NULL`) and either deploys (auto) or queues an approval (manual / time_delay).
+- `signalman release deploy` that lands as `status=active` (i.e., health probes passed) → the listener walks active policies whose `source` matches the just-deployed target and fires the same way. Tier-to-tier promotion = "test → demo → prod" without an operator pulling the trigger.
+- Failed / rolled-back deploys do NOT promote — only `status=active` triggers the next-tier listener.
 - The promotion path is idempotent on (release, dest_target). A re-fire of the listener returns the existing approval row, never queues a duplicate.
 - `signalman release show <release_id>` now includes an `approvals` array surfacing the per-target promotion state.
 - Approval/rejection emits `promotion-approved` / `promotion-rejected` webhook events (Epic 2). Pair this skill with `signalman webhook add --events promotion-approved,promotion-rejected --kind slack ...` to mirror decisions into chat.
+
+### Approver allow-list (honour-system)
+
+Add an `approvers` array to a manual policy's gate config to require `--decided-by` matches one of the listed identities:
+
+```bash
+signalman promotion add --product p --dest demo --gate manual \
+  --gate-config '{"approvers": ["alice@example", "bob@example"]}'
+```
+
+`signalman promotion approve <id>` then refuses any `--decided-by` that isn't in the list (and refuses if `--decided-by` was omitted). This is an honour-system check: it surfaces accidental self-approval and creates a clear audit trail, but it does NOT cryptographically authenticate the caller. Anyone who can run the CLI could type `--decided-by alice` and bypass it; segregation of duties at that level requires the v0.5+ API-key-bound identity work.
 
 ## Exit codes
 
