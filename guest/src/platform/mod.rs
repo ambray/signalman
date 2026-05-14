@@ -271,10 +271,13 @@ mod tests {
     }
 
     #[test]
-    fn linux_impl_only_supports_portable_rpcs() {
+    fn linux_impl_supports_portable_rpcs_and_sudo_elevation() {
+        // Linux gains `supports_system_elevation()` post-WS4 via the
+        // passwordless `sudo -n` path in `process::start_process_as_system`.
+        // UI automation and package-manager install remain off.
         assert_eq!(
             dispatch(&super::linux::LinuxPlatform),
-            (PlatformKind::Linux, false, false, false, false),
+            (PlatformKind::Linux, false, false, true, false),
         );
     }
 

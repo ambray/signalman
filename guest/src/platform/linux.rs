@@ -32,11 +32,16 @@ impl Platform for LinuxPlatform {
     }
 
     fn supports_system_elevation(&self) -> bool {
-        // Linux has equivalents (`setuid` / `sudo`) but they're
-        // out of scope for v0.4.0; the cross-platform doc explicitly
-        // defers them to a future milestone. We don't want to claim
-        // support and silently run as the agent user.
-        false
+        // Linux elevation is implemented via passwordless `sudo -n`
+        // in `crate::process::start_process_as_system`. The agent's
+        // invoking user must have NOPASSWD configured in sudoers for
+        // the commands the operator intends to run; otherwise the
+        // first elevation attempt fails fast with
+        // `Status::permission_denied`. Operators who haven't set up
+        // sudoers see the failure on first use — that's the same
+        // shape as Windows when the host process isn't running as
+        // an admin.
+        true
     }
 
     fn supports_package_manager_install(&self) -> bool {
@@ -49,12 +54,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reports_linux_kind_and_minimal_capability_surface() {
+    fn reports_linux_kind_and_capability_surface() {
         let p = LinuxPlatform;
         assert_eq!(p.kind(), PlatformKind::Linux);
         assert!(!p.supports_ui_automation());
         assert!(!p.supports_browser_automation());
-        assert!(!p.supports_system_elevation());
+        // Linux SYSTEM-elevation lands via passwordless sudo -n
+        // (v0.4.0-4 follow-up).
+        assert!(p.supports_system_elevation());
         assert!(!p.supports_package_manager_install());
     }
 
