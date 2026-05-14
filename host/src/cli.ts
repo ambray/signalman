@@ -78,6 +78,13 @@ import {
   runWebhookList,
   runWebhookRemove,
   runWebhookTest,
+  runPromotionPolicyAdd,
+  runPromotionPolicyList,
+  runPromotionPolicyRemove,
+  runApprovalList,
+  runPromotionApprove,
+  runPromotionReject,
+  runPromotionTickVerb,
 } from "./verbs/control-plane.js";
 import { runSchedulerTick, startScheduler } from "./control-plane/scheduler/index.js";
 // PR 6 — `signalman serve` HTTP control plane.
@@ -3919,6 +3926,229 @@ async function cmdWebhookTest(args: ParsedArgs): Promise<number> {
   }
 }
 
+// ── promotion verbs (v0.4.0-1 / Epic 1) ─────────────────────────────
+
+async function cmdPromotion(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub)
+    usageError(
+      "promotion requires a subcommand (list, add, remove, approve, reject, tick, approvals)",
+    );
+  switch (sub) {
+    case "list":
+      return await cmdPromotionList(args);
+    case "add":
+      return await cmdPromotionAdd(args);
+    case "remove":
+      return await cmdPromotionRemove(args);
+    case "approve":
+      return await cmdPromotionApprove(args);
+    case "reject":
+      return await cmdPromotionReject(args);
+    case "tick":
+      return await cmdPromotionTick(args);
+    case "approvals":
+      return await cmdPromotionApprovals(args);
+    default:
+      usageError(`unknown promotion subcommand: ${sub}`);
+  }
+}
+
+async function cmdPromotionAdd(args: ParsedArgs): Promise<number> {
+  const productName = args.options.get("product");
+  const destTargetName = args.options.get("dest");
+  const sourceTargetName = args.options.get("source");
+  const gateRaw = args.options.get("gate");
+  if (!productName) usageError("promotion add requires --product <NAME>");
+  if (!destTargetName) usageError("promotion add requires --dest <TARGET>");
+  if (!gateRaw) usageError("promotion add requires --gate <auto|manual|time_delay>");
+  if (!["auto", "manual", "time_delay"].includes(gateRaw)) {
+    usageError(`promotion add: invalid --gate '${gateRaw}'`);
+  }
+  const gateKind = gateRaw as "auto" | "manual" | "time_delay";
+  const gateConfigRaw = args.options.get("gate-config");
+  let gateConfig: Record<string, unknown> | undefined;
+  if (gateConfigRaw) {
+    try {
+      gateConfig = JSON.parse(gateConfigRaw) as Record<string, unknown>;
+    } catch {
+      usageError("promotion add: --gate-config must be valid JSON");
+    }
+  }
+  if (gateKind === "time_delay" && !gateConfig) {
+    const delaySeconds = Number(args.options.get("delay-seconds"));
+    if (Number.isFinite(delaySeconds) && delaySeconds >= 0) {
+      gateConfig = { delay_seconds: delaySeconds };
+    }
+  }
+  const description = args.options.get("description");
+  const format = args.options.get("format");
+  try {
+    const entry = await withControlPlane((cp) =>
+      runPromotionPolicyAdd(cp, {
+        productName,
+        destTargetName,
+        sourceTargetName,
+        gateKind,
+        gateConfig,
+        description,
+      }),
+    );
+    if (format === "json") {
+      emitJson(entry);
+    } else {
+      process.stdout.write(
+        `Added promotion policy '${entry.policy.id}'\n` +
+          `  product:   ${entry.product.name}\n` +
+          `  source:    ${entry.sourceTarget?.name ?? "(initial tier — fires on release-built)"}\n` +
+          `  dest:      ${entry.destTarget.name}\n` +
+          `  gate:      ${entry.policy.gateKind}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman promotion add: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdPromotionList(args: ParsedArgs): Promise<number> {
+  const format = args.options.get("format");
+  try {
+    const entries = await withControlPlane((cp) => runPromotionPolicyList(cp));
+    if (format === "json") {
+      emitJson(entries);
+      return 0;
+    }
+    if (entries.length === 0) {
+      process.stdout.write("(no promotion policies)\n");
+      return 0;
+    }
+    emitTable(
+      entries.map((e) => ({
+        id: e.policy.id,
+        product: e.product.name,
+        source: e.sourceTarget?.name ?? "(initial)",
+        dest: e.destTarget.name,
+        gate: e.policy.gateKind,
+        active: e.policy.active ? "yes" : "no",
+      })),
+    );
+    return 0;
+  } catch (err) {
+    console.error(`signalman promotion list: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdPromotionRemove(args: ParsedArgs): Promise<number> {
+  const id = args.positional[0] ?? args.options.get("id");
+  if (!id) usageError("promotion remove requires <id>");
+  try {
+    await withControlPlane((cp) => runPromotionPolicyRemove(cp, { id }));
+    process.stdout.write(`Removed promotion policy '${id}'.\n`);
+    return 0;
+  } catch (err) {
+    console.error(`signalman promotion remove: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdPromotionApprove(args: ParsedArgs): Promise<number> {
+  const id = args.positional[0] ?? args.options.get("id");
+  if (!id) usageError("promotion approve requires <approval-id>");
+  const decidedBy = args.options.get("decided-by");
+  const reason = args.options.get("reason");
+  const format = args.options.get("format");
+  try {
+    const result = await withControlPlane((cp) =>
+      runPromotionApprove(cp, { id, decidedBy, reason }),
+    );
+    if (format === "json") {
+      emitJson(result);
+    } else {
+      process.stdout.write(
+        `Approved approval '${id}'\n` +
+          `  deploy outcome: ${result.deployOutcome ?? "(not run)"}\n` +
+          (result.deployedDeploymentId
+            ? `  deployment id:  ${result.deployedDeploymentId}\n`
+            : ""),
+      );
+    }
+    return result.deployOutcome === "failed" ? 4 : 0;
+  } catch (err) {
+    console.error(`signalman promotion approve: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdPromotionReject(args: ParsedArgs): Promise<number> {
+  const id = args.positional[0] ?? args.options.get("id");
+  if (!id) usageError("promotion reject requires <approval-id>");
+  const decidedBy = args.options.get("decided-by");
+  const reason = args.options.get("reason");
+  try {
+    await withControlPlane((cp) =>
+      runPromotionReject(cp, { id, decidedBy, reason }),
+    );
+    process.stdout.write(`Rejected approval '${id}'.\n`);
+    return 0;
+  } catch (err) {
+    console.error(`signalman promotion reject: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdPromotionTick(_args: ParsedArgs): Promise<number> {
+  try {
+    const r = await withControlPlane((cp) => runPromotionTickVerb(cp));
+    process.stdout.write(`Promotion tick processed ${r.processed} approval(s).\n`);
+    return 0;
+  } catch (err) {
+    console.error(`signalman promotion tick: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdPromotionApprovals(args: ParsedArgs): Promise<number> {
+  const statusRaw = args.options.get("status");
+  const status = statusRaw as
+    | "pending"
+    | "approved"
+    | "rejected"
+    | "auto_approved"
+    | undefined;
+  const format = args.options.get("format");
+  try {
+    const entries = await withControlPlane((cp) =>
+      runApprovalList(cp, { status }),
+    );
+    if (format === "json") {
+      emitJson(entries);
+      return 0;
+    }
+    if (entries.length === 0) {
+      process.stdout.write("(no approvals)\n");
+      return 0;
+    }
+    emitTable(
+      entries.map((e) => ({
+        id: e.approval.id,
+        status: e.approval.status,
+        release: e.release?.tag ?? e.approval.releaseId,
+        dest: e.destTarget?.name ?? e.approval.destTargetId,
+        gate: e.policy?.gateKind ?? "?",
+        auto_at: e.approval.autoApproveAt ?? "-",
+        deploy: e.approval.deployOutcome ?? "-",
+      })),
+    );
+    return 0;
+  } catch (err) {
+    console.error(`signalman promotion approvals: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 async function main(argv: string[]): Promise<number> {
@@ -3967,6 +4197,8 @@ async function main(argv: string[]): Promise<number> {
         return await cmdSchedule(args);
       case "webhook":
         return await cmdWebhook(args);
+      case "promotion":
+        return await cmdPromotion(args);
       case "serve":
         return await cmdServe(args);
       case "api-key":
@@ -4028,6 +4260,7 @@ function printHelp(): void {
       "  health <subcommand>    (check, history)",
       "  schedule <subcommand>  (list, add, disable, enable, remove, run-once, start)",
       "  webhook <subcommand>   (list, add, remove, test)",
+      "  promotion <subcommand> (list, add, remove, approve, reject, tick, approvals)",
       "  serve [--port P] [--host H] [--disable-loopback-bypass]",
       "                              (start the control-plane HTTP server)",
       "  api-key <subcommand>   (create, list, revoke)",

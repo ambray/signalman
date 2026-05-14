@@ -60,6 +60,13 @@ import {
   runWebhookList,
   runWebhookRemove,
   runWebhookTest,
+  runPromotionPolicyAdd,
+  runPromotionPolicyList,
+  runPromotionPolicyRemove,
+  runApprovalList,
+  runPromotionApprove,
+  runPromotionReject,
+  runPromotionTickVerb,
   withControlPlane,
 } from "./verbs/control-plane.js";
 import { runSchedulerTick } from "./control-plane/scheduler/index.js";
@@ -1745,6 +1752,142 @@ server.tool(
           runWebhookTest(cp, { id: (params as { id: string }).id }),
         ),
       ),
+    ),
+);
+
+// ── Promotion verbs (v0.4.0-1 / Epic 1) ───────────────────────────
+
+server.tool(
+  "signalman_promotion_list",
+  "List promotion policies in the active org. Each policy describes how a release of a product moves from one tier (source target) to another (dest target) — auto, manual, or time-delay gate.",
+  {},
+  async (params) =>
+    withRecording("signalman_promotion_list", params, async () =>
+      asMcpResult(await withControlPlane((cp) => runPromotionPolicyList(cp))),
+    ),
+);
+
+server.tool(
+  "signalman_promotion_add",
+  "Register a promotion policy. Auto = fires deploy immediately on release-built. Manual = creates a pending approval row that signalman_promotion_approve flips. Time-delay = pending until auto_approve_at elapses; the promotion tick fires the deploy.",
+  {
+    product: z.string().describe("Product name."),
+    dest: z.string().describe("Dest target name."),
+    source: z
+      .string()
+      .optional()
+      .describe("Source target name. Omit for the initial-tier policy (fires on release-built)."),
+    gate: z.enum(["auto", "manual", "time_delay"]),
+    gate_config: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe(
+        "Kind-specific config. For time_delay supply { delay_seconds: N }.",
+      ),
+    description: z.string().optional(),
+  },
+  async (params) =>
+    withRecording("signalman_promotion_add", params, async () =>
+      asMcpResult(
+        await withControlPlane((cp) =>
+          runPromotionPolicyAdd(cp, {
+            productName: (params as { product: string }).product,
+            destTargetName: (params as { dest: string }).dest,
+            sourceTargetName: (params as { source?: string }).source,
+            gateKind: (params as { gate: "auto" | "manual" | "time_delay" }).gate,
+            gateConfig: (params as { gate_config?: Record<string, unknown> }).gate_config,
+            description: (params as { description?: string }).description,
+          }),
+        ),
+      ),
+    ),
+);
+
+server.tool(
+  "signalman_promotion_remove",
+  "Soft-delete a promotion policy. Existing in-flight approvals are not affected.",
+  {
+    id: z.string().describe("Promotion policy id."),
+  },
+  async (params) =>
+    withRecording("signalman_promotion_remove", params, async () => {
+      await withControlPlane((cp) =>
+        runPromotionPolicyRemove(cp, { id: (params as { id: string }).id }),
+      );
+      return asMcpResult({ removed: true });
+    }),
+);
+
+server.tool(
+  "signalman_promotion_approve",
+  "Approve a pending approval row and fire the deploy. Returns the deploy outcome (success / failed) and the resulting deployment id when one was created.",
+  {
+    id: z.string().describe("Approval id."),
+    decided_by: z.string().optional().describe("Audit-log actor label."),
+    reason: z.string().optional(),
+  },
+  async (params) =>
+    withRecording("signalman_promotion_approve", params, async () =>
+      asMcpResult(
+        await withControlPlane((cp) =>
+          runPromotionApprove(cp, {
+            id: (params as { id: string }).id,
+            decidedBy: (params as { decided_by?: string }).decided_by,
+            reason: (params as { reason?: string }).reason,
+          }),
+        ),
+      ),
+    ),
+);
+
+server.tool(
+  "signalman_promotion_reject",
+  "Reject a pending approval. The approval row is preserved with status=rejected; no deploy is attempted.",
+  {
+    id: z.string().describe("Approval id."),
+    decided_by: z.string().optional(),
+    reason: z.string().optional(),
+  },
+  async (params) =>
+    withRecording("signalman_promotion_reject", params, async () =>
+      asMcpResult(
+        await withControlPlane((cp) =>
+          runPromotionReject(cp, {
+            id: (params as { id: string }).id,
+            decidedBy: (params as { decided_by?: string }).decided_by,
+            reason: (params as { reason?: string }).reason,
+          }),
+        ),
+      ),
+    ),
+);
+
+server.tool(
+  "signalman_promotion_approvals",
+  "List approval rows in the active org. Optional status filter (pending / approved / rejected / auto_approved).",
+  {
+    status: z.enum(["pending", "approved", "rejected", "auto_approved"]).optional(),
+  },
+  async (params) =>
+    withRecording("signalman_promotion_approvals", params, async () =>
+      asMcpResult(
+        await withControlPlane((cp) =>
+          runApprovalList(cp, {
+            status: (params as { status?: "pending" | "approved" | "rejected" | "auto_approved" })
+              .status,
+          }),
+        ),
+      ),
+    ),
+);
+
+server.tool(
+  "signalman_promotion_tick",
+  "Process due `time_delay` approvals: find pending rows whose auto_approve_at has elapsed, flip to auto_approved, fire the deploy. Returns the count dispatched. Useful for cron paths.",
+  {},
+  async (params) =>
+    withRecording("signalman_promotion_tick", params, async () =>
+      asMcpResult(await withControlPlane((cp) => runPromotionTickVerb(cp))),
     ),
 );
 
