@@ -65,6 +65,9 @@ import {
   runHealthCheck,
   runHealthHistory,
   runReleaseVerify,
+  runK8sDeployVerb,
+  runK8sRollbackVerb,
+  runK8sStatusVerb,
 } from "./verbs/control-plane.js";
 // PR 6 — `signalman serve` HTTP control plane.
 // PR 7 — `signalman api-key create`.
@@ -1688,6 +1691,162 @@ async function cmdHealthHistory(args: ParsedArgs): Promise<number> {
     return 0;
   } catch (err) {
     console.error(`signalman health history: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// ── k8s (v0.3.0-6 sub-task 1) ──────────────────────────────────────
+
+async function cmdK8s(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) usageError("k8s requires a subcommand (deploy, rollback, status)");
+  switch (sub) {
+    case "deploy":
+      return await cmdK8sDeploy(args);
+    case "rollback":
+      return await cmdK8sRollback(args);
+    case "status":
+      return await cmdK8sStatus(args);
+    default:
+      usageError(`unknown k8s subcommand: ${sub}`);
+  }
+}
+
+async function cmdK8sDeploy(args: ParsedArgs): Promise<number> {
+  const bundle = args.options.get("bundle");
+  const namespace = args.options.get("namespace");
+  if (!bundle) usageError("k8s deploy requires --bundle <PATH>");
+  if (!namespace) usageError("k8s deploy requires --namespace <NS>");
+  const clusterContext = args.options.get("context");
+  const releaseName = args.options.get("release-name");
+  const waitForHealth = !args.flags.has("no-wait");
+  const healthTimeoutRaw = args.options.get("health-timeout-ms");
+  const healthTimeoutMs = healthTimeoutRaw
+    ? parseInt(healthTimeoutRaw, 10)
+    : undefined;
+  if (healthTimeoutMs !== undefined && Number.isNaN(healthTimeoutMs)) {
+    usageError("k8s deploy: --health-timeout-ms must be an integer");
+  }
+  const format = args.options.get("format");
+  try {
+    const result = await runK8sDeployVerb({
+      bundleUri: bundle,
+      namespace,
+      clusterContext,
+      releaseName,
+      waitForHealth,
+      healthTimeoutMs,
+    });
+    if (format === "json") {
+      emitJson(result);
+    } else {
+      process.stdout.write(
+        `Deployed ${result.apply.releaseName} via ${result.apply.driver} → ${namespace}\n` +
+          `  bundle kind: ${result.bundleKind}\n` +
+          `  apply duration: ${result.apply.durationMs}ms\n` +
+          (result.health
+            ? `  health: ${result.health.ready ? "ready" : "NOT ready"}\n`
+            : "  health: (skipped)\n"),
+      );
+    }
+    return 0;
+  } catch (err) {
+    const e = err as { code?: string; message?: string };
+    console.error(
+      `signalman k8s deploy: ${e.message ?? String(err)}` +
+        (e.code ? ` (code=${e.code})` : ""),
+    );
+    return 4;
+  }
+}
+
+async function cmdK8sRollback(args: ParsedArgs): Promise<number> {
+  const releaseId = args.options.get("release-id");
+  const namespace = args.options.get("namespace");
+  if (!releaseId) usageError("k8s rollback requires --release-id <ID>");
+  if (!namespace) usageError("k8s rollback requires --namespace <NS>");
+  const clusterContext = args.options.get("context");
+  const driverRaw = args.options.get("driver");
+  let driver: "kubectl" | "helm" | undefined;
+  if (driverRaw === "kubectl" || driverRaw === "helm") driver = driverRaw;
+  else if (driverRaw) usageError(`k8s rollback: --driver must be 'kubectl' or 'helm'`);
+  const toRevisionRaw = args.options.get("to-revision");
+  const toRevision = toRevisionRaw ? parseInt(toRevisionRaw, 10) : undefined;
+  if (toRevision !== undefined && (Number.isNaN(toRevision) || toRevision <= 0)) {
+    usageError("k8s rollback: --to-revision must be a positive integer");
+  }
+  const format = args.options.get("format");
+  try {
+    const result = await runK8sRollbackVerb({
+      releaseId,
+      namespace,
+      clusterContext,
+      toRevision,
+      driver,
+    });
+    if (format === "json") {
+      emitJson(result);
+    } else {
+      process.stdout.write(
+        `Rolled back ${result.releaseId} via ${result.driver}` +
+          (result.toRevision !== null ? ` to revision ${result.toRevision}` : "") +
+          "\n",
+      );
+    }
+    return 0;
+  } catch (err) {
+    const e = err as { code?: string; message?: string };
+    console.error(
+      `signalman k8s rollback: ${e.message ?? String(err)}` +
+        (e.code ? ` (code=${e.code})` : ""),
+    );
+    return 4;
+  }
+}
+
+async function cmdK8sStatus(args: ParsedArgs): Promise<number> {
+  const namespace = args.options.get("namespace");
+  if (!namespace) usageError("k8s status requires --namespace <NS>");
+  const clusterContext = args.options.get("context");
+  const selector = args.options.get("selector");
+  const releaseName = args.options.get("release-name");
+  const driverRaw = args.options.get("driver");
+  let driver: "kubectl" | "helm" | undefined;
+  if (driverRaw === "kubectl" || driverRaw === "helm") driver = driverRaw;
+  else if (driverRaw) usageError(`k8s status: --driver must be 'kubectl' or 'helm'`);
+  const format = args.options.get("format");
+  try {
+    const result = await runK8sStatusVerb({
+      namespace,
+      clusterContext,
+      selector,
+      releaseName,
+      driver,
+    });
+    if (format === "json") {
+      emitJson(result);
+      return result.allHealthy ? 0 : 1;
+    }
+    if (result.workloads.length === 0) {
+      process.stdout.write(`Namespace '${namespace}': no workloads found\n`);
+      return result.allHealthy ? 0 : 1;
+    }
+    emitTable(
+      result.workloads.map((w) => ({
+        kind: w.kind,
+        name: w.name,
+        replicas: String(w.replicas),
+        ready: String(w.readyReplicas),
+        state: w.state,
+      })),
+    );
+    return result.allHealthy ? 0 : 1;
+  } catch (err) {
+    const e = err as { code?: string; message?: string };
+    console.error(
+      `signalman k8s status: ${e.message ?? String(err)}` +
+        (e.code ? ` (code=${e.code})` : ""),
+    );
     return 4;
   }
 }
@@ -3418,6 +3577,8 @@ async function main(argv: string[]): Promise<number> {
         return await cmdApiKey(args);
       case "runner":
         return await cmdRunner(args);
+      case "k8s":
+        return await cmdK8s(args);
       case "key":
         return await cmdKey(args);
       case "cloud":
@@ -3473,6 +3634,7 @@ function printHelp(): void {
       "                              (start the control-plane HTTP server)",
       "  api-key <subcommand>   (create, list, revoke)",
       "  runner <subcommand>    (register, start)",
+      "  k8s <subcommand>       (deploy, rollback, status — direct K8s ops)",
       "  key <subcommand>       (generate, fingerprint — Ed25519 release signing)",
       "  cloud <subcommand>     (provision, terminate, status, list, backends, reaper, budget, creds, connection-descriptor)",
       "  stack <subcommand>     (apply, destroy, plan-cost — OpenTofu stack lifecycle)",

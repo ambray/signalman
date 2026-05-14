@@ -1381,6 +1381,153 @@ server.tool(
     ),
 );
 
+// ── K8s tools (v0.3.0-6 sub-task 1) ───────────────────────────────
+
+/**
+ * K8s-specific result envelope. Mirrors `asCloudMcpResult`: surfaces
+ * the K8sDriverError stable `code` to agents verbatim so they can
+ * dispatch on it without parsing message strings. Kept separate so a
+ * future refactor of either envelope helper doesn't fan out.
+ */
+function asK8sMcpResult<T>(fn: () => Promise<T>): Promise<{
+  content: { type: "text"; text: string }[];
+  isError?: boolean;
+}> {
+  return fn()
+    .then((value) => asMcpResult({ ok: true, value }))
+    .catch((err: unknown) => {
+      const e = err as { code?: string };
+      const payload = {
+        ok: false,
+        error: {
+          code: typeof e?.code === "string" ? e.code : "unknown",
+          message: (err as Error)?.message ?? String(err),
+        },
+      };
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(payload, null, 2) },
+        ],
+        isError: true,
+      };
+    });
+}
+
+server.tool(
+  "signalman_k8s_deploy",
+  "Deploy a Kubernetes bundle. Auto-dispatches between `kubectl apply -k` and `helm upgrade --install` based on whether the bundle directory contains Chart.yaml. Optionally runs `kubectl wait --for=condition=Ready pod` after apply.",
+  {
+    bundle_uri: z
+      .string()
+      .describe(
+        "Absolute path to a manifest bundle (directory or single .yaml file) or a Helm chart directory containing Chart.yaml.",
+      ),
+    namespace: z.string().describe("Target Kubernetes namespace."),
+    cluster_context: z
+      .string()
+      .optional()
+      .describe("Optional kubectl/helm context name; defaults to KUBECONFIG selection."),
+    release_name: z
+      .string()
+      .optional()
+      .describe("Helm release name (ignored for kubectl). Defaults to bundle basename."),
+    wait_for_health: z
+      .boolean()
+      .optional()
+      .describe(
+        "If true (default), run `kubectl wait` after apply and surface health.ready in the response.",
+      ),
+    health_timeout_ms: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("Wait timeout in milliseconds; defaults to 5 minutes."),
+  },
+  async (params) =>
+    withRecording("signalman_k8s_deploy", params, () =>
+      asK8sMcpResult(async () => {
+        const { runK8sDeployVerb } = await import("./verbs/control-plane.js");
+        return await runK8sDeployVerb({
+          bundleUri: params.bundle_uri,
+          namespace: params.namespace,
+          clusterContext: params.cluster_context,
+          releaseName: params.release_name,
+          waitForHealth: params.wait_for_health,
+          healthTimeoutMs: params.health_timeout_ms,
+        });
+      }),
+    ),
+);
+
+server.tool(
+  "signalman_k8s_rollback",
+  "Roll back a Kubernetes release via `kubectl rollout undo` or `helm rollback`. Pass driver=helm for Helm-deployed releases. release_id is the rollout subject for kubectl (e.g. 'deployment/my-app') or the Helm release name for helm.",
+  {
+    release_id: z
+      .string()
+      .describe(
+        "Rollback subject. For kubectl: 'deployment/<name>'. For helm: the Helm release name.",
+      ),
+    namespace: z.string(),
+    cluster_context: z.string().optional(),
+    to_revision: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("Optional explicit revision to roll back to."),
+    driver: z
+      .enum(["kubectl", "helm"])
+      .optional()
+      .describe("Driver to use. Defaults to 'kubectl'."),
+  },
+  async (params) =>
+    withRecording("signalman_k8s_rollback", params, () =>
+      asK8sMcpResult(async () => {
+        const { runK8sRollbackVerb } = await import("./verbs/control-plane.js");
+        return await runK8sRollbackVerb({
+          releaseId: params.release_id,
+          namespace: params.namespace,
+          clusterContext: params.cluster_context,
+          toRevision: params.to_revision,
+          driver: params.driver,
+        });
+      }),
+    ),
+);
+
+server.tool(
+  "signalman_k8s_status",
+  "Read deployment status in a namespace. Defaults to `kubectl get deployments -o json`; pass driver=helm + release_name for `helm status`. Returns a normalised workload list with derived state (healthy/degraded/unknown).",
+  {
+    namespace: z.string(),
+    cluster_context: z.string().optional(),
+    selector: z
+      .string()
+      .optional()
+      .describe("Optional label selector (kubectl `-l`)."),
+    release_name: z
+      .string()
+      .optional()
+      .describe("Required when driver='helm'."),
+    driver: z.enum(["kubectl", "helm"]).optional(),
+  },
+  async (params) =>
+    withRecording("signalman_k8s_status", params, () =>
+      asK8sMcpResult(async () => {
+        const { runK8sStatusVerb } = await import("./verbs/control-plane.js");
+        return await runK8sStatusVerb({
+          namespace: params.namespace,
+          clusterContext: params.cluster_context,
+          selector: params.selector,
+          releaseName: params.release_name,
+          driver: params.driver,
+        });
+      }),
+    ),
+);
+
 // ── Start Server ──────────────────────────────────────────────────
 
 async function main() {
