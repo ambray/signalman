@@ -32,14 +32,20 @@ export interface SignalmanConfig {
      *
      * - "service": the signalman-service daemon (default; preferred-when-available, P1)
      * - "hyperv": direct PowerShell + gsudo elevation
-     * - "vmware": VMware Workstation/Fusion via vmrun
+     * - "vmware": VMware Workstation/Fusion via vmrun (legacy alias for the vmware.ts backend)
      * - "tart": Tart on Apple Silicon macOS hosts
+     * - "libvirt": libvirt / KVM via the `virsh` CLI (Linux hosts, v0.4.0-4)
+     * - "vmrun": VMware Workstation/Fusion via the parallel-track `vmrun.ts` backend (v0.4.0-4)
      */
-    backend: "service" | "hyperv" | "vmware" | "tart";
+    backend: "service" | "hyperv" | "vmware" | "tart" | "libvirt" | "vmrun";
     /** Path to vmrun executable (VMware only). */
     vmrunPath?: string;
     /** Path to tart executable (Tart/macOS only). */
     tartPath?: string;
+    /** Path to virsh executable (libvirt only). */
+    virshPath?: string;
+    /** libvirt connect URI, e.g. `qemu:///system`. */
+    libvirtUri?: string;
     /** Default guest credentials for hypervisor-level operations. */
     guestCredentials?: {
       username: string;
@@ -428,7 +434,14 @@ function applyEnvOverrides(config: SignalmanConfig): SignalmanConfig {
   const result = structuredClone(config);
 
   const backend = process.env.SIGNALMAN_BACKEND;
-  if (backend === "hyperv" || backend === "vmware" || backend === "service" || backend === "tart") {
+  if (
+    backend === "hyperv" ||
+    backend === "vmware" ||
+    backend === "service" ||
+    backend === "tart" ||
+    backend === "libvirt" ||
+    backend === "vmrun"
+  ) {
     result.hypervisor.backend = backend;
   }
 
@@ -455,6 +468,14 @@ function applyEnvOverrides(config: SignalmanConfig): SignalmanConfig {
 
   if (process.env.SIGNALMAN_TART_PATH) {
     result.hypervisor.tartPath = process.env.SIGNALMAN_TART_PATH;
+  }
+
+  // v0.4.0-4 cross-platform: libvirt + vmrun parallel-track backends.
+  if (process.env.SIGNALMAN_VIRSH_BIN) {
+    result.hypervisor.virshPath = process.env.SIGNALMAN_VIRSH_BIN;
+  }
+  if (process.env.LIBVIRT_DEFAULT_URI) {
+    result.hypervisor.libvirtUri = process.env.LIBVIRT_DEFAULT_URI;
   }
 
   const guestPort = process.env.SIGNALMAN_GUEST_PORT;
