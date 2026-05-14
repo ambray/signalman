@@ -1,0 +1,3 @@
+Total snapshots: 2
+clean-state
+post-install

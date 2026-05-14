@@ -1,0 +1,4 @@
+Total running VMs: 3
+/Users/ops/VMs/alpha.vmx
+/Users/ops/VMs/beta.vmx
+/Users/ops/VMs/gamma.vmx
