@@ -10,16 +10,32 @@ Apache-2.0 licensed.
 
 This bootstrap milestone ships the **package skeleton + generic blob
 format + Ed25519 signing port + minimal HTTP API + host federation
-driver**. The following features are explicitly deferred to v0.4.x:
+driver**. The next releases are tracked in [`ROADMAP.md`](./ROADMAP.md).
 
-- OCI distribution spec v1.1 (push/pull container images)
-- Mutable tags (`latest`, `staging`, `production`)
-- Retention / GC by age, count, or tag policy
-- npm / crates.io / maven / pip / Helm protocols
-- Vulnerability scanning (Trivy / Grype integration)
-- Mirroring + caching upstream public registries
+Highlights of what's coming in v0.4.x (each is its own release —
+see the roadmap for ordering and detail):
 
-See `docs/design/meta-build-system.md` §15 for the full design.
+- **v0.4.1 — OCI distribution spec v1.1.** `docker push` / `oras push`
+  work unchanged; in-router namespacing makes the v0.4.0 `%2F`
+  encoding requirement go away.
+- **v0.4.2 — Mutable tags + retention / GC.** `latest` / `staging`,
+  age + count policies, reference-counted blob GC, real blob DELETE.
+- **v0.4.3 — Operational hardening.** HEAD route, streaming PUT for
+  >1 GB artifacts, short-lived URL signing, Postgres-backed manifest
+  index.
+- **v0.4.4 — RBAC + Cloud federation.** OSS row-level token table
+  AND a contract with `signalman-cloud` so Cloud can front the
+  registry with delegated bearer auth + multi-tenant scoping.
+- **v0.4.x — Protocol facades.** npm, crates.io, maven, pip, Helm
+  registry protocols. Each is its own workstream on top of the
+  shared blob + manifest storage.
+- **v0.4.x — Virtual registries.** Mirror + cache upstream public
+  registries (npm, Docker Hub, Maven Central) for air-gapped,
+  compliance, and latency use cases.
+- **v0.4.x — Vulnerability scanning.** Trivy / Grype on ingest.
+
+See `docs/design/meta-build-system.md` §15 for the full design and
+[`ROADMAP.md`](./ROADMAP.md) for the phased plan.
 
 ## Surfaces
 
