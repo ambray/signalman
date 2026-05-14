@@ -230,6 +230,37 @@ In Claude Code or Codex, the agent invokes `loom.signalman.list`, then
 `loom.signalman.run <scenario>`. Loom holds the run handle (via its
 `TaskOwnership` state) and streams envelope events through its `EventBus`.
 
+#### Hermetic identity for workflow caching (v0.3.0-4)
+
+When a Loom workflow node invokes `loom.signalman.run` (or polls via
+`loom.signalman.status`) the plugin promotes the run envelope's
+identity subset to a top-level `hermetic_identity` object on the
+response:
+
+```json
+{
+  "run_id": "abc",
+  "status": "passed",
+  "envelope": { /* full ScenarioResult */ },
+  "hermetic_identity": {
+    "scenario_hash":   "0a1b2c...",
+    "vm_lineage_hash": "f4e5d6...",
+    "agent_version":   "0.2.1",
+    "network_class":   "default-switch"
+  }
+}
+```
+
+Workflow nodes gate on `hermetic_identity` for cache-keying without
+descending into envelope JSON: identical
+`(scenario_hash, vm_lineage_hash, agent_version)` tuples are
+guaranteed to produce the same `ScenarioResult` under hermetic
+execution, so Loom's cache layer can short-circuit identical inputs.
+
+The field is absent (rather than `null`) when the envelope is
+pre-v0.3.0-3 or the run failed before populating any identity field
+— callers can use presence to detect cache-eligible runs.
+
 ### Standalone (CI / direct MCP / debugging)
 
 ```bash
@@ -246,6 +277,24 @@ claude mcp add signalman node host/dist/server.js
 node host/dist/cli.js run service-backend-smoke
 echo $?   # standard exit codes; envelope JSON on stdout
 ```
+
+#### Choosing between Loom-fronted and direct CLI
+
+Both paths produce the same `ScenarioResult` envelope (v0.3.0-3 +
+hermetic identity fields), so the choice is about orchestration
+ownership:
+
+| Concern | Loom-fronted | Direct CLI / CI |
+|---|---|---|
+| Run state persistence | Loom-managed, survives host restart | Caller manages (e.g. GH Actions artifact) |
+| Live event streaming | `signalman.run.*` events on Loom's EventBus | None — wait for envelope on stdout |
+| Retry / scheduling | Loom workflows or directives | Caller's CI scheduler |
+| Cache lookup | `hermetic_identity` on plugin response | Parse envelope `scenario_hash` + `vm_lineage_hash` |
+| Best for | Agent-driven DevOps, multi-step compositions | Single-shot CI gates, third-party schedulers |
+
+The CLI's exit codes and envelope JSON are the stable contract for
+direct callers — adding Loom in front of them never changes the
+underlying run shape.
 
 ### Meta build system (release lifecycle for an external product)
 

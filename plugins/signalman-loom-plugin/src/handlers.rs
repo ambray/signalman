@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 use crate::events::{emit_envelope_events, EventEmitter};
 use crate::forms::{descriptor_for_scenario, ScenarioMeta, ScenarioParameter};
+use crate::hermetic_identity::extract_hermetic_identity;
 use crate::schemas;
 use crate::state::{RunState, RunStateStore};
 use crate::subprocess::run_signalman;
@@ -284,7 +285,31 @@ pub fn finalize_run_start_with_emitter(
         }
     }
 
-    Ok(response)
+    // v0.3.0-4 — promote the envelope's hermetic identity subset to a
+    // top-level `hermetic_identity` field so Loom workflow nodes can
+    // gate on it without descending into envelope JSON. Returns None
+    // (field absent in response) when the envelope is missing or
+    // pre-v0.3.0-3.
+    Ok(promote_hermetic_identity(response))
+}
+
+/// Augment a plugin response object with a top-level
+/// `hermetic_identity` field extracted from its inner `envelope`.
+///
+/// v0.3.0-4 contract: the field is present only when the response
+/// carries an envelope AND that envelope has at least one identity
+/// field. Returns the response unchanged otherwise (pre-v0.3.0-3
+/// signalman, or a run that failed before populating identity).
+fn promote_hermetic_identity(mut response: Value) -> Value {
+    let identity = response
+        .get("envelope")
+        .and_then(extract_hermetic_identity);
+    if let Some(id) = identity {
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert("hermetic_identity".to_string(), id);
+        }
+    }
+    response
 }
 
 fn handle_run(cx: &PluginContext, args: Value) -> LoomResult<Value> {
@@ -388,7 +413,10 @@ pub fn finalize_status_with_emitter(
                     store.record_streaming_with_emitter(rid, event_seq, envelope, emitter)?;
                 }
             }
-            Ok(value)
+            // v0.3.0-4 — promote the envelope's hermetic identity subset
+            // to a top-level field; absent when no envelope or no
+            // identity fields are present (pre-v0.3.0-3 signalman).
+            Ok(promote_hermetic_identity(value))
         }
         Err(err) => {
             // No run_id => the agent asked for environment health; no
@@ -1299,5 +1327,79 @@ mod tests {
         assert!(names.contains(&"parameters.ok"));
         // Only one parameter field plus the three baselines.
         assert_eq!(d.fields.len(), 4);
+    }
+
+    // ── v0.3.0-4: hermetic_identity promotion ────────────────────────
+
+    #[test]
+    fn promote_hermetic_identity_adds_top_level_field_when_envelope_has_identity() {
+        let response = json!({
+            "run_id": "abc",
+            "envelope": {
+                "name": "smoke",
+                "status": "passed",
+                "scenario_hash": "a".repeat(64),
+                "vm_lineage_hash": "b".repeat(64),
+                "agent_version": "0.2.1",
+                "network_class": "default-switch"
+            }
+        });
+        let promoted = promote_hermetic_identity(response);
+        let id = promoted.get("hermetic_identity").expect("present");
+        assert_eq!(id["scenario_hash"].as_str(), Some("a".repeat(64).as_str()));
+        assert_eq!(id["vm_lineage_hash"].as_str(), Some("b".repeat(64).as_str()));
+        assert_eq!(id["agent_version"].as_str(), Some("0.2.1"));
+        assert_eq!(id["network_class"].as_str(), Some("default-switch"));
+        // Original envelope unchanged.
+        assert_eq!(
+            promoted["envelope"]["scenario_hash"].as_str(),
+            Some("a".repeat(64).as_str()),
+        );
+    }
+
+    #[test]
+    fn promote_hermetic_identity_no_op_when_envelope_missing() {
+        let response = json!({ "run_id": "abc" });
+        let promoted = promote_hermetic_identity(response);
+        assert!(promoted.get("hermetic_identity").is_none());
+    }
+
+    #[test]
+    fn promote_hermetic_identity_no_op_when_envelope_has_no_identity_fields() {
+        // Pre-v0.3.0-3 envelope: has status + duration but no
+        // identity fields. Promotion is a no-op so workflow nodes
+        // can branch on `hermetic_identity` presence to know whether
+        // the upstream signalman is new enough.
+        let response = json!({
+            "run_id": "abc",
+            "envelope": {
+                "name": "smoke",
+                "status": "passed",
+                "duration_ms": 1234
+            }
+        });
+        let promoted = promote_hermetic_identity(response);
+        assert!(promoted.get("hermetic_identity").is_none());
+    }
+
+    #[test]
+    fn promote_hermetic_identity_partial_envelope_promotes_subset() {
+        // Envelope from a run that captured scenario_hash but
+        // didn't reach the guest-agent-version probe (e.g. crashed
+        // in setup). Promotion surfaces what we have; missing
+        // fields are null.
+        let response = json!({
+            "run_id": "abc",
+            "envelope": {
+                "status": "error",
+                "scenario_hash": "d".repeat(64)
+            }
+        });
+        let promoted = promote_hermetic_identity(response);
+        let id = promoted.get("hermetic_identity").expect("present");
+        assert_eq!(id["scenario_hash"].as_str(), Some("d".repeat(64).as_str()));
+        assert!(id["vm_lineage_hash"].is_null());
+        assert!(id["agent_version"].is_null());
+        assert!(id["network_class"].is_null());
     }
 }

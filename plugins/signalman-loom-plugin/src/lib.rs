@@ -46,6 +46,7 @@ use loom_plugin_api::{
 pub mod events;
 pub mod forms;
 pub mod handlers;
+pub mod hermetic_identity;
 pub mod integration;
 pub mod schemas;
 pub mod state;

@@ -142,9 +142,38 @@ pub fn run_output() -> Value {
         "properties": {
             "run_id": { "type": "string" },
             "started_at": { "type": "string" },
-            "scenario_hash": { "type": "string" }
+            "scenario_hash": { "type": "string" },
+            // v0.3.0-4 — promoted from envelope when the run is
+            // immediate-terminal. Workflow nodes gate on this for
+            // cache-keying without descending into envelope JSON.
+            // Absent when no envelope or no identity fields are
+            // populated.
+            "hermetic_identity": hermetic_identity_schema()
         },
         "required": ["run_id"]
+    })
+}
+
+/// v0.3.0-4 — shape of the hermetic-identity object promoted to
+/// top-level on `run` and `status` responses. Mirrors the
+/// `ScenarioResult` identity-field subset (v0.3.0-3) structurally;
+/// see `plugins/signalman-loom-plugin/src/hermetic_identity.rs` for
+/// the locked contract.
+fn hermetic_identity_schema() -> Value {
+    json!({
+        "type": "object",
+        "description":
+            "Hermetic identity fields (v0.3.0-4): subset of the run \
+             envelope sufficient for cache-keying + Loom task evidence. \
+             Always carries all four keys when present, with null for \
+             individual absent fields.",
+        "properties": {
+            "scenario_hash":   { "type": ["string", "null"] },
+            "vm_lineage_hash": { "type": ["string", "null"] },
+            "agent_version":   { "type": ["string", "null"] },
+            "network_class":   { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
     })
 }
 
@@ -181,7 +210,9 @@ pub fn status_output() -> Value {
             "run_id": { "type": "string" },
             "status": { "type": "string" },
             "events": { "type": "array" },
-            "envelope": {}
+            "envelope": {},
+            // v0.3.0-4 — see hermetic_identity_schema().
+            "hermetic_identity": hermetic_identity_schema()
         }
     })
 }
