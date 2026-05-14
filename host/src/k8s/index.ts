@@ -13,6 +13,16 @@
  */
 
 export {
+  KubectlDriver,
+  type KubectlDriverOptions,
+  buildApplyArgs,
+  buildRollbackArgs,
+  buildStatusArgs,
+  buildHealthArgs,
+  parseDeploymentsJson,
+  classifyStderr,
+} from "./kubectl.js";
+export {
   detectBundleKind,
   hasKustomization,
   HELM_CHART_FILE,
