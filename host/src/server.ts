@@ -930,6 +930,33 @@ server.tool(
 );
 
 server.tool(
+  "signalman_stack_plan_cost",
+  "Run a dry-run plan against an OpenTofu module and return a best-effort monthly cost estimate (in cents) for the resources the plan would CREATE. Use this BEFORE signalman_stack_apply to surface a heads-up: 'Deploying this stack costs ~$X/month'. Estimates come from a static SKU × region cost table; unknown SKUs fall back to a high default rate (conservative; better to over-estimate than miss a runaway cost).",
+  {
+    stack_name: z.string(),
+    module_path: z.string(),
+    vars: z
+      .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+      .optional(),
+  },
+  async (params) =>
+    withRecording("signalman_stack_plan_cost", params, () =>
+      asCloudMcpResult(async () => {
+        const driver = new TofuDriver({ projectRoot: process.cwd() });
+        const planVars: Record<string, string | number | boolean> = {};
+        for (const [k, v] of Object.entries(params.vars ?? {})) {
+          planVars[k] = v;
+        }
+        return driver.planModule({
+          stackName: params.stack_name,
+          modulePath: params.module_path,
+          vars: planVars,
+        });
+      }),
+    ),
+);
+
+server.tool(
   "signalman_stack_destroy",
   "Destroy an OpenTofu stack's resources. Idempotent: returns alreadyEmpty=true when the workspace doesn't exist. Workspace directory is intentionally NOT removed after destroy so operators can inspect post-mortem.",
   {

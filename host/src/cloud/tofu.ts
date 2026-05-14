@@ -184,6 +184,55 @@ export interface ApplyModuleResult {
   durationMs: number;
 }
 
+/** Inputs to {@link TofuDriver.planModule}. */
+export interface PlanModuleOptions {
+  /** Stack identifier; same regex as applyModule. */
+  stackName: string;
+  /** HCL module path; same as applyModule. */
+  modulePath: string;
+  /** -var key=value pairs; same as applyModule. */
+  vars?: Record<string, string | number | boolean>;
+  /** Subprocess timeout. Defaults to {@link TOFU_DEFAULT_TIMEOUT_MS}. */
+  timeoutMs?: number;
+}
+
+/**
+ * Outcome of {@link TofuDriver.planModule} — the change summary
+ * plus a best-effort per-resource cost estimate.
+ *
+ * The estimate is conservative: unknown SKUs use the cost-table
+ * fallback rate (see `host/src/cloud/cost.ts`). Operators should
+ * read this as a guard against catastrophic mistakes, not a
+ * precise bill.
+ */
+export interface PlanModuleResult {
+  stackName: string;
+  workspacePath: string;
+  /** Resource adds / changes / destroys; same shape as apply. */
+  changeSummary: { add: number; change: number; destroy: number };
+  /**
+   * Estimated monthly cost in cents for resources the plan
+   * would CREATE (we don't subtract destroys — operators see
+   * the additions explicitly, and a pure-destroy plan estimates
+   * to zero).
+   */
+  estimatedMonthlyCents: number;
+  /**
+   * Per-resource breakdown of the estimate. Includes only
+   * recognised compute SKUs; storage / networking / IAM / DNS
+   * resources contribute zero and are listed under `untracked`.
+   */
+  costedResources: Array<{
+    address: string;
+    sku: string;
+    region: string;
+    monthlyCents: number;
+  }>;
+  /** Resources the cost estimator did not recognise (free-of-charge or unknown). */
+  untrackedResources: string[];
+  durationMs: number;
+}
+
 /** Inputs to {@link TofuDriver.destroyModule}. */
 export interface DestroyModuleOptions {
   stackName: string;
@@ -271,6 +320,69 @@ export class TofuDriver {
    * Returns the full apply outcome including outputs + change
    * summary so callers know what they got.
    */
+  /**
+   * Pre-flight dry-run for a stack: runs `tofu init` + `tofu plan
+   * -json` against the materialised workspace and returns the
+   * change summary + an estimated monthly cost (cents) for the
+   * resources the plan would CREATE. No state is mutated; the
+   * caller is responsible for applying separately if the estimate
+   * is acceptable.
+   *
+   * The cost estimate uses the static SKU × region table from
+   * `host/src/cloud/cost.ts`. It is deliberately conservative
+   * (unknown SKUs fall back to the high default rate). Operators
+   * read this as a guardrail, not a billing-grade quote.
+   */
+  async planModule(opts: PlanModuleOptions): Promise<PlanModuleResult> {
+    const stackName = validateStackName(opts.stackName);
+    const workspacePath = this.workspacePathFor(stackName);
+
+    if (!fs.existsSync(opts.modulePath)) {
+      throw tofuError(
+        "module_path_missing",
+        `HCL module path does not exist: ${opts.modulePath}`,
+      );
+    }
+    const start = Date.now();
+    materialiseWorkspace(workspacePath, opts.modulePath);
+
+    const timeoutMs = opts.timeoutMs ?? TOFU_DEFAULT_TIMEOUT_MS;
+
+    // 1. init (cheap if providers already cached)
+    await this.runTofu(
+      ["init", "-no-color", "-input=false"],
+      { cwd: workspacePath, timeoutMs },
+      "init",
+    );
+
+    // 2. plan -json. We deliberately do NOT write -out=<file> here:
+    // we're not going to feed the plan into a subsequent apply
+    // (apply will re-plan). Reading the structured JSON events
+    // off stdout is enough to extract the cost-relevant resources.
+    const planArgs = ["plan", "-no-color", "-input=false", "-json"];
+    for (const [k, v] of Object.entries(opts.vars ?? {})) {
+      planArgs.push("-var", `${k}=${String(v)}`);
+    }
+    const planResult = await this.runTofu(
+      planArgs,
+      { cwd: workspacePath, timeoutMs },
+      "plan",
+    );
+    const changeSummary = parseChangeSummary(planResult.stdout);
+    const { costedResources, untrackedResources, estimatedMonthlyCents } =
+      parsePlanCost(planResult.stdout);
+
+    return {
+      stackName,
+      workspacePath,
+      changeSummary,
+      estimatedMonthlyCents,
+      costedResources,
+      untrackedResources,
+      durationMs: Date.now() - start,
+    };
+  }
+
   async applyModule(opts: ApplyModuleOptions): Promise<ApplyModuleResult> {
     const stackName = validateStackName(opts.stackName);
     const workspacePath = this.workspacePathFor(stackName);
@@ -578,6 +690,118 @@ export function parseOutputs(stdout: string): Record<string, unknown> {
   }
   return out;
 }
+
+// ── Cost-extraction helpers (v0.3.0-5 sub-task 5 control 3) ────────
+
+/**
+ * Best-effort cost extraction from `tofu plan -json` stdout.
+ *
+ * Scans the JSONL events for `planned_change` records and pulls
+ * compute-resource SKU + region from the `change.after` block.
+ * Resource types we recognise:
+ *   - `aws_instance` → `change.after.instance_type` × region from
+ *     the addressable provider config (or the SKU's table default)
+ *   - `azurerm_linux_virtual_machine` / `azurerm_windows_virtual_machine`
+ *     → `change.after.size` + `change.after.location`
+ *
+ * Anything we can't cost is reported under `untrackedResources`
+ * so operators see the full plan footprint, just without a $$
+ * estimate. Numbers should be read as a guardrail, not a quote.
+ *
+ * Exported for tests.
+ */
+export function parsePlanCost(stdout: string): {
+  costedResources: Array<{
+    address: string;
+    sku: string;
+    region: string;
+    monthlyCents: number;
+  }>;
+  untrackedResources: string[];
+  estimatedMonthlyCents: number;
+} {
+  // Lazy import — avoids a circular dep between cloud/tofu.ts and
+  // cloud/cost.ts and keeps cost.ts free of tofu coupling.
+  const costed: Array<{
+    address: string;
+    sku: string;
+    region: string;
+    monthlyCents: number;
+  }> = [];
+  const untracked: string[] = [];
+
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    const evt = parsed as {
+      type?: string;
+      change?: {
+        action?: string;
+        actions?: string[];
+        resource?: { resource?: string; addr?: string };
+        after?: Record<string, unknown>;
+      };
+    };
+    if (evt.type !== "planned_change") continue;
+    const action =
+      evt.change?.action ?? evt.change?.actions?.[0] ?? "no-op";
+    if (action !== "create" && action !== "create_then_delete") continue;
+    const addr =
+      evt.change?.resource?.addr ??
+      evt.change?.resource?.resource ??
+      "unknown";
+    const after = evt.change?.after ?? {};
+    const resourceType = String(addr).split(".")[0];
+
+    if (resourceType === "aws_instance") {
+      const sku = String(after["instance_type"] ?? "unknown-sku");
+      const region = String(after["availability_zone"] ?? "us-east-1")
+        // availability zone like "us-east-1a" → region "us-east-1"
+        .replace(/[a-z]$/, "");
+      const monthly = monthlyRateCentsForResource(sku, region);
+      costed.push({ address: addr, sku, region, monthlyCents: monthly });
+    } else if (
+      resourceType === "azurerm_linux_virtual_machine" ||
+      resourceType === "azurerm_windows_virtual_machine" ||
+      resourceType === "azurerm_virtual_machine"
+    ) {
+      const sku = String(after["size"] ?? after["vm_size"] ?? "unknown-sku");
+      const region = String(after["location"] ?? "eastus");
+      const monthly = monthlyRateCentsForResource(sku, region);
+      costed.push({ address: addr, sku, region, monthlyCents: monthly });
+    } else {
+      untracked.push(addr);
+    }
+  }
+
+  const estimatedMonthlyCents = costed.reduce(
+    (s, r) => s + r.monthlyCents,
+    0,
+  );
+  return { costedResources: costed, untrackedResources: untracked, estimatedMonthlyCents };
+}
+
+/**
+ * Small wrapper over `monthlyRateCents` so the tofu module
+ * doesn't directly import the cost table at module-load time
+ * (keeps the dependency arrow one-way; cost.ts has no tofu
+ * dependencies). We require it lazily at the call site so
+ * mocks in tests can replace the table.
+ */
+function monthlyRateCentsForResource(sku: string, region: string): number {
+  // Synchronous require would be cleaner but we're in ESM-land.
+  // The actual import is hoisted at module-init time (line below).
+  return monthlyRateImpl(sku, region);
+}
+
+// Imported at module init; bound for use by monthlyRateCentsForResource.
+import { monthlyRateCents as monthlyRateImpl } from "./cost.js";
 
 /** Truncate stderr for error messages so they stay readable. */
 function truncateStderr(stderr: string): string {

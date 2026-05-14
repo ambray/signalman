@@ -2641,6 +2641,86 @@ export async function cmdCloudReaper(args: ParsedArgs): Promise<number> {
   }
 }
 
+// ── v0.3.0-5 sub-task 5 control 3: stack plan-cost ───────────────
+//
+// Pre-flight cost estimate for an OpenTofu stack. Operators run
+// this before `stack apply` to confirm the bill. Sub-task 8 will
+// add `stack apply --plan-cost-first` that runs this then prompts
+// the operator interactively.
+
+async function cmdStack(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) {
+    usageError(
+      "stack requires a subcommand (e.g. plan-cost — see `signalman --help`)",
+    );
+  }
+  switch (sub) {
+    case "plan-cost":
+      return await cmdStackPlanCost(args);
+    default:
+      usageError(`unknown stack subcommand: ${sub}`);
+  }
+}
+
+// Exported for tests.
+export async function cmdStackPlanCost(args: ParsedArgs): Promise<number> {
+  const stackName = args.options.get("stack-name");
+  const modulePath = args.options.get("module-path");
+  if (!stackName) usageError("stack plan-cost requires --stack-name <NAME>");
+  if (!modulePath) usageError("stack plan-cost requires --module-path <DIR>");
+  const isJson = args.options.get("format") === "json";
+
+  const { TofuDriver } = await import("./cloud/tofu.js");
+  const driver = new TofuDriver({ projectRoot: process.cwd() });
+  const vars: Record<string, string | number | boolean> = {};
+  // Honour --param k=v repetition (operator already uses this on
+  // signalman plan / signalman run; reuse the convention).
+  for (const [k, v] of Object.entries(args.params)) {
+    vars[k] = v;
+  }
+
+  try {
+    const result = await driver.planModule({
+      stackName: stackName!,
+      modulePath: modulePath!,
+      vars,
+    });
+    if (isJson) {
+      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    } else {
+      const dollars = (result.estimatedMonthlyCents / 100).toFixed(2);
+      process.stdout.write(
+        `Plan for stack '${result.stackName}':\n` +
+          `  add:           ${result.changeSummary.add}\n` +
+          `  change:        ${result.changeSummary.change}\n` +
+          `  destroy:       ${result.changeSummary.destroy}\n` +
+          `  estimated:     $${dollars}/month (${result.estimatedMonthlyCents}¢)\n` +
+          (result.costedResources.length
+            ? `  costed resources:\n` +
+              result.costedResources
+                .map(
+                  (r) =>
+                    `    - ${r.address} (${r.sku} @ ${r.region}) = ${r.monthlyCents}¢/month`,
+                )
+                .join("\n") +
+              "\n"
+            : "") +
+          (result.untrackedResources.length
+            ? `  untracked resources (no SKU-level estimate):\n` +
+              result.untrackedResources.map((a) => `    - ${a}`).join("\n") +
+              "\n"
+            : "") +
+          `Estimates use a static SKU x region table from v0.3.0-5; treat as guardrail, not invoice.\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    process.stderr.write(`signalman: stack plan-cost failed: ${(err as Error).message}\n`);
+    return 4;
+  }
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 async function main(argv: string[]): Promise<number> {
@@ -2695,6 +2775,8 @@ async function main(argv: string[]): Promise<number> {
         return await cmdKey(args);
       case "cloud":
         return await cmdCloud(args);
+      case "stack":
+        return await cmdStack(args);
       default:
         usageError(`unknown verb: ${verb}`);
     }
@@ -2746,6 +2828,7 @@ function printHelp(): void {
       "  runner <subcommand>    (register, start)",
       "  key <subcommand>       (generate, fingerprint — Ed25519 release signing)",
       "  cloud <subcommand>     (reaper run/status, budget get/set/usage — cost guardrails)",
+      "  stack <subcommand>     (plan-cost — OpenTofu stack pre-flight cost estimate)",
       "",
       "Exit codes (per docs/design/p0-mcp-surface.md §5):",
       "  0  pass        2  workflow fail        4  infra error",

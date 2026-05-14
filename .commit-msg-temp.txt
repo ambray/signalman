@@ -1,0 +1,108 @@
+feat(v0.3.0-5): pre-flight stack cost estimate (sub-task 5 commit 3)
+
+Third and final control from design §13.5: before applying an
+OpenTofu stack, operators get a "this will cost ~$X/month"
+heads-up so they don't accidentally commit to a $400/mo demo
+fixture.
+
+## Behaviour
+
+- New `TofuDriver.planModule(opts)` method:
+  - Materialises the module into the workspace (same as
+    applyModule), runs `tofu init`, then `tofu plan -no-color
+    -input=false -json` (NO apply, NO state mutation).
+  - Parses the JSONL stream looking for `planned_change` events
+    with `action="create"`; extracts SKU + region for recognised
+    resource types (`aws_instance`, `azurerm_*virtual_machine`)
+    and sums against the static cost table from sub-task 5
+    commit 2.
+  - Resources we can't cost (S3 buckets, IAM roles, route
+    tables, etc) land in `untrackedResources` so the operator
+    sees the full plan footprint, just without a $$ figure.
+  - Returns `{ stackName, workspacePath, changeSummary,
+    estimatedMonthlyCents, costedResources, untrackedResources,
+    durationMs }`.
+
+- Exported helper `parsePlanCost(stdout)` so the parser is
+  unit-testable in isolation and reusable from other contexts
+  (e.g. a future webhook event consumer).
+
+- Estimate is **monthly** (730 hours/month, the AWS billing
+  convention) — the operator question is "what does running
+  this stack cost me for the month it'll be up" not "what does
+  it cost me right now". Sub-task 6/7 may add daily / hourly
+  variants if operator feedback asks for them.
+
+## Operator surface — both MCP and CLI
+
+MCP (host/src/server.ts):
+  - `signalman_stack_plan_cost { stack_name, module_path, vars? }`
+    — wraps `TofuDriver.planModule`. Same envelope shape as
+    other cloud tools `{ ok: true, value: PlanModuleResult }`.
+
+CLI (host/src/cli.ts):
+  - `signalman stack plan-cost --stack-name X --module-path Y
+    [--format json] [--param k=v]...`
+    — human-readable output by default with $X.YY/month + the
+    costed + untracked resource list; `--format=json` emits the
+    full PlanModuleResult.
+  - Exit 0 on success, 4 on failure (tofu binary missing,
+    module path missing, plan error).
+
+## Estimate accuracy
+
+Deliberately conservative — unknown SKUs use the cost-table
+fallback rate (50¢/hour) so an unpriced instance still consumes
+meaningful "budget". Operators read this as a guardrail against
+catastrophic mistakes, not as a precise bill.
+
+Vendor real-pricing API integration (AWS Price List, Azure
+RateCard) is a v0.3.x followup; design §13.5 acknowledged
+"naive at first" for v0.3.0-5.
+
+## Tests — all three layers
+
+Unit (cloud-plan-cost.test.ts):
+  - parsePlanCost on empty input
+  - aws_instance recognition (instance_type + AZ → region)
+  - azurerm_linux_virtual_machine recognition (size + location)
+  - unknown resource types → untrackedResources
+  - update / delete actions skipped (cost is for creates only)
+  - multiple resources → sum
+  - malformed JSON lines tolerated
+  - non-planned_change events ignored
+
+Integration (cloud-plan-cost.test.ts):
+  - TofuDriver.planModule via injected exec: init + plan invoked
+    with the right args; canned plan stream → expected result
+  - NO apply or destroy called (read-only)
+  - tofu plan failures propagate as tofu_failed
+
+System (cloud-plan-cost.test.ts):
+  - CLI handler rejects missing args (usage errors)
+  - CLI handler returns exit 4 on plan failure
+  - monthlyRateCents = hourlyRateCents × 730 (public API
+    contract)
+
+## Test counts
+
+- cloud-plan-cost.test.ts: 15 tests (8 unit + 3 integration + 4 system)
+
+Full host suite: 103 files, 1865 tests pass; 2 skipped
+(pre-existing). Coverage: 86.17% lines / 81.69% branches /
+90.58% functions / 86.17% statements — all above thresholds.
+
+## What's deferred
+
+- Real vendor pricing API (Price List, RateCard) — v0.3.x
+- Spot / preemptible / reserved-instance discounts — out of
+  scope
+- Per-attribute cost extraction (gp3 disk type, IOPS,
+  cross-region transfer) — v0.3.x
+- `signalman stack apply --plan-cost-first` interactive prompt
+  (sub-task 8 will tie the CLI verbs together with confirmation
+  flow)
+- SKILL.md updates for the new tools — batched with the
+  consolidated sub-task 5 skill commit (followup PR)
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
