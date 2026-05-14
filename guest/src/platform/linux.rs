@@ -44,8 +44,13 @@ impl Platform for LinuxPlatform {
         true
     }
 
-    fn supports_package_manager_install(&self) -> bool {
-        false
+    fn supported_package_sources(&self) -> &'static [&'static str] {
+        // `apt` covers Debian / Ubuntu; `dnf` covers RHEL / Fedora /
+        // CentOS Stream; `yum` is the legacy alias still present on
+        // RHEL ≤ 7. We list both `dnf` and `yum` so operators with
+        // older distros don't have to translate; the underlying argv
+        // differs only in the binary name.
+        &["apt", "dnf", "yum"]
     }
 }
 
@@ -62,7 +67,10 @@ mod tests {
         // Linux SYSTEM-elevation lands via passwordless sudo -n
         // (v0.4.0-4 follow-up).
         assert!(p.supports_system_elevation());
-        assert!(!p.supports_package_manager_install());
+        // Package-manager routing lands via the same follow-up:
+        // apt / dnf / yum on Linux.
+        assert!(p.supports_package_manager_install());
+        assert_eq!(p.supported_package_sources(), &["apt", "dnf", "yum"]);
     }
 
     #[test]

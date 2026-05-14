@@ -31,11 +31,11 @@ impl Platform for MacosPlatform {
         false
     }
 
-    fn supports_package_manager_install(&self) -> bool {
-        // brew / mas would be the obvious fits; the
-        // `install_software` enum doesn't yet route to them. Operators
-        // call `brew install ...` through `RunCommand` for now.
-        false
+    fn supported_package_sources(&self) -> &'static [&'static str] {
+        // Homebrew is the only macOS package source we route to today.
+        // `mas` (Mac App Store CLI) could land in a follow-up; for now
+        // operators install Mac App Store apps via RunCommand.
+        &["brew"]
     }
 }
 
@@ -44,13 +44,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reports_macos_kind_and_minimal_capability_surface() {
+    fn reports_macos_kind_and_capability_surface() {
         let p = MacosPlatform;
         assert_eq!(p.kind(), PlatformKind::Macos);
         assert!(!p.supports_ui_automation());
         assert!(!p.supports_browser_automation());
         assert!(!p.supports_system_elevation());
-        assert!(!p.supports_package_manager_install());
+        // Brew routing lands in the v0.4.0-4 package-manager
+        // follow-up.
+        assert!(p.supports_package_manager_install());
+        assert_eq!(p.supported_package_sources(), &["brew"]);
     }
 
     #[test]

@@ -36,10 +36,10 @@ impl Platform for WindowsPlatform {
         true
     }
 
-    fn supports_package_manager_install(&self) -> bool {
+    fn supported_package_sources(&self) -> &'static [&'static str] {
         // `install_software` understands winget / choco / scoop / msstore —
         // all four are Windows-only.
-        true
+        &["winget", "msstore", "choco", "scoop"]
     }
 }
 
@@ -55,6 +55,10 @@ mod tests {
         assert!(p.supports_browser_automation());
         assert!(p.supports_system_elevation());
         assert!(p.supports_package_manager_install());
+        assert_eq!(
+            p.supported_package_sources(),
+            &["winget", "msstore", "choco", "scoop"],
+        );
     }
 
     #[test]

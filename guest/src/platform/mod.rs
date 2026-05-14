@@ -98,13 +98,26 @@ pub trait Platform: Debug + Send + Sync {
     /// silently running as the agent user.
     fn supports_system_elevation(&self) -> bool;
 
-    /// Whether `install_software` can route through a real package
-    /// manager (`winget`, `choco`, `scoop`, `msstore`). The Linux and
-    /// macOS impls return false; the host orchestrator is expected to
-    /// route through `RunCommand` to invoke `apt`, `dnf`, `brew`, etc.
-    /// explicitly — the package-manager string-enum on `InstallSoftware`
-    /// is Windows-only.
-    fn supports_package_manager_install(&self) -> bool;
+    /// Package-manager sources `install_software` can route to on
+    /// this platform. Windows ships `["winget", "msstore", "choco",
+    /// "scoop"]`; Linux ships `["apt", "dnf", "yum"]`; macOS ships
+    /// `["brew"]`. Targets we don't recognise return `&[]`.
+    ///
+    /// The host orchestrator dispatches by `req.source` against this
+    /// list — sources outside the list either route to a different
+    /// platform (returns `Status::unimplemented`) or are genuinely
+    /// unknown (returns `Status::invalid_argument`); the union of
+    /// every platform's list is the "known" set.
+    fn supported_package_sources(&self) -> &'static [&'static str];
+
+    /// Convenience accessor: `true` when the platform supports at
+    /// least one package-manager source. Default impl delegates to
+    /// `supported_package_sources`. Implementations don't need to
+    /// override unless they want to short-circuit a heavyweight
+    /// `supported_package_sources` computation (none today).
+    fn supports_package_manager_install(&self) -> bool {
+        !self.supported_package_sources().is_empty()
+    }
 
     /// Canonical "not supported here" RPC message for the given
     /// feature name. Lives on the trait so wording stays consistent
@@ -155,7 +168,7 @@ mod tests {
         kind: PlatformKind,
         ui: bool,
         elevation: bool,
-        package_manager: bool,
+        package_sources: &'static [&'static str],
     }
 
     impl FakePlatform {
@@ -164,7 +177,7 @@ mod tests {
                 kind,
                 ui: false,
                 elevation: false,
-                package_manager: false,
+                package_sources: &[],
             }
         }
     }
@@ -182,8 +195,8 @@ mod tests {
         fn supports_system_elevation(&self) -> bool {
             self.elevation
         }
-        fn supports_package_manager_install(&self) -> bool {
-            self.package_manager
+        fn supported_package_sources(&self) -> &'static [&'static str] {
+            self.package_sources
         }
     }
 
@@ -271,21 +284,22 @@ mod tests {
     }
 
     #[test]
-    fn linux_impl_supports_portable_rpcs_and_sudo_elevation() {
-        // Linux gains `supports_system_elevation()` post-WS4 via the
-        // passwordless `sudo -n` path in `process::start_process_as_system`.
-        // UI automation and package-manager install remain off.
+    fn linux_impl_supports_portable_rpcs_sudo_and_package_mgrs() {
+        // Linux gains `supports_system_elevation()` and
+        // `supports_package_manager_install()` post-WS4 via the
+        // passwordless `sudo -n` path and the apt/dnf/yum routing
+        // in `install_software`. UI automation remains off.
         assert_eq!(
             dispatch(&super::linux::LinuxPlatform),
-            (PlatformKind::Linux, false, false, true, false),
+            (PlatformKind::Linux, false, false, true, true),
         );
     }
 
     #[test]
-    fn macos_impl_only_supports_portable_rpcs() {
+    fn macos_impl_supports_portable_rpcs_and_brew() {
         assert_eq!(
             dispatch(&super::macos::MacosPlatform),
-            (PlatformKind::Macos, false, false, false, false),
+            (PlatformKind::Macos, false, false, false, true),
         );
     }
 
@@ -295,6 +309,41 @@ mod tests {
             dispatch(&super::other::OtherPlatform),
             (PlatformKind::Other, false, false, false, false),
         );
+    }
+
+    #[test]
+    fn supports_package_manager_install_default_impl_derives_from_sources_list() {
+        // Empty list → false.
+        let empty = FakePlatform::new(PlatformKind::Other);
+        assert!(!empty.supports_package_manager_install());
+        // Non-empty list → true.
+        let mut with_sources = FakePlatform::new(PlatformKind::Linux);
+        with_sources.package_sources = &["apt"];
+        assert!(with_sources.supports_package_manager_install());
+    }
+
+    #[test]
+    fn supported_package_sources_disjoint_per_platform() {
+        // Lock the rule: no source string appears on more than one
+        // platform's supported list. The host orchestrator's routing
+        // logic depends on this disjointness — a source that mapped
+        // to two platforms would silently pick the wrong package
+        // manager on a multi-OS deployment.
+        let lists: Vec<&'static [&'static str]> = vec![
+            super::windows::WindowsPlatform.supported_package_sources(),
+            super::linux::LinuxPlatform.supported_package_sources(),
+            super::macos::MacosPlatform.supported_package_sources(),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for list in lists {
+            for source in list {
+                assert!(
+                    seen.insert(source.to_string()),
+                    "source '{source}' is listed by more than one platform; \
+                     the union must be disjoint."
+                );
+            }
+        }
     }
 
     #[test]

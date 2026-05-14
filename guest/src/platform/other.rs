@@ -32,7 +32,7 @@ impl Platform for OtherPlatform {
         false
     }
 
-    fn supports_package_manager_install(&self) -> bool {
-        false
+    fn supported_package_sources(&self) -> &'static [&'static str] {
+        &[]
     }
 }

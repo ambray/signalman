@@ -1384,9 +1384,9 @@ impl GuestAgent for GuestAgentService {
         if !platform.supports_package_manager_install() {
             return Err(Status::unimplemented(
                 platform.unsupported_message(
-                    "install_software (winget/choco/scoop/msstore). \
-                     Use RunCommand to invoke the platform-native \
-                     package manager instead",
+                    "install_software (winget/choco/scoop/msstore/apt/dnf/yum/brew). \
+                     Use RunCommand to invoke the platform-native package manager \
+                     instead",
                 ),
             ));
         }
@@ -1395,16 +1395,67 @@ impl GuestAgent for GuestAgentService {
         // S-20: Validate package ID format before passing to package managers.
         validate_package_id(&req.package_id)?;
 
+        // Normalise the source string against the platform's
+        // supported list. Three outcomes:
+        //   - empty source + Windows platform → default to "winget"
+        //     (backwards-compat with v0.1.x bundles that omitted the
+        //     source field);
+        //   - empty source + Linux/macOS → invalid_argument with a
+        //     hint of the supported set (we won't pick a default
+        //     because Linux distros differ);
+        //   - non-empty source ∉ this platform's supported list:
+        //     - source ∈ KNOWN_PACKAGE_SOURCES (some other platform's
+        //       list)  → unimplemented (wrong-platform routing);
+        //     - otherwise → invalid_argument (typo / unknown source).
+        let supported = platform.supported_package_sources();
+        let normalised_source: String = if req.source.is_empty() {
+            if platform.kind() == platform::PlatformKind::Windows {
+                "winget".into()
+            } else {
+                return Err(Status::invalid_argument(format!(
+                    "install_software requires an explicit source on {os}. \
+                     Supported sources: {sources:?}",
+                    os = platform.kind().as_str(),
+                    sources = supported,
+                )));
+            }
+        } else {
+            req.source.clone()
+        };
+        if !supported.contains(&normalised_source.as_str()) {
+            const KNOWN_PACKAGE_SOURCES: &[&str] = &[
+                "winget", "msstore", "choco", "scoop", "apt", "dnf", "yum", "brew",
+            ];
+            if KNOWN_PACKAGE_SOURCES.contains(&normalised_source.as_str()) {
+                return Err(Status::unimplemented(format!(
+                    "install_software source '{src}' is not supported on {os}. \
+                     This platform supports: {sources:?}",
+                    src = normalised_source,
+                    os = platform.kind().as_str(),
+                    sources = supported,
+                )));
+            }
+            return Err(Status::invalid_argument(format!(
+                "Unsupported install source: '{src}'. {os} supports: {sources:?}. \
+                 InstallDirect / InstallDocker handle direct installer / \
+                 docker-image sources; Tier-2 npm/pip/cargo/powershell route \
+                 through RunCommand from the host side.",
+                src = normalised_source,
+                os = platform.kind().as_str(),
+                sources = supported,
+            )));
+        }
+
         // S-20: Audit logging for install operations.
         warn!(
-            source = %req.source,
+            source = %normalised_source,
             package = %req.package_id,
             version = %req.version,
             "AUDIT: install_software invoked"
         );
 
-        let (program, args) = match req.source.as_str() {
-            "winget" | "" => {
+        let (program, args) = match normalised_source.as_str() {
+            "winget" => {
                 let mut a = vec![
                     "install".to_string(),
                     req.package_id.clone(),
@@ -1482,18 +1533,87 @@ impl GuestAgent for GuestAgentService {
                 }
                 ("scoop".to_string(), a)
             }
+            // ── v0.4.0-4 follow-up: Linux + macOS package managers ────
+            //
+            // `apt`, `dnf`, `yum`, and `brew` all default to
+            // non-interactive when given their `-y` flag (apt/dnf/yum)
+            // or run without a TTY (brew). The `silent` field on the
+            // request is honoured as best-effort; these tools don't
+            // have a separate quiet mode distinct from
+            // non-interactive, so silent=true is effectively a no-op
+            // beyond what `-y` already provides.
+            "apt" => {
+                // Debian / Ubuntu. Version syntax: `<pkg>=<version>`.
+                // We use `apt-get` (not `apt`) because the latter
+                // prints a "WARNING: apt does not have a stable CLI
+                // interface" banner that confuses CI log scraping.
+                let target = if req.version.is_empty() {
+                    req.package_id.clone()
+                } else {
+                    format!("{}={}", req.package_id, req.version)
+                };
+                (
+                    "apt-get".to_string(),
+                    vec!["install".to_string(), "-y".into(), target],
+                )
+            }
+            "dnf" => {
+                // RHEL 8+ / Fedora / CentOS Stream. Version syntax:
+                // `<pkg>-<version>` (the hyphen is part of dnf's
+                // package-spec grammar, not a separator the shell
+                // would mangle).
+                let target = if req.version.is_empty() {
+                    req.package_id.clone()
+                } else {
+                    format!("{}-{}", req.package_id, req.version)
+                };
+                (
+                    "dnf".to_string(),
+                    vec!["install".to_string(), "-y".into(), target],
+                )
+            }
+            "yum" => {
+                // RHEL ≤ 7 legacy alias. Same version syntax as dnf.
+                let target = if req.version.is_empty() {
+                    req.package_id.clone()
+                } else {
+                    format!("{}-{}", req.package_id, req.version)
+                };
+                (
+                    "yum".to_string(),
+                    vec!["install".to_string(), "-y".into(), target],
+                )
+            }
+            "brew" => {
+                // Homebrew on macOS. Version pinning uses formula
+                // suffixes like `python@3.11` — these are *separate
+                // formulas* on the brew side, not literal version
+                // pins, so we just concatenate with `@` when a
+                // version is supplied and the operator is responsible
+                // for the right formula name.
+                let target = if req.version.is_empty() {
+                    req.package_id.clone()
+                } else {
+                    format!("{}@{}", req.package_id, req.version)
+                };
+                (
+                    "brew".to_string(),
+                    vec!["install".to_string(), target],
+                )
+            }
+            // Source already validated above; reaching here would
+            // indicate the supported list drifted from the match.
+            // Surface as `internal` so the operator sees the bug.
             other => {
-                return Err(Status::invalid_argument(format!(
-                    "Unsupported install source: '{other}'. Use 'winget', 'choco', \
-                     'scoop', 'msstore', or call InstallDirect / InstallDocker for \
-                     direct installer / docker-image sources. Tier-2 npm/pip/cargo/ \
-                     powershell route through RunCommand on the host side."
+                return Err(Status::internal(format!(
+                    "BUG: source '{other}' passed the platform-supported \
+                     check but is missing from the install_software match",
                 )));
             }
         };
 
         info!(
-            source = %req.source,
+            source = %normalised_source,
             package = %req.package_id,
             "Installing software"
         );
@@ -1512,9 +1632,10 @@ impl GuestAgent for GuestAgentService {
         // bundle orchestrator counts the package as `skipped` rather
         // than `installed`. Detection is package-manager-specific and
         // crude (substring match) but doesn't have false positives in
-        // practice — winget and choco use stable phrasing.
+        // practice — winget / choco / apt / dnf / brew all use stable
+        // phrasing.
         let already_installed =
-            is_already_installed_output(&req.source, exit_code, &stdout, &stderr);
+            is_already_installed_output(&normalised_source, exit_code, &stdout, &stderr);
 
         Ok(Response::new(InstallSoftwareResponse {
             success: output.status.success() || already_installed,
@@ -1778,6 +1899,27 @@ fn is_already_installed_output(source: &str, exit_code: i32, stdout: &str, stder
         "choco" => stdout.contains("already installed"),
         // scoop exits 0 with "WARN  '<pkg>' (<ver>) is already installed."
         "scoop" => stdout.contains("is already installed") || stdout.contains("already installed"),
+        // apt-get exits 0 with "<pkg> is already the newest version" on
+        // stdout when the requested version is already installed.
+        "apt" => {
+            stdout.contains("is already the newest version")
+                || stdout.contains("already installed")
+        }
+        // dnf / yum exit 0 with "Nothing to do." (no resolution
+        // changes) or "Package <nvr> is already installed."
+        "dnf" | "yum" => {
+            stdout.contains("Nothing to do.")
+                || stdout.contains("is already installed")
+                || stdout.contains("already installed")
+        }
+        // brew exits 0 with "Warning: <pkg> <ver> is already installed
+        // and up-to-date." on stderr (it routes warnings to stderr by
+        // convention).
+        "brew" => {
+            stdout.contains("already installed")
+                || stderr.contains("already installed")
+                || stderr.contains("up-to-date")
+        }
         _ => false,
     };
     // Also check stderr — some package managers route their
@@ -2298,6 +2440,117 @@ mod tests {
 
         assert!(r.is_err());
         assert_eq!(r.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    /// Sending a known package-manager source that belongs to a
+    /// *different* platform than the build host must surface as
+    /// `Unimplemented` (wrong-platform routing) rather than
+    /// `InvalidArgument` (typo). The differentiation lets the host
+    /// orchestrator decide whether to retry on a different VM.
+    #[tokio::test]
+    async fn test_install_software_wrong_platform_source_unimplemented() {
+        let svc = make_service();
+        // Pick a source the build host (Windows in CI) does not
+        // claim — on Windows that's apt/dnf/yum/brew; on Linux it's
+        // winget/msstore/choco/scoop/brew; on macOS it's everything
+        // except brew. The test picks the source matching the
+        // *opposite* OS at runtime so it works on all three.
+        let foreign_source = match platform::current().kind() {
+            platform::PlatformKind::Windows => "apt",
+            platform::PlatformKind::Linux => "winget",
+            platform::PlatformKind::Macos => "winget",
+            platform::PlatformKind::Other => "winget",
+        };
+        let r = svc
+            .install_software(Request::new(InstallSoftwareRequest {
+                package_id: "some-package".into(),
+                source: foreign_source.into(),
+                version: String::new(),
+                silent: false,
+            }))
+            .await;
+        let err = r.expect_err("wrong-platform source must error");
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        assert!(
+            err.message().contains(foreign_source),
+            "error should name the rejected source; got: {}",
+            err.message()
+        );
+    }
+
+    /// On Linux + macOS, an empty source string is not a valid
+    /// default (the platform's package-manager universe is diverse).
+    /// The handler must reject it with `InvalidArgument` rather
+    /// than guessing.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn test_install_software_empty_source_rejected_on_unix() {
+        let svc = make_service();
+        let r = svc
+            .install_software(Request::new(InstallSoftwareRequest {
+                package_id: "some-package".into(),
+                source: String::new(),
+                version: String::new(),
+                silent: false,
+            }))
+            .await;
+        let err = r.expect_err("empty source must error on non-Windows");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    // ── v0.4.0-4 follow-up: idempotency detection for apt/dnf/brew ────
+
+    #[test]
+    fn already_installed_apt_matches_newest_version_stdout() {
+        assert!(is_already_installed_output(
+            "apt",
+            0,
+            "Reading package lists... Done\nbuild-essential is already the newest version (12.10).\n",
+            "",
+        ));
+    }
+
+    #[test]
+    fn already_installed_dnf_matches_nothing_to_do_stdout() {
+        assert!(is_already_installed_output(
+            "dnf",
+            0,
+            "Last metadata expiration check: ...\nNothing to do.\nComplete!\n",
+            "",
+        ));
+    }
+
+    #[test]
+    fn already_installed_yum_matches_already_installed_stdout() {
+        assert!(is_already_installed_output(
+            "yum",
+            0,
+            "Package make-1:4.3-5.el9.x86_64 is already installed.\n",
+            "",
+        ));
+    }
+
+    #[test]
+    fn already_installed_brew_matches_up_to_date_stderr() {
+        assert!(is_already_installed_output(
+            "brew",
+            0,
+            "",
+            "Warning: jq 1.7.1 is already installed and up-to-date.\n",
+        ));
+    }
+
+    #[test]
+    fn already_installed_non_zero_exit_never_counts_as_idempotent() {
+        // Stricter than the matcher's substring rules — even if the
+        // text mentions "already installed", a non-zero exit code
+        // means something went wrong elsewhere.
+        assert!(!is_already_installed_output(
+            "apt",
+            100,
+            "is already the newest version",
+            "",
+        ));
     }
 
     // ── S-06: Command denylist tests ────────────────────────────
