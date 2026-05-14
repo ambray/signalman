@@ -132,4 +132,11 @@ export class ControlPlane {
   get jobs() {
     return this.storage.jobs;
   }
+  // v0.3.0-5 sub-task 5 — cloud cost guardrails:
+  get cloudBudgets() {
+    return this.storage.cloudBudgets;
+  }
+  get cloudUsage() {
+    return this.storage.cloudUsage;
+  }
 }

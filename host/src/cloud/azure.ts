@@ -80,6 +80,7 @@ import {
   SIGNALMAN_TTL_EXPIRES_AT_TAG_KEY,
   SIGNALMAN_TTL_MINUTES_TAG_KEY,
 } from "./types.js";
+import { getBudgetGate } from "./budget.js";
 
 // ── Options ────────────────────────────────────────────────────────
 
@@ -186,8 +187,16 @@ export class AzureBackend implements CloudBackend {
       );
     }
 
+    // Budget gate (v0.3.0-5 sub-task 5) — refuse before vendor API
+    // call if the org is over budget. Back-compat: absent gate
+    // skips the check entirely.
     const orgId = config.org_id ?? "default";
     const ttlMinutes = config.ttl_minutes ?? DEFAULT_INSTANCE_TTL_MINUTES;
+    const gate = getBudgetGate();
+    if (gate) {
+      await gate.checkForConfig(config);
+    }
+
     const tags = buildAzureTags(config, orgId, ttlMinutes);
 
     const vmParams: VirtualMachine = {
@@ -222,15 +231,44 @@ export class AzureBackend implements CloudBackend {
       throw mapAzureError(err, "provision_failed", "VM create failed");
     }
 
-    return {
+    const handle: CloudInstanceHandle = {
       id: vm.id ?? `${this.resourceGroup}/${config.name}`,
       backend: "azure",
       name: config.name,
       region: this.region,
     };
+
+    // Record usage (best-effort, advisory; v0.3.0-5 sub-task 5).
+    if (gate) {
+      try {
+        await gate.recordStart({
+          orgId,
+          backend: "azure",
+          instanceId: handle.id,
+          instanceType: config.instance_type,
+          region: this.region,
+          ttlMinutes,
+        });
+      } catch {
+        // swallow.
+      }
+    }
+
+    return handle;
   }
 
   async terminateInstance(handle: CloudInstanceHandle): Promise<void> {
+    // Best-effort usage update before vendor call.
+    const gate = getBudgetGate();
+    if (gate) {
+      const orgId = handle.tags?.["signalman-org"] ?? "default";
+      try {
+        await gate.recordTerminate({ orgId, instanceId: handle.id });
+      } catch {
+        // swallow.
+      }
+    }
+
     try {
       await this.client.virtualMachines.beginDeleteAndWait(
         this.resourceGroup,

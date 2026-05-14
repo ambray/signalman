@@ -249,3 +249,41 @@ export interface AuditLogEntry {
   at: string;
   createdAt: string;
 }
+
+// ── Cloud cost guardrails (v0.3.0-5 sub-task 5) ─────────────────────
+
+/**
+ * Per-org monthly spend cap. Absence = no budget = unlimited
+ * (back-compat for existing orgs). The budget gate is consulted
+ * on provisionInstance: usage >= 100% throws `budget_exceeded`;
+ * usage >= softWarnPct returns `warned: true` so the caller can
+ * surface the warning.
+ */
+export interface CloudOrgBudget {
+  orgId: string;
+  monthlyCentsLimit: number;
+  softWarnPct: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * One row per provisioned instance recording the estimated
+ * cost. `estimatedCents` is computed at provision time from a
+ * static SKU × region cost table (see `host/src/cloud/cost.ts`);
+ * acceptable starting point per design §13.5 "naive at first".
+ * `terminatedAt` is updated when the instance is reaped /
+ * terminated; this lets the cost reaper retroactively narrow the
+ * estimate to actual lifetime in followup work.
+ */
+export interface CloudOrgUsage {
+  id: string;
+  orgId: string;
+  backend: string;
+  instanceId: string;
+  instanceType: string;
+  region: string;
+  startedAt: string;
+  terminatedAt: string | null;
+  estimatedCents: number;
+}

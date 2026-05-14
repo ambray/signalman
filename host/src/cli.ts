@@ -2406,15 +2406,142 @@ async function cmdCloud(args: ParsedArgs): Promise<number> {
   const sub = args.positional.shift();
   if (!sub) {
     usageError(
-      "cloud requires a subcommand (e.g. reaper run, reaper status — " +
-        "see `signalman --help`)",
+      "cloud requires a subcommand (e.g. reaper run, reaper status, " +
+        "budget get/set/usage — see `signalman --help`)",
     );
   }
   switch (sub) {
     case "reaper":
       return await cmdCloudReaper(args);
+    case "budget":
+      return await cmdCloudBudget(args);
     default:
       usageError(`unknown cloud subcommand: ${sub}`);
+  }
+}
+
+// Exported for cli-cloud-budget.test.ts.
+export async function cmdCloudBudget(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) {
+    usageError(
+      "cloud budget requires a subcommand: 'get --org X', 'set --org X " +
+        "--monthly-cents N [--soft-warn-pct 80]', or 'usage --org X'.",
+    );
+  }
+  const orgId = args.options.get("org");
+  if (!orgId) usageError("cloud budget requires --org <ORG_ID>");
+  const isJson = args.options.get("format") === "json";
+
+  const { ControlPlane } = await import("./control-plane/index.js");
+  const { loadConfig } = await import("./config.js");
+  const { monthBoundsUtc } = await import("./cloud/budget.js");
+  const config = loadConfig();
+  const cp = ControlPlane.fromConfig(config.controlPlane);
+  await cp.init();
+  try {
+    switch (sub) {
+      case "get": {
+        const budget = await cp.cloudBudgets.get(orgId);
+        const { startedAtFrom, startedAtTo } = monthBoundsUtc(new Date());
+        const usageCents = await cp.cloudUsage.sumForRange({
+          orgId,
+          startedAtFrom,
+          startedAtTo,
+        });
+        if (isJson) {
+          process.stdout.write(
+            JSON.stringify(
+              { orgId, budget, usageCents, monthStart: startedAtFrom },
+              null,
+              2,
+            ) + "\n",
+          );
+        } else if (!budget) {
+          process.stdout.write(
+            `org '${orgId}' has no budget configured (unlimited).\n` +
+              `  Current month usage: ${usageCents}¢\n`,
+          );
+        } else {
+          const pct = (usageCents / budget.monthlyCentsLimit) * 100;
+          process.stdout.write(
+            `org '${orgId}' budget:\n` +
+              `  monthly limit:    ${budget.monthlyCentsLimit}¢\n` +
+              `  soft warn pct:    ${budget.softWarnPct}%\n` +
+              `  current usage:    ${usageCents}¢ (${pct.toFixed(1)}%)\n` +
+              `  month started:    ${startedAtFrom}\n`,
+          );
+        }
+        return 0;
+      }
+      case "set": {
+        const limitStr = args.options.get("monthly-cents");
+        if (!limitStr) usageError("cloud budget set requires --monthly-cents <N>");
+        const monthlyCentsLimit = Number(limitStr);
+        if (!Number.isInteger(monthlyCentsLimit) || monthlyCentsLimit <= 0) {
+          usageError("--monthly-cents must be a positive integer");
+        }
+        const softWarnStr = args.options.get("soft-warn-pct");
+        const softWarnPct =
+          softWarnStr !== undefined ? Number(softWarnStr) : undefined;
+        if (
+          softWarnPct !== undefined &&
+          (!Number.isInteger(softWarnPct) || softWarnPct < 1 || softWarnPct > 100)
+        ) {
+          usageError("--soft-warn-pct must be an integer in [1, 100]");
+        }
+        const row = await cp.cloudBudgets.upsert({
+          orgId,
+          monthlyCentsLimit,
+          softWarnPct,
+        });
+        if (isJson) {
+          process.stdout.write(JSON.stringify(row, null, 2) + "\n");
+        } else {
+          process.stdout.write(
+            `Set budget for org '${orgId}':\n` +
+              `  monthly limit:  ${row.monthlyCentsLimit}¢\n` +
+              `  soft warn pct:  ${row.softWarnPct}%\n`,
+          );
+        }
+        return 0;
+      }
+      case "usage": {
+        const { startedAtFrom, startedAtTo } = monthBoundsUtc(new Date());
+        const rows = await cp.cloudUsage.listForOrg(orgId, {
+          startedAtFrom,
+          startedAtTo,
+        });
+        const totalCents = rows.reduce((s, r) => s + r.estimatedCents, 0);
+        if (isJson) {
+          process.stdout.write(
+            JSON.stringify(
+              { orgId, monthStart: startedAtFrom, totalCents, rows },
+              null,
+              2,
+            ) + "\n",
+          );
+        } else {
+          process.stdout.write(
+            `org '${orgId}' usage for month starting ${startedAtFrom}:\n` +
+              `  total: ${totalCents}¢ across ${rows.length} instance(s)\n` +
+              rows
+                .map(
+                  (r) =>
+                    `  - ${r.backend}:${r.instanceId} (${r.instanceType} @ ${r.region}) = ${r.estimatedCents}¢` +
+                    (r.terminatedAt ? ` [terminated ${r.terminatedAt}]` : " [running]"),
+                )
+                .join("\n") +
+              (rows.length ? "\n" : ""),
+          );
+        }
+        return 0;
+      }
+      default:
+        usageError(`unknown cloud budget subcommand: ${sub}`);
+    }
+  } finally {
+    await cp.close();
   }
 }
 
@@ -2618,7 +2745,7 @@ function printHelp(): void {
       "  api-key <subcommand>   (create, list, revoke)",
       "  runner <subcommand>    (register, start)",
       "  key <subcommand>       (generate, fingerprint — Ed25519 release signing)",
-      "  cloud <subcommand>     (reaper run, reaper status — cost guardrails)",
+      "  cloud <subcommand>     (reaper run/status, budget get/set/usage — cost guardrails)",
       "",
       "Exit codes (per docs/design/p0-mcp-surface.md §5):",
       "  0  pass        2  workflow fail        4  infra error",

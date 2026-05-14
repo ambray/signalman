@@ -728,6 +728,7 @@ import {
 } from "./cloud/types.js";
 import { TofuDriver } from "./cloud/tofu.js";
 import { CloudReaper, getOrCreateReaper } from "./cloud/reaper.js";
+import type { CloudBudgetGate } from "./cloud/budget.js";
 
 /**
  * Tool handler error→MCP-result envelope. Cloud errors carry a
@@ -1003,6 +1004,131 @@ server.tool(
         isRunning: reaperSingleton().isRunning(),
         lastResult: reaperSingleton().getLastResult(),
       })),
+    ),
+);
+
+// ── v0.3.0-5 sub-task 5: Cost guardrails — per-org budgets ────────
+//
+// Three tools exposing the budget gate's data surface:
+//
+//   - signalman_budget_get      Return the org's configured budget
+//                               (or null) plus current month usage.
+//   - signalman_budget_set      Create or update the org's budget.
+//                               Idempotent — same org_id replaces.
+//   - signalman_budget_usage    List per-instance usage rows for the
+//                               current month so operators can see
+//                               what's accumulating.
+//
+// All three lazily construct a SqliteStorageDriver via
+// resolveControlPlaneConfig so the MCP server doesn't need a
+// long-lived storage handle. The same code path the CLI uses.
+
+async function withBudgetGate<T>(
+  fn: (gate: CloudBudgetGate, controlPlane: { close(): Promise<void> }) => Promise<T>,
+): Promise<T> {
+  const { ControlPlane } = await import("./control-plane/index.js");
+  const { CloudBudgetGate } = await import("./cloud/budget.js");
+  const { loadConfig } = await import("./config.js");
+  const config = loadConfig();
+  const cp = ControlPlane.fromConfig(config.controlPlane);
+  await cp.init();
+  const gate = new CloudBudgetGate({
+    budgets: cp.cloudBudgets,
+    usage: cp.cloudUsage,
+  });
+  try {
+    return await fn(gate, cp);
+  } finally {
+    await cp.close();
+  }
+}
+
+server.tool(
+  "signalman_budget_get",
+  "Return the per-org cloud-spend budget configuration (monthly cents limit + soft-warn percentage) plus current calendar-month usage in cents. Returns null in `budget` when no budget is configured for the org (back-compat: unlimited).",
+  {
+    org_id: z.string().describe("Owning org id."),
+  },
+  async (params) =>
+    withRecording("signalman_budget_get", params, () =>
+      asCloudMcpResult(async () =>
+        withBudgetGate(async (_gate, cp) => {
+          const facade = cp as unknown as {
+            cloudBudgets: import("./control-plane/storage/driver.js").CloudBudgetRepo;
+            cloudUsage: import("./control-plane/storage/driver.js").CloudUsageRepo;
+          };
+          const { monthBoundsUtc } = await import("./cloud/budget.js");
+          const budget = await facade.cloudBudgets.get(params.org_id);
+          const { startedAtFrom, startedAtTo } = monthBoundsUtc(new Date());
+          const usageCents = await facade.cloudUsage.sumForRange({
+            orgId: params.org_id,
+            startedAtFrom,
+            startedAtTo,
+          });
+          return { orgId: params.org_id, budget, usageCents, monthStart: startedAtFrom };
+        }),
+      ),
+    ),
+);
+
+server.tool(
+  "signalman_budget_set",
+  "Create or update the per-org cloud-spend budget. Soft-warn percentage defaults to 80% (per design §13.5). Hard refusal at 100% is non-configurable. Setting a budget is the explicit opt-in — orgs without a row in the table are treated as unlimited.",
+  {
+    org_id: z.string().describe("Owning org id."),
+    monthly_cents_limit: z
+      .number()
+      .int()
+      .positive()
+      .describe("Monthly limit in cents (e.g. 50000 = $500/month)."),
+    soft_warn_pct: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe("Soft-warning threshold, defaults to 80."),
+  },
+  async (params) =>
+    withRecording("signalman_budget_set", params, () =>
+      asCloudMcpResult(async () =>
+        withBudgetGate(async (_gate, cp) => {
+          const facade = cp as unknown as {
+            cloudBudgets: import("./control-plane/storage/driver.js").CloudBudgetRepo;
+          };
+          return facade.cloudBudgets.upsert({
+            orgId: params.org_id,
+            monthlyCentsLimit: params.monthly_cents_limit,
+            softWarnPct: params.soft_warn_pct,
+          });
+        }),
+      ),
+    ),
+);
+
+server.tool(
+  "signalman_budget_usage",
+  "List per-instance cloud usage rows for the org's current calendar month. Each row has the SKU, region, started/terminated timestamps, and estimated cost in cents. Use this to investigate budget exhaustion (which instance types / scenarios are accumulating).",
+  {
+    org_id: z.string().describe("Owning org id."),
+  },
+  async (params) =>
+    withRecording("signalman_budget_usage", params, () =>
+      asCloudMcpResult(async () =>
+        withBudgetGate(async (_gate, cp) => {
+          const facade = cp as unknown as {
+            cloudUsage: import("./control-plane/storage/driver.js").CloudUsageRepo;
+          };
+          const { monthBoundsUtc } = await import("./cloud/budget.js");
+          const { startedAtFrom, startedAtTo } = monthBoundsUtc(new Date());
+          const rows = await facade.cloudUsage.listForOrg(params.org_id, {
+            startedAtFrom,
+            startedAtTo,
+          });
+          const totalCents = rows.reduce((s, r) => s + r.estimatedCents, 0);
+          return { orgId: params.org_id, monthStart: startedAtFrom, totalCents, rows };
+        }),
+      ),
     ),
 );
 

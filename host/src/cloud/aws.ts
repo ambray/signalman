@@ -71,6 +71,7 @@ import {
   SIGNALMAN_TTL_EXPIRES_AT_TAG_KEY,
   SIGNALMAN_TTL_MINUTES_TAG_KEY,
 } from "./types.js";
+import { getBudgetGate } from "./budget.js";
 
 // ── Public constants ──────────────────────────────────────────────
 
@@ -175,9 +176,17 @@ export class AwsBackend implements CloudBackend {
       );
     }
 
-    // ── Build RunInstancesCommand ──
+    // ── Budget gate (v0.3.0-5 sub-task 5) ──
+    // If a gate is wired, check before any vendor API call.
+    // Absent gate = back-compat, provisions proceed unchecked.
     const orgId = config.org_id ?? "default";
     const ttlMinutes = config.ttl_minutes ?? DEFAULT_INSTANCE_TTL_MINUTES;
+    const gate = getBudgetGate();
+    if (gate) {
+      await gate.checkForConfig(config);
+    }
+
+    // ── Build RunInstancesCommand ──
     const tags = buildInstanceTags(config, orgId, ttlMinutes);
 
     const runInput = {
@@ -242,10 +251,44 @@ export class AwsBackend implements CloudBackend {
     // ── Poll until running ──
     await this.waitUntilRunning(handle);
 
+    // ── Record usage (v0.3.0-5 sub-task 5) ──
+    // Done AFTER waitUntilRunning so failed provisions don't
+    // bill the org's budget. The record is best-effort:
+    // a storage error here MUST NOT undo the provision (caller
+    // already has a running instance). The reaper + an out-of-
+    // band reconciliation backfills any missing rows.
+    if (gate) {
+      try {
+        await gate.recordStart({
+          orgId,
+          backend: "aws",
+          instanceId: handle.id,
+          instanceType: config.instance_type,
+          region: this.region,
+          ttlMinutes,
+        });
+      } catch {
+        // swallow — usage tracking is advisory, not critical-path.
+      }
+    }
+
     return handle;
   }
 
   async terminateInstance(handle: CloudInstanceHandle): Promise<void> {
+    // Best-effort budget-usage update before the vendor call so
+    // a quick re-list after terminate sees the row already
+    // marked. Failure is non-fatal: terminate still runs.
+    const gate = getBudgetGate();
+    if (gate) {
+      const orgId = handle.tags?.["signalman-org"] ?? "default";
+      try {
+        await gate.recordTerminate({ orgId, instanceId: handle.id });
+      } catch {
+        // swallow — advisory.
+      }
+    }
+
     let out: TerminateInstancesCommandOutput;
     try {
       out = await this.client.send(

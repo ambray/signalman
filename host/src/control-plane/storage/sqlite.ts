@@ -26,6 +26,8 @@ import type {
   Artifact,
   ArtifactKind,
   AuditLogEntry,
+  CloudOrgBudget,
+  CloudOrgUsage,
   Deployment,
   DeploymentHealthSummary,
   DeploymentStatus,
@@ -50,6 +52,8 @@ import {
   type ApiKeyRepo,
   type ArtifactRepo,
   type AuditLogRepo,
+  type CloudBudgetRepo,
+  type CloudUsageRepo,
   type DeploymentRepo,
   type HealthCheckRepo,
   type JobRepo,
@@ -97,6 +101,8 @@ export class SqliteStorageDriver implements StorageDriver {
   readonly scenarios: ScenarioRepo;
   readonly runs: RunRepo;
   readonly jobs: JobRepo;
+  readonly cloudBudgets: CloudBudgetRepo;
+  readonly cloudUsage: CloudUsageRepo;
 
   constructor(opts: SqliteDriverOptions) {
     if (opts.path !== ":memory:") {
@@ -123,6 +129,8 @@ export class SqliteStorageDriver implements StorageDriver {
     this.scenarios = new SqliteScenarioRepo(this.db);
     this.runs = new SqliteRunRepo(this.db);
     this.jobs = new SqliteJobRepo(this.db);
+    this.cloudBudgets = new SqliteCloudBudgetRepo(this.db);
+    this.cloudUsage = new SqliteCloudUsageRepo(this.db);
   }
 
   async migrate(): Promise<void> {
@@ -1534,5 +1542,176 @@ class SqliteJobRepo implements JobRepo {
       created_at: existing.createdAt,
       deleted_at: existing.deletedAt,
     });
+  }
+}
+
+// ── Cloud cost guardrails (v0.3.0-5 sub-task 5) ────────────────────
+
+function mapCloudBudget(row: SqlRow): CloudOrgBudget {
+  return {
+    orgId: row.org_id as string,
+    monthlyCentsLimit: row.monthly_cents_limit as number,
+    softWarnPct: row.soft_warn_pct as number,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+function mapCloudUsage(row: SqlRow): CloudOrgUsage {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    backend: row.backend as string,
+    instanceId: row.instance_id as string,
+    instanceType: row.instance_type as string,
+    region: row.region as string,
+    startedAt: row.started_at as string,
+    terminatedAt: (row.terminated_at as string | null) ?? null,
+    estimatedCents: row.estimated_cents as number,
+  };
+}
+
+class SqliteCloudBudgetRepo implements CloudBudgetRepo {
+  constructor(private readonly db: DatabaseSync) {}
+
+  async get(orgId: string): Promise<CloudOrgBudget | null> {
+    const row = this.db
+      .prepare("SELECT * FROM cloud_org_budget WHERE org_id = ?")
+      .get(orgId) as SqlRow | undefined;
+    return row ? mapCloudBudget(row) : null;
+  }
+
+  async upsert(input: {
+    orgId: string;
+    monthlyCentsLimit: number;
+    softWarnPct?: number;
+  }): Promise<CloudOrgBudget> {
+    const now = nowIso();
+    const bind = {
+      org_id: input.orgId,
+      monthly_cents_limit: input.monthlyCentsLimit,
+      soft_warn_pct: input.softWarnPct ?? 80,
+      created_at: now,
+      updated_at: now,
+    };
+    // INSERT OR REPLACE preserves created_at via the existing-row
+    // path below; for a true insert the bind value is used.
+    const existing = await this.get(input.orgId);
+    try {
+      if (existing) {
+        prep(
+          this.db,
+          "UPDATE cloud_org_budget SET monthly_cents_limit = @monthly_cents_limit, soft_warn_pct = @soft_warn_pct, updated_at = @updated_at WHERE org_id = @org_id",
+        ).run({
+          org_id: bind.org_id,
+          monthly_cents_limit: bind.monthly_cents_limit,
+          soft_warn_pct: bind.soft_warn_pct,
+          updated_at: bind.updated_at,
+        });
+        return mapCloudBudget({
+          ...bind,
+          created_at: existing.createdAt,
+        });
+      } else {
+        prep(
+          this.db,
+          "INSERT INTO cloud_org_budget (org_id, monthly_cents_limit, soft_warn_pct, created_at, updated_at) VALUES (@org_id, @monthly_cents_limit, @soft_warn_pct, @created_at, @updated_at)",
+        ).run(bind);
+        return mapCloudBudget(bind);
+      }
+    } catch (err) {
+      mapSqliteError(err);
+    }
+  }
+
+  async remove(orgId: string): Promise<void> {
+    this.db.prepare("DELETE FROM cloud_org_budget WHERE org_id = ?").run(orgId);
+  }
+}
+
+class SqliteCloudUsageRepo implements CloudUsageRepo {
+  constructor(private readonly db: DatabaseSync) {}
+
+  async recordStart(input: {
+    orgId: string;
+    backend: string;
+    instanceId: string;
+    instanceType: string;
+    region: string;
+    startedAt: string;
+    estimatedCents: number;
+  }): Promise<CloudOrgUsage> {
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      backend: input.backend,
+      instance_id: input.instanceId,
+      instance_type: input.instanceType,
+      region: input.region,
+      started_at: input.startedAt,
+      terminated_at: null,
+      estimated_cents: input.estimatedCents,
+    };
+    try {
+      prep(
+        this.db,
+        "INSERT INTO cloud_org_usage (id, org_id, backend, instance_id, instance_type, region, started_at, terminated_at, estimated_cents) VALUES (@id, @org_id, @backend, @instance_id, @instance_type, @region, @started_at, @terminated_at, @estimated_cents)",
+      ).run(bind);
+    } catch (err) {
+      mapSqliteError(err);
+    }
+    return mapCloudUsage(bind);
+  }
+
+  async recordTerminate(input: {
+    orgId: string;
+    instanceId: string;
+    terminatedAt: string;
+  }): Promise<void> {
+    // Idempotent: matches the backend.terminateInstance contract.
+    // An unknown instance is a no-op (e.g. reaper sweeping a row
+    // that has already been recorded-terminated by a CLI run).
+    this.db
+      .prepare(
+        "UPDATE cloud_org_usage SET terminated_at = ? WHERE org_id = ? AND instance_id = ? AND terminated_at IS NULL",
+      )
+      .run(input.terminatedAt, input.orgId, input.instanceId);
+  }
+
+  async sumForRange(input: {
+    orgId: string;
+    startedAtFrom: string;
+    startedAtTo: string;
+  }): Promise<number> {
+    const row = this.db
+      .prepare(
+        "SELECT COALESCE(SUM(estimated_cents), 0) AS total FROM cloud_org_usage WHERE org_id = ? AND started_at >= ? AND started_at < ?",
+      )
+      .get(input.orgId, input.startedAtFrom, input.startedAtTo) as
+      | { total: number }
+      | undefined;
+    return row?.total ?? 0;
+  }
+
+  async listForOrg(
+    orgId: string,
+    opts?: { startedAtFrom?: string; startedAtTo?: string },
+  ): Promise<CloudOrgUsage[]> {
+    const clauses: string[] = ["org_id = ?"];
+    const binds: string[] = [orgId];
+    if (opts?.startedAtFrom) {
+      clauses.push("started_at >= ?");
+      binds.push(opts.startedAtFrom);
+    }
+    if (opts?.startedAtTo) {
+      clauses.push("started_at < ?");
+      binds.push(opts.startedAtTo);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM cloud_org_usage WHERE ${clauses.join(" AND ")} ORDER BY started_at`,
+      )
+      .all(...binds) as SqlRow[];
+    return rows.map(mapCloudUsage);
   }
 }

@@ -21,6 +21,8 @@ import type {
   Artifact,
   ArtifactKind,
   AuditLogEntry,
+  CloudOrgBudget,
+  CloudOrgUsage,
   Deployment,
   HealthCheck,
   HealthStatus,
@@ -255,6 +257,74 @@ export interface RunRepo {
   ): Promise<Run>;
 }
 
+// ── Cloud cost guardrails (v0.3.0-5 sub-task 5) ────────────────────
+
+/**
+ * Per-org budget configuration. `softWarnPct` is the percentage
+ * at which the gate flags `warned: true`; 100% is the hard limit.
+ */
+export interface CloudBudgetRepo {
+  /** Return the org's budget row, or null if none configured. */
+  get(orgId: string): Promise<CloudOrgBudget | null>;
+  /**
+   * Create or update the org's budget. softWarnPct defaults to 80
+   * per design §13.5. Caller passes monthlyCentsLimit > 0
+   * (constraint enforced by the storage layer).
+   */
+  upsert(input: {
+    orgId: string;
+    monthlyCentsLimit: number;
+    softWarnPct?: number;
+  }): Promise<CloudOrgBudget>;
+  /** Remove the org's budget; usage rows are unaffected. */
+  remove(orgId: string): Promise<void>;
+}
+
+/**
+ * Per-instance cost tracking. The budget gate sums rows by
+ * (orgId, billing-month) to compute current usage; terminate
+ * marks the row so followup reconciliation can narrow estimates
+ * to actual lifetime.
+ */
+export interface CloudUsageRepo {
+  /**
+   * Record a new in-flight instance with its initial estimated
+   * cost. Unique on (orgId, instanceId).
+   */
+  recordStart(input: {
+    orgId: string;
+    backend: string;
+    instanceId: string;
+    instanceType: string;
+    region: string;
+    startedAt: string;
+    estimatedCents: number;
+  }): Promise<CloudOrgUsage>;
+  /**
+   * Mark the row terminated. No-op if no matching row (idempotent
+   * — matches the backend's terminateInstance contract).
+   */
+  recordTerminate(input: {
+    orgId: string;
+    instanceId: string;
+    terminatedAt: string;
+  }): Promise<void>;
+  /**
+   * Sum estimated_cents for the org across a date range. The gate
+   * calls this with the current billing month's bounds.
+   */
+  sumForRange(input: {
+    orgId: string;
+    startedAtFrom: string;
+    startedAtTo: string;
+  }): Promise<number>;
+  /** List usage rows for an org (optionally filtered by range). */
+  listForOrg(
+    orgId: string,
+    opts?: { startedAtFrom?: string; startedAtTo?: string },
+  ): Promise<CloudOrgUsage[]>;
+}
+
 // ── Driver façade ───────────────────────────────────────────────────
 
 export interface StorageDriver {
@@ -282,6 +352,10 @@ export interface StorageDriver {
 
   // PR 8 — runner queue:
   readonly jobs: JobRepo;
+
+  // v0.3.0-5 sub-task 5 — cloud cost guardrails:
+  readonly cloudBudgets: CloudBudgetRepo;
+  readonly cloudUsage: CloudUsageRepo;
 }
 
 /** Thrown by repos that are declared in this PR but not yet implemented. */

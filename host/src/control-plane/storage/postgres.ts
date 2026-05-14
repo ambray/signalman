@@ -39,6 +39,8 @@ import type {
   Artifact,
   ArtifactKind,
   AuditLogEntry,
+  CloudOrgBudget,
+  CloudOrgUsage,
   Deployment,
   DeploymentHealthSummary,
   DeploymentStatus,
@@ -63,6 +65,8 @@ import {
   type ApiKeyRepo,
   type ArtifactRepo,
   type AuditLogRepo,
+  type CloudBudgetRepo,
+  type CloudUsageRepo,
   type DeploymentRepo,
   type HealthCheckRepo,
   type JobRepo,
@@ -115,6 +119,8 @@ export class PostgresStorageDriver implements StorageDriver {
   readonly scenarios: ScenarioRepo;
   readonly runs: RunRepo;
   readonly jobs: JobRepo;
+  readonly cloudBudgets: CloudBudgetRepo;
+  readonly cloudUsage: CloudUsageRepo;
 
   constructor(opts: PostgresDriverOptions) {
     if (opts.pool) {
@@ -142,6 +148,8 @@ export class PostgresStorageDriver implements StorageDriver {
     this.scenarios = new PgScenarioRepo(this.pool);
     this.runs = new PgRunRepo(this.pool);
     this.jobs = new PgJobRepo(this.pool);
+    this.cloudBudgets = new PgCloudBudgetRepo(this.pool);
+    this.cloudUsage = new PgCloudUsageRepo(this.pool);
   }
 
   async migrate(): Promise<void> {
@@ -1524,5 +1532,154 @@ class PgJobRepo implements JobRepo {
       created_at: existing.createdAt,
       deleted_at: existing.deletedAt,
     });
+  }
+}
+
+// ── Cloud cost guardrails (v0.3.0-5 sub-task 5) ────────────────────
+
+function mapPgCloudBudget(row: SqlRow): CloudOrgBudget {
+  return {
+    orgId: row.org_id as string,
+    monthlyCentsLimit: Number(row.monthly_cents_limit),
+    softWarnPct: Number(row.soft_warn_pct),
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+function mapPgCloudUsage(row: SqlRow): CloudOrgUsage {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    backend: row.backend as string,
+    instanceId: row.instance_id as string,
+    instanceType: row.instance_type as string,
+    region: row.region as string,
+    startedAt: row.started_at as string,
+    terminatedAt: (row.terminated_at as string | null) ?? null,
+    estimatedCents: Number(row.estimated_cents),
+  };
+}
+
+class PgCloudBudgetRepo implements CloudBudgetRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async get(orgId: string): Promise<CloudOrgBudget | null> {
+    const out = await this.pool.query(
+      "SELECT * FROM cloud_org_budget WHERE org_id = $1",
+      [orgId],
+    );
+    return out.rows[0] ? mapPgCloudBudget(out.rows[0] as SqlRow) : null;
+  }
+
+  async upsert(input: {
+    orgId: string;
+    monthlyCentsLimit: number;
+    softWarnPct?: number;
+  }): Promise<CloudOrgBudget> {
+    const now = nowIso();
+    const softWarnPct = input.softWarnPct ?? 80;
+    try {
+      const out = await this.pool.query(
+        `INSERT INTO cloud_org_budget (org_id, monthly_cents_limit, soft_warn_pct, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $4)
+         ON CONFLICT (org_id) DO UPDATE SET
+           monthly_cents_limit = EXCLUDED.monthly_cents_limit,
+           soft_warn_pct = EXCLUDED.soft_warn_pct,
+           updated_at = EXCLUDED.updated_at
+         RETURNING *`,
+        [input.orgId, input.monthlyCentsLimit, softWarnPct, now],
+      );
+      return mapPgCloudBudget(out.rows[0] as SqlRow);
+    } catch (err) {
+      mapPgError(err);
+    }
+  }
+
+  async remove(orgId: string): Promise<void> {
+    await this.pool.query("DELETE FROM cloud_org_budget WHERE org_id = $1", [
+      orgId,
+    ]);
+  }
+}
+
+class PgCloudUsageRepo implements CloudUsageRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async recordStart(input: {
+    orgId: string;
+    backend: string;
+    instanceId: string;
+    instanceType: string;
+    region: string;
+    startedAt: string;
+    estimatedCents: number;
+  }): Promise<CloudOrgUsage> {
+    try {
+      const out = await this.pool.query(
+        `INSERT INTO cloud_org_usage (id, org_id, backend, instance_id, instance_type, region, started_at, terminated_at, estimated_cents)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8)
+         RETURNING *`,
+        [
+          newId(),
+          input.orgId,
+          input.backend,
+          input.instanceId,
+          input.instanceType,
+          input.region,
+          input.startedAt,
+          input.estimatedCents,
+        ],
+      );
+      return mapPgCloudUsage(out.rows[0] as SqlRow);
+    } catch (err) {
+      mapPgError(err);
+    }
+  }
+
+  async recordTerminate(input: {
+    orgId: string;
+    instanceId: string;
+    terminatedAt: string;
+  }): Promise<void> {
+    await this.pool.query(
+      "UPDATE cloud_org_usage SET terminated_at = $1 WHERE org_id = $2 AND instance_id = $3 AND terminated_at IS NULL",
+      [input.terminatedAt, input.orgId, input.instanceId],
+    );
+  }
+
+  async sumForRange(input: {
+    orgId: string;
+    startedAtFrom: string;
+    startedAtTo: string;
+  }): Promise<number> {
+    const out = await this.pool.query(
+      "SELECT COALESCE(SUM(estimated_cents), 0)::bigint AS total FROM cloud_org_usage WHERE org_id = $1 AND started_at >= $2 AND started_at < $3",
+      [input.orgId, input.startedAtFrom, input.startedAtTo],
+    );
+    return Number(
+      (out.rows[0] as { total: string | number } | undefined)?.total ?? 0,
+    );
+  }
+
+  async listForOrg(
+    orgId: string,
+    opts?: { startedAtFrom?: string; startedAtTo?: string },
+  ): Promise<CloudOrgUsage[]> {
+    const clauses: string[] = ["org_id = $1"];
+    const binds: unknown[] = [orgId];
+    if (opts?.startedAtFrom) {
+      binds.push(opts.startedAtFrom);
+      clauses.push(`started_at >= $${binds.length}`);
+    }
+    if (opts?.startedAtTo) {
+      binds.push(opts.startedAtTo);
+      clauses.push(`started_at < $${binds.length}`);
+    }
+    const out = await this.pool.query(
+      `SELECT * FROM cloud_org_usage WHERE ${clauses.join(" AND ")} ORDER BY started_at`,
+      binds,
+    );
+    return (out.rows as SqlRow[]).map(mapPgCloudUsage);
   }
 }
