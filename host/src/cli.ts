@@ -74,6 +74,10 @@ import {
   runScheduleList,
   runScheduleRemove,
   createDefaultProbeInvoker,
+  runWebhookAdd,
+  runWebhookList,
+  runWebhookRemove,
+  runWebhookTest,
 } from "./verbs/control-plane.js";
 import { runSchedulerTick, startScheduler } from "./control-plane/scheduler/index.js";
 // PR 6 — `signalman serve` HTTP control plane.
@@ -3779,6 +3783,142 @@ async function cmdScheduleStart(args: ParsedArgs): Promise<number> {
   }
 }
 
+// ── webhook verbs (v0.4.0-2 / Epic 2) ───────────────────────────────
+
+async function cmdWebhook(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) usageError("webhook requires a subcommand (list, add, remove, test)");
+  switch (sub) {
+    case "list":
+      return await cmdWebhookList(args);
+    case "add":
+      return await cmdWebhookAdd(args);
+    case "remove":
+      return await cmdWebhookRemove(args);
+    case "test":
+      return await cmdWebhookTest(args);
+    default:
+      usageError(`unknown webhook subcommand: ${sub}`);
+  }
+}
+
+async function cmdWebhookAdd(args: ParsedArgs): Promise<number> {
+  const kindRaw = args.options.get("kind");
+  const url = args.options.get("url");
+  if (!kindRaw) usageError("webhook add requires --kind <generic|slack|email>");
+  if (!url) usageError("webhook add requires --url <URL or mailto:>");
+  if (!["generic", "slack", "email"].includes(kindRaw)) {
+    usageError(`webhook add: invalid --kind '${kindRaw}'`);
+  }
+  const kind = kindRaw as "generic" | "slack" | "email";
+  const secretHmacKey = args.options.get("secret");
+  const eventsRaw = args.options.get("events");
+  const eventKinds = eventsRaw
+    ? eventsRaw
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+    : [];
+  const description = args.options.get("description");
+  const format = args.options.get("format");
+  try {
+    const sub = await withControlPlane((cp) =>
+      runWebhookAdd(cp, {
+        kind,
+        url,
+        secretHmacKey,
+        eventKinds,
+        description,
+      }),
+    );
+    if (format === "json") {
+      emitJson(sub);
+    } else {
+      process.stdout.write(
+        `Added webhook '${sub.id}'\n` +
+          `  kind: ${sub.kind}\n` +
+          `  url:  ${sub.url}\n` +
+          `  events: ${
+            sub.eventKinds.length === 0 ? "(all)" : sub.eventKinds.join(", ")
+          }\n` +
+          (sub.secretHmacKey ? `  signed: HMAC-SHA256\n` : ""),
+      );
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman webhook add: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdWebhookList(args: ParsedArgs): Promise<number> {
+  const format = args.options.get("format");
+  try {
+    const subs = await withControlPlane((cp) => runWebhookList(cp));
+    if (format === "json") {
+      emitJson(subs);
+      return 0;
+    }
+    if (subs.length === 0) {
+      process.stdout.write("(no webhooks)\n");
+      return 0;
+    }
+    emitTable(
+      subs.map((s) => ({
+        id: s.id,
+        kind: s.kind,
+        url: s.url,
+        active: s.active ? "yes" : "no",
+        events: s.eventKinds.length === 0 ? "(all)" : s.eventKinds.join(","),
+        signed: s.secretHmacKey ? "yes" : "no",
+      })),
+    );
+    return 0;
+  } catch (err) {
+    console.error(`signalman webhook list: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdWebhookRemove(args: ParsedArgs): Promise<number> {
+  const id = args.positional[0] ?? args.options.get("id");
+  if (!id) usageError("webhook remove requires <id>");
+  try {
+    await withControlPlane((cp) => runWebhookRemove(cp, { id }));
+    process.stdout.write(`Removed webhook '${id}'.\n`);
+    return 0;
+  } catch (err) {
+    console.error(`signalman webhook remove: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdWebhookTest(args: ParsedArgs): Promise<number> {
+  const id = args.positional[0] ?? args.options.get("id");
+  if (!id) usageError("webhook test requires <id>");
+  const format = args.options.get("format");
+  try {
+    const result = await withControlPlane((cp) => runWebhookTest(cp, { id }));
+    if (format === "json") {
+      emitJson(result);
+    } else {
+      process.stdout.write(
+        `Webhook test → ${result.outcome.delivered ? "delivered" : "FAILED"}\n` +
+          `  subscription: ${result.subscription.id} (${result.subscription.kind})\n` +
+          `  url:          ${result.subscription.url}\n` +
+          (result.outcome.status
+            ? `  status:       ${result.outcome.status}\n`
+            : "") +
+          (result.outcome.error ? `  error:        ${result.outcome.error}\n` : ""),
+      );
+    }
+    return result.outcome.delivered ? 0 : 4;
+  } catch (err) {
+    console.error(`signalman webhook test: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 async function main(argv: string[]): Promise<number> {
@@ -3825,6 +3965,8 @@ async function main(argv: string[]): Promise<number> {
         return await cmdHealth(args);
       case "schedule":
         return await cmdSchedule(args);
+      case "webhook":
+        return await cmdWebhook(args);
       case "serve":
         return await cmdServe(args);
       case "api-key":
@@ -3885,6 +4027,7 @@ function printHelp(): void {
       "  target <subcommand>    (add, list, remove)",
       "  health <subcommand>    (check, history)",
       "  schedule <subcommand>  (list, add, disable, enable, remove, run-once, start)",
+      "  webhook <subcommand>   (list, add, remove, test)",
       "  serve [--port P] [--host H] [--disable-loopback-bypass]",
       "                              (start the control-plane HTTP server)",
       "  api-key <subcommand>   (create, list, revoke)",

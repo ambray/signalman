@@ -56,6 +56,10 @@ import {
   runTargetAdd,
   runTargetList,
   runTargetRemove,
+  runWebhookAdd,
+  runWebhookList,
+  runWebhookRemove,
+  runWebhookTest,
   withControlPlane,
 } from "./verbs/control-plane.js";
 import { runSchedulerTick } from "./control-plane/scheduler/index.js";
@@ -1655,6 +1659,91 @@ server.tool(
             invoke: createDefaultProbeInvoker(cp),
           }),
         })),
+      ),
+    ),
+);
+
+// ── Webhook verbs (v0.4.0-2 / Epic 2) ─────────────────────────────
+
+server.tool(
+  "signalman_webhook_list",
+  "List webhook subscriptions registered in the active org. Returns both active and disabled subscriptions; the dispatcher only delivers to active ones.",
+  {},
+  async (params) =>
+    withRecording("signalman_webhook_list", params, async () =>
+      asMcpResult(await withControlPlane((cp) => runWebhookList(cp))),
+    ),
+);
+
+server.tool(
+  "signalman_webhook_add",
+  "Register a webhook subscription. Generic = POST JSON with HMAC-SHA256 signature header X-Signalman-Signature. Slack = formatted blocks. Email = mailto: URL with SMTP from SIGNALMAN_SMTP_URL (no-op when unset).",
+  {
+    kind: z.enum(["generic", "slack", "email"]),
+    url: z
+      .string()
+      .describe(
+        "Generic / Slack: http(s):// endpoint. Email: mailto:user@host or bare user@host.",
+      ),
+    secret: z
+      .string()
+      .optional()
+      .describe(
+        "HMAC-SHA256 shared secret. Generic kind only; ignored by Slack/email.",
+      ),
+    event_kinds: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Event kinds to receive (release-built / release-deployed / " +
+          "deployment-rolled-back / health-failed / promotion-approved / " +
+          "promotion-rejected). Empty / omitted = all kinds.",
+      ),
+    description: z.string().optional(),
+  },
+  async (params) =>
+    withRecording("signalman_webhook_add", params, async () =>
+      asMcpResult(
+        await withControlPlane((cp) =>
+          runWebhookAdd(cp, {
+            kind: (params as { kind: "generic" | "slack" | "email" }).kind,
+            url: (params as { url: string }).url,
+            secretHmacKey: (params as { secret?: string }).secret,
+            eventKinds: (params as { event_kinds?: string[] }).event_kinds,
+            description: (params as { description?: string }).description,
+          }),
+        ),
+      ),
+    ),
+);
+
+server.tool(
+  "signalman_webhook_remove",
+  "Soft-delete a webhook subscription. The row stays in storage for audit.",
+  {
+    id: z.string().describe("Webhook subscription id from signalman_webhook_list."),
+  },
+  async (params) =>
+    withRecording("signalman_webhook_remove", params, async () => {
+      await withControlPlane((cp) =>
+        runWebhookRemove(cp, { id: (params as { id: string }).id }),
+      );
+      return asMcpResult({ removed: true });
+    }),
+);
+
+server.tool(
+  "signalman_webhook_test",
+  "Send a synthetic release-built event to a single subscription. Returns delivery outcome (status code for generic/slack, error reason for failures). Useful before relying on a subscription in the release-build / deploy paths.",
+  {
+    id: z.string().describe("Webhook subscription id."),
+  },
+  async (params) =>
+    withRecording("signalman_webhook_test", params, async () =>
+      asMcpResult(
+        await withControlPlane((cp) =>
+          runWebhookTest(cp, { id: (params as { id: string }).id }),
+        ),
       ),
     ),
 );
