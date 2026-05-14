@@ -162,19 +162,28 @@ describe("asCloudMcpResult envelope — error paths", () => {
 // they verify the documented behaviours that the agents rely on.
 
 describe("Cloud MCP tool surface — discoverability", () => {
-  it("server.ts imports signalman_cloud_* tools", async () => {
-    // Smoke: importing server.ts triggers vendor backend module-
-    // load registration. After import, both 'aws' and 'azure'
-    // should be in the registry. This proves the cloud tool
-    // wiring runs at server startup.
-    //
-    // We re-import via a dynamic side-effect so the static import
-    // ordering of test files doesn't matter.
-    await import("../cloud/aws.js");
-    await import("../cloud/azure.js");
-    const { listRegisteredBackends } = await import("../cloud/registry.js");
-    const backends = listRegisteredBackends();
-    expect(backends).toContain("aws");
-    expect(backends).toContain("azure");
-  });
+  // Bumped timeout: under coverage instrumentation the dynamic
+  // module-load chain (aws → @aws-sdk/client-ec2 transitive deps;
+  // azure → @azure/arm-compute + @azure/identity) takes longer
+  // than the default 5s. The cold-cache imports themselves only
+  // take ~900ms in non-coverage mode.
+  it(
+    "server.ts imports signalman_cloud_* tools",
+    async () => {
+      // Smoke: importing server.ts triggers vendor backend module-
+      // load registration. After import, both 'aws' and 'azure'
+      // should be in the registry. This proves the cloud tool
+      // wiring runs at server startup.
+      //
+      // We re-import via a dynamic side-effect so the static import
+      // ordering of test files doesn't matter.
+      await import("../cloud/aws.js");
+      await import("../cloud/azure.js");
+      const { listRegisteredBackends } = await import("../cloud/registry.js");
+      const backends = listRegisteredBackends();
+      expect(backends).toContain("aws");
+      expect(backends).toContain("azure");
+    },
+    30000,
+  );
 });
