@@ -72,3 +72,4 @@ certs/*.crt
 .loom/metrics/
 .loom/review/
 # END LOOM generated-artifacts
+.commit-msg-temp.txt
