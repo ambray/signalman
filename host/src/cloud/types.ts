@@ -223,6 +223,9 @@ export const SIGNALMAN_MANAGED_TAG_VALUE = "true";
 /**
  * Stable error code for `CloudBackendError`. Callers can dispatch
  * on these without parsing message strings.
+ *
+ * Codes prefixed `tofu_` are added by the OpenTofu driver
+ * (sub-task 4); other vendor backends shouldn't emit them.
  */
 export type CloudBackendErrorCode =
   | "unsupported_provider"
@@ -232,7 +235,13 @@ export type CloudBackendErrorCode =
   | "ttl_expired"
   | "auth_failed"
   | "quota_exceeded"
-  | "invalid_config";
+  | "invalid_config"
+  // ── OpenTofu driver (sub-task 4) ────────────────────────────
+  | "tofu_failed"
+  | "tofu_not_found"
+  | "invalid_stack_name"
+  | "module_path_missing"
+  | "project_root_invalid";
 
 /**
  * Structured error for cloud-backend failures. Carries the stable
