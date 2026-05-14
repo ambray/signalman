@@ -423,18 +423,33 @@ function readRecordedCalls(callsPath: string): {
 }
 
 function synthesizeScenarioFromCalls(input: SynthesisInput): SynthesisOutput {
+  // v0.3.0-1 follow-up: infer the VM list from the recorded calls
+  // rather than emitting a single placeholder. Scan `params.vm`
+  // and `params.vm_name` across captured calls; emit one vms[]
+  // entry per unique name. Falls back to the legacy placeholder
+  // when no VM references are observed (e.g. a recording with
+  // only `signalman.list` calls).
+  const inferredVms = extractVmReferencesFromCalls(input.calls);
+  const vms = inferredVms.length > 0
+    ? inferredVms.map((name) => ({
+        name,
+        template: "recorded-template",
+        guest_agent_port: 50051,
+        pre_started: true,
+      }))
+    : [
+        {
+          name: "recorded-vm",
+          template: "recorded-template",
+          guest_agent_port: 50051,
+          pre_started: true,
+        },
+      ];
   const setup = {
     name: `${input.name} candidate`,
     version: "1.0",
     tags: ["recorded", "candidate"],
-    vms: [
-      {
-        name: "recorded-vm",
-        template: "recorded-template",
-        guest_agent_port: 50051,
-        pre_started: true,
-      },
-    ],
+    vms,
   };
   let emittedToolBlocks = 0;
   let skippedCallCount = 0;
@@ -499,6 +514,41 @@ function workflowToolName(tool: string): string | null {
     return tool;
   }
   return null;
+}
+
+/**
+ * Scan recorded call params for VM-name references and return a
+ * sorted-unique list (v0.3.0-1 synthesiser follow-up).
+ *
+ * Recognised param keys:
+ *   - `vm`         — the dominant convention for VM-scoped tools
+ *                    (vm_run_command, vm_copy_file, etc.)
+ *   - `vm_name`    — used by a handful of older tool shapes
+ *
+ * Empty / non-string values are skipped. Names are sanity-checked
+ * against a permissive identifier regex so a corrupted recording
+ * doesn't produce a setup.yaml with invalid VM names.
+ *
+ * Exported so the synthesiser tests can pin the contract; callers
+ * outside the synthesiser don't need this directly.
+ */
+export function extractVmReferencesFromCalls(
+  calls: RecordedCallEvent[],
+): string[] {
+  const seen = new Set<string>();
+  const VM_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+  for (const call of calls) {
+    const params = call.params_redacted;
+    if (!params || typeof params !== "object") continue;
+    const p = params as Record<string, unknown>;
+    for (const key of ["vm", "vm_name"]) {
+      const v = p[key];
+      if (typeof v !== "string" || v.length === 0) continue;
+      if (!VM_NAME_RE.test(v)) continue;
+      seen.add(v);
+    }
+  }
+  return Array.from(seen).sort();
 }
 
 function labelSeq(call: RecordedCallEvent): string {
