@@ -44,6 +44,10 @@ export default defineConfig({
         "src/server.ts",
         "src/guest/client.ts",
         "src/hypervisors/**",
+        // Production subprocess spawner for kubectl/helm. Tests
+        // inject their own `K8sExec` stubs, so the default-exec
+        // path is intentionally not exercised in unit tests.
+        "src/k8s/exec.ts",
         "src/tools/**",
         "src/scenarios/orchestrator.ts",
         "src/scenarios/runner.ts",
