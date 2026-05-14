@@ -2419,9 +2419,285 @@ async function cmdCloud(args: ParsedArgs): Promise<number> {
       return await cmdCloudConnectionDescriptor(args);
     case "creds":
       return await cmdCloudCreds(args);
+    case "provision":
+      return await cmdCloudProvision(args);
+    case "terminate":
+      return await cmdCloudTerminate(args);
+    case "status":
+      return await cmdCloudStatus(args);
+    case "list":
+      return await cmdCloudList(args);
+    case "backends":
+      return await cmdCloudBackends(args);
     default:
       usageError(`unknown cloud subcommand: ${sub}`);
   }
+}
+
+/**
+ * Shared helper: build a `CloudBackend` for a provider via the
+ * registry, lazily importing vendor modules on first use to
+ * avoid pulling vendor SDKs into every CLI invocation.
+ *
+ * Exported for tests that need to swap in a stub backend via
+ * `registerCloudBackend(kind, () => stub, { force: true })`
+ * BEFORE this helper runs.
+ */
+async function resolveCloudBackend(provider: string) {
+  if (provider !== "aws" && provider !== "azure") {
+    usageError(`--provider must be 'aws' or 'azure', got: ${provider}`);
+  }
+  const { getCloudBackend, listRegisteredBackends } = await import("./cloud/registry.js");
+  if (listRegisteredBackends().length === 0) {
+    // Operator hasn't pre-registered a backend; lazy-load the
+    // vendor module (which auto-registers via module side-effect).
+    if (provider === "aws") await import("./cloud/aws.js");
+    if (provider === "azure") await import("./cloud/azure.js");
+  }
+  return getCloudBackend(provider);
+}
+
+/**
+ * Parse `--tag k=v` repeats into a tag filter map. Used by
+ * `cloud list` and `cloud provision`. Operators pass
+ * `--tag scenario=foo --tag project=bar`.
+ */
+function parseTagFlags(args: ParsedArgs): Record<string, string> {
+  const tags: Record<string, string> = {};
+  // CLI parser stores repeated `--tag k=v` under `params` if we
+  // use --param, but cloud verbs read --tag directly. Simulate
+  // repetition by allowing comma-separated as a fallback.
+  const raw = args.options.get("tag");
+  if (raw) {
+    for (const pair of raw.split(",")) {
+      const eq = pair.indexOf("=");
+      if (eq > 0) tags[pair.slice(0, eq)] = pair.slice(eq + 1);
+    }
+  }
+  // Also honour `--param k=v` (the existing repeated-flag form)
+  // for ergonomic parity with `signalman run --param`.
+  for (const [k, v] of Object.entries(args.params)) {
+    tags[k] = v;
+  }
+  return tags;
+}
+
+// ── cloud provision ─────────────────────────────────────────────
+
+export async function cmdCloudProvision(args: ParsedArgs): Promise<number> {
+  const provider = args.options.get("provider");
+  const region = args.options.get("region");
+  const instanceType = args.options.get("instance-type");
+  const imageRef = args.options.get("image-ref");
+  const name = args.options.get("name");
+  if (!provider) usageError("cloud provision requires --provider <aws|azure>");
+  if (!region) usageError("cloud provision requires --region <REGION>");
+  if (!instanceType) usageError("cloud provision requires --instance-type <SKU>");
+  if (!imageRef) usageError("cloud provision requires --image-ref <ID>");
+  if (!name) usageError("cloud provision requires --name <FRIENDLY_NAME>");
+  const orgId = args.options.get("org-id");
+  const ttlStr = args.options.get("ttl-minutes");
+  const ttlMinutes = ttlStr ? Number(ttlStr) : undefined;
+  if (ttlMinutes !== undefined && (!Number.isInteger(ttlMinutes) || ttlMinutes <= 0)) {
+    usageError("--ttl-minutes must be a positive integer");
+  }
+  const networkMode = args.options.get("network-mode");
+  if (
+    networkMode !== undefined &&
+    networkMode !== "public_mtls" &&
+    networkMode !== "aws_ssm" &&
+    networkMode !== "azure_bastion"
+  ) {
+    usageError(`--network-mode must be 'public_mtls', 'aws_ssm', or 'azure_bastion'`);
+  }
+  const tags = parseTagFlags(args);
+  const isJson = args.options.get("format") === "json";
+
+  const { CloudBackendError } = await import("./cloud/types.js");
+  const backend = await resolveCloudBackend(provider!);
+  try {
+    const handle = await backend.provisionInstance({
+      region: region!,
+      instance_type: instanceType!,
+      image_ref: imageRef!,
+      name: name!,
+      org_id: orgId,
+      ttl_minutes: ttlMinutes,
+      tags: Object.keys(tags).length ? tags : undefined,
+      network: networkMode
+        ? {
+            mode: networkMode as "public_mtls" | "aws_ssm" | "azure_bastion",
+          }
+        : undefined,
+    });
+    if (isJson) {
+      process.stdout.write(JSON.stringify(handle, null, 2) + "\n");
+    } else {
+      process.stdout.write(
+        `Provisioned ${handle.backend} instance:\n` +
+          `  id:           ${handle.id}\n` +
+          `  name:         ${handle.name}\n` +
+          `  region:       ${handle.region}\n` +
+          `  network_mode: ${handle.network_mode ?? "public_mtls (default)"}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    const e = err as { code?: string; message: string };
+    process.stderr.write(
+      `signalman: cloud provision failed [${e.code ?? "unknown"}]: ${e.message}\n`,
+    );
+    return e.code === "budget_exceeded" || e.code === "auth_failed" ? 3 : 4;
+    void CloudBackendError;
+  }
+}
+
+// ── cloud terminate ─────────────────────────────────────────────
+
+export async function cmdCloudTerminate(args: ParsedArgs): Promise<number> {
+  const provider = args.options.get("provider");
+  const id = args.options.get("id");
+  const name = args.options.get("name");
+  const region = args.options.get("region");
+  if (!provider) usageError("cloud terminate requires --provider <aws|azure>");
+  if (!id) usageError("cloud terminate requires --id <INSTANCE_ID>");
+  if (!name) usageError("cloud terminate requires --name <FRIENDLY_NAME>");
+  if (!region) usageError("cloud terminate requires --region <REGION>");
+  const isJson = args.options.get("format") === "json";
+
+  const backend = await resolveCloudBackend(provider!);
+  try {
+    await backend.terminateInstance({
+      id: id!,
+      backend: provider as "aws" | "azure",
+      name: name!,
+      region: region!,
+    });
+    if (isJson) {
+      process.stdout.write(JSON.stringify({ ok: true, id }) + "\n");
+    } else {
+      process.stdout.write(
+        `Terminated ${provider} instance ${id} (idempotent — repeat sweeps are safe).\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    const e = err as { code?: string; message: string };
+    process.stderr.write(
+      `signalman: cloud terminate failed [${e.code ?? "unknown"}]: ${e.message}\n`,
+    );
+    return 4;
+  }
+}
+
+// ── cloud status ────────────────────────────────────────────────
+
+export async function cmdCloudStatus(args: ParsedArgs): Promise<number> {
+  const provider = args.options.get("provider");
+  const id = args.options.get("id");
+  const name = args.options.get("name");
+  const region = args.options.get("region");
+  if (!provider) usageError("cloud status requires --provider <aws|azure>");
+  if (!id) usageError("cloud status requires --id <INSTANCE_ID>");
+  if (!name) usageError("cloud status requires --name <FRIENDLY_NAME>");
+  if (!region) usageError("cloud status requires --region <REGION>");
+  const isJson = args.options.get("format") === "json";
+
+  const backend = await resolveCloudBackend(provider!);
+  try {
+    const status = await backend.getInstanceStatus({
+      id: id!,
+      backend: provider as "aws" | "azure",
+      name: name!,
+      region: region!,
+    });
+    if (isJson) {
+      process.stdout.write(JSON.stringify(status, null, 2) + "\n");
+    } else {
+      process.stdout.write(
+        `Status for ${provider}:${id}:\n` +
+          `  state:      ${status.state}\n` +
+          `  public_ip:  ${status.public_ip ?? "(none)"}\n` +
+          `  private_ip: ${status.private_ip ?? "(none)"}\n` +
+          (status.reason ? `  reason:     ${status.reason}\n` : ""),
+      );
+    }
+    return 0;
+  } catch (err) {
+    const e = err as { code?: string; message: string };
+    process.stderr.write(
+      `signalman: cloud status failed [${e.code ?? "unknown"}]: ${e.message}\n`,
+    );
+    return 4;
+  }
+}
+
+// ── cloud list ──────────────────────────────────────────────────
+
+export async function cmdCloudList(args: ParsedArgs): Promise<number> {
+  const provider = args.options.get("provider");
+  if (!provider) usageError("cloud list requires --provider <aws|azure>");
+  const tags = parseTagFlags(args);
+  const isJson = args.options.get("format") === "json";
+
+  const backend = await resolveCloudBackend(provider!);
+  try {
+    const handles = await backend.listInstances({
+      tags: Object.keys(tags).length ? tags : undefined,
+    });
+    if (isJson) {
+      process.stdout.write(JSON.stringify(handles, null, 2) + "\n");
+    } else if (handles.length === 0) {
+      process.stdout.write(
+        `No Signalman-managed instances on ${provider}` +
+          (Object.keys(tags).length
+            ? ` matching tags ${JSON.stringify(tags)}`
+            : "") +
+          `.\n`,
+      );
+    } else {
+      process.stdout.write(
+        `${handles.length} ${provider} instance(s):\n` +
+          handles
+            .map(
+              (h) =>
+                `  - ${h.id} (${h.name}) @ ${h.region}` +
+                (h.network_mode ? ` [mode=${h.network_mode}]` : ""),
+            )
+            .join("\n") +
+          "\n",
+      );
+    }
+    return 0;
+  } catch (err) {
+    const e = err as { code?: string; message: string };
+    process.stderr.write(
+      `signalman: cloud list failed [${e.code ?? "unknown"}]: ${e.message}\n`,
+    );
+    return 4;
+  }
+}
+
+// ── cloud backends ──────────────────────────────────────────────
+
+export async function cmdCloudBackends(args: ParsedArgs): Promise<number> {
+  const isJson = args.options.get("format") === "json";
+  const { listRegisteredBackends } = await import("./cloud/registry.js");
+  if (listRegisteredBackends().length === 0) {
+    await import("./cloud/aws.js");
+    await import("./cloud/azure.js");
+  }
+  const backends = listRegisteredBackends();
+  if (isJson) {
+    process.stdout.write(JSON.stringify(backends, null, 2) + "\n");
+  } else {
+    process.stdout.write(
+      `Registered cloud backends (${backends.length}):\n` +
+        backends.map((b) => `  - ${b}`).join("\n") +
+        (backends.length ? "\n" : ""),
+    );
+  }
+  return 0;
 }
 
 /**
@@ -2894,14 +3170,130 @@ async function cmdStack(args: ParsedArgs): Promise<number> {
   const sub = args.positional.shift();
   if (!sub) {
     usageError(
-      "stack requires a subcommand (e.g. plan-cost — see `signalman --help`)",
+      "stack requires a subcommand (apply, destroy, plan-cost — see " +
+        "`signalman --help`)",
     );
   }
   switch (sub) {
     case "plan-cost":
       return await cmdStackPlanCost(args);
+    case "apply":
+      return await cmdStackApply(args);
+    case "destroy":
+      return await cmdStackDestroy(args);
     default:
       usageError(`unknown stack subcommand: ${sub}`);
+  }
+}
+
+/**
+ * Parse `--var k=v` repetitions (CLI parser stores via --param
+ * convention) plus single `--vars k=v,k=v` shorthand.
+ */
+function parseVarFlags(args: ParsedArgs): Record<string, string | number | boolean> {
+  const vars: Record<string, string | number | boolean> = {};
+  for (const [k, v] of Object.entries(args.params)) {
+    vars[k] = v;
+  }
+  const compact = args.options.get("vars");
+  if (compact) {
+    for (const pair of compact.split(",")) {
+      const eq = pair.indexOf("=");
+      if (eq > 0) vars[pair.slice(0, eq)] = pair.slice(eq + 1);
+    }
+  }
+  return vars;
+}
+
+// ── stack apply ────────────────────────────────────────────────
+
+export async function cmdStackApply(args: ParsedArgs): Promise<number> {
+  const stackName = args.options.get("stack-name");
+  const modulePath = args.options.get("module-path");
+  if (!stackName) usageError("stack apply requires --stack-name <NAME>");
+  if (!modulePath) usageError("stack apply requires --module-path <DIR>");
+  const isJson = args.options.get("format") === "json";
+  const noAutoApprove = args.flags.has("no-auto-approve");
+  const vars = parseVarFlags(args);
+
+  const { TofuDriver } = await import("./cloud/tofu.js");
+  const driver = new TofuDriver({ projectRoot: process.cwd() });
+  try {
+    const result = await driver.applyModule({
+      stackName: stackName!,
+      modulePath: modulePath!,
+      vars,
+      autoApprove: !noAutoApprove,
+    });
+    if (isJson) {
+      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    } else {
+      process.stdout.write(
+        `Applied stack '${result.stackName}':\n` +
+          `  workspace:    ${result.workspacePath}\n` +
+          `  add:          ${result.changeSummary.add}\n` +
+          `  change:       ${result.changeSummary.change}\n` +
+          `  destroy:      ${result.changeSummary.destroy}\n` +
+          `  changed:      ${result.changed}\n` +
+          `  duration_ms:  ${result.durationMs}\n` +
+          (Object.keys(result.outputs).length
+            ? `  outputs:\n${Object.entries(result.outputs)
+                .map(([k, v]) => `    - ${k}: ${JSON.stringify(v)}`)
+                .join("\n")}\n`
+            : ""),
+      );
+    }
+    return 0;
+  } catch (err) {
+    const e = err as { code?: string; message: string };
+    process.stderr.write(
+      `signalman: stack apply failed [${e.code ?? "unknown"}]: ${e.message}\n`,
+    );
+    return 4;
+  }
+}
+
+// ── stack destroy ──────────────────────────────────────────────
+
+export async function cmdStackDestroy(args: ParsedArgs): Promise<number> {
+  const stackName = args.options.get("stack-name");
+  if (!stackName) usageError("stack destroy requires --stack-name <NAME>");
+  const isJson = args.options.get("format") === "json";
+  const noAutoApprove = args.flags.has("no-auto-approve");
+  const vars = parseVarFlags(args);
+
+  const { TofuDriver } = await import("./cloud/tofu.js");
+  const driver = new TofuDriver({ projectRoot: process.cwd() });
+  try {
+    const result = await driver.destroyModule({
+      stackName: stackName!,
+      vars,
+      autoApprove: !noAutoApprove,
+    });
+    if (isJson) {
+      process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    } else if ("alreadyEmpty" in result && result.alreadyEmpty) {
+      process.stdout.write(
+        `Stack '${result.stackName}' workspace not present (idempotent no-op).\n`,
+      );
+    } else {
+      const destroyed =
+        "changeSummary" in result && "destroy" in result.changeSummary
+          ? result.changeSummary.destroy
+          : 0;
+      process.stdout.write(
+        `Destroyed stack '${result.stackName}':\n` +
+          `  destroyed: ${destroyed}\n` +
+          `  workspace remains at ${result.workspacePath} for inspection.\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    const e = err as { code?: string; message: string };
+    process.stderr.write(
+      `signalman: stack destroy failed [${e.code ?? "unknown"}]: ${e.message}\n`,
+    );
+    return 4;
   }
 }
 
@@ -3069,8 +3461,8 @@ function printHelp(): void {
       "  api-key <subcommand>   (create, list, revoke)",
       "  runner <subcommand>    (register, start)",
       "  key <subcommand>       (generate, fingerprint — Ed25519 release signing)",
-      "  cloud <subcommand>     (reaper run/status, budget get/set/usage, creds get/set/remove, connection-descriptor)",
-      "  stack <subcommand>     (plan-cost — OpenTofu stack pre-flight cost estimate)",
+      "  cloud <subcommand>     (provision, terminate, status, list, backends, reaper, budget, creds, connection-descriptor)",
+      "  stack <subcommand>     (apply, destroy, plan-cost — OpenTofu stack lifecycle)",
       "",
       "Exit codes (per docs/design/p0-mcp-surface.md §5):",
       "  0  pass        2  workflow fail        4  infra error",
