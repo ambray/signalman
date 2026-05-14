@@ -1145,17 +1145,33 @@ stable enough to commit to a wire contract.
 
 ### Platform + protocol expansion
 
-- **Cross-platform daemon** (libvirt on Linux, vmrun wrapper on macOS).
-  Depends on P8 (proto v1 freeze with `oneof platform_details` and
-  hypervisor-contract decision) — done in v0.1.0.
+- **Cross-platform daemon** (libvirt on Linux, vmrun wrapper on
+  macOS). Depends on P8 (proto v1 freeze with `oneof platform_details`
+  and hypervisor-contract decision) — done in v0.1.0.
+  **Shipped in v0.4.0-4** (WS4): `host/src/hypervisors/libvirt.ts`
+  wraps `virsh` (Linux); `host/src/hypervisors/vmrun.ts` is the new
+  parallel-track Workstation/Fusion driver. Both register through
+  the existing `buildBackendList` selector, so existing MCP / CLI
+  surfaces auto-discover them. See *Backend convergence (vmrun.ts +
+  vmware.ts)* in [Cuts and Deferrals](#2026-05-14-v040-4-cross-platform-followups)
+  for the lone outstanding consolidation item.
 - **E3 — Linux/macOS guest agent.** Audit found the guest crate
   compiles on Linux but `ProcessInspect` is Win32-only
   ([guest/src/service.rs](guest/src/service.rs)). Implement
   the proto-portable RPCs (Health/Register/RunCommand/TestNetwork/
-  TestFileAccess) per OS; leave Windows-only RPCs `unimplemented` per
-  platform. Mobile (iOS/Android emulators, real devices via USB/network)
-  is a further extension that needs a different UI proto shape
-  than Windows UIA.
+  TestFileAccess) per OS; leave Windows-only RPCs `unimplemented`
+  per platform. **Largely shipped in v0.4.0-4** (WS4):
+  `guest/src/platform/{windows,linux,macos,other}.rs` houses a
+  `Platform` trait the service layer dispatches through. Linux now
+  has SYSTEM-elevation via passwordless `sudo -n` plus
+  `install_software` routing through `apt`/`dnf`/`yum`; macOS routes
+  through `brew`. UI / browser RPCs return `Status::unimplemented`
+  on non-Windows with a canonical message. **Remaining**: macOS UI
+  automation parity with the Win32 UIA sidecar — see
+  *macOS UI automation* in [Cuts and Deferrals](#2026-05-14-v040-4-cross-platform-followups).
+  Mobile (iOS/Android emulators, real devices via USB/network) is
+  a further extension that needs a different UI proto shape than
+  Windows UIA.
 - **E4 — Mobile UI proto shape.** Today's UI RPCs presuppose Windows UIA
   selectors (`automation_id`, `class_name`); accommodating ADB / idb /
   Appium needs a different message shape. Defer until a real consumer
@@ -1242,6 +1258,61 @@ with the cloud track.
 
 Removed from main roadmap; revisit only with concrete evidence of need.
 
+### 2026-05-14 (v0.4.0-4 cross-platform followups)
+
+Two items from the WS4 cross-platform milestone were intentionally
+deferred at the close of the workstream. Both have explicit
+preconditions; do not re-open without them.
+
+- **macOS UI automation parity with the Win32 UIA sidecar.** WS4
+  landed the `Platform` trait, the Linux/macOS guest agent split,
+  package-manager routing (`brew` on macOS), and a clean
+  `Status::unimplemented` response for `ui_click` / `ui_type` /
+  `ui_key` / `ui_find` / `ui_screenshot` / `browser_*` on non-
+  Windows. The remaining work is a macOS-native UI driver
+  (AppleScript + the Accessibility API), parallel to
+  `guest/src/ui_sidecar.rs`. Scope estimate is multi-session and
+  the selector/control-type grammar will be different from UIA's
+  (`automation_id`, `class_name` don't translate cleanly to AX).
+
+  **Precondition for restart**: the work must run on a real macOS
+  development host. The current build environment is Windows; we
+  cannot iterate on the Accessibility API surface or driving real
+  desktop apps from here. **Next session must be on a Mac** — open
+  a fresh worktree there off `feat/v0.4.0-cross-platform` (or the
+  appropriate descendant), then implement
+  `guest/src/ui_sidecar_macos.rs` behind
+  `#[cfg(target_os = "macos")]` and flip
+  `MacosPlatform::supports_ui_automation()` to true. The trait
+  contract and unimplemented-message tests already in
+  `guest/src/platform/macos.rs` lock the surface so the flip is
+  a one-line capability change once the implementation lands.
+
+  No proto change required — UI RPCs are already on the proto v1
+  surface and the macOS side reuses them.
+
+- **Backend convergence (vmrun.ts + vmware.ts).** WS4 deliberately
+  shipped `host/src/hypervisors/vmrun.ts` as a parallel-track
+  file rather than refactoring the existing `vmware.ts` (operator
+  decision in the WS4 kickoff). The two drivers wrap the same
+  `vmrun` CLI but differ on injection-shape and error-code
+  surface; `vmware.ts` additionally has the `govc` fallback for
+  vSphere.
+
+  **Precondition for restart**: vmrun.ts must have seen at least
+  one production scenario run end-to-end. Today (2026-05-14) it
+  has only the unit + integration test fixtures from WS4 Chunk 3
+  — merging now would lock in an unproven shape. Once a real
+  scenario lands on it, audit which features each driver carries
+  uniquely and converge onto one file. The govc-vSphere path
+  belongs in the converged file; injectable exec + stable error
+  codes (the vmrun.ts contribution) belong in the converged file.
+
+  Operators currently choose between the two via
+  `hypervisor.backend = "vmware"` vs `"vmrun"`; the convergence
+  PR is expected to keep both keys working for one release with
+  a deprecation note, then drop the older one.
+
 ### 2026-04-25 (audit-driven)
 
 - **Hub component (`hub/`)** — was 122 LOC of TODO stubs. **Done
@@ -1266,9 +1337,17 @@ Removed from main roadmap; revisit only with concrete evidence of need.
   matching `vms[].name` literally and a hand-named checkpoint. Documented
   as known in P6; wired for real in v0.3.0-2 (C9). Acceptable for v0.1.0
   because the existing product scenarios already work this way.
-- **Cross-platform claims** in README — removed until P8 (proto split)
-  + E3 (Linux/macOS guest implementation) ship. Today the guest crate
-  compiles on Linux but Win32-only RPCs return `unimplemented`.
+- **Cross-platform claims** in README — removed until P8 (proto
+  split) + E3 (Linux/macOS guest implementation) ship. P8 closed
+  in v0.1.0; E3 largely shipped in v0.4.0-4 (WS4) — the guest
+  crate now has a `Platform` trait, Linux SYSTEM-elevation via
+  `sudo -n`, and `apt`/`dnf`/`yum`/`brew` package-manager
+  routing. **Re-introduce README cross-platform claims** carefully
+  scoped to what's actually supported today: Linux fully (guest
+  agent + libvirt hypervisor); macOS partially (guest agent +
+  Tart/vmrun hypervisors, but no UI automation — see
+  *macOS UI automation* in the 2026-05-14 deferrals). Do NOT
+  claim macOS UI driving until that work lands.
 
 ### 2026-04-24 (original)
 
