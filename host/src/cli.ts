@@ -1444,12 +1444,25 @@ async function cmdTargetAdd(args: ParsedArgs): Promise<number> {
   const name = args.options.get("name") ?? args.positional[0];
   const kindRaw = args.options.get("kind");
   if (!name) usageError("target add requires --name <NAME>");
-  if (!kindRaw) usageError("target add requires --kind <vm_test|vm_demo|docker_test|docker_demo>");
-  const validKinds = new Set(["vm_test", "vm_demo", "docker_test", "docker_demo"]);
+  if (!kindRaw) usageError("target add requires --kind <vm_test|vm_demo|docker_test|docker_demo|k8s_test|k8s_demo>");
+  const validKinds = new Set([
+    "vm_test",
+    "vm_demo",
+    "docker_test",
+    "docker_demo",
+    "k8s_test",
+    "k8s_demo",
+  ]);
   if (!validKinds.has(kindRaw)) {
     usageError(`target add: invalid --kind '${kindRaw}'`);
   }
-  const kind = kindRaw as "vm_test" | "vm_demo" | "docker_test" | "docker_demo";
+  const kind = kindRaw as
+    | "vm_test"
+    | "vm_demo"
+    | "docker_test"
+    | "docker_demo"
+    | "k8s_test"
+    | "k8s_demo";
 
   // Connection: either an explicit JSON blob, or assembled from
   // --vm-name + --backend for the common VM-target case.

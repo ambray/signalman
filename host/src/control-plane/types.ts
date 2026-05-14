@@ -104,7 +104,26 @@ export interface Artifact {
 
 // ── Targets and deployments ─────────────────────────────────────────
 
-export type TargetKind = "vm_test" | "vm_demo" | "docker_test" | "docker_demo";
+/**
+ * Target dispatch kind. Append-only: existing rows in storage carry
+ * the old kinds, so removing or renaming a value is a migration.
+ *
+ * - `vm_test` / `vm_demo` — hypervisor-backed VMs (v0.2.0).
+ * - `docker_test` / `docker_demo` — docker-compose deploy targets
+ *   (v0.2.0 placeholder; the driver wiring landed alongside the VM
+ *   path).
+ * - `k8s_test` / `k8s_demo` — Kubernetes deploy targets (v0.3.0-6).
+ *   The `bundle_uri` + `namespace` + optional `cluster_context` live
+ *   on `TargetConnection`; dispatch happens in
+ *   `verbs/control-plane.ts` based on the `k8s_` prefix.
+ */
+export type TargetKind =
+  | "vm_test"
+  | "vm_demo"
+  | "docker_test"
+  | "docker_demo"
+  | "k8s_test"
+  | "k8s_demo";
 
 /** JSON shape of `target.connection`. Intentionally permissive — the
  * exact required fields vary per `kind` and are validated by the
