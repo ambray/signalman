@@ -16,6 +16,7 @@ export type {
   AuditLogRepo,
   DeploymentRepo,
   HealthCheckRepo,
+  HealthScheduleRepo,
   OrgRepo,
   ProductRepo,
   ReleaseRepo,

@@ -46,12 +46,14 @@ import type {
   Deployment,
   DeploymentHealthSummary,
   HealthCheck,
+  HealthSchedule,
   Product,
   Release,
   Target,
   TargetConnection,
   TargetKind,
 } from "../control-plane/types.js";
+import type { ProbeInvoker, ScheduledProbeOutcome } from "../control-plane/scheduler/index.js";
 
 // ── Lifecycle helper ────────────────────────────────────────────────
 
@@ -1096,4 +1098,158 @@ export async function runK8sStatusVerb(input: K8sStatusVerbInput) {
     releaseName: input.releaseName,
     driver: input.driver,
   });
+}
+
+// ── Scheduled health verbs (v0.4.0-3 / Epic 3) ──────────────────────
+
+export interface ScheduleAddInput {
+  targetName: string;
+  intervalSeconds: number;
+  probeNames?: string[];
+  active?: boolean;
+}
+
+export interface ScheduleListEntry {
+  schedule: HealthSchedule;
+  target: Target;
+}
+
+export async function runScheduleAdd(
+  controlPlane: ControlPlane,
+  input: ScheduleAddInput,
+): Promise<ScheduleListEntry> {
+  if (!Number.isFinite(input.intervalSeconds) || input.intervalSeconds < 60) {
+    throw new Error("schedule add: --interval-seconds must be >= 60");
+  }
+  const orgId = await getActiveOrgId(controlPlane);
+  const target = await controlPlane.targets.getByName(orgId, input.targetName);
+  if (!target) throw new Error(`target not found: ${input.targetName}`);
+  const schedule = await controlPlane.healthSchedules.create({
+    orgId,
+    targetId: target.id,
+    intervalSeconds: input.intervalSeconds,
+    probeNames: input.probeNames ?? [],
+    active: input.active,
+  });
+  await controlPlane.auditLog.append({
+    orgId,
+    actor: "cli",
+    action: "health_schedule.added",
+    entityType: "health_schedule",
+    entityId: schedule.id,
+    detail: {
+      targetId: target.id,
+      intervalSeconds: schedule.intervalSeconds,
+      probeNames: schedule.probeNames,
+    },
+  });
+  return { schedule, target };
+}
+
+export async function runScheduleList(
+  controlPlane: ControlPlane,
+  input: { targetName?: string } = {},
+): Promise<ScheduleListEntry[]> {
+  const orgId = await getActiveOrgId(controlPlane);
+  if (input.targetName) {
+    const target = await controlPlane.targets.getByName(orgId, input.targetName);
+    if (!target) throw new Error(`target not found: ${input.targetName}`);
+    const schedules = await controlPlane.healthSchedules.listForTarget(target.id);
+    return schedules.map((schedule) => ({ schedule, target }));
+  }
+  const schedules = await controlPlane.healthSchedules.listForOrg(orgId);
+  const out: ScheduleListEntry[] = [];
+  for (const schedule of schedules) {
+    const target = await controlPlane.targets.get(schedule.targetId);
+    if (target) out.push({ schedule, target });
+  }
+  return out;
+}
+
+export async function runScheduleDisable(
+  controlPlane: ControlPlane,
+  input: { id: string },
+): Promise<HealthSchedule> {
+  const existing = await controlPlane.healthSchedules.get(input.id);
+  if (!existing) throw new Error(`health schedule not found: ${input.id}`);
+  const updated = await controlPlane.healthSchedules.update(existing.id, {
+    active: false,
+  });
+  await controlPlane.auditLog.append({
+    orgId: existing.orgId,
+    actor: "cli",
+    action: "health_schedule.disabled",
+    entityType: "health_schedule",
+    entityId: existing.id,
+  });
+  return updated;
+}
+
+export async function runScheduleEnable(
+  controlPlane: ControlPlane,
+  input: { id: string },
+): Promise<HealthSchedule> {
+  const existing = await controlPlane.healthSchedules.get(input.id);
+  if (!existing) throw new Error(`health schedule not found: ${input.id}`);
+  const updated = await controlPlane.healthSchedules.update(existing.id, {
+    active: true,
+  });
+  await controlPlane.auditLog.append({
+    orgId: existing.orgId,
+    actor: "cli",
+    action: "health_schedule.enabled",
+    entityType: "health_schedule",
+    entityId: existing.id,
+  });
+  return updated;
+}
+
+export async function runScheduleRemove(
+  controlPlane: ControlPlane,
+  input: { id: string },
+): Promise<void> {
+  const existing = await controlPlane.healthSchedules.get(input.id);
+  if (!existing) throw new Error(`health schedule not found: ${input.id}`);
+  await controlPlane.healthSchedules.softDelete(existing.id);
+  await controlPlane.auditLog.append({
+    orgId: existing.orgId,
+    actor: "cli",
+    action: "health_schedule.removed",
+    entityType: "health_schedule",
+    entityId: existing.id,
+  });
+}
+
+/**
+ * Build a `ProbeInvoker` that re-uses the existing `runHealthCheck`
+ * verb. The scheduler module is agnostic about how probes execute;
+ * the production wiring lives here so the scheduler stays testable in
+ * isolation.
+ */
+export function createDefaultProbeInvoker(
+  controlPlane: ControlPlane,
+): ProbeInvoker {
+  return async ({ schedule }) => {
+    const target = await controlPlane.targets.get(schedule.targetId);
+    if (!target) {
+      throw new Error(
+        `health schedule ${schedule.id} references missing target ${schedule.targetId}`,
+      );
+    }
+    const result = await runHealthCheck(
+      controlPlane,
+      {
+        targetName: target.name,
+        probeNames: schedule.probeNames.length > 0 ? schedule.probeNames : undefined,
+        actor: "scheduler",
+      },
+      { out: process.stderr },
+    );
+    const outcome: ScheduledProbeOutcome = {
+      reachable: result.reachability.reachable,
+      probes: result.probes.map((p) => ({ name: p.name, status: p.status })),
+      deploymentId: result.deploymentId,
+    };
+    return outcome;
+  };
 }

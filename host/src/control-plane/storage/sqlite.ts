@@ -33,6 +33,7 @@ import type {
   DeploymentHealthSummary,
   DeploymentStatus,
   HealthCheck,
+  HealthSchedule,
   HealthStatus,
   Job,
   JobStatus,
@@ -58,6 +59,7 @@ import {
   type CloudUsageRepo,
   type DeploymentRepo,
   type HealthCheckRepo,
+  type HealthScheduleRepo,
   type JobRepo,
   type OrgRepo,
   type ProductRepo,
@@ -106,6 +108,7 @@ export class SqliteStorageDriver implements StorageDriver {
   readonly cloudBudgets: CloudBudgetRepo;
   readonly cloudUsage: CloudUsageRepo;
   readonly cloudCredentials: CloudCredentialsRepo;
+  readonly healthSchedules: HealthScheduleRepo;
 
   constructor(opts: SqliteDriverOptions) {
     if (opts.path !== ":memory:") {
@@ -135,6 +138,7 @@ export class SqliteStorageDriver implements StorageDriver {
     this.cloudBudgets = new SqliteCloudBudgetRepo(this.db);
     this.cloudUsage = new SqliteCloudUsageRepo(this.db);
     this.cloudCredentials = new SqliteCloudCredentialsRepo(this.db);
+    this.healthSchedules = new SqliteHealthScheduleRepo(this.db);
   }
 
   async migrate(): Promise<void> {
@@ -1819,5 +1823,152 @@ class SqliteCloudCredentialsRepo implements CloudCredentialsRepo {
       )
       .all(orgId) as SqlRow[];
     return rows.map(mapCloudCredential);
+  }
+}
+
+// ── Health schedule repo (v0.4.0-3) ─────────────────────────────────
+
+function mapHealthSchedule(row: SqlRow): HealthSchedule {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    targetId: row.target_id as string,
+    intervalSeconds: row.interval_seconds as number,
+    probeNames: JSON.parse(row.probe_ids_json as string) as string[],
+    lastRunAt: (row.last_run_at as string | null) ?? null,
+    active: (row.active as number) === 1,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+class SqliteHealthScheduleRepo implements HealthScheduleRepo {
+  constructor(private readonly db: DatabaseSync) {}
+
+  async create(input: {
+    orgId: string;
+    targetId: string;
+    intervalSeconds: number;
+    probeNames: string[];
+    active?: boolean;
+  }): Promise<HealthSchedule> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      target_id: input.targetId,
+      interval_seconds: input.intervalSeconds,
+      probe_ids_json: JSON.stringify(input.probeNames),
+      active: input.active === false ? 0 : 1,
+      created_at: now,
+      updated_at: now,
+    };
+    try {
+      prep(
+        this.db,
+        "INSERT INTO health_schedule (id, org_id, target_id, interval_seconds, probe_ids_json, active, created_at, updated_at) VALUES (@id, @org_id, @target_id, @interval_seconds, @probe_ids_json, @active, @created_at, @updated_at)",
+      ).run(bind);
+    } catch (err) {
+      mapSqliteError(err);
+    }
+    return mapHealthSchedule({ ...bind, last_run_at: null, deleted_at: null });
+  }
+
+  async get(id: string): Promise<HealthSchedule | null> {
+    const row = this.db
+      .prepare("SELECT * FROM health_schedule WHERE id = ? AND deleted_at IS NULL")
+      .get(id) as SqlRow | undefined;
+    return row ? mapHealthSchedule(row) : null;
+  }
+
+  async listForOrg(orgId: string): Promise<HealthSchedule[]> {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM health_schedule WHERE org_id = ? AND deleted_at IS NULL ORDER BY created_at",
+        )
+        .all(orgId) as SqlRow[]
+    ).map(mapHealthSchedule);
+  }
+
+  async listForTarget(targetId: string): Promise<HealthSchedule[]> {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM health_schedule WHERE target_id = ? AND deleted_at IS NULL ORDER BY created_at",
+        )
+        .all(targetId) as SqlRow[]
+    ).map(mapHealthSchedule);
+  }
+
+  async listActive(orgId?: string): Promise<HealthSchedule[]> {
+    if (orgId) {
+      return (
+        this.db
+          .prepare(
+            "SELECT * FROM health_schedule WHERE org_id = ? AND active = 1 AND deleted_at IS NULL ORDER BY created_at",
+          )
+          .all(orgId) as SqlRow[]
+      ).map(mapHealthSchedule);
+    }
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM health_schedule WHERE active = 1 AND deleted_at IS NULL ORDER BY created_at",
+        )
+        .all() as SqlRow[]
+    ).map(mapHealthSchedule);
+  }
+
+  async update(
+    id: string,
+    patch: Partial<
+      Pick<HealthSchedule, "intervalSeconds" | "probeNames" | "active" | "lastRunAt">
+    >,
+  ): Promise<HealthSchedule> {
+    const existing = await this.get(id);
+    if (!existing) throw new StorageNotFoundError("health_schedule", id);
+    const bind = {
+      id: existing.id,
+      interval_seconds: patch.intervalSeconds ?? existing.intervalSeconds,
+      probe_ids_json: JSON.stringify(patch.probeNames ?? existing.probeNames),
+      last_run_at:
+        patch.lastRunAt !== undefined ? patch.lastRunAt : existing.lastRunAt,
+      active:
+        patch.active !== undefined
+          ? patch.active
+            ? 1
+            : 0
+          : existing.active
+            ? 1
+            : 0,
+      updated_at: nowIso(),
+    };
+    try {
+      prep(
+        this.db,
+        "UPDATE health_schedule SET interval_seconds = @interval_seconds, probe_ids_json = @probe_ids_json, last_run_at = @last_run_at, active = @active, updated_at = @updated_at WHERE id = @id",
+      ).run(bind);
+    } catch (err) {
+      mapSqliteError(err);
+    }
+    return mapHealthSchedule({
+      ...bind,
+      org_id: existing.orgId,
+      target_id: existing.targetId,
+      created_at: existing.createdAt,
+      deleted_at: existing.deletedAt,
+    });
+  }
+
+  async softDelete(id: string): Promise<void> {
+    const now = nowIso();
+    const result = this.db
+      .prepare(
+        "UPDATE health_schedule SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+      )
+      .run(now, now, id);
+    if (result.changes === 0) throw new StorageNotFoundError("health_schedule", id);
   }
 }

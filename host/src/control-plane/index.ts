@@ -143,4 +143,8 @@ export class ControlPlane {
   get cloudCredentials() {
     return this.storage.cloudCredentials;
   }
+  // v0.4.0-3 (Epic 3, WS3) — scheduled health checks:
+  get healthSchedules() {
+    return this.storage.healthSchedules;
+  }
 }

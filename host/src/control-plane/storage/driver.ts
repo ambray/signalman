@@ -26,6 +26,7 @@ import type {
   CloudOrgUsage,
   Deployment,
   HealthCheck,
+  HealthSchedule,
   HealthStatus,
   Job,
   JobStatus,
@@ -193,6 +194,39 @@ export interface HealthCheckRepo {
     deploymentId: string,
     opts?: { since?: string; limit?: number },
   ): Promise<HealthCheck[]>;
+}
+
+/**
+ * Repository for periodic health-check schedules (v0.4.0-3 / Epic 3).
+ * The scheduler module in control-plane/scheduler/ owns the wake-and-
+ * dispatch loop; this repo just persists the configured schedules.
+ */
+export interface HealthScheduleRepo {
+  create(input: {
+    orgId: string;
+    targetId: string;
+    intervalSeconds: number;
+    probeNames: string[];
+    active?: boolean;
+  }): Promise<HealthSchedule>;
+  get(id: string): Promise<HealthSchedule | null>;
+  listForOrg(orgId: string): Promise<HealthSchedule[]>;
+  listForTarget(targetId: string): Promise<HealthSchedule[]>;
+  /**
+   * Active, undeleted schedules for the org, regardless of target.
+   * The scheduler tick uses this to find work; "due-ness" is decided
+   * in the scheduler against `now` (rather than via SQL) so the
+   * comparison stays portable between SQLite and Postgres without
+   * driver-specific time arithmetic.
+   */
+  listActive(orgId?: string): Promise<HealthSchedule[]>;
+  update(
+    id: string,
+    patch: Partial<
+      Pick<HealthSchedule, "intervalSeconds" | "probeNames" | "active" | "lastRunAt">
+    >,
+  ): Promise<HealthSchedule>;
+  softDelete(id: string): Promise<void>;
 }
 
 export interface ScenarioRepo {
@@ -388,6 +422,8 @@ export interface StorageDriver {
   readonly cloudUsage: CloudUsageRepo;
   // v0.3.0-5 sub-task 6 — per-org credentials at rest:
   readonly cloudCredentials: CloudCredentialsRepo;
+  // v0.4.0-3 (Epic 3, WS3) — scheduled health checks:
+  readonly healthSchedules: HealthScheduleRepo;
 }
 
 /** Thrown by repos that are declared in this PR but not yet implemented. */

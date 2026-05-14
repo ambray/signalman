@@ -226,6 +226,37 @@ export interface Run {
   deletedAt: string | null;
 }
 
+// ── Health schedules (v0.4.0-3) ─────────────────────────────────────
+
+/**
+ * Periodic re-run of the existing `health check` verb against a
+ * target's active deployment, without an operator triggering it. See
+ * docs/design/meta-build-system.md §12 (v0.4 phasing) and migration
+ * 0060_health_schedule.sql.
+ *
+ * `probeNames` is a list of probe names from the target's active
+ * release's signalman.build.yaml. An empty array means "all declared
+ * probes" — matches the CLI's `health check` default behaviour.
+ *
+ * `intervalSeconds` is the minimum gap between runs. The scheduler
+ * wakes once per minute and runs everything whose `lastRunAt + intervalSeconds`
+ * is in the past (or which has never run). Lower bound is 60 seconds
+ * (enforced at the schema level) so a runaway schedule can't flood the
+ * health surface.
+ */
+export interface HealthSchedule {
+  id: string;
+  orgId: string;
+  targetId: string;
+  intervalSeconds: number;
+  probeNames: string[];
+  lastRunAt: string | null;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+}
+
 // ── Jobs (PR 8 — submit-mode runner queue) ──────────────────────────
 
 export type JobStatus =

@@ -46,6 +46,7 @@ import type {
   DeploymentHealthSummary,
   DeploymentStatus,
   HealthCheck,
+  HealthSchedule,
   HealthStatus,
   Job,
   JobStatus,
@@ -71,6 +72,7 @@ import {
   type CloudUsageRepo,
   type DeploymentRepo,
   type HealthCheckRepo,
+  type HealthScheduleRepo,
   type JobRepo,
   type OrgRepo,
   type ProductRepo,
@@ -124,6 +126,7 @@ export class PostgresStorageDriver implements StorageDriver {
   readonly cloudBudgets: CloudBudgetRepo;
   readonly cloudUsage: CloudUsageRepo;
   readonly cloudCredentials: CloudCredentialsRepo;
+  readonly healthSchedules: HealthScheduleRepo;
 
   constructor(opts: PostgresDriverOptions) {
     if (opts.pool) {
@@ -154,6 +157,7 @@ export class PostgresStorageDriver implements StorageDriver {
     this.cloudBudgets = new PgCloudBudgetRepo(this.pool);
     this.cloudUsage = new PgCloudUsageRepo(this.pool);
     this.cloudCredentials = new PgCloudCredentialsRepo(this.pool);
+    this.healthSchedules = new PgHealthScheduleRepo(this.pool);
   }
 
   async migrate(): Promise<void> {
@@ -1763,5 +1767,144 @@ class PgCloudCredentialsRepo implements CloudCredentialsRepo {
       [orgId],
     );
     return (out.rows as SqlRow[]).map(mapPgCloudCredential);
+  }
+}
+
+// ── Health schedule repo (v0.4.0-3) ─────────────────────────────────
+
+function mapHealthSchedule(row: SqlRow): HealthSchedule {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    targetId: row.target_id as string,
+    intervalSeconds: Number(row.interval_seconds),
+    probeNames: JSON.parse(row.probe_ids_json as string) as string[],
+    lastRunAt: (row.last_run_at as string | null) ?? null,
+    active: Number(row.active) === 1,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+class PgHealthScheduleRepo implements HealthScheduleRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async create(input: {
+    orgId: string;
+    targetId: string;
+    intervalSeconds: number;
+    probeNames: string[];
+    active?: boolean;
+  }): Promise<HealthSchedule> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      target_id: input.targetId,
+      interval_seconds: input.intervalSeconds,
+      probe_ids_json: JSON.stringify(input.probeNames),
+      active: input.active === false ? 0 : 1,
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO health_schedule (id, org_id, target_id, interval_seconds, probe_ids_json, active, created_at, updated_at) VALUES (@id, @org_id, @target_id, @interval_seconds, @probe_ids_json, @active, @created_at, @updated_at)",
+      bind,
+    );
+    return mapHealthSchedule({ ...bind, last_run_at: null, deleted_at: null });
+  }
+
+  async get(id: string): Promise<HealthSchedule | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM health_schedule WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    return r.rows[0] ? mapHealthSchedule(r.rows[0]) : null;
+  }
+
+  async listForOrg(orgId: string): Promise<HealthSchedule[]> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM health_schedule WHERE org_id = $1 AND deleted_at IS NULL ORDER BY created_at",
+      [orgId],
+    );
+    return r.rows.map(mapHealthSchedule);
+  }
+
+  async listForTarget(targetId: string): Promise<HealthSchedule[]> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM health_schedule WHERE target_id = $1 AND deleted_at IS NULL ORDER BY created_at",
+      [targetId],
+    );
+    return r.rows.map(mapHealthSchedule);
+  }
+
+  async listActive(orgId?: string): Promise<HealthSchedule[]> {
+    if (orgId) {
+      const r = await pgPositional(
+        this.pool,
+        "SELECT * FROM health_schedule WHERE org_id = $1 AND active = 1 AND deleted_at IS NULL ORDER BY created_at",
+        [orgId],
+      );
+      return r.rows.map(mapHealthSchedule);
+    }
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM health_schedule WHERE active = 1 AND deleted_at IS NULL ORDER BY created_at",
+      [],
+    );
+    return r.rows.map(mapHealthSchedule);
+  }
+
+  async update(
+    id: string,
+    patch: Partial<
+      Pick<HealthSchedule, "intervalSeconds" | "probeNames" | "active" | "lastRunAt">
+    >,
+  ): Promise<HealthSchedule> {
+    const existing = await this.get(id);
+    if (!existing) throw new StorageNotFoundError("health_schedule", id);
+    const bind = {
+      id: existing.id,
+      interval_seconds: patch.intervalSeconds ?? existing.intervalSeconds,
+      probe_ids_json: JSON.stringify(patch.probeNames ?? existing.probeNames),
+      last_run_at:
+        patch.lastRunAt !== undefined ? patch.lastRunAt : existing.lastRunAt,
+      active:
+        patch.active !== undefined
+          ? patch.active
+            ? 1
+            : 0
+          : existing.active
+            ? 1
+            : 0,
+      updated_at: nowIso(),
+    };
+    await pgQuery(
+      this.pool,
+      "UPDATE health_schedule SET interval_seconds = @interval_seconds, probe_ids_json = @probe_ids_json, last_run_at = @last_run_at, active = @active, updated_at = @updated_at WHERE id = @id",
+      bind,
+    );
+    return mapHealthSchedule({
+      ...bind,
+      org_id: existing.orgId,
+      target_id: existing.targetId,
+      created_at: existing.createdAt,
+      deleted_at: existing.deletedAt,
+    });
+  }
+
+  async softDelete(id: string): Promise<void> {
+    const now = nowIso();
+    const r = await pgPositional(
+      this.pool,
+      "UPDATE health_schedule SET deleted_at = $1, updated_at = $2 WHERE id = $3 AND deleted_at IS NULL",
+      [now, now, id],
+    );
+    if (r.rowCount === 0) throw new StorageNotFoundError("health_schedule", id);
   }
 }
