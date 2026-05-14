@@ -94,7 +94,7 @@ import * as os from "node:os";
 
 // ── Tiny argv parser ──────────────────────────────────────────────
 
-interface ParsedArgs {
+export interface ParsedArgs {
   positional: string[];
   flags: Set<string>;
   options: Map<string, string>;
@@ -2395,6 +2395,125 @@ async function withCliCapture<T>(
   }
 }
 
+// ── v0.3.0-5 sub-task 5: cloud cost-guardrail verbs ──────────────
+//
+// Today only the reaper subcommands are wired (sub-task 8 will add
+// `cloud provision / terminate / status / list / backends` as
+// CLI wrappers over the existing MCP tools). Splitting that work
+// keeps this sub-task's diff scoped to the cost-guardrail surface.
+
+async function cmdCloud(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) {
+    usageError(
+      "cloud requires a subcommand (e.g. reaper run, reaper status — " +
+        "see `signalman --help`)",
+    );
+  }
+  switch (sub) {
+    case "reaper":
+      return await cmdCloudReaper(args);
+    default:
+      usageError(`unknown cloud subcommand: ${sub}`);
+  }
+}
+
+// Exported for tests in host/src/__tests__/cli-cloud-reaper.test.ts.
+// Production callers route through `cmdCloud(args)` which positionally
+// shifts the subcommand off before delegating here.
+export async function cmdCloudReaper(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) {
+    usageError(
+      "cloud reaper requires a subcommand: 'run' (force a sweep now) or " +
+        "'status' (show last sweep result).",
+    );
+  }
+  const { CloudReaper, getOrCreateReaper } = await import("./cloud/reaper.js");
+  const { getCloudBackend, listRegisteredBackends } = await import(
+    "./cloud/registry.js"
+  );
+  // Only lazy-import vendor modules when the registry is empty.
+  // Pre-registered backends (e.g. injected by a wrapping host
+  // process or by a test) are honoured as-is — re-importing would
+  // attempt to construct the real backend factories, which fail
+  // hard when vendor creds / env vars aren't set.
+  if (listRegisteredBackends().length === 0) {
+    await import("./cloud/aws.js");
+    await import("./cloud/azure.js");
+  }
+  const reaper = getOrCreateReaper(
+    () =>
+      new CloudReaper({
+        getBackends: () =>
+          listRegisteredBackends().map((k) => getCloudBackend(k)),
+      }),
+  );
+  const isJson = args.options.get("format") === "json";
+  switch (sub) {
+    case "run": {
+      const result = await reaper.runOnce();
+      if (isJson) {
+        process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+      } else {
+        process.stdout.write(
+          `Reaper sweep complete.\n` +
+            `  started:    ${result.startedAt}\n` +
+            `  finished:   ${result.finishedAt}\n` +
+            `  terminated: ${result.totalTerminated}\n` +
+            result.backends
+              .map(
+                (b) =>
+                  `  - ${b.backend}: inspected=${b.inspected} ` +
+                  `noTtl=${b.noTtl} malformed=${b.malformed} ` +
+                  `terminated=${b.terminated}` +
+                  (b.listError ? ` listError=${b.listError}` : "") +
+                  (b.terminateErrors.length
+                    ? ` terminateErrors=${b.terminateErrors.length}`
+                    : ""),
+              )
+              .join("\n") +
+            "\n",
+        );
+      }
+      // Exit non-zero if any backend had a list or terminate error
+      // so CI pipelines can detect a failed sweep. 0 means full
+      // clean sweep (even with 0 terminated).
+      const hadError =
+        result.backends.some(
+          (b) => b.listError || b.terminateErrors.length > 0,
+        );
+      return hadError ? 4 : 0;
+    }
+    case "status": {
+      const last = reaper.getLastResult();
+      const payload = {
+        isRunning: reaper.isRunning(),
+        lastResult: last,
+      };
+      if (isJson) {
+        process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+      } else if (!last) {
+        process.stdout.write(
+          "Reaper has not run in this process.\n" +
+            "Use 'signalman cloud reaper run' to force a sweep, or run " +
+            "the MCP server (it can run the reaper on a schedule).\n",
+        );
+      } else {
+        process.stdout.write(
+          `Reaper last ran:\n` +
+            `  started:    ${last.startedAt}\n` +
+            `  finished:   ${last.finishedAt}\n` +
+            `  terminated: ${last.totalTerminated}\n`,
+        );
+      }
+      return 0;
+    }
+    default:
+      usageError(`unknown cloud reaper subcommand: ${sub}`);
+  }
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 async function main(argv: string[]): Promise<number> {
@@ -2447,6 +2566,8 @@ async function main(argv: string[]): Promise<number> {
         return await cmdRunner(args);
       case "key":
         return await cmdKey(args);
+      case "cloud":
+        return await cmdCloud(args);
       default:
         usageError(`unknown verb: ${verb}`);
     }
@@ -2497,6 +2618,7 @@ function printHelp(): void {
       "  api-key <subcommand>   (create, list, revoke)",
       "  runner <subcommand>    (register, start)",
       "  key <subcommand>       (generate, fingerprint — Ed25519 release signing)",
+      "  cloud <subcommand>     (reaper run, reaper status — cost guardrails)",
       "",
       "Exit codes (per docs/design/p0-mcp-surface.md §5):",
       "  0  pass        2  workflow fail        4  infra error",

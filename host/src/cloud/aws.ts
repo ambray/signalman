@@ -68,6 +68,8 @@ import {
   SIGNALMAN_MANAGED_TAG_KEY,
   SIGNALMAN_MANAGED_TAG_VALUE,
   SIGNALMAN_ORG_TAG_KEY,
+  SIGNALMAN_TTL_EXPIRES_AT_TAG_KEY,
+  SIGNALMAN_TTL_MINUTES_TAG_KEY,
 } from "./types.js";
 
 // ── Public constants ──────────────────────────────────────────────
@@ -350,12 +352,16 @@ export class AwsBackend implements CloudBackend {
     for (const reservation of out.Reservations ?? []) {
       for (const instance of reservation.Instances ?? []) {
         if (!instance.InstanceId) continue;
-        const nameTag = instance.Tags?.find((t) => t.Key === "Name");
+        const tagMap: Record<string, string> = {};
+        for (const t of instance.Tags ?? []) {
+          if (t.Key && t.Value !== undefined) tagMap[t.Key] = t.Value;
+        }
         handles.push({
           id: instance.InstanceId,
           backend: "aws",
-          name: nameTag?.Value ?? instance.InstanceId,
+          name: tagMap["Name"] ?? instance.InstanceId,
           region: this.region,
+          tags: tagMap,
         });
       }
     }
@@ -404,17 +410,21 @@ export function buildInstanceTags(
   config: CloudInstanceConfig,
   orgId: string,
   ttlMinutes: number,
+  now: Date = new Date(),
 ): Tag[] {
+  const expiresAtEpochSec = Math.floor(now.getTime() / 1000) + ttlMinutes * 60;
   const sentinelKeys = new Set([
     SIGNALMAN_MANAGED_TAG_KEY,
     SIGNALMAN_ORG_TAG_KEY,
-    "signalman-ttl-minutes",
+    SIGNALMAN_TTL_MINUTES_TAG_KEY,
+    SIGNALMAN_TTL_EXPIRES_AT_TAG_KEY,
   ]);
   const tags: Tag[] = [
     { Key: "Name", Value: config.name },
     { Key: SIGNALMAN_MANAGED_TAG_KEY, Value: SIGNALMAN_MANAGED_TAG_VALUE },
     { Key: SIGNALMAN_ORG_TAG_KEY, Value: orgId },
-    { Key: "signalman-ttl-minutes", Value: String(ttlMinutes) },
+    { Key: SIGNALMAN_TTL_MINUTES_TAG_KEY, Value: String(ttlMinutes) },
+    { Key: SIGNALMAN_TTL_EXPIRES_AT_TAG_KEY, Value: String(expiresAtEpochSec) },
   ];
   if (config.tags) {
     for (const [k, v] of Object.entries(config.tags)) {

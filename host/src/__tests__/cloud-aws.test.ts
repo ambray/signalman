@@ -507,12 +507,16 @@ describe("AwsBackend.listInstances", () => {
     const backend = new AwsBackend({ region: "us-east-1", client });
     const handles = await backend.listInstances();
     expect(handles).toHaveLength(2);
-    expect(handles[0]).toEqual({
+    // toMatchObject so the assertion remains valid when the
+    // backend populates the new optional `tags` field
+    // (v0.3.0-5 sub-task 5 — reaper needs the tag map).
+    expect(handles[0]).toMatchObject({
       id: "i-A",
       backend: "aws",
       name: "vm-a",
       region: "us-east-1",
     });
+    expect(handles[0].tags).toEqual({ Name: "vm-a" });
     expect(handles[1].name).toBe("vm-b");
   });
 

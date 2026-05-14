@@ -727,6 +727,7 @@ import {
   type CloudInstanceHandle,
 } from "./cloud/types.js";
 import { TofuDriver } from "./cloud/tofu.js";
+import { CloudReaper, getOrCreateReaper } from "./cloud/reaper.js";
 
 /**
  * Tool handler error→MCP-result envelope. Cloud errors carry a
@@ -947,6 +948,61 @@ server.tool(
           autoApprove: params.auto_approve,
         });
       }),
+    ),
+);
+
+// ── v0.3.0-5 sub-task 5: Cost guardrails — TTL reaper ─────────────
+//
+// The reaper sweeps registered cloud backends for instances whose
+// `signalman-ttl-expires-at` tag (epoch seconds) is in the past and
+// terminates them. Two operator-facing MCP tools:
+//
+//   - signalman_reaper_run_once — force a single sweep now. Useful
+//     in CI ("clean up everything past-TTL before I exit"), in
+//     incident response, and for the parallel `signalman cloud
+//     reaper run` CLI verb.
+//   - signalman_reaper_status — return the result of the most
+//     recent sweep in this MCP server's process (null if never).
+//
+// The singleton wires through `getOrCreateReaper` so `run_once` and
+// `status` share state across handler invocations. A long-running
+// host process can additionally call `reaper.start()` to wire the
+// 5-min cadence; the MCP server itself does NOT start the
+// scheduler today (operators wire it via cron / systemd or
+// scheduled MCP invocations until sub-task 6 wires it into the
+// daemon path).
+
+function reaperSingleton(): CloudReaper {
+  return getOrCreateReaper(
+    () =>
+      new CloudReaper({
+        getBackends: () => {
+          return listRegisteredBackends().map((k) => getCloudBackend(k));
+        },
+      }),
+  );
+}
+
+server.tool(
+  "signalman_reaper_run_once",
+  "Run a single cost-reaper sweep across every registered cloud backend. Lists Signalman-managed instances, terminates any whose signalman-ttl-expires-at tag (epoch seconds) is in the past. Returns per-backend counts + the per-instance terminate errors (if any). Idempotent — repeat sweeps are safe; terminating an already-terminated handle is a no-op per the backend contract.",
+  {},
+  async (params) =>
+    withRecording("signalman_reaper_run_once", params, () =>
+      asCloudMcpResult(async () => reaperSingleton().runOnce()),
+    ),
+);
+
+server.tool(
+  "signalman_reaper_status",
+  "Return the result of the most recent reaper sweep in this MCP server's process. Returns null when the reaper has not yet run. Use this to confirm a sweep happened + see what it did, without re-triggering it.",
+  {},
+  async (params) =>
+    withRecording("signalman_reaper_status", params, () =>
+      asCloudMcpResult(async () => ({
+        isRunning: reaperSingleton().isRunning(),
+        lastResult: reaperSingleton().getLastResult(),
+      })),
     ),
 );
 

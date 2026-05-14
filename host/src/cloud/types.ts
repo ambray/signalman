@@ -182,6 +182,18 @@ export interface CloudInstanceHandle {
   name: string;
   /** Region the instance was provisioned in. */
   region: string;
+  /**
+   * Vendor tags on the instance — populated by `listInstances`
+   * when the backend can include them cheaply (the AWS + Azure
+   * implementations do). The reaper reads
+   * `signalman-ttl-expires-at` (see {@link SIGNALMAN_TTL_EXPIRES_AT_TAG_KEY})
+   * from this map to decide which handles are past TTL.
+   *
+   * Optional + informational: callers that do not need tags should
+   * not depend on the field being populated. `provisionInstance`
+   * does not necessarily populate it on the returned handle.
+   */
+  tags?: Record<string, string>;
 }
 
 /** Runtime state of a cloud instance. */
@@ -218,6 +230,20 @@ export const SIGNALMAN_ORG_TAG_KEY = "signalman-org";
 /** Value the reaper matches against {@link SIGNALMAN_MANAGED_TAG_KEY}. */
 export const SIGNALMAN_MANAGED_TAG_VALUE = "true";
 
+/**
+ * Tag key holding the wall-clock TTL deadline as epoch seconds.
+ * Set on provision; read by {@link ./reaper.CloudReaper} to decide
+ * which instances are past their lifetime. Absence means "no TTL"
+ * (a back-compat for instances provisioned before sub-task 5);
+ * presence with a non-numeric value is treated as malformed and
+ * the reaper skips the instance with a warning so a corrupted tag
+ * does not cause a sweep-mass-terminate.
+ */
+export const SIGNALMAN_TTL_EXPIRES_AT_TAG_KEY = "signalman-ttl-expires-at";
+
+/** Diagnostic tag — operator-readable TTL in minutes, set on provision. */
+export const SIGNALMAN_TTL_MINUTES_TAG_KEY = "signalman-ttl-minutes";
+
 // ── Errors ─────────────────────────────────────────────────────────
 
 /**
@@ -241,7 +267,10 @@ export type CloudBackendErrorCode =
   | "tofu_not_found"
   | "invalid_stack_name"
   | "module_path_missing"
-  | "project_root_invalid";
+  | "project_root_invalid"
+  // ── Cost guardrails (sub-task 5) ────────────────────────────
+  | "budget_exceeded"
+  | "budget_not_found";
 
 /**
  * Structured error for cloud-backend failures. Carries the stable
