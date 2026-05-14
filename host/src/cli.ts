@@ -29,6 +29,10 @@ import { runInit } from "./verbs/init.js";
 import { createDefaultExecutor } from "./verbs/default-executor.js";
 import { provisionVM } from "./provisioning/provision.js";
 import { cleanupVM } from "./provisioning/cleanup.js";
+import {
+  reapOrphanedEphemeralResources,
+  DEFAULT_MIN_AGE_MS,
+} from "./provisioning/ephemeral-reaper.js";
 import { GuestMsiDiscoveryError } from "./provisioning/guest-msi-discovery.js";
 import type { HypervisorBackend, VMHandle } from "./hypervisors/interface.js";
 import {
@@ -1226,6 +1230,93 @@ async function cmdVmCleanup(args: ParsedArgs): Promise<number> {
   }
 }
 
+// ── ephemeral (v0.3.0-2 follow-up) ────────────────────────────────
+
+async function cmdEphemeral(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) {
+    usageError(
+      "ephemeral requires a subcommand (currently: reap)",
+    );
+  }
+  switch (sub) {
+    case "reap":
+      return await cmdEphemeralReap(args);
+    default:
+      usageError(`unknown ephemeral subcommand: ${sub}`);
+  }
+}
+
+/**
+ * `signalman ephemeral reap [--older-than <duration>] [--dry-run]`
+ *
+ * Scans `<projectRoot>/.signalman/ephemeral-disks/` and the active
+ * hypervisor backend for orphaned ephemeral VMs + child VHDX files
+ * left behind by crashed scenario runs. Stops + deletes VMs and
+ * unlinks child disks past the age threshold.
+ *
+ * `--older-than` accepts human-friendly durations: `30m`, `1h`,
+ * `24h`. Default: 1 hour. The threshold should match operators'
+ * max-expected scenario wall-clock budget so a still-running
+ * scenario is never reaped.
+ *
+ * `--dry-run` reports orphans without deleting; recommended for
+ * the first run after changing the threshold.
+ */
+async function cmdEphemeralReap(args: ParsedArgs): Promise<number> {
+  const olderThan = args.options.get("older-than");
+  const dryRun = args.flags.has("dry-run");
+  const minAgeMs = olderThan
+    ? parseDurationToMs(olderThan)
+    : DEFAULT_MIN_AGE_MS;
+
+  const backend = await getCliBackend();
+  const result = await reapOrphanedEphemeralResources({
+    projectRoot: process.cwd(),
+    backend,
+    minAgeMs,
+    dryRun,
+  });
+  emitJson(result);
+  // Exit non-zero on any per-resource error so cron-driven runs
+  // surface failures via exit code without parsing JSON.
+  return result.errors.length === 0 ? 0 : 4;
+}
+
+/**
+ * Parse a CLI duration string into milliseconds.
+ *
+ * Recognised suffixes: `s`, `m`, `h`, `d`. Bare numbers are
+ * treated as milliseconds (matches the underlying ReapOptions
+ * field name). Examples: `30m`, `1h`, `24h`, `7d`, `5000`.
+ */
+function parseDurationToMs(input: string): number {
+  const m = /^(\d+)([smhd]?)$/.exec(input.trim());
+  if (!m) {
+    usageError(
+      `--older-than must be a number plus an optional s/m/h/d suffix; got '${input}'`,
+    );
+  }
+  const n = Number(m![1]);
+  const suffix = m![2];
+  switch (suffix) {
+    case "s":
+      return n * 1000;
+    case "m":
+      return n * 60 * 1000;
+    case "h":
+      return n * 60 * 60 * 1000;
+    case "d":
+      return n * 24 * 60 * 60 * 1000;
+    case "":
+      return n;
+    default:
+      // Unreachable — the regex pins the alphabet. The default
+      // arm satisfies the TS exhaustiveness checker.
+      return n;
+  }
+}
+
 // ── Product / Release verbs (PR 2 — control-plane) ────────────────
 
 async function cmdProduct(args: ParsedArgs): Promise<number> {
@@ -2263,6 +2354,8 @@ async function main(argv: string[]): Promise<number> {
         return cmdInit(args);
       case "vm":
         return await cmdVm(args);
+      case "ephemeral":
+        return await cmdEphemeral(args);
       case "product":
         return await cmdProduct(args);
       case "release":
