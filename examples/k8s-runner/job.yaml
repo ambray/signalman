@@ -1,0 +1,77 @@
+# Signalman runner as a one-shot Kubernetes Job.
+#
+# Pattern: the operator submits one Job per scenario invocation
+# (or per CI build); the runner registers, claims one queued job
+# from the Signalman control plane, executes it, reports the
+# envelope back, and exits. restartPolicy=Never so a crash does
+# not silently retry the same scenario.
+#
+# Use `signalman runner deploy-k8s --manifest examples/k8s-runner/job.yaml`
+# to apply this AND wait for the runner to register with the
+# control plane (the CLI verb polls GET /v1/runners by the worker
+# name encoded in `metadata.generateName`).
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: signalman-runner-
+  labels:
+    app.kubernetes.io/name: signalman-runner
+    app.kubernetes.io/component: scenario-runner
+    signalman.dev/lifecycle: oneshot
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: signalman-runner
+        signalman.dev/lifecycle: oneshot
+    spec:
+      restartPolicy: Never
+      serviceAccountName: signalman-runner
+      automountServiceAccountToken: true
+      containers:
+        - name: runner
+          image: ghcr.io/ambray/signalman-runner:0.3.0-6
+          imagePullPolicy: IfNotPresent
+          command: ["signalman", "runner", "start", "--poll-interval-ms=1000"]
+          env:
+            - name: SIGNALMAN_CONTROL_PLANE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: signalman-runner
+                  key: control_plane_url
+            - name: SIGNALMAN_RUNNER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: signalman-runner
+                  key: token
+            - name: SIGNALMAN_TENANT_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SIGNALMAN_RUNNER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: signalman-state
+              mountPath: /var/lib/signalman
+      volumes:
+        - name: signalman-state
+          emptyDir:
+            sizeLimit: 1Gi

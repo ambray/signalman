@@ -1,0 +1,87 @@
+# Signalman runner as a long-lived Kubernetes Deployment.
+#
+# Pattern: a small fleet (1-N replicas) polls the Signalman control
+# plane for queued jobs continuously. Lower latency per scenario
+# (no Pod cold-start) but more expensive at idle than the Job shape.
+#
+# Scale via `kubectl scale deployment/signalman-runner --replicas=N`.
+# Each replica registers with a unique runner name (the Pod's
+# `metadata.name` flows in via the downward API), so the control
+# plane can attribute claimed jobs back to a specific replica.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signalman-runner
+  labels:
+    app.kubernetes.io/name: signalman-runner
+    app.kubernetes.io/component: scenario-runner
+    signalman.dev/lifecycle: warm
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: signalman-runner
+      signalman.dev/lifecycle: warm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: signalman-runner
+        signalman.dev/lifecycle: warm
+    spec:
+      serviceAccountName: signalman-runner
+      automountServiceAccountToken: true
+      containers:
+        - name: runner
+          image: ghcr.io/ambray/signalman-runner:0.3.0-6
+          imagePullPolicy: IfNotPresent
+          command: ["signalman", "runner", "start", "--poll-interval-ms=2000"]
+          env:
+            - name: SIGNALMAN_CONTROL_PLANE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: signalman-runner
+                  key: control_plane_url
+            - name: SIGNALMAN_RUNNER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: signalman-runner
+                  key: token
+            - name: SIGNALMAN_TENANT_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SIGNALMAN_RUNNER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          # Pod-level health: exit code 0 from `signalman runner
+          # start` only happens on clean shutdown. Liveness probes
+          # the worker's HTTP health endpoint when present (v0.3.0-7
+          # follow-up); for now we rely on the runner's own
+          # graceful-shutdown SIGINT/SIGTERM handlers.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: signalman-state
+              mountPath: /var/lib/signalman
+      volumes:
+        - name: signalman-state
+          emptyDir:
+            sizeLimit: 1Gi
