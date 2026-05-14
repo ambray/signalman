@@ -37,6 +37,7 @@ import { runStatus } from "./verbs/status.js";
 import { recordMcpCall, runRecord, runRecordFinalize } from "./verbs/record.js";
 import { createDefaultExecutor } from "./verbs/default-executor.js";
 import {
+  createDefaultProbeInvoker,
   runHealthCheck,
   runHealthHistory,
   runProductAdd,
@@ -47,11 +48,17 @@ import {
   runReleaseList,
   runReleaseRollback,
   runReleaseShow,
+  runScheduleAdd,
+  runScheduleDisable,
+  runScheduleEnable,
+  runScheduleList,
+  runScheduleRemove,
   runTargetAdd,
   runTargetList,
   runTargetRemove,
   withControlPlane,
 } from "./verbs/control-plane.js";
+import { runSchedulerTick } from "./control-plane/scheduler/index.js";
 
 // ── Backend Discovery ─────────────────────────────────────────────
 
@@ -1525,6 +1532,130 @@ server.tool(
           driver: params.driver,
         });
       }),
+    ),
+);
+
+// ── Scheduled health verbs (v0.4.0-3 / Epic 3) ────────────────────
+
+server.tool(
+  "signalman_schedule_list",
+  "List periodic health-check schedules in the active org. Optionally filtered to one target.",
+  {
+    target: z
+      .string()
+      .optional()
+      .describe("Filter to schedules attached to this target by name."),
+  },
+  async (params) =>
+    withRecording("signalman_schedule_list", params, async () =>
+      asMcpResult(
+        await withControlPlane((cp) =>
+          runScheduleList(cp, {
+            targetName: (params as { target?: string }).target,
+          }),
+        ),
+      ),
+    ),
+);
+
+server.tool(
+  "signalman_schedule_add",
+  "Register a periodic health-check schedule for a target. The scheduler tick (signalman schedule run-once / start) re-runs the named probes against the target's active deployment every interval_seconds.",
+  {
+    target: z.string().describe("Target name to probe."),
+    interval_seconds: z
+      .number()
+      .int()
+      .min(60)
+      .describe("Minimum gap between runs (seconds). >= 60."),
+    probes: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Probe names from the target's active release's build.yaml. " +
+          "Empty / omitted = all declared probes.",
+      ),
+    active: z
+      .boolean()
+      .optional()
+      .describe("Set false to register the schedule disabled. Default true."),
+  },
+  async (params) =>
+    withRecording("signalman_schedule_add", params, async () =>
+      asMcpResult(
+        await withControlPlane((cp) =>
+          runScheduleAdd(cp, {
+            targetName: (params as { target: string }).target,
+            intervalSeconds: (params as { interval_seconds: number }).interval_seconds,
+            probeNames: (params as { probes?: string[] }).probes,
+            active: (params as { active?: boolean }).active,
+          }),
+        ),
+      ),
+    ),
+);
+
+server.tool(
+  "signalman_schedule_disable",
+  "Disable a health schedule without deleting it. Inactive schedules are skipped by the scheduler tick but stay queryable via signalman_schedule_list.",
+  {
+    id: z.string().describe("Schedule id from signalman_schedule_list."),
+  },
+  async (params) =>
+    withRecording("signalman_schedule_disable", params, async () =>
+      asMcpResult(
+        await withControlPlane((cp) =>
+          runScheduleDisable(cp, { id: (params as { id: string }).id }),
+        ),
+      ),
+    ),
+);
+
+server.tool(
+  "signalman_schedule_enable",
+  "Re-enable a previously-disabled health schedule.",
+  {
+    id: z.string().describe("Schedule id."),
+  },
+  async (params) =>
+    withRecording("signalman_schedule_enable", params, async () =>
+      asMcpResult(
+        await withControlPlane((cp) =>
+          runScheduleEnable(cp, { id: (params as { id: string }).id }),
+        ),
+      ),
+    ),
+);
+
+server.tool(
+  "signalman_schedule_remove",
+  "Soft-delete a health schedule. The row remains in storage for audit but is invisible to subsequent list calls.",
+  {
+    id: z.string().describe("Schedule id."),
+  },
+  async (params) =>
+    withRecording("signalman_schedule_remove", params, async () => {
+      await withControlPlane((cp) =>
+        runScheduleRemove(cp, { id: (params as { id: string }).id }),
+      );
+      return asMcpResult({ removed: true });
+    }),
+);
+
+server.tool(
+  "signalman_schedule_run_once",
+  "Execute a single scheduler tick: find due schedules, run their probes, persist results. Returns the count of schedules processed. Useful for CI cron paths and on-demand verification.",
+  {},
+  async (params) =>
+    withRecording("signalman_schedule_run_once", params, async () =>
+      asMcpResult(
+        await withControlPlane(async (cp) => ({
+          processed: await runSchedulerTick({
+            controlPlane: cp,
+            invoke: createDefaultProbeInvoker(cp),
+          }),
+        })),
+      ),
     ),
 );
 

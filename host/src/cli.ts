@@ -68,7 +68,14 @@ import {
   runK8sDeployVerb,
   runK8sRollbackVerb,
   runK8sStatusVerb,
+  runScheduleAdd,
+  runScheduleDisable,
+  runScheduleEnable,
+  runScheduleList,
+  runScheduleRemove,
+  createDefaultProbeInvoker,
 } from "./verbs/control-plane.js";
+import { runSchedulerTick, startScheduler } from "./control-plane/scheduler/index.js";
 // PR 6 — `signalman serve` HTTP control plane.
 // PR 7 — `signalman api-key create`.
 // PR 8 — `signalman runner register/start`, `release build --remote`.
@@ -3582,6 +3589,196 @@ export async function cmdStackPlanCost(args: ParsedArgs): Promise<number> {
   }
 }
 
+// ── schedule verbs (v0.4.0-3 / Epic 3) ──────────────────────────────
+
+async function cmdSchedule(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub)
+    usageError(
+      "schedule requires a subcommand (list, add, disable, enable, remove, run-once)",
+    );
+  switch (sub) {
+    case "list":
+      return await cmdScheduleList(args);
+    case "add":
+      return await cmdScheduleAdd(args);
+    case "disable":
+      return await cmdScheduleDisable(args);
+    case "enable":
+      return await cmdScheduleEnable(args);
+    case "remove":
+      return await cmdScheduleRemove(args);
+    case "run-once":
+      return await cmdScheduleRunOnce(args);
+    case "start":
+      return await cmdScheduleStart(args);
+    default:
+      usageError(`unknown schedule subcommand: ${sub}`);
+  }
+}
+
+async function cmdScheduleAdd(args: ParsedArgs): Promise<number> {
+  const targetName = args.options.get("target");
+  const intervalRaw = args.options.get("interval-seconds");
+  if (!targetName) usageError("schedule add requires --target <NAME>");
+  if (!intervalRaw) usageError("schedule add requires --interval-seconds <N>");
+  const intervalSeconds = Number(intervalRaw);
+  if (!Number.isFinite(intervalSeconds)) {
+    usageError("schedule add: --interval-seconds must be a number");
+  }
+  const probesArg = args.options.get("probes");
+  const probeNames = probesArg
+    ? probesArg
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+    : [];
+  const format = args.options.get("format");
+  try {
+    const result = await withControlPlane((cp) =>
+      runScheduleAdd(cp, { targetName, intervalSeconds, probeNames }),
+    );
+    if (format === "json") {
+      emitJson(result);
+    } else {
+      process.stdout.write(
+        `Added schedule '${result.schedule.id}' on target '${result.target.name}'\n` +
+          `  interval: ${result.schedule.intervalSeconds}s\n` +
+          `  probes:   ${
+            result.schedule.probeNames.length === 0
+              ? "(all declared)"
+              : result.schedule.probeNames.join(", ")
+          }\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman schedule add: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdScheduleList(args: ParsedArgs): Promise<number> {
+  const format = args.options.get("format");
+  const targetName = args.options.get("target");
+  try {
+    const entries = await withControlPlane((cp) =>
+      runScheduleList(cp, { targetName }),
+    );
+    if (format === "json") {
+      emitJson(entries);
+      return 0;
+    }
+    if (entries.length === 0) {
+      process.stdout.write("(no schedules)\n");
+      return 0;
+    }
+    emitTable(
+      entries.map((e) => ({
+        id: e.schedule.id,
+        target: e.target.name,
+        interval_s: String(e.schedule.intervalSeconds),
+        active: e.schedule.active ? "yes" : "no",
+        last_run: e.schedule.lastRunAt ?? "-",
+        probes:
+          e.schedule.probeNames.length === 0
+            ? "(all)"
+            : e.schedule.probeNames.join(","),
+      })),
+    );
+    return 0;
+  } catch (err) {
+    console.error(`signalman schedule list: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdScheduleDisable(args: ParsedArgs): Promise<number> {
+  const id = args.positional[0] ?? args.options.get("id");
+  if (!id) usageError("schedule disable requires <id>");
+  try {
+    await withControlPlane((cp) => runScheduleDisable(cp, { id }));
+    process.stdout.write(`Disabled schedule '${id}'.\n`);
+    return 0;
+  } catch (err) {
+    console.error(`signalman schedule disable: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdScheduleEnable(args: ParsedArgs): Promise<number> {
+  const id = args.positional[0] ?? args.options.get("id");
+  if (!id) usageError("schedule enable requires <id>");
+  try {
+    await withControlPlane((cp) => runScheduleEnable(cp, { id }));
+    process.stdout.write(`Enabled schedule '${id}'.\n`);
+    return 0;
+  } catch (err) {
+    console.error(`signalman schedule enable: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdScheduleRemove(args: ParsedArgs): Promise<number> {
+  const id = args.positional[0] ?? args.options.get("id");
+  if (!id) usageError("schedule remove requires <id>");
+  try {
+    await withControlPlane((cp) => runScheduleRemove(cp, { id }));
+    process.stdout.write(`Removed schedule '${id}'.\n`);
+    return 0;
+  } catch (err) {
+    console.error(`signalman schedule remove: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+/**
+ * Run a single scheduler tick. Useful for diagnostics, for CI cron
+ * paths that don't want a long-running daemon, and for the end-to-end
+ * test taxonomy under `host/src/__tests__`.
+ */
+async function cmdScheduleRunOnce(_args: ParsedArgs): Promise<number> {
+  try {
+    const ran = await withControlPlane((cp) =>
+      runSchedulerTick({
+        controlPlane: cp,
+        invoke: createDefaultProbeInvoker(cp),
+      }),
+    );
+    process.stdout.write(`Scheduler tick processed ${ran} schedule(s).\n`);
+    return 0;
+  } catch (err) {
+    console.error(`signalman schedule run-once: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdScheduleStart(args: ParsedArgs): Promise<number> {
+  const intervalMs = Number(args.options.get("tick-ms") ?? "60000");
+  try {
+    await withControlPlane(async (cp) => {
+      const handle = startScheduler({
+        controlPlane: cp,
+        invoke: createDefaultProbeInvoker(cp),
+        tickIntervalMs: intervalMs,
+      });
+      process.stderr.write(
+        `[scheduler] running, tick=${intervalMs}ms. Press Ctrl-C to stop.\n`,
+      );
+      const stopSignal = new Promise<void>((res) => {
+        process.once("SIGINT", () => res());
+        process.once("SIGTERM", () => res());
+      });
+      await stopSignal;
+      await handle.stop();
+    });
+    return 0;
+  } catch (err) {
+    console.error(`signalman schedule start: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 async function main(argv: string[]): Promise<number> {
@@ -3626,6 +3823,8 @@ async function main(argv: string[]): Promise<number> {
         return await cmdTarget(args);
       case "health":
         return await cmdHealth(args);
+      case "schedule":
+        return await cmdSchedule(args);
       case "serve":
         return await cmdServe(args);
       case "api-key":
@@ -3685,6 +3884,7 @@ function printHelp(): void {
       "  release <subcommand>   (build, list, show, deploy, rollback)",
       "  target <subcommand>    (add, list, remove)",
       "  health <subcommand>    (check, history)",
+      "  schedule <subcommand>  (list, add, disable, enable, remove, run-once, start)",
       "  serve [--port P] [--host H] [--disable-loopback-bypass]",
       "                              (start the control-plane HTTP server)",
       "  api-key <subcommand>   (create, list, revoke)",
