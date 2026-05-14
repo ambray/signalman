@@ -6,7 +6,138 @@ aims for [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+Cross-platform milestone (v0.4.0-4 / WS4). Lands first-class Linux
+and macOS support across the guest agent and host hypervisor
+surfaces, plus the explicit platform-capability machinery the host
+orchestrator needs to skip-gate scenarios that require Windows-only
+behaviour on non-Windows VMs.
+
+Not wire-breaking. The new `install_software` sources are additive
+string values; the `hypervisor.backend` union gains
+`"libvirt" | "vmrun"` but existing values stay valid; the guest
+proto is unchanged.
+
+### Added (host hypervisor backends)
+
+- `host/src/hypervisors/libvirt.ts` — libvirt / KVM backend driven
+  by the `virsh` CLI (no native libvirt-node dep, so Windows CI
+  keeps building). Covers lifecycle, snapshots, file transfer
+  (via qemu-guest-agent JSON-RPC), and command execution.
+  Constructor accepts an injectable `LibvirtExec` callback for
+  tests, mirroring `cloud/tofu.ts`.
+- `host/src/hypervisors/vmrun.ts` — parallel-track VMware
+  Workstation / Fusion backend wrapping `vmrun`. Same shape as
+  libvirt: injectable `VmrunExec`, stable error codes, S-14
+  password redaction on every stderr egress. The existing
+  `vmware.ts` (with its `govc` vSphere fallback) is unchanged.
+  Operators opt in via `hypervisor.backend = "vmrun"`.
+  Convergence onto a single VMware backend is tracked as a
+  roadmap follow-up.
+- New error classes `LibvirtBackendError` and `VmrunBackendError`
+  with stable codes the orchestrator dispatches on without
+  parsing CLI phrasing.
+
+### Added (guest agent platform layer)
+
+- `guest/src/platform/{windows,linux,macos,other}.rs` — new
+  `Platform` trait the service layer dispatches through.
+  Capability getters (`supports_ui_automation`,
+  `supports_system_elevation`, `supported_package_sources`)
+  let RPC handlers return a clean `Status::unimplemented`
+  on platforms that don't implement a given operation,
+  rather than letting the call hang on a sidecar that will
+  never connect.
+- All four `Platform` impls compile on every target; only the
+  `Current` re-export is `cfg`-gated so trait tests can
+  exercise each impl regardless of build host.
+
+### Added (Linux SYSTEM-elevation)
+
+- `process::start_process_as_system` on Linux now shells
+  `sudo -n [-E] -- <path> <args>`. Sudoers refusal surfaces
+  as `Status::permission_denied`; the agent's invoking user
+  must have NOPASSWD configured for the commands the operator
+  intends to run.
+- `build_sudo_argv` is factored out as a free function so the
+  argv shape is unit-testable on every build host.
+
+### Added (install_software sources)
+
+- Linux: `apt` (shells `apt-get install -y`), `dnf`
+  (`dnf install -y`), `yum` (legacy RHEL ≤ 7 alias). Version
+  pinning via `<pkg>=<ver>` (apt) or `<pkg>-<ver>` (dnf/yum).
+- macOS: `brew` (`brew install`). Version pinning via
+  `<pkg>@<ver>` (note: brew's `@`-suffix names are separate
+  formulas, not literal version pins).
+- Idempotent re-runs detected via stable phrasing matching:
+  "is already the newest version" (apt), "Nothing to do." /
+  "is already installed" (dnf/yum), "already installed" /
+  "up-to-date" (brew).
+
+### Changed (cross-platform RPC behaviour)
+
+- Windows-only RPCs (`ui_click` / `ui_type` / `ui_key` /
+  `ui_find` / `ui_screenshot` / `browser_*` /
+  `install_software` with Windows-only sources /
+  `run_command(run_as="system")` on macOS) now return
+  `Status::unimplemented` with a canonical
+  "<feature> is not supported on <os>" message rather than
+  failing through downstream subsystems.
+- `ui_health` is the deliberate exception: keeps its
+  OK-with-payload shape on non-Windows and reports
+  `sidecar_reachable=false` with the canonical message in
+  the `error` field, so existing host pattern-matching on
+  that shape continues to work.
+- `install_software` distinguishes three failure modes for
+  an unrecognised source: wrong-platform →
+  `Status::unimplemented`; typo / unknown source →
+  `Status::invalid_argument`; empty source on Linux + macOS
+  → `Status::invalid_argument` with a hint of the supported
+  set (Windows still defaults to winget for backwards compat).
+
+### Changed (selector + config)
+
+- `host/src/hypervisors/selector.ts` registers libvirt and
+  vmrun in `buildBackendList`. Platform-aware default
+  ordering: Linux gets libvirt first, macOS keeps tart first,
+  Windows keeps the existing service-first chain.
+- `SignalmanConfig.hypervisor` adds `virshPath` and
+  `libvirtUri` fields; the `backend` union now accepts
+  `"libvirt" | "vmrun"` in addition to the existing values.
+  Env overrides: `SIGNALMAN_VIRSH_BIN`,
+  `LIBVIRT_DEFAULT_URI`.
+
+### Tests
+
+- Guest: +29 tests (147 → 159 over the WS4 commits, plus
+  +12 from the follow-up sudo + package-manager work).
+  Coverage of every `LinuxPlatform` / `MacosPlatform` /
+  `WindowsPlatform` capability surface; cross-platform
+  trait dispatch tests that exercise non-host impls from a
+  Windows build host; argv-helper coverage for
+  `build_sudo_argv`.
+- Host: +85 tests (1795 → 1880). Libvirt argv composition,
+  parser coverage with fixture files under
+  `host/src/__tests__/fixtures/virsh-*.txt`, integration
+  tests covering every `LibvirtBackendError` and
+  `VmrunBackendError` code path, selector registration.
+  Held-core coverage holds at 86.57% statements / 81.61%
+  branches / 91.15% functions / 86.57% lines (well above
+  the 80/70/80/80 floors).
+
+### Deferred (tracked in ROADMAP)
+
+- macOS UI automation parity with the Win32 UIA sidecar.
+  Trait contract + unimplemented-message tests are in
+  place; the AppleScript / Accessibility-API
+  implementation requires a real macOS dev host.
+- `vmrun.ts` + `vmware.ts` convergence. Deliberately
+  deferred until `vmrun.ts` has seen at least one
+  production scenario end-to-end so the merge target isn't
+  unproven.
+
+See ROADMAP §"2026-05-14 (v0.4.0-4 cross-platform
+followups)" for both items' restart preconditions.
 
 ## [0.2.1] — 2026-05-13
 
