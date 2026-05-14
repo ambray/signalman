@@ -50,6 +50,8 @@
     "@aws-sdk/client-ec2": "^3.1046.0",
     "@aws-sdk/client-s3": "^3.700.0",
     "@aws-sdk/s3-request-presigner": "^3.700.0",
+    "@azure/arm-compute": "^24.0.0",
+    "@azure/identity": "^4.13.1",
     "@grpc/grpc-js": "^1.12.0",
     "@grpc/proto-loader": "^0.7.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
