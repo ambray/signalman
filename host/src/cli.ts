@@ -93,6 +93,7 @@ import {
   loadRunnerConfig,
   writeRunnerConfig,
 } from "./runner/config.js";
+import { runRunnerDeployK8s } from "./runner/deploy-k8s.js";
 import * as os from "node:os";
 
 // ── Tiny argv parser ──────────────────────────────────────────────
@@ -1855,14 +1856,68 @@ async function cmdK8sStatus(args: ParsedArgs): Promise<number> {
 
 async function cmdRunner(args: ParsedArgs): Promise<number> {
   const sub = args.positional.shift();
-  if (!sub) usageError("runner requires a subcommand (register, start)");
+  if (!sub) usageError("runner requires a subcommand (register, start, deploy-k8s)");
   switch (sub) {
     case "register":
       return await cmdRunnerRegister(args);
     case "start":
       return await cmdRunnerStart(args);
+    case "deploy-k8s":
+      return await cmdRunnerDeployK8s(args);
     default:
       usageError(`unknown runner subcommand: ${sub}`);
+  }
+}
+
+async function cmdRunnerDeployK8s(args: ParsedArgs): Promise<number> {
+  const manifest = args.options.get("manifest");
+  const namespace = args.options.get("namespace");
+  if (!manifest)
+    usageError("runner deploy-k8s requires --manifest <PATH>");
+  if (!namespace)
+    usageError("runner deploy-k8s requires --namespace <NS>");
+  const context = args.options.get("context");
+  const selector = args.options.get("selector");
+  const waitTimeoutRaw = args.options.get("wait-timeout-ms");
+  const waitTimeoutMs = waitTimeoutRaw
+    ? parseInt(waitTimeoutRaw, 10)
+    : undefined;
+  if (waitTimeoutMs !== undefined && Number.isNaN(waitTimeoutMs)) {
+    usageError("runner deploy-k8s: --wait-timeout-ms must be an integer");
+  }
+  const waitForReady = !args.flags.has("no-wait");
+  const format = args.options.get("format");
+  try {
+    const result = await runRunnerDeployK8s({
+      manifestPath: manifest,
+      namespace,
+      context,
+      selector,
+      waitTimeoutMs,
+      waitForReady,
+      out: process.stderr,
+    });
+    if (format === "json") {
+      emitJson(result);
+    } else {
+      process.stdout.write(
+        `Applied ${result.apply.releaseName} to '${namespace}' via ${result.apply.driver}\n` +
+          (result.health
+            ? `  pods ready: ${result.health.ready ? "yes" : "NO"}\n` +
+              (result.health.detail
+                ? `  detail: ${result.health.detail}\n`
+                : "")
+            : "  (wait skipped)\n"),
+      );
+    }
+    return result.ready ? 0 : 1;
+  } catch (err) {
+    const e = err as { code?: string; message?: string };
+    console.error(
+      `signalman runner deploy-k8s: ${e.message ?? String(err)}` +
+        (e.code ? ` (code=${e.code})` : ""),
+    );
+    return 4;
   }
 }
 
@@ -3633,7 +3688,7 @@ function printHelp(): void {
       "  serve [--port P] [--host H] [--disable-loopback-bypass]",
       "                              (start the control-plane HTTP server)",
       "  api-key <subcommand>   (create, list, revoke)",
-      "  runner <subcommand>    (register, start)",
+      "  runner <subcommand>    (register, start, deploy-k8s)",
       "  k8s <subcommand>       (deploy, rollback, status — direct K8s ops)",
       "  key <subcommand>       (generate, fingerprint — Ed25519 release signing)",
       "  cloud <subcommand>     (provision, terminate, status, list, backends, reaper, budget, creds, connection-descriptor)",
