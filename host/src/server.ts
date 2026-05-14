@@ -703,6 +703,253 @@ server.tool(
     }),
 );
 
+// ── v0.3.0-5: Cloud-provider tools ────────────────────────────────
+//
+// These tools let agents drive the cloud backends (AWS / Azure /
+// OpenTofu) directly via MCP. The signalman_cloud_* family covers
+// single-instance lifecycle (provision / terminate / status / list);
+// the signalman_stack_* family wraps the OpenTofu driver.
+//
+// Vendor backends register themselves at module-load time; importing
+// them here pulls them into the registry so a `getCloudBackend("aws")`
+// from a tool handler resolves. Tests that don't want side-effects
+// import these dynamically per-case.
+import "./cloud/aws.js";
+import "./cloud/azure.js";
+import {
+  getCloudBackend,
+  listRegisteredBackends,
+} from "./cloud/registry.js";
+import {
+  CloudBackendError,
+  type CloudBackendKind,
+  type CloudInstanceConfig,
+  type CloudInstanceHandle,
+} from "./cloud/types.js";
+import { TofuDriver } from "./cloud/tofu.js";
+
+/**
+ * Tool handler error→MCP-result envelope. Cloud errors carry a
+ * stable `code`; we surface that to the agent verbatim so the
+ * tool consumer can dispatch on it without parsing the message.
+ */
+function asCloudMcpResult<T>(fn: () => Promise<T>): Promise<{
+  content: { type: "text"; text: string }[];
+  isError?: boolean;
+}> {
+  return fn()
+    .then((value) => asMcpResult({ ok: true, value }))
+    .catch((err: unknown) => {
+      const e = err as CloudBackendError;
+      const payload = {
+        ok: false,
+        error: {
+          code: e?.code ?? "unknown",
+          message: (err as Error)?.message ?? String(err),
+        },
+      };
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(payload, null, 2) },
+        ],
+        isError: true,
+      };
+    });
+}
+
+const cloudProviderEnum = z.enum(["aws", "azure"]);
+
+server.tool(
+  "signalman_cloud_provision",
+  "Provision an ephemeral cloud VM via the AWS or Azure backend. Returns the instance handle (id + region + backend + name) on success. Every instance carries the signalman-managed=true and signalman-org=<org_id> tags so the cost-reaper can identify it.",
+  {
+    provider: cloudProviderEnum,
+    region: z.string().describe("Cloud region (e.g. 'us-east-1', 'eastus')."),
+    instance_type: z
+      .string()
+      .describe("Vendor-specific instance type / VM size."),
+    image_ref: z
+      .string()
+      .describe(
+        "Vendor-specific image identifier. AWS: AMI id. Azure: full ARM " +
+          "resource id of a gallery image version or custom image.",
+      ),
+    name: z.string().describe("Friendly instance name (surfaces as Name tag / Azure VM name)."),
+    org_id: z
+      .string()
+      .optional()
+      .describe("Owning org for the cost-reaper. Defaults to 'default'."),
+    ttl_minutes: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("Max lifetime in minutes. Defaults to 60. Cost-reaper enforces."),
+    tags: z
+      .record(z.string(), z.string())
+      .optional()
+      .describe(
+        "Additional vendor tags. signalman-managed / signalman-org / " +
+          "signalman-ttl-minutes keys are filtered out (sentinel tags are " +
+          "always set by Signalman; caller can't spoof).",
+      ),
+    network: z
+      .object({
+        subnet_id: z.string().optional(),
+        security_group_ids: z.array(z.string()).optional(),
+        assign_public_ip: z.boolean().optional(),
+      })
+      .optional()
+      .describe(
+        "Network config. For Azure, subnet_id holds the pre-created NIC's " +
+          "ARM resource id (sub-task 3 limitation; sub-task 4 follow-up " +
+          "creates NICs).",
+      ),
+  },
+  async (params) =>
+    withRecording("signalman_cloud_provision", params, () =>
+      asCloudMcpResult(async () => {
+        const backend = getCloudBackend(params.provider as CloudBackendKind);
+        const config: CloudInstanceConfig = params as CloudInstanceConfig;
+        return await backend.provisionInstance(config);
+      }),
+    ),
+);
+
+server.tool(
+  "signalman_cloud_terminate",
+  "Terminate a cloud VM by handle. Idempotent: returns success for already-terminated instances. Per the cost-reaper contract, the backend handles dependent-resource cleanup (Azure auto-deletes the OS disk via deleteOption=Delete; AWS terminates EC2 atomically).",
+  {
+    provider: cloudProviderEnum,
+    id: z.string().describe("Vendor instance id from signalman_cloud_provision."),
+    name: z.string().describe("Instance friendly name."),
+    region: z.string().describe("Cloud region."),
+  },
+  async (params) =>
+    withRecording("signalman_cloud_terminate", params, () =>
+      asCloudMcpResult(async () => {
+        const backend = getCloudBackend(params.provider as CloudBackendKind);
+        const handle: CloudInstanceHandle = {
+          id: params.id,
+          backend: params.provider as CloudBackendKind,
+          name: params.name,
+          region: params.region,
+        };
+        await backend.terminateInstance(handle);
+        return { ok: true };
+      }),
+    ),
+);
+
+server.tool(
+  "signalman_cloud_status",
+  "Get the current state of a cloud VM. Returns state (pending/running/stopped/terminated/unknown), IPs when running, and a reason string when state is unknown.",
+  {
+    provider: cloudProviderEnum,
+    id: z.string(),
+    name: z.string(),
+    region: z.string(),
+  },
+  async (params) =>
+    withRecording("signalman_cloud_status", params, () =>
+      asCloudMcpResult(async () => {
+        const backend = getCloudBackend(params.provider as CloudBackendKind);
+        const handle: CloudInstanceHandle = {
+          id: params.id,
+          backend: params.provider as CloudBackendKind,
+          name: params.name,
+          region: params.region,
+        };
+        return await backend.getInstanceStatus(handle);
+      }),
+    ),
+);
+
+server.tool(
+  "signalman_cloud_list",
+  "List Signalman-managed cloud VMs. Filtered to signalman-managed=true server-side so operators never accidentally see their other cloud workloads. Optional caller tags narrow further.",
+  {
+    provider: cloudProviderEnum,
+    tags: z
+      .record(z.string(), z.string())
+      .optional()
+      .describe("Additional tag filters to narrow the result."),
+  },
+  async (params) =>
+    withRecording("signalman_cloud_list", params, () =>
+      asCloudMcpResult(async () => {
+        const backend = getCloudBackend(params.provider as CloudBackendKind);
+        return await backend.listInstances({ tags: params.tags });
+      }),
+    ),
+);
+
+server.tool(
+  "signalman_cloud_backends",
+  "List the cloud backends registered at this signalman host's module-load time. Useful when an agent doesn't know which providers are available.",
+  {},
+  async (params) =>
+    withRecording("signalman_cloud_backends", params, () =>
+      asCloudMcpResult(async () => listRegisteredBackends()),
+    ),
+);
+
+server.tool(
+  "signalman_stack_apply",
+  "Apply an OpenTofu HCL module as a per-stack workspace. Returns parsed outputs from `tofu output -json` plus the change summary (add/change/destroy counts). The workspace lives under <projectRoot>/.signalman/tofu-workspaces/<stack_name>/.",
+  {
+    stack_name: z
+      .string()
+      .describe("Stack name (1-64 chars, alphanumeric + _.-). Becomes the workspace subdirectory."),
+    module_path: z
+      .string()
+      .describe("Absolute path to the HCL module directory."),
+    vars: z
+      .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+      .optional()
+      .describe("Variables forwarded as `-var k=v` to tofu apply."),
+    auto_approve: z
+      .boolean()
+      .optional()
+      .describe("Pass -auto-approve to tofu apply. Defaults to true."),
+  },
+  async (params) =>
+    withRecording("signalman_stack_apply", params, () =>
+      asCloudMcpResult(async () => {
+        const driver = new TofuDriver({ projectRoot: process.cwd() });
+        return await driver.applyModule({
+          stackName: params.stack_name,
+          modulePath: params.module_path,
+          vars: params.vars,
+          autoApprove: params.auto_approve,
+        });
+      }),
+    ),
+);
+
+server.tool(
+  "signalman_stack_destroy",
+  "Destroy an OpenTofu stack's resources. Idempotent: returns alreadyEmpty=true when the workspace doesn't exist. Workspace directory is intentionally NOT removed after destroy so operators can inspect post-mortem.",
+  {
+    stack_name: z.string(),
+    vars: z
+      .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+      .optional(),
+    auto_approve: z.boolean().optional(),
+  },
+  async (params) =>
+    withRecording("signalman_stack_destroy", params, () =>
+      asCloudMcpResult(async () => {
+        const driver = new TofuDriver({ projectRoot: process.cwd() });
+        return await driver.destroyModule({
+          stackName: params.stack_name,
+          vars: params.vars,
+          autoApprove: params.auto_approve,
+        });
+      }),
+    ),
+);
+
 // ── Start Server ──────────────────────────────────────────────────
 
 async function main() {
