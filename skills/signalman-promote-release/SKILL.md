@@ -76,7 +76,7 @@ signalman promotion add --product p --dest demo --gate manual \
   --gate-config '{"approvers": ["alice@example", "bob@example"]}'
 ```
 
-`signalman promotion approve <id>` then refuses any `--decided-by` that isn't in the list (and refuses if `--decided-by` was omitted). This is an honour-system check: it surfaces accidental self-approval and creates a clear audit trail, but it does NOT cryptographically authenticate the caller. Anyone who can run the CLI could type `--decided-by alice` and bypass it; segregation of duties at that level requires the v0.5+ API-key-bound identity work.
+`signalman promotion approve <id>` then refuses any `--decided-by` that isn't in the list (and refuses if `--decided-by` was omitted). The check is honour-system: `--decided-by` is caller-supplied. It surfaces accidental self-approval and creates an audit trail for small teams; it is not a defence against an adversary with CLI access. Deployments that need authenticated approver identity should front this control plane with an external auth layer.
 
 ## Exit codes
 
