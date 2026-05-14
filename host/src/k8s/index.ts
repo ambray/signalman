@@ -23,6 +23,14 @@ export {
   classifyStderr,
 } from "./kubectl.js";
 export {
+  HelmDriver,
+  type HelmDriverOptions,
+  buildHelmApplyArgs,
+  buildHelmRollbackArgs,
+  buildHelmStatusArgs,
+  parseHelmStatusJson,
+} from "./helm.js";
+export {
   detectBundleKind,
   hasKustomization,
   HELM_CHART_FILE,
