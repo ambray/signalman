@@ -481,6 +481,28 @@ assertions:
     pattern: "ProcessName"
 ```
 
+### Result Envelope (v0.3.0+)
+
+Every `signalman run` produces a `ScenarioResult` envelope on stdout
+(or via the MCP `signalman.run` response). Beyond the usual
+`status` / `duration_ms` / `setup_results[]` / `assertion_results[]`
+fields, v0.3.0 ships four identity fields that pin the run's
+content-addressed shape:
+
+| Field              | Type     | Description |
+|--------------------|----------|-------------|
+| `scenario_hash`    | hex(64)  | SHA-256 over the canonical form of `setup.yaml` + `assertions.yaml` + `workflow.md`. Stable across whitespace / comment changes; perturbed by any semantic change. Two runs of the same scenario carry the same hash. |
+| `vm_lineage_hash`  | hex(64)  | Aggregate of per-VM lineage identities for ephemeral runs. Same template + same OS + same installed[] → same hash. Undefined when no ephemeral VMs were provisioned. |
+| `agent_version`    | string   | Guest-agent version(s) observed during the run. `"0.2.1"` for a single agent; `"0.1.5,0.2.1"` for a mixed-version multi-VM scenario. |
+| `network_class`    | string   | Network class label. `"pre-started"` when operator-managed, `<sanitised switch name>` when network is declared, `"default"` otherwise. Multi-VM scenarios get the sorted-comma-joined unique set. |
+
+These fields are the input to scenario-run caching: a downstream
+consumer (Loom workflow evidence, CI dashboard) can safely cache
+`(scenario_hash, vm_lineage_hash, agent_version) → result` because
+identical inputs are guaranteed to produce identical results under
+hermetic execution. The cache layer itself ships in a v0.3.0
+follow-up; the envelope graduation here is the contract it needs.
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE) for the full text.
