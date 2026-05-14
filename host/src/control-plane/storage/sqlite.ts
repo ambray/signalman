@@ -160,13 +160,19 @@ function loadMigrations(dir: string): MigrationFile[] {
   if (!fs.existsSync(dir)) {
     throw new Error(`migrations directory not found: ${dir}`);
   }
+  // Dialect-aware: files ending in `.pg.sql` are Postgres-only and
+  // skipped here; `.sqlite.sql` are SQLite-only; plain `.sql` apply
+  // to both (the existing v0.2.0 convention). v0.3.0-6 introduces
+  // dialect splits because SQLite's CHECK-constraint replacement
+  // requires table-recreate, while Postgres needs ALTER TABLE
+  // DROP/ADD CONSTRAINT — the two SQL shapes don't overlap.
   const files = fs
     .readdirSync(dir)
-    .filter((f) => f.endsWith(".sql"))
+    .filter((f) => f.endsWith(".sql") && !f.endsWith(".pg.sql"))
     .sort();
   return files.map((f) => {
-    // Filename convention: NNNN_name.sql (4-digit zero-padded version).
-    const match = /^(\d+)_(.+)\.sql$/.exec(f);
+    // Filename convention: NNNN_name.sql or NNNN_name.sqlite.sql.
+    const match = /^(\d+)_(.+?)(?:\.sqlite)?\.sql$/.exec(f);
     if (!match) {
       throw new Error(`migration filename does not match NNNN_name.sql: ${f}`);
     }

@@ -44,6 +44,7 @@ import { loadConfig } from "../config.js";
 import type {
   Artifact,
   Deployment,
+  DeploymentHealthSummary,
   HealthCheck,
   Product,
   Release,
@@ -425,6 +426,15 @@ async function defaultDeployBackend(): Promise<DeployBackend> {
   return new HypervisorDeployBackend(hyp);
 }
 
+/**
+ * True when a target kind is one of the Kubernetes-routed kinds.
+ * Used by {@link runReleaseDeploy} / {@link runReleaseRollback} to
+ * dispatch away from the hypervisor backend.
+ */
+function isK8sTargetKind(kind: TargetKind): boolean {
+  return kind === "k8s_test" || kind === "k8s_demo";
+}
+
 export async function runReleaseDeploy(
   controlPlane: ControlPlane,
   input: ReleaseDeployInput,
@@ -452,6 +462,19 @@ export async function runReleaseDeploy(
   const target = await controlPlane.targets.getByName(orgId, input.targetName);
   if (!target) throw new Error(`target not found: ${input.targetName}`);
 
+  // Kubernetes targets route to the K8s driver path. The VM-backed
+  // hypervisor backend (checkpoints + staging + reachability) does
+  // not apply.
+  if (isK8sTargetKind(target.kind)) {
+    return runK8sReleaseDeploy(controlPlane, {
+      orgId,
+      releaseId,
+      target,
+      actor: input.actor,
+      out: options.out,
+    });
+  }
+
   const backend = options.backend ?? (await defaultDeployBackend());
   return runDeploy({
     controlPlane,
@@ -478,6 +501,16 @@ export async function runReleaseRollback(
   const orgId = await getActiveOrgId(controlPlane);
   const target = await controlPlane.targets.getByName(orgId, input.targetName);
   if (!target) throw new Error(`target not found: ${input.targetName}`);
+
+  if (isK8sTargetKind(target.kind)) {
+    return runK8sReleaseRollback(controlPlane, {
+      orgId,
+      target,
+      toReleaseId: input.toReleaseId,
+      actor: input.actor,
+      out: options.out,
+    });
+  }
 
   const backend = options.backend ?? (await defaultDeployBackend());
   return runRollback({
@@ -689,4 +722,378 @@ function parseDeclaredProbesFromRelease(release: Release): Probe[] {
   const parsed = JSON.parse(release.buildYamlJson) as unknown;
   const yaml: BuildYaml = validateBuildYaml(parsed);
   return yaml.probes ?? [];
+}
+
+// ── K8s release-deploy adapter (v0.3.0-6 sub-task 1) ────────────────
+
+/**
+ * Pull k8s-target-specific connection fields with shape validation.
+ *
+ * Stored on `TargetConnection` for `kind: k8s_test | k8s_demo`:
+ *   - `bundleUri` (string, required): absolute path to a chart dir
+ *     or manifest bundle.
+ *   - `namespace` (string, required): target namespace.
+ *   - `clusterContext` (string, optional): kubectl/helm --context.
+ *   - `releaseName` (string, optional): defaults to bundle basename.
+ */
+function readK8sConnection(target: Target): {
+  bundleUri: string;
+  namespace: string;
+  clusterContext?: string;
+  releaseName?: string;
+} {
+  const c = target.connection;
+  const bundleUri = typeof c.bundleUri === "string" ? c.bundleUri : "";
+  const namespace = typeof c.namespace === "string" ? c.namespace : "";
+  if (!bundleUri) {
+    throw new Error(
+      `k8s target '${target.name}' missing connection.bundleUri`,
+    );
+  }
+  if (!namespace) {
+    throw new Error(
+      `k8s target '${target.name}' missing connection.namespace`,
+    );
+  }
+  return {
+    bundleUri,
+    namespace,
+    clusterContext:
+      typeof c.clusterContext === "string" ? c.clusterContext : undefined,
+    releaseName:
+      typeof c.releaseName === "string" ? c.releaseName : undefined,
+  };
+}
+
+interface RunK8sReleaseDeployArgs {
+  orgId: string;
+  releaseId: string;
+  target: Target;
+  actor?: string;
+  out?: NodeJS.WritableStream;
+  /** Injectable for tests; production callers omit. */
+  drivers?: import("../k8s/index.js").K8sDriverPair;
+}
+
+/**
+ * K8s adapter for `release deploy`. Creates the same Deployment row
+ * shape the hypervisor path uses, runs `runK8sDeploy` (apply +
+ * health), then promotes / fails the deployment row identically to
+ * the VM flow.
+ *
+ * Differences from the VM path:
+ *   - No pre-deploy checkpoint (Kubernetes uses revision history,
+ *     not VM snapshots).
+ *   - No artifact staging — the manifest bundle is the artifact;
+ *     the release's build.yaml stays informational only.
+ *   - Only the `vm_reachable` analogue ("apply succeeded" + pods
+ *     ready) is run; declared probes from build.yaml are skipped
+ *     in this commit and queued for the v0.3.0-7 probe-runner pass.
+ */
+export async function runK8sReleaseDeploy(
+  controlPlane: ControlPlane,
+  args: RunK8sReleaseDeployArgs,
+): Promise<RunDeployResult> {
+  const { runK8sDeploy } = await import("../k8s/index.js");
+  const actor = args.actor ?? "cli";
+  const out = args.out ?? process.stderr;
+
+  const release = await controlPlane.releases.get(args.releaseId);
+  if (!release) throw new Error(`release not found: ${args.releaseId}`);
+  if (release.status !== "ready") {
+    throw new Error(
+      `release ${release.id} is not ready (status=${release.status})`,
+    );
+  }
+  const conn = readK8sConnection(args.target);
+  const artifacts = await controlPlane.artifacts.listForRelease(release.id);
+  const previousActive = await controlPlane.deployments.getActiveForTarget(
+    args.target.id,
+  );
+
+  const deployment = await controlPlane.deployments.create({
+    orgId: args.orgId,
+    releaseId: release.id,
+    targetId: args.target.id,
+    previousDeploymentId: previousActive?.id,
+  });
+  await controlPlane.auditLog.append({
+    orgId: args.orgId,
+    actor,
+    action: "release.deploy.started",
+    entityType: "deployment",
+    entityId: deployment.id,
+    detail: { releaseId: release.id, targetId: args.target.id, kind: args.target.kind },
+  });
+  await controlPlane.deployments.update(deployment.id, {
+    status: "deploying",
+    startedAt: new Date().toISOString(),
+  });
+  out.write(
+    `[release deploy] k8s target '${args.target.name}' → namespace '${conn.namespace}'\n`,
+  );
+
+  try {
+    const result = await runK8sDeploy({
+      bundleUri: conn.bundleUri,
+      namespace: conn.namespace,
+      context: conn.clusterContext,
+      releaseName: conn.releaseName,
+      drivers: args.drivers,
+    });
+    const reachable = result.health?.ready ?? true;
+    const reachabilityStatus = reachable ? "pass" : "fail";
+    await controlPlane.healthChecks.append({
+      deploymentId: deployment.id,
+      probeName: "k8s_pods_ready",
+      status: reachabilityStatus,
+      detail: result.health?.detail ?? `applied via ${result.apply.driver}`,
+    });
+
+    const healthSummary: DeploymentHealthSummary = {
+      total: 1,
+      pass: reachable ? 1 : 0,
+      fail: reachable ? 0 : 1,
+      degraded: 0,
+      lastCheckedAt: new Date().toISOString(),
+    };
+
+    if (!reachable) {
+      await controlPlane.deployments.update(deployment.id, {
+        status: "failed",
+        completedAt: new Date().toISOString(),
+        healthSummary,
+      });
+      await controlPlane.auditLog.append({
+        orgId: args.orgId,
+        actor,
+        action: "release.deploy.failed",
+        entityType: "deployment",
+        entityId: deployment.id,
+        detail: {
+          releaseId: release.id,
+          targetId: args.target.id,
+          error: result.health?.detail ?? "pods not ready",
+        },
+      });
+      throw new Error(
+        `k8s health check failed: ${result.health?.detail ?? "pods not ready"}`,
+      );
+    }
+
+    if (previousActive) {
+      await controlPlane.deployments.update(previousActive.id, {
+        status: "superseded",
+      });
+    }
+    const finalized = await controlPlane.deployments.update(deployment.id, {
+      status: "active",
+      completedAt: new Date().toISOString(),
+      healthSummary,
+    });
+    await controlPlane.auditLog.append({
+      orgId: args.orgId,
+      actor,
+      action: "release.deploy.completed",
+      entityType: "deployment",
+      entityId: deployment.id,
+      detail: {
+        releaseId: release.id,
+        targetId: args.target.id,
+        supersededId: previousActive?.id,
+        bundleKind: result.bundleKind,
+        driver: result.apply.driver,
+      },
+    });
+    return {
+      deployment: finalized,
+      release,
+      target: args.target,
+      artifacts,
+      healthSummary,
+    };
+  } catch (err) {
+    // Distinguish thrown-by-us (failed health) from driver-thrown
+    // (apply failure). The deployment row is only updated when we
+    // didn't already do it above.
+    const current = await controlPlane.deployments.get(deployment.id);
+    if (current && current.status !== "failed") {
+      await controlPlane.deployments.update(deployment.id, {
+        status: "failed",
+        completedAt: new Date().toISOString(),
+      });
+      await controlPlane.auditLog.append({
+        orgId: args.orgId,
+        actor,
+        action: "release.deploy.failed",
+        entityType: "deployment",
+        entityId: deployment.id,
+        detail: {
+          releaseId: release.id,
+          targetId: args.target.id,
+          error: (err as Error).message,
+        },
+      });
+    }
+    throw err;
+  }
+}
+
+interface RunK8sReleaseRollbackArgs {
+  orgId: string;
+  target: Target;
+  toReleaseId?: string;
+  actor?: string;
+  out?: NodeJS.WritableStream;
+  drivers?: import("../k8s/index.js").K8sDriverPair;
+}
+
+/**
+ * Rollback path for k8s targets: defer to the K8s driver's native
+ * rollback (`kubectl rollout undo` or `helm rollback`) rather than
+ * "redeploy the prior release", since Kubernetes already maintains
+ * a revision history.
+ *
+ * The implementation records the rollback as a deployment-row state
+ * transition so the audit timeline matches the VM path. We map the
+ * rolled-back deployment to `status: rolled_back` and, when a prior
+ * superseded deployment exists, promote it back to active.
+ */
+export async function runK8sReleaseRollback(
+  controlPlane: ControlPlane,
+  args: RunK8sReleaseRollbackArgs,
+): Promise<RunDeployResult> {
+  const { runK8sRollback } = await import("../k8s/index.js");
+  const actor = args.actor ?? "cli-rollback";
+  const out = args.out ?? process.stderr;
+
+  const active = await controlPlane.deployments.getActiveForTarget(args.target.id);
+  if (!active) {
+    throw new Error(
+      `no active deployment on k8s target '${args.target.name}' to roll back`,
+    );
+  }
+  const release = await controlPlane.releases.get(active.releaseId);
+  if (!release) {
+    throw new Error(`active deployment ${active.id} references missing release`);
+  }
+  const conn = readK8sConnection(args.target);
+  const releaseName = conn.releaseName ?? release.id;
+  const artifacts = await controlPlane.artifacts.listForRelease(release.id);
+  out.write(
+    `[release rollback] k8s target '${args.target.name}' → release '${releaseName}'\n`,
+  );
+
+  // Kubernetes rollback addresses a workload by name; the operator
+  // pins the rollback target name via `releaseName` on the target's
+  // connection. We default to `deployment/<releaseName>` so the
+  // common "single Deployment per target" shape works out of the box.
+  const releaseId = conn.releaseName
+    ? `deployment/${conn.releaseName}`
+    : `deployment/${release.id}`;
+
+  await runK8sRollback({
+    releaseId,
+    namespace: conn.namespace,
+    context: conn.clusterContext,
+    drivers: args.drivers,
+  });
+
+  await controlPlane.deployments.update(active.id, {
+    status: "rolled_back",
+    completedAt: new Date().toISOString(),
+  });
+  await controlPlane.auditLog.append({
+    orgId: args.orgId,
+    actor,
+    action: "release.rollback.completed",
+    entityType: "deployment",
+    entityId: active.id,
+    detail: {
+      releaseId: release.id,
+      targetId: args.target.id,
+      driver: "kubectl",
+    },
+  });
+  const finalized = await controlPlane.deployments.get(active.id);
+  return {
+    deployment: finalized ?? active,
+    release,
+    target: args.target,
+    artifacts,
+    healthSummary: active.healthSummary ?? {
+      total: 0,
+      pass: 0,
+      fail: 0,
+      degraded: 0,
+    },
+  };
+}
+
+// ── Direct K8s verbs (MCP + CLI entry points) ───────────────────────
+
+export interface K8sDeployVerbInput {
+  bundleUri: string;
+  namespace: string;
+  clusterContext?: string;
+  releaseName?: string;
+  waitForHealth?: boolean;
+  healthTimeoutMs?: number;
+}
+
+/**
+ * Direct K8s deploy — bypasses the control-plane Deployment row and
+ * runs `runK8sDeploy` on an explicit bundle/namespace. Mirrors the
+ * cloud `signalman_stack_apply` path: the MCP / CLI surface drives
+ * the driver, the control-plane release-deploy verb stays the
+ * audit-logged path.
+ */
+export async function runK8sDeployVerb(input: K8sDeployVerbInput) {
+  const { runK8sDeploy } = await import("../k8s/index.js");
+  return runK8sDeploy({
+    bundleUri: input.bundleUri,
+    namespace: input.namespace,
+    context: input.clusterContext,
+    releaseName: input.releaseName,
+    waitForHealth: input.waitForHealth,
+    healthTimeoutMs: input.healthTimeoutMs,
+  });
+}
+
+export interface K8sRollbackVerbInput {
+  releaseId: string;
+  namespace: string;
+  clusterContext?: string;
+  toRevision?: number;
+  driver?: "kubectl" | "helm";
+}
+
+export async function runK8sRollbackVerb(input: K8sRollbackVerbInput) {
+  const { runK8sRollback } = await import("../k8s/index.js");
+  return runK8sRollback({
+    releaseId: input.releaseId,
+    namespace: input.namespace,
+    context: input.clusterContext,
+    toRevision: input.toRevision,
+    driver: input.driver,
+  });
+}
+
+export interface K8sStatusVerbInput {
+  namespace: string;
+  clusterContext?: string;
+  selector?: string;
+  releaseName?: string;
+  driver?: "kubectl" | "helm";
+}
+
+export async function runK8sStatusVerb(input: K8sStatusVerbInput) {
+  const { runK8sStatus } = await import("../k8s/index.js");
+  return runK8sStatus({
+    namespace: input.namespace,
+    context: input.clusterContext,
+    selector: input.selector,
+    releaseName: input.releaseName,
+    driver: input.driver,
+  });
 }

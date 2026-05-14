@@ -181,12 +181,15 @@ function loadMigrations(dir: string): MigrationFile[] {
   if (!fs.existsSync(dir)) {
     throw new Error(`migrations directory not found: ${dir}`);
   }
+  // Dialect-aware (see sqlite.ts for the rationale): `.sqlite.sql`
+  // files are SQLite-only and skipped here; `.pg.sql` is the
+  // Postgres-only counterpart; plain `.sql` applies to both.
   return fs
     .readdirSync(dir)
-    .filter((f) => f.endsWith(".sql"))
+    .filter((f) => f.endsWith(".sql") && !f.endsWith(".sqlite.sql"))
     .sort()
     .map((f) => {
-      const match = /^(\d+)_(.+)\.sql$/.exec(f);
+      const match = /^(\d+)_(.+?)(?:\.pg)?\.sql$/.exec(f);
       if (!match) throw new Error(`bad migration filename: ${f}`);
       return {
         version: parseInt(match[1], 10),

@@ -31,6 +31,19 @@ export {
   parseHelmStatusJson,
 } from "./helm.js";
 export {
+  runK8sDeploy,
+  runK8sRollback,
+  runK8sStatus,
+  runK8sHealth,
+  defaultDriverFactory,
+  type RunK8sDeployOptions,
+  type RunK8sDeployResult,
+  type RunK8sRollbackOptions,
+  type RunK8sStatusOptions,
+  type RunK8sHealthOptions,
+  type K8sDriverPair,
+} from "./executor.js";
+export {
   detectBundleKind,
   hasKustomization,
   HELM_CHART_FILE,
