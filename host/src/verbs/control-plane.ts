@@ -52,8 +52,17 @@ import type {
   Target,
   TargetConnection,
   TargetKind,
+  WebhookKind,
+  WebhookSubscription,
 } from "../control-plane/types.js";
 import type { ProbeInvoker, ScheduledProbeOutcome } from "../control-plane/scheduler/index.js";
+import {
+  EventDispatcher,
+  type DispatchResult,
+  type EmailSender,
+  type HttpFetcher,
+  type SignalmanEvent,
+} from "../control-plane/events/index.js";
 
 // ── Lifecycle helper ────────────────────────────────────────────────
 
@@ -205,7 +214,7 @@ export async function runReleaseBuild(
 
   try {
     const commitSha = input.commitSha ?? (await resolveCommitSha(workDir));
-    return await runBuild({
+    const result = await runBuild({
       controlPlane,
       orgId,
       productId: product.id,
@@ -217,6 +226,18 @@ export async function runReleaseBuild(
       out: options.out,
       signingKeyPem: input.signingKeyPem,
     });
+    if (result.release.status === "ready") {
+      await fireEventBestEffort(controlPlane, {
+        kind: "release-built",
+        orgId,
+        at: new Date().toISOString(),
+        releaseId: result.release.id,
+        productName: product.name,
+        tag: result.release.tag,
+        manifestSha256: result.release.manifestSha256,
+      });
+    }
+    return result;
   } finally {
     if (cleanup) await cleanup();
   }
@@ -478,7 +499,7 @@ export async function runReleaseDeploy(
   }
 
   const backend = options.backend ?? (await defaultDeployBackend());
-  return runDeploy({
+  const result = await runDeploy({
     controlPlane,
     orgId,
     releaseId,
@@ -487,6 +508,21 @@ export async function runReleaseDeploy(
     actor: input.actor,
     out: options.out,
   });
+  await fireEventBestEffort(controlPlane, {
+    kind: "release-deployed",
+    orgId,
+    at: new Date().toISOString(),
+    deploymentId: result.deployment.id,
+    releaseId: result.release.id,
+    targetName: result.target.name,
+    status: result.deployment.status,
+    healthSummary: {
+      total: result.healthSummary.total,
+      pass: result.healthSummary.pass,
+      fail: result.healthSummary.fail,
+    },
+  });
+  return result;
 }
 
 export interface ReleaseRollbackInput {
@@ -515,7 +551,7 @@ export async function runReleaseRollback(
   }
 
   const backend = options.backend ?? (await defaultDeployBackend());
-  return runRollback({
+  const result = await runRollback({
     controlPlane,
     orgId,
     targetId: target.id,
@@ -524,6 +560,15 @@ export async function runReleaseRollback(
     actor: input.actor,
     out: options.out,
   });
+  await fireEventBestEffort(controlPlane, {
+    kind: "deployment-rolled-back",
+    orgId,
+    at: new Date().toISOString(),
+    deploymentId: result.deployment.id,
+    releaseId: result.release.id,
+    targetName: result.target.name,
+  });
+  return result;
 }
 
 // ── Deployment + health query verbs (PR 3 read surface) ─────────────
@@ -1251,5 +1296,187 @@ export function createDefaultProbeInvoker(
       deploymentId: result.deploymentId,
     };
     return outcome;
+  };
+}
+
+// ── Webhook subscription verbs (v0.4.0-2 / Epic 2) ──────────────────
+
+export interface WebhookAddInput {
+  kind: WebhookKind;
+  url: string;
+  secretHmacKey?: string;
+  eventKinds?: string[];
+  active?: boolean;
+  description?: string;
+}
+
+export async function runWebhookAdd(
+  controlPlane: ControlPlane,
+  input: WebhookAddInput,
+): Promise<WebhookSubscription> {
+  if (input.kind === "email" && !input.url.startsWith("mailto:") && !input.url.includes("@")) {
+    throw new Error(
+      "webhook add: email kind requires a mailto: URL or a bare email address",
+    );
+  }
+  if ((input.kind === "generic" || input.kind === "slack") && !/^https?:\/\//i.test(input.url)) {
+    throw new Error("webhook add: generic/slack kinds require an http(s):// URL");
+  }
+  const orgId = await getActiveOrgId(controlPlane);
+  const sub = await controlPlane.webhookSubscriptions.create({
+    orgId,
+    kind: input.kind,
+    url: input.url,
+    secretHmacKey: input.secretHmacKey ?? null,
+    eventKinds: input.eventKinds ?? [],
+    active: input.active,
+    description: input.description ?? null,
+  });
+  await controlPlane.auditLog.append({
+    orgId,
+    actor: "cli",
+    action: "webhook.added",
+    entityType: "webhook_subscription",
+    entityId: sub.id,
+    detail: {
+      kind: sub.kind,
+      url: sub.url,
+      eventKinds: sub.eventKinds,
+    },
+  });
+  return sub;
+}
+
+export async function runWebhookList(
+  controlPlane: ControlPlane,
+): Promise<WebhookSubscription[]> {
+  const orgId = await getActiveOrgId(controlPlane);
+  return controlPlane.webhookSubscriptions.listForOrg(orgId);
+}
+
+export async function runWebhookRemove(
+  controlPlane: ControlPlane,
+  input: { id: string },
+): Promise<void> {
+  const existing = await controlPlane.webhookSubscriptions.get(input.id);
+  if (!existing) throw new Error(`webhook subscription not found: ${input.id}`);
+  await controlPlane.webhookSubscriptions.softDelete(existing.id);
+  await controlPlane.auditLog.append({
+    orgId: existing.orgId,
+    actor: "cli",
+    action: "webhook.removed",
+    entityType: "webhook_subscription",
+    entityId: existing.id,
+  });
+}
+
+export interface WebhookTestInput {
+  id: string;
+  /** Event payload to use for the test. Defaults to a synthetic `release-built`. */
+  event?: SignalmanEvent;
+}
+
+export interface WebhookTestResult {
+  subscription: WebhookSubscription;
+  outcome: { delivered: boolean; status?: number; error?: string };
+}
+
+/**
+ * Send a synthetic event to a single subscription. Used by `signalman
+ * webhook test <id>` to verify a subscription before relying on it
+ * in production paths.
+ */
+export async function runWebhookTest(
+  controlPlane: ControlPlane,
+  input: WebhookTestInput,
+  options: { fetch?: HttpFetcher; email?: EmailSender | null } = {},
+): Promise<WebhookTestResult> {
+  const existing = await controlPlane.webhookSubscriptions.get(input.id);
+  if (!existing) throw new Error(`webhook subscription not found: ${input.id}`);
+  const event: SignalmanEvent = input.event ?? {
+    kind: "release-built",
+    orgId: existing.orgId,
+    at: new Date().toISOString(),
+    releaseId: "test-release",
+    productName: "test-product",
+    tag: "v0.0.0-test",
+    manifestSha256: null,
+  };
+  const dispatcher = new EventDispatcher({
+    controlPlane,
+    fetch: options.fetch,
+    email: options.email,
+  });
+  const outcome = await dispatcher.deliver(existing, event);
+  return {
+    subscription: existing,
+    outcome: {
+      delivered: outcome.delivered,
+      status: outcome.status,
+      error: outcome.error,
+    },
+  };
+}
+
+/**
+ * Fire an event through the dispatcher without letting downstream
+ * delivery failures propagate. The release-build / deploy / rollback
+ * paths use this so a flaky Slack webhook can't block a build from
+ * landing.
+ *
+ * Returns the dispatch result for tests that want to assert delivery;
+ * production paths discard the return value.
+ */
+export async function fireEventBestEffort(
+  controlPlane: ControlPlane,
+  event: SignalmanEvent,
+): Promise<DispatchResult | null> {
+  try {
+    const dispatcher = new EventDispatcher({ controlPlane });
+    return await dispatcher.dispatch(event);
+  } catch (err) {
+    // Dispatcher itself blew up (e.g. listActive() against a closed
+    // DB). Log to stderr and continue.
+    process.stderr.write(
+      JSON.stringify({
+        source: "signalman-dispatcher",
+        kind: "dispatch-error",
+        event: event.kind,
+        error: (err as Error).message,
+      }) + "\n",
+    );
+    return null;
+  }
+}
+
+/**
+ * Wire the scheduler emit hook into the event dispatcher. Returns an
+ * emit function suitable for `runSchedulerTick`'s `emit` option;
+ * health-failed events get translated into dispatcher events, all
+ * other scheduler events are logged but not dispatched.
+ */
+export function createSchedulerDispatcherBridge(
+  controlPlane: ControlPlane,
+  orgId: string,
+) {
+  return (ev: {
+    kind: "health-tick" | "health-failed" | "schedule-error";
+    scheduleId: string;
+    targetId: string;
+    at: string;
+    outcome?: ScheduledProbeOutcome;
+    error?: string;
+  }) => {
+    if (ev.kind !== "health-failed" || !ev.outcome) return;
+    void fireEventBestEffort(controlPlane, {
+      kind: "health-failed",
+      orgId,
+      at: ev.at,
+      scheduleId: ev.scheduleId,
+      targetId: ev.targetId,
+      deploymentId: ev.outcome.deploymentId,
+      reachable: ev.outcome.reachable,
+      probes: ev.outcome.probes,
+    });
   };
 }
