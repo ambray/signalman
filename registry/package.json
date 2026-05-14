@@ -5,7 +5,8 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "signalman-registry": "dist/cli.js"
+    "signalman-registry": "dist/cli.js",
+    "signalman-registry-mcp": "dist/mcp.js"
   },
   "homepage": "https://signalman.dev",
   "repository": {
