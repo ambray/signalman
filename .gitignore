@@ -1,9 +1,11 @@
 # Dependencies
 node_modules/
 host/node_modules/
+registry/node_modules/
 
 # Build output
 host/dist/
+registry/dist/
 guest/target/
 # Cargo workspace target (P1 service crate). The `target-*/` glob
 # catches CARGO_TARGET_DIR overrides (e.g. `target-codex-check/`)
@@ -13,6 +15,7 @@ target-*/
 
 # Coverage reports (vitest v8 provider)
 host/coverage/
+registry/coverage/
 
 # OS files
 .DS_Store

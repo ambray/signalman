@@ -1,0 +1,55 @@
+{
+  "name": "@signalman/registry",
+  "version": "0.0.1",
+  "description": "Signalman artifact registry: standalone OSS content-addressed blob + signed-manifest registry. Federates with @signalman/host via the BlobDriver interface.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "signalman-registry": "dist/cli.js"
+  },
+  "homepage": "https://signalman.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ambray/signalman.git",
+    "directory": "registry"
+  },
+  "bugs": {
+    "url": "https://github.com/ambray/signalman/issues"
+  },
+  "scripts": {
+    "build": "tsc && node scripts/copy-assets.mjs",
+    "dev": "tsx src/cli.ts serve",
+    "cli": "tsx src/cli.ts",
+    "mcp": "tsx src/mcp.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage"
+  },
+  "keywords": [
+    "artifact-registry",
+    "blob-store",
+    "content-addressed",
+    "ed25519",
+    "signed-manifests",
+    "oci",
+    "supply-chain",
+    "devops",
+    "signalman"
+  ],
+  "author": "Signalman Contributors",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^3.2.4",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
