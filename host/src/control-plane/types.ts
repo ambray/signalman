@@ -287,3 +287,28 @@ export interface CloudOrgUsage {
   terminatedAt: string | null;
   estimatedCents: number;
 }
+
+/**
+ * Per-org cloud credential stored encrypted at rest
+ * (v0.3.0-5 sub-task 6, design §13.7).
+ *
+ * The `ciphertextB64` field holds the base64-encoded AES-GCM
+ * blob (iv || ciphertext || auth_tag). Decryption is in
+ * `host/src/cloud/credentials.ts`; callers should NEVER pass
+ * the raw `ciphertextB64` to anything other than the decrypter.
+ *
+ * `redactedHint` is the safe-to-display short string — operators
+ * see this in `signalman cloud creds get` / `signalman_creds_get`
+ * to confirm "yes, that's the right key without leaking the
+ * secret".
+ */
+export interface CloudOrgCredential {
+  id: string;
+  orgId: string;
+  backend: string;
+  ciphertextB64: string;
+  encryptionMethod: string;
+  redactedHint: string;
+  createdAt: string;
+  updatedAt: string;
+}

@@ -22,6 +22,7 @@ import type {
   ArtifactKind,
   AuditLogEntry,
   CloudOrgBudget,
+  CloudOrgCredential,
   CloudOrgUsage,
   Deployment,
   HealthCheck,
@@ -325,6 +326,35 @@ export interface CloudUsageRepo {
   ): Promise<CloudOrgUsage[]>;
 }
 
+/**
+ * Per-org cloud credentials, stored encrypted (v0.3.0-5 sub-task 6).
+ *
+ * Repos handle the raw row. Encryption/decryption lives in
+ * `host/src/cloud/credentials.ts` — repo callers pass ciphertext
+ * + redacted hint in; the decrypter loads the row and applies
+ * AES-GCM at call time.
+ */
+export interface CloudCredentialsRepo {
+  /** Return the credential row for the org+backend, or null. */
+  get(orgId: string, backend: string): Promise<CloudOrgCredential | null>;
+  /**
+   * Upsert (overwrite) the credential. Operators rotating
+   * credentials run this; downstream callers re-decrypt with the
+   * new ciphertext on next read.
+   */
+  upsert(input: {
+    orgId: string;
+    backend: string;
+    ciphertextB64: string;
+    encryptionMethod: string;
+    redactedHint: string;
+  }): Promise<CloudOrgCredential>;
+  /** Remove the credential. Idempotent. */
+  remove(orgId: string, backend: string): Promise<void>;
+  /** List all credentials for the org (across backends). */
+  listForOrg(orgId: string): Promise<CloudOrgCredential[]>;
+}
+
 // ── Driver façade ───────────────────────────────────────────────────
 
 export interface StorageDriver {
@@ -356,6 +386,8 @@ export interface StorageDriver {
   // v0.3.0-5 sub-task 5 — cloud cost guardrails:
   readonly cloudBudgets: CloudBudgetRepo;
   readonly cloudUsage: CloudUsageRepo;
+  // v0.3.0-5 sub-task 6 — per-org credentials at rest:
+  readonly cloudCredentials: CloudCredentialsRepo;
 }
 
 /** Thrown by repos that are declared in this PR but not yet implemented. */

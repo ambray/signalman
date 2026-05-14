@@ -139,4 +139,8 @@ export class ControlPlane {
   get cloudUsage() {
     return this.storage.cloudUsage;
   }
+  // v0.3.0-5 sub-task 6 — per-org credentials at rest:
+  get cloudCredentials() {
+    return this.storage.cloudCredentials;
+  }
 }

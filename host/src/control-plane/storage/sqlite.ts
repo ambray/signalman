@@ -27,6 +27,7 @@ import type {
   ArtifactKind,
   AuditLogEntry,
   CloudOrgBudget,
+  CloudOrgCredential,
   CloudOrgUsage,
   Deployment,
   DeploymentHealthSummary,
@@ -53,6 +54,7 @@ import {
   type ArtifactRepo,
   type AuditLogRepo,
   type CloudBudgetRepo,
+  type CloudCredentialsRepo,
   type CloudUsageRepo,
   type DeploymentRepo,
   type HealthCheckRepo,
@@ -103,6 +105,7 @@ export class SqliteStorageDriver implements StorageDriver {
   readonly jobs: JobRepo;
   readonly cloudBudgets: CloudBudgetRepo;
   readonly cloudUsage: CloudUsageRepo;
+  readonly cloudCredentials: CloudCredentialsRepo;
 
   constructor(opts: SqliteDriverOptions) {
     if (opts.path !== ":memory:") {
@@ -131,6 +134,7 @@ export class SqliteStorageDriver implements StorageDriver {
     this.jobs = new SqliteJobRepo(this.db);
     this.cloudBudgets = new SqliteCloudBudgetRepo(this.db);
     this.cloudUsage = new SqliteCloudUsageRepo(this.db);
+    this.cloudCredentials = new SqliteCloudCredentialsRepo(this.db);
   }
 
   async migrate(): Promise<void> {
@@ -1713,5 +1717,101 @@ class SqliteCloudUsageRepo implements CloudUsageRepo {
       )
       .all(...binds) as SqlRow[];
     return rows.map(mapCloudUsage);
+  }
+}
+
+function mapCloudCredential(row: SqlRow): CloudOrgCredential {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    backend: row.backend as string,
+    ciphertextB64: row.ciphertext_b64 as string,
+    encryptionMethod: row.encryption_method as string,
+    redactedHint: row.redacted_hint as string,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+class SqliteCloudCredentialsRepo implements CloudCredentialsRepo {
+  constructor(private readonly db: DatabaseSync) {}
+
+  async get(orgId: string, backend: string): Promise<CloudOrgCredential | null> {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM cloud_org_credential WHERE org_id = ? AND backend = ?",
+      )
+      .get(orgId, backend) as SqlRow | undefined;
+    return row ? mapCloudCredential(row) : null;
+  }
+
+  async upsert(input: {
+    orgId: string;
+    backend: string;
+    ciphertextB64: string;
+    encryptionMethod: string;
+    redactedHint: string;
+  }): Promise<CloudOrgCredential> {
+    const now = nowIso();
+    const existing = await this.get(input.orgId, input.backend);
+    try {
+      if (existing) {
+        prep(
+          this.db,
+          "UPDATE cloud_org_credential SET ciphertext_b64 = @ciphertext_b64, encryption_method = @encryption_method, redacted_hint = @redacted_hint, updated_at = @updated_at WHERE id = @id",
+        ).run({
+          id: existing.id,
+          ciphertext_b64: input.ciphertextB64,
+          encryption_method: input.encryptionMethod,
+          redacted_hint: input.redactedHint,
+          updated_at: now,
+        });
+        return mapCloudCredential({
+          id: existing.id,
+          org_id: existing.orgId,
+          backend: existing.backend,
+          ciphertext_b64: input.ciphertextB64,
+          encryption_method: input.encryptionMethod,
+          redacted_hint: input.redactedHint,
+          created_at: existing.createdAt,
+          updated_at: now,
+        });
+      } else {
+        const bind = {
+          id: newId(),
+          org_id: input.orgId,
+          backend: input.backend,
+          ciphertext_b64: input.ciphertextB64,
+          encryption_method: input.encryptionMethod,
+          redacted_hint: input.redactedHint,
+          created_at: now,
+          updated_at: now,
+        };
+        prep(
+          this.db,
+          "INSERT INTO cloud_org_credential (id, org_id, backend, ciphertext_b64, encryption_method, redacted_hint, created_at, updated_at) VALUES (@id, @org_id, @backend, @ciphertext_b64, @encryption_method, @redacted_hint, @created_at, @updated_at)",
+        ).run(bind);
+        return mapCloudCredential(bind);
+      }
+    } catch (err) {
+      mapSqliteError(err);
+    }
+  }
+
+  async remove(orgId: string, backend: string): Promise<void> {
+    this.db
+      .prepare(
+        "DELETE FROM cloud_org_credential WHERE org_id = ? AND backend = ?",
+      )
+      .run(orgId, backend);
+  }
+
+  async listForOrg(orgId: string): Promise<CloudOrgCredential[]> {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM cloud_org_credential WHERE org_id = ? ORDER BY backend",
+      )
+      .all(orgId) as SqlRow[];
+    return rows.map(mapCloudCredential);
   }
 }

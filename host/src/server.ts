@@ -1220,6 +1220,130 @@ server.tool(
     ),
 );
 
+// ── v0.3.0-5 sub-task 6: per-org credentials at rest ─────────────
+//
+// Three operator-facing tools (get / set / remove). All three
+// touch encrypted-at-rest credentials; reads return REDACTED
+// hints, never the plaintext secret. Decryption happens only
+// at the call site (provisionInstance) via the loader helper.
+
+server.tool(
+  "signalman_creds_set",
+  "Encrypt and store per-org cloud credentials. AWS shape: {access_key_id, secret_access_key, session_token?}. Azure shape: {tenant_id, client_id, client_secret}. Requires SIGNALMAN_CRED_KEY env var (base64 32-byte AES-256-GCM key). Returns only the redacted hint; the plaintext does NOT echo back. Idempotent upsert — re-running with new plaintext rotates the stored secret.",
+  {
+    org_id: z.string().describe("Owning org id."),
+    backend: z.enum(["aws", "azure"]),
+    aws: z
+      .object({
+        access_key_id: z.string(),
+        secret_access_key: z.string(),
+        session_token: z.string().optional(),
+      })
+      .optional()
+      .describe("AWS credential plaintext (required when backend=aws)."),
+    azure: z
+      .object({
+        tenant_id: z.string(),
+        client_id: z.string(),
+        client_secret: z.string(),
+      })
+      .optional()
+      .describe("Azure credential plaintext (required when backend=azure)."),
+  },
+  async (params) =>
+    withRecording("signalman_creds_set", params, () =>
+      asCloudMcpResult(async () => {
+        const { setCredential } = await import("./cloud/credentials.js");
+        const { ControlPlane } = await import("./control-plane/index.js");
+        const { loadConfig } = await import("./config.js");
+        const config = loadConfig();
+        const cp = ControlPlane.fromConfig(config.controlPlane);
+        await cp.init();
+        try {
+          if (params.backend === "aws") {
+            if (!params.aws) {
+              throw new CloudBackendError(
+                "invalid_config",
+                "backend=aws requires the 'aws' plaintext object",
+              );
+            }
+            return setCredential(cp.cloudCredentials, params.org_id, "aws", params.aws);
+          } else {
+            if (!params.azure) {
+              throw new CloudBackendError(
+                "invalid_config",
+                "backend=azure requires the 'azure' plaintext object",
+              );
+            }
+            return setCredential(cp.cloudCredentials, params.org_id, "azure", params.azure);
+          }
+        } finally {
+          await cp.close();
+        }
+      }),
+    ),
+);
+
+server.tool(
+  "signalman_creds_get",
+  "Return the per-org credential row's REDACTED metadata: backend, redacted hint (e.g. 'AKIA****EXAMPLE'), encryption method, timestamps. The plaintext secret is NEVER returned; this tool is for confirming the right credential is wired, not for retrieving secrets. Returns null when no credential is configured (caller falls back to SDK default chain).",
+  {
+    org_id: z.string(),
+    backend: z.enum(["aws", "azure"]),
+  },
+  async (params) =>
+    withRecording("signalman_creds_get", params, () =>
+      asCloudMcpResult(async () => {
+        const { ControlPlane } = await import("./control-plane/index.js");
+        const { loadConfig } = await import("./config.js");
+        const config = loadConfig();
+        const cp = ControlPlane.fromConfig(config.controlPlane);
+        await cp.init();
+        try {
+          const row = await cp.cloudCredentials.get(params.org_id, params.backend);
+          if (!row) return null;
+          // Return only the safe fields; do NOT echo ciphertextB64.
+          return {
+            id: row.id,
+            orgId: row.orgId,
+            backend: row.backend,
+            redactedHint: row.redactedHint,
+            encryptionMethod: row.encryptionMethod,
+            createdAt: row.createdAt,
+            updatedAt: row.updatedAt,
+          };
+        } finally {
+          await cp.close();
+        }
+      }),
+    ),
+);
+
+server.tool(
+  "signalman_creds_remove",
+  "Remove the per-org credential row. Idempotent — removing a non-existent row is success. After remove, provision falls back to the SDK default credential chain.",
+  {
+    org_id: z.string(),
+    backend: z.enum(["aws", "azure"]),
+  },
+  async (params) =>
+    withRecording("signalman_creds_remove", params, () =>
+      asCloudMcpResult(async () => {
+        const { ControlPlane } = await import("./control-plane/index.js");
+        const { loadConfig } = await import("./config.js");
+        const config = loadConfig();
+        const cp = ControlPlane.fromConfig(config.controlPlane);
+        await cp.init();
+        try {
+          await cp.cloudCredentials.remove(params.org_id, params.backend);
+          return { ok: true };
+        } finally {
+          await cp.close();
+        }
+      }),
+    ),
+);
+
 // ── Start Server ──────────────────────────────────────────────────
 
 async function main() {

@@ -40,6 +40,7 @@ import type {
   ArtifactKind,
   AuditLogEntry,
   CloudOrgBudget,
+  CloudOrgCredential,
   CloudOrgUsage,
   Deployment,
   DeploymentHealthSummary,
@@ -66,6 +67,7 @@ import {
   type ArtifactRepo,
   type AuditLogRepo,
   type CloudBudgetRepo,
+  type CloudCredentialsRepo,
   type CloudUsageRepo,
   type DeploymentRepo,
   type HealthCheckRepo,
@@ -121,6 +123,7 @@ export class PostgresStorageDriver implements StorageDriver {
   readonly jobs: JobRepo;
   readonly cloudBudgets: CloudBudgetRepo;
   readonly cloudUsage: CloudUsageRepo;
+  readonly cloudCredentials: CloudCredentialsRepo;
 
   constructor(opts: PostgresDriverOptions) {
     if (opts.pool) {
@@ -150,6 +153,7 @@ export class PostgresStorageDriver implements StorageDriver {
     this.jobs = new PgJobRepo(this.pool);
     this.cloudBudgets = new PgCloudBudgetRepo(this.pool);
     this.cloudUsage = new PgCloudUsageRepo(this.pool);
+    this.cloudCredentials = new PgCloudCredentialsRepo(this.pool);
   }
 
   async migrate(): Promise<void> {
@@ -1681,5 +1685,80 @@ class PgCloudUsageRepo implements CloudUsageRepo {
       binds,
     );
     return (out.rows as SqlRow[]).map(mapPgCloudUsage);
+  }
+}
+
+function mapPgCloudCredential(row: SqlRow): CloudOrgCredential {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    backend: row.backend as string,
+    ciphertextB64: row.ciphertext_b64 as string,
+    encryptionMethod: row.encryption_method as string,
+    redactedHint: row.redacted_hint as string,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+class PgCloudCredentialsRepo implements CloudCredentialsRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async get(orgId: string, backend: string): Promise<CloudOrgCredential | null> {
+    const out = await this.pool.query(
+      "SELECT * FROM cloud_org_credential WHERE org_id = $1 AND backend = $2",
+      [orgId, backend],
+    );
+    return out.rows[0] ? mapPgCloudCredential(out.rows[0] as SqlRow) : null;
+  }
+
+  async upsert(input: {
+    orgId: string;
+    backend: string;
+    ciphertextB64: string;
+    encryptionMethod: string;
+    redactedHint: string;
+  }): Promise<CloudOrgCredential> {
+    const now = nowIso();
+    try {
+      const out = await this.pool.query(
+        `INSERT INTO cloud_org_credential
+          (id, org_id, backend, ciphertext_b64, encryption_method, redacted_hint, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+         ON CONFLICT (org_id, backend) DO UPDATE SET
+           ciphertext_b64 = EXCLUDED.ciphertext_b64,
+           encryption_method = EXCLUDED.encryption_method,
+           redacted_hint = EXCLUDED.redacted_hint,
+           updated_at = EXCLUDED.updated_at
+         RETURNING *`,
+        [
+          newId(),
+          input.orgId,
+          input.backend,
+          input.ciphertextB64,
+          input.encryptionMethod,
+          input.redactedHint,
+          now,
+        ],
+      );
+      return mapPgCloudCredential(out.rows[0] as SqlRow);
+    } catch (err) {
+      mapPgError(err);
+    }
+  }
+
+  async remove(orgId: string, backend: string): Promise<void> {
+    await this.pool.query(
+      "DELETE FROM cloud_org_credential WHERE org_id = $1 AND backend = $2",
+      [orgId, backend],
+    );
+  }
+
+  async listForOrg(orgId: string): Promise<CloudOrgCredential[]> {
+    const out = await this.pool.query(
+      "SELECT * FROM cloud_org_credential WHERE org_id = $1 ORDER BY backend",
+      [orgId],
+    );
+    return (out.rows as SqlRow[]).map(mapPgCloudCredential);
   }
 }

@@ -2417,8 +2417,160 @@ async function cmdCloud(args: ParsedArgs): Promise<number> {
       return await cmdCloudBudget(args);
     case "connection-descriptor":
       return await cmdCloudConnectionDescriptor(args);
+    case "creds":
+      return await cmdCloudCreds(args);
     default:
       usageError(`unknown cloud subcommand: ${sub}`);
+  }
+}
+
+/**
+ * `signalman cloud creds set/get/remove` — per-org credentials
+ * at rest. Sub-task 6.
+ *
+ * Operators must set `SIGNALMAN_CRED_KEY` (base64-encoded 32-byte
+ * AES-256-GCM key) before running `set`. The `get` verb returns
+ * a redacted hint only — never the plaintext secret. `remove` is
+ * idempotent.
+ *
+ * Exported for tests.
+ */
+export async function cmdCloudCreds(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) {
+    usageError(
+      "cloud creds requires a subcommand: 'set --org X --backend aws|azure ...', " +
+        "'get --org X --backend ...', or 'remove --org X --backend ...'.",
+    );
+  }
+  const orgId = args.options.get("org");
+  const backend = args.options.get("backend");
+  if (!orgId) usageError("cloud creds requires --org <ORG_ID>");
+  if (backend !== "aws" && backend !== "azure") {
+    usageError("cloud creds requires --backend aws|azure");
+  }
+  const isJson = args.options.get("format") === "json";
+
+  const { ControlPlane } = await import("./control-plane/index.js");
+  const { loadConfig } = await import("./config.js");
+  const config = loadConfig();
+  const cp = ControlPlane.fromConfig(config.controlPlane);
+  await cp.init();
+
+  try {
+    switch (sub) {
+      case "set": {
+        const { setCredential } = await import("./cloud/credentials.js");
+        if (backend === "aws") {
+          const accessKeyId = args.options.get("access-key-id");
+          const secretAccessKey = args.options.get("secret-access-key");
+          const sessionToken = args.options.get("session-token");
+          if (!accessKeyId)
+            usageError(
+              "cloud creds set --backend aws requires --access-key-id",
+            );
+          if (!secretAccessKey)
+            usageError(
+              "cloud creds set --backend aws requires --secret-access-key",
+            );
+          const result = await setCredential(
+            cp.cloudCredentials,
+            orgId!,
+            "aws",
+            {
+              access_key_id: accessKeyId!,
+              secret_access_key: secretAccessKey!,
+              session_token: sessionToken,
+            },
+          );
+          if (isJson) {
+            process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+          } else {
+            process.stdout.write(
+              `Stored AWS credential for org '${orgId}':\n` +
+                `  redacted hint: ${result.redactedHint}\n`,
+            );
+          }
+        } else {
+          const tenantId = args.options.get("tenant-id");
+          const clientId = args.options.get("client-id");
+          const clientSecret = args.options.get("client-secret");
+          if (!tenantId) usageError("cloud creds set --backend azure requires --tenant-id");
+          if (!clientId) usageError("cloud creds set --backend azure requires --client-id");
+          if (!clientSecret)
+            usageError("cloud creds set --backend azure requires --client-secret");
+          const result = await setCredential(
+            cp.cloudCredentials,
+            orgId!,
+            "azure",
+            {
+              tenant_id: tenantId!,
+              client_id: clientId!,
+              client_secret: clientSecret!,
+            },
+          );
+          if (isJson) {
+            process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+          } else {
+            process.stdout.write(
+              `Stored Azure credential for org '${orgId}':\n` +
+                `  redacted hint: ${result.redactedHint}\n`,
+            );
+          }
+        }
+        return 0;
+      }
+      case "get": {
+        const row = await cp.cloudCredentials.get(orgId!, backend!);
+        if (!row) {
+          if (isJson) {
+            process.stdout.write("null\n");
+          } else {
+            process.stdout.write(
+              `No credential configured for org '${orgId}' backend '${backend}'. ` +
+                `Provision will fall back to the SDK default credential chain.\n`,
+            );
+          }
+          return 0;
+        }
+        const safe = {
+          id: row.id,
+          orgId: row.orgId,
+          backend: row.backend,
+          redactedHint: row.redactedHint,
+          encryptionMethod: row.encryptionMethod,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+        };
+        if (isJson) {
+          process.stdout.write(JSON.stringify(safe, null, 2) + "\n");
+        } else {
+          process.stdout.write(
+            `Credential for org '${row.orgId}' backend '${row.backend}':\n` +
+              `  redacted hint:     ${row.redactedHint}\n` +
+              `  encryption method: ${row.encryptionMethod}\n` +
+              `  created:           ${row.createdAt}\n` +
+              `  updated:           ${row.updatedAt}\n`,
+          );
+        }
+        return 0;
+      }
+      case "remove": {
+        await cp.cloudCredentials.remove(orgId!, backend!);
+        if (isJson) {
+          process.stdout.write(JSON.stringify({ ok: true }) + "\n");
+        } else {
+          process.stdout.write(
+            `Removed credential for org '${orgId}' backend '${backend}' (if present).\n`,
+          );
+        }
+        return 0;
+      }
+      default:
+        usageError(`unknown cloud creds subcommand: ${sub}`);
+    }
+  } finally {
+    await cp.close();
   }
 }
 
@@ -2917,7 +3069,7 @@ function printHelp(): void {
       "  api-key <subcommand>   (create, list, revoke)",
       "  runner <subcommand>    (register, start)",
       "  key <subcommand>       (generate, fingerprint — Ed25519 release signing)",
-      "  cloud <subcommand>     (reaper run/status, budget get/set/usage, connection-descriptor)",
+      "  cloud <subcommand>     (reaper run/status, budget get/set/usage, creds get/set/remove, connection-descriptor)",
       "  stack <subcommand>     (plan-cost — OpenTofu stack pre-flight cost estimate)",
       "",
       "Exit codes (per docs/design/p0-mcp-surface.md §5):",
