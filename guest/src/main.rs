@@ -26,6 +26,7 @@ pub mod guest_proto {
 }
 
 pub mod cert_pin;
+pub mod platform;
 pub mod probes;
 pub mod process;
 mod service;

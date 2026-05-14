@@ -15,6 +15,7 @@ use tracing::{info, warn};
 
 use crate::guest_proto::guest_agent_server::GuestAgent;
 use crate::guest_proto::*;
+use crate::platform::{self, Platform};
 use crate::{probes, process, ui_sidecar};
 
 #[allow(dead_code)]
@@ -374,30 +375,19 @@ impl GuestAgentService {
 }
 
 /// Return the OS name string for the current platform.
+///
+/// Delegates to the [`Platform`] trait so the canonical wire string
+/// flows through a single point that tests can substitute.
 fn os_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "windows"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        "unknown"
-    }
+    platform::current().kind().as_str()
 }
 
 /// Return the hostname of the machine, or "unknown" on failure.
+///
+/// Delegates to the platform impl — the env-var conventions differ by
+/// OS (`COMPUTERNAME` on Windows, `HOSTNAME` on Linux, ...).
 fn hostname() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var("COMPUTERNAME").unwrap_or_else(|_| "unknown".into())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::env::var("HOSTNAME")
-            .or_else(|_| std::env::var("HOST"))
-            .unwrap_or_else(|_| "unknown".into())
-    }
+    platform::current().hostname()
 }
 
 /// Current agent capabilities.
@@ -847,6 +837,12 @@ impl GuestAgent for GuestAgentService {
         // This is a behaviour change for SYSTEM callers; documented
         // in CHANGELOG (when written) and in the function header.
         if req.run_as.eq_ignore_ascii_case("system") {
+            let plat = platform::current();
+            if !plat.supports_system_elevation() {
+                return Err(Status::unimplemented(
+                    plat.unsupported_message("run_command(run_as=\"system\")"),
+                ));
+            }
             if req.command.is_empty() {
                 return Err(Status::invalid_argument(
                     "run_as=system requires command to be a program path; cmd.exe builtins must be invoked explicitly via command=\"cmd.exe\" args=[\"/C\",...]",
@@ -944,12 +940,23 @@ impl GuestAgent for GuestAgentService {
         }
     }
 
-    // ── UI Automation (unimplemented) ───────────────────────────
+    // ── UI Automation ──────────────────────────────────────────
+    //
+    // These RPCs are gated by `Platform::supports_ui_automation()` —
+    // on Linux and macOS the agent returns `Status::unimplemented`
+    // synchronously rather than letting the call hang waiting for a
+    // UI sidecar that will never connect.
 
     async fn ui_click(
         &self,
         request: Request<UiClickRequest>,
     ) -> Result<Response<UiActionResponse>, Status> {
+        let platform = platform::current();
+        if !platform.supports_ui_automation() {
+            return Err(Status::unimplemented(
+                platform.unsupported_message("ui.click"),
+            ));
+        }
         let req = request.into_inner();
         let started = Instant::now();
         let result: ui_sidecar::UiActionResult = ui_sidecar::call_typed(
@@ -973,6 +980,12 @@ impl GuestAgent for GuestAgentService {
         &self,
         request: Request<UiTypeRequest>,
     ) -> Result<Response<UiActionResponse>, Status> {
+        let platform = platform::current();
+        if !platform.supports_ui_automation() {
+            return Err(Status::unimplemented(
+                platform.unsupported_message("ui.type"),
+            ));
+        }
         let req = request.into_inner();
         let started = Instant::now();
         let result: ui_sidecar::UiActionResult = ui_sidecar::call_typed(
@@ -997,6 +1010,12 @@ impl GuestAgent for GuestAgentService {
         &self,
         request: Request<UiKeyRequest>,
     ) -> Result<Response<UiActionResponse>, Status> {
+        let platform = platform::current();
+        if !platform.supports_ui_automation() {
+            return Err(Status::unimplemented(
+                platform.unsupported_message("ui.key"),
+            ));
+        }
         let req = request.into_inner();
         let started = Instant::now();
         let result: ui_sidecar::UiActionResult = ui_sidecar::call_typed(
@@ -1021,6 +1040,12 @@ impl GuestAgent for GuestAgentService {
         &self,
         request: Request<UiFindRequest>,
     ) -> Result<Response<UiFindResponse>, Status> {
+        let platform = platform::current();
+        if !platform.supports_ui_automation() {
+            return Err(Status::unimplemented(
+                platform.unsupported_message("ui.find"),
+            ));
+        }
         let req = request.into_inner();
         let started = Instant::now();
         let result: ui_sidecar::UiFindResult = ui_sidecar::call_typed(
@@ -1044,6 +1069,12 @@ impl GuestAgent for GuestAgentService {
         &self,
         request: Request<UiScreenshotRequest>,
     ) -> Result<Response<UiScreenshotResponse>, Status> {
+        let platform = platform::current();
+        if !platform.supports_ui_automation() {
+            return Err(Status::unimplemented(
+                platform.unsupported_message("ui.screenshot"),
+            ));
+        }
         let req = request.into_inner();
         let started = Instant::now();
         let result: ui_sidecar::UiScreenshotResult = ui_sidecar::call_typed(
@@ -1073,6 +1104,22 @@ impl GuestAgent for GuestAgentService {
         _request: Request<UiHealthRequest>,
     ) -> Result<Response<UiHealthResponse>, Status> {
         let started = Instant::now();
+        let platform = platform::current();
+        if !platform.supports_ui_automation() {
+            // ui.health is the only RPC where the host *expects* an
+            // OK response carrying a "not reachable" payload — that's
+            // how it differentiates "sidecar is down" from "VM is
+            // unreachable". Keeping the same shape on non-Windows
+            // means scenario authors don't have to special-case it.
+            return Ok(Response::new(UiHealthResponse {
+                sidecar_reachable: false,
+                engine: String::new(),
+                pid: 0,
+                uptime_ms: 0,
+                error: platform.unsupported_message("ui.health"),
+                duration_ms: started.elapsed().as_millis() as u64,
+            }));
+        }
         match ui_sidecar::call_typed::<ui_sidecar::UiHealthResult>("ui.health", json!({})).await {
             Ok(result) => Ok(Response::new(UiHealthResponse {
                 sidecar_reachable: true,
@@ -1097,6 +1144,12 @@ impl GuestAgent for GuestAgentService {
         &self,
         request: Request<BrowserNavigateRequest>,
     ) -> Result<Response<BrowserActionResponse>, Status> {
+        let platform = platform::current();
+        if !platform.supports_browser_automation() {
+            return Err(Status::unimplemented(
+                platform.unsupported_message("browser.navigate"),
+            ));
+        }
         let req = request.into_inner();
         let result: ui_sidecar::BrowserActionResult = ui_sidecar::call_typed(
             "browser.navigate",
@@ -1121,6 +1174,12 @@ impl GuestAgent for GuestAgentService {
         &self,
         request: Request<BrowserClickRequest>,
     ) -> Result<Response<BrowserActionResponse>, Status> {
+        let platform = platform::current();
+        if !platform.supports_browser_automation() {
+            return Err(Status::unimplemented(
+                platform.unsupported_message("browser.click"),
+            ));
+        }
         let req = request.into_inner();
         let result: ui_sidecar::BrowserActionResult = ui_sidecar::call_typed(
             "browser.click",
@@ -1143,6 +1202,12 @@ impl GuestAgent for GuestAgentService {
         &self,
         request: Request<BrowserEvaluateRequest>,
     ) -> Result<Response<BrowserEvaluateResponse>, Status> {
+        let platform = platform::current();
+        if !platform.supports_browser_automation() {
+            return Err(Status::unimplemented(
+                platform.unsupported_message("browser.evaluate"),
+            ));
+        }
         let req = request.into_inner();
         let result: ui_sidecar::BrowserEvaluateResult = ui_sidecar::call_typed(
             "browser.evaluate",
@@ -1168,6 +1233,12 @@ impl GuestAgent for GuestAgentService {
         &self,
         request: Request<BrowserScreenshotRequest>,
     ) -> Result<Response<BrowserScreenshotResponse>, Status> {
+        let platform = platform::current();
+        if !platform.supports_browser_automation() {
+            return Err(Status::unimplemented(
+                platform.unsupported_message("browser.screenshot"),
+            ));
+        }
         let req = request.into_inner();
         let result: ui_sidecar::BrowserScreenshotResult = ui_sidecar::call_typed(
             "browser.screenshot",
@@ -1309,6 +1380,16 @@ impl GuestAgent for GuestAgentService {
         &self,
         request: Request<InstallSoftwareRequest>,
     ) -> Result<Response<InstallSoftwareResponse>, Status> {
+        let platform = platform::current();
+        if !platform.supports_package_manager_install() {
+            return Err(Status::unimplemented(
+                platform.unsupported_message(
+                    "install_software (winget/choco/scoop/msstore). \
+                     Use RunCommand to invoke the platform-native \
+                     package manager instead",
+                ),
+            ));
+        }
         let req = request.into_inner();
 
         // S-20: Validate package ID format before passing to package managers.
