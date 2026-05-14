@@ -1,7 +1,7 @@
 ---
 name: signalman-list-cloud-instances
-description: Enumerate Signalman-tagged cloud instances for a given provider. Filters by signalman-managed=true internally — only Signalman-provisioned VMs surface, never operator-owned workloads. Trigger on "what cloud VMs are running", "list test boxes on AWS", "audit signalman cloud usage", "find that VM from yesterday". Use for audit, recovery, and cost-reaper sanity checks.
-allowed-tools: mcp__signalman__signalman_cloud_list, mcp__signalman__signalman_cloud_backends, mcp__signalman__signalman_cloud_status
+description: Enumerate Signalman-tagged cloud instances for a given provider. Filters by signalman-managed=true internally — only Signalman-provisioned VMs surface, never operator-owned workloads. Trigger on "what cloud VMs are running", "list test boxes on AWS", "audit signalman cloud usage", "find that VM from yesterday". Use for audit, recovery, and cost-reaper sanity checks. v0.3.0-5: returned handles carry `tags` + `network_mode` (read by the reaper). CLI parity: `signalman cloud list`.
+allowed-tools: mcp__signalman__signalman_cloud_list, mcp__signalman__signalman_cloud_backends, mcp__signalman__signalman_cloud_status, Bash
 ---
 
 # List Signalman-tagged cloud instances

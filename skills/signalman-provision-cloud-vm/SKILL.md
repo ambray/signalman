@@ -1,7 +1,7 @@
 ---
 name: signalman-provision-cloud-vm
-description: Provision an ephemeral cloud VM (AWS EC2 or Azure VM) tagged with signalman-managed=true so the cost-reaper owns its TTL. Trigger when the user says "spin up an EC2 box", "give me an Azure VM for scenario X", "provision a cloud target", or any variant of "create a test VM on AWS / Azure". Returns a handle the operator can pass to status / terminate.
-allowed-tools: mcp__signalman__signalman_cloud_provision, mcp__signalman__signalman_cloud_backends, mcp__signalman__signalman_cloud_status
+description: Provision an ephemeral cloud VM (AWS EC2 or Azure VM) tagged with signalman-managed=true so the cost-reaper owns its TTL. Trigger when the user says "spin up an EC2 box", "give me an Azure VM for scenario X", "provision a cloud target", or any variant of "create a test VM on AWS / Azure". Returns a handle the operator can pass to status / terminate. v0.3.0-5: budget-gated (over-budget orgs refuse with `budget_exceeded`); `network.mode` supports public_mtls / aws_ssm / azure_bastion; per-org credentials inject when org_id is set and a cred row exists. CLI parity: `signalman cloud provision`.
+allowed-tools: mcp__signalman__signalman_cloud_provision, mcp__signalman__signalman_cloud_backends, mcp__signalman__signalman_cloud_status, Bash
 ---
 
 # Provision an ephemeral cloud VM
@@ -40,6 +40,8 @@ is known-startable.
 
 ## How to invoke
 
+**MCP**:
+
 ```jsonc
 // signalman_cloud_provision
 {
@@ -50,9 +52,37 @@ is known-startable.
   "name": "scenario-checkout-flow",
   "org_id": "acme",
   "ttl_minutes": 90,
-  "tags": { "scenario": "checkout-flow" }
+  "tags": { "scenario": "checkout-flow" },
+  "network": { "mode": "aws_ssm" }
 }
 ```
+
+**CLI** (v0.3.0-5 sub-task 8):
+
+```bash
+signalman cloud provision \
+  --provider aws \
+  --region us-east-1 \
+  --instance-type t3.medium \
+  --image-ref ami-0123456789abcdef0 \
+  --name scenario-checkout-flow \
+  --org-id acme \
+  --ttl-minutes 90 \
+  --network-mode aws_ssm \
+  [--tag k=v] \
+  [--format json]
+```
+
+**Per-org credential auto-injection** (v0.3.0-5 sub-task 8): when
+`org_id` is set AND a credential row exists for (org, provider) via
+`signalman_creds_set`, provision uses those credentials. Otherwise
+falls back to the SDK default credential chain. See
+`signalman-manage-cloud-credentials` skill.
+
+**Network mode** (v0.3.0-5 sub-task 6): `aws_ssm` forces no-public-IP
+(security invariant). `azure_bastion` is Azure-only. Cross-vendor
+mode passes raise `invalid_config`. See `signalman-build-cloud-connection`
+skill for how to dial the resulting handle.
 
 ## Expected response envelope
 

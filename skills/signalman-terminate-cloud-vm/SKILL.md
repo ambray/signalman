@@ -1,7 +1,7 @@
 ---
 name: signalman-terminate-cloud-vm
-description: Terminate an ephemeral cloud VM previously provisioned by Signalman. Idempotent — terminating an already-terminated handle returns success, not an error. Trigger on "kill that EC2 box", "tear down the Azure VM", "destroy <handle>", or any "clean up the test VM" variant. Refuses untagged instances (only Signalman-managed handles can be terminated through this path).
-allowed-tools: mcp__signalman__signalman_cloud_terminate, mcp__signalman__signalman_cloud_status
+description: Terminate an ephemeral cloud VM previously provisioned by Signalman. Idempotent — terminating an already-terminated handle returns success, not an error. Trigger on "kill that EC2 box", "tear down the Azure VM", "destroy <handle>", or any "clean up the test VM" variant. Refuses untagged instances (only Signalman-managed handles can be terminated through this path). For bulk past-TTL cleanup, use `signalman-reap-cloud-instances` instead. CLI parity: `signalman cloud terminate`.
+allowed-tools: mcp__signalman__signalman_cloud_terminate, mcp__signalman__signalman_cloud_status, Bash
 ---
 
 # Terminate an ephemeral cloud VM

@@ -1,7 +1,7 @@
 ---
 name: signalman-apply-cloud-stack
-description: Apply an OpenTofu HCL module as a Signalman cloud stack. Materialises the module into a workspace under .signalman/tofu-workspaces/<stack_name>/, runs tofu init+apply+output, and returns the parsed outputs + a change summary. Trigger on "apply the network stack", "stand up the test fixture from infra/<dir>", "run tofu apply on <module>". Refuses stack names that aren't safe filesystem identifiers.
-allowed-tools: mcp__signalman__signalman_stack_apply, mcp__signalman__signalman_cloud_backends
+description: Apply an OpenTofu HCL module as a Signalman cloud stack. Materialises the module into a workspace under .signalman/tofu-workspaces/<stack_name>/, runs tofu init+apply+output, and returns the parsed outputs + a change summary. Trigger on "apply the network stack", "stand up the test fixture from infra/<dir>", "run tofu apply on <module>". Refuses stack names that aren't safe filesystem identifiers. Recommended workflow: run `signalman-estimate-stack-cost` FIRST to see the projected monthly cost before applying. CLI parity: `signalman stack apply`.
+allowed-tools: mcp__signalman__signalman_stack_apply, mcp__signalman__signalman_cloud_backends, mcp__signalman__signalman_stack_plan_cost, Bash
 ---
 
 # Apply an OpenTofu stack
