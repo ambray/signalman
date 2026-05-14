@@ -24,7 +24,7 @@ import { runDescribe } from "./verbs/describe.js";
 import { runPlan } from "./verbs/plan.js";
 import { runRun } from "./verbs/run.js";
 import { runStatus } from "./verbs/status.js";
-import { runRecord, runRecordFinalize } from "./verbs/record.js";
+import { recordMcpCall, runRecord, runRecordFinalize } from "./verbs/record.js";
 import { runInit } from "./verbs/init.js";
 import { createDefaultExecutor } from "./verbs/default-executor.js";
 import { provisionVM } from "./provisioning/provision.js";
@@ -2326,6 +2326,75 @@ async function cmdReleaseShow(args: ParsedArgs): Promise<number> {
   }
 }
 
+// ── CLI capture for record/replay (v0.3.0-1 follow-up) ───────────
+
+/**
+ * Converts ParsedArgs into a JSON-friendly object suitable for the
+ * recordMcpCall `params` slot. Captures positional args, options
+ * map, flags set, and --param key/value pairs. The result flows
+ * through the existing redaction layer in `recordMcpCall` so
+ * sensitive keys (token, password, etc) are scrubbed before they
+ * land in `calls.jsonl`.
+ *
+ * Exported for tests; not part of the public CLI surface.
+ */
+export function parsedArgsToRecord(args: ParsedArgs): Record<string, unknown> {
+  return {
+    positional: args.positional,
+    options: Object.fromEntries(args.options),
+    flags: Array.from(args.flags),
+    params: args.params,
+  };
+}
+
+/**
+ * Wrap a CLI verb dispatch in a record/replay capture call.
+ *
+ * Mirrors the MCP server's `withRecording` wrapper so agent
+ * workflows that mix direct CLI use with MCP tool use produce a
+ * single unified calls.jsonl. Captures the verb name, parsed args,
+ * exit code, and timing. Errors are captured then re-thrown
+ * unchanged so the CLI's existing error handling stays.
+ *
+ * Capture is a no-op when no recording session is active; the
+ * underlying `recordMcpCall` is idempotent in that case.
+ *
+ * Note we deliberately do NOT capture `record` itself (it's how
+ * recordings get started + finalised; capturing it would be
+ * circular) — see the verbs filter in the dispatcher.
+ */
+async function withCliCapture<T>(
+  verb: string,
+  args: ParsedArgs,
+  fn: () => Promise<T> | T,
+): Promise<T> {
+  const started = new Date();
+  try {
+    const result = await fn();
+    const finished = new Date();
+    recordMcpCall({
+      tool: `cli.${verb}`,
+      params: parsedArgsToRecord(args),
+      result: { exit_code: result },
+      started_at: started.toISOString(),
+      finished_at: finished.toISOString(),
+      duration_ms: finished.getTime() - started.getTime(),
+    });
+    return result;
+  } catch (err) {
+    const finished = new Date();
+    recordMcpCall({
+      tool: `cli.${verb}`,
+      params: parsedArgsToRecord(args),
+      error: err,
+      started_at: started.toISOString(),
+      finished_at: finished.toISOString(),
+      duration_ms: finished.getTime() - started.getTime(),
+    });
+    throw err;
+  }
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 async function main(argv: string[]): Promise<number> {
@@ -2338,16 +2407,22 @@ async function main(argv: string[]): Promise<number> {
 
   try {
     switch (verb) {
+      // v0.3.0-1 follow-up: the five agent-relevant verbs (list,
+      // describe, plan, run, status) flow through withCliCapture so
+      // direct CLI invocations are captured into the active
+      // recording session alongside MCP tool calls. `record` itself
+      // is NOT wrapped — capturing record-start/record-finalize
+      // would be circular.
       case "list":
-        return await cmdList(args);
+        return await withCliCapture("list", args, () => cmdList(args));
       case "describe":
-        return await cmdDescribe(args);
+        return await withCliCapture("describe", args, () => cmdDescribe(args));
       case "plan":
-        return await cmdPlan(args);
+        return await withCliCapture("plan", args, () => cmdPlan(args));
       case "run":
-        return await cmdRun(args);
+        return await withCliCapture("run", args, () => cmdRun(args));
       case "status":
-        return await cmdStatus(args);
+        return await withCliCapture("status", args, () => cmdStatus(args));
       case "record":
         return await cmdRecord(args);
       case "init":
