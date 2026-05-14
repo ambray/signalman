@@ -820,12 +820,49 @@ server.tool(
   async (params) =>
     withRecording("signalman_cloud_provision", params, () =>
       asCloudMcpResult(async () => {
-        const backend = getCloudBackend(params.provider as CloudBackendKind);
+        // Sub-task 8 commit 2: when org_id is supplied AND
+        // a per-org credential row exists, construct the backend
+        // with that credential. Otherwise fall back to the
+        // registry's default backend (SDK default credential
+        // chain). Decryption failures propagate.
+        const backend = await resolveBackendForRequest(
+          params.provider as CloudBackendKind,
+          params.org_id,
+        );
         const config: CloudInstanceConfig = params as CloudInstanceConfig;
         return await backend.provisionInstance(config);
       }),
     ),
 );
+
+/**
+ * Per-request backend resolver. When org_id is absent, returns
+ * the registry's default backend (the existing v0.3.0-5 sub-tasks
+ * 2/3 path). When org_id is present, looks up the org's
+ * credential via the control-plane storage and constructs a
+ * backend with those keys; decryption failures propagate.
+ */
+async function resolveBackendForRequest(
+  kind: CloudBackendKind,
+  orgId: string | undefined,
+): Promise<ReturnType<typeof getCloudBackend>> {
+  if (!orgId || orgId === "default") {
+    return getCloudBackend(kind);
+  }
+  const { resolveBackendForOrgWithDefaults } = await import(
+    "./cloud/per-org-backend.js"
+  );
+  const { ControlPlane } = await import("./control-plane/index.js");
+  const { loadConfig } = await import("./config.js");
+  const config = loadConfig();
+  const cp = ControlPlane.fromConfig(config.controlPlane);
+  await cp.init();
+  // Note: we don't `cp.close()` here because the backend may
+  // outlive this call (callers might re-use it for a status
+  // poll). The control-plane handle is a process-wide pool; one
+  // un-closed instance per provision is acceptable for v0.3.0-5.
+  return resolveBackendForOrgWithDefaults(kind, orgId, cp.cloudCredentials);
+}
 
 server.tool(
   "signalman_cloud_terminate",
