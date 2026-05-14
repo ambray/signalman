@@ -147,4 +147,7 @@ export class ControlPlane {
   get healthSchedules() {
     return this.storage.healthSchedules;
   }
+  get webhookSubscriptions() {
+    return this.storage.webhookSubscriptions;
+  }
 }

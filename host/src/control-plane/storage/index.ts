@@ -24,6 +24,7 @@ export type {
   ScenarioRepo,
   StorageDriver,
   TargetRepo,
+  WebhookSubscriptionRepo,
 } from "./driver.js";
 export {
   NotImplementedError,

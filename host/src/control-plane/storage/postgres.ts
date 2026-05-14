@@ -62,6 +62,8 @@ import type {
   Target,
   TargetConnection,
   TargetKind,
+  WebhookKind,
+  WebhookSubscription,
 } from "../types.js";
 import {
   type ApiKeyRepo,
@@ -83,6 +85,7 @@ import {
   type StorageDriver,
   StorageNotFoundError,
   type TargetRepo,
+  type WebhookSubscriptionRepo,
 } from "./driver.js";
 
 const { Pool: DefaultPool } = pgPkg;
@@ -127,6 +130,7 @@ export class PostgresStorageDriver implements StorageDriver {
   readonly cloudUsage: CloudUsageRepo;
   readonly cloudCredentials: CloudCredentialsRepo;
   readonly healthSchedules: HealthScheduleRepo;
+  readonly webhookSubscriptions: WebhookSubscriptionRepo;
 
   constructor(opts: PostgresDriverOptions) {
     if (opts.pool) {
@@ -158,6 +162,7 @@ export class PostgresStorageDriver implements StorageDriver {
     this.cloudUsage = new PgCloudUsageRepo(this.pool);
     this.cloudCredentials = new PgCloudCredentialsRepo(this.pool);
     this.healthSchedules = new PgHealthScheduleRepo(this.pool);
+    this.webhookSubscriptions = new PgWebhookSubscriptionRepo(this.pool);
   }
 
   async migrate(): Promise<void> {
@@ -1906,5 +1911,148 @@ class PgHealthScheduleRepo implements HealthScheduleRepo {
       [now, now, id],
     );
     if (r.rowCount === 0) throw new StorageNotFoundError("health_schedule", id);
+  }
+}
+
+// ── Webhook subscription repo (v0.4.0-2) ────────────────────────────
+
+function mapWebhookSubscription(row: SqlRow): WebhookSubscription {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    kind: row.kind as WebhookKind,
+    url: row.url as string,
+    secretHmacKey: (row.secret_hmac_key as string | null) ?? null,
+    eventKinds: JSON.parse(row.event_kinds_json as string) as string[],
+    active: Number(row.active) === 1,
+    description: (row.description as string | null) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+class PgWebhookSubscriptionRepo implements WebhookSubscriptionRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async create(input: {
+    orgId: string;
+    kind: WebhookKind;
+    url: string;
+    secretHmacKey?: string | null;
+    eventKinds?: string[];
+    active?: boolean;
+    description?: string | null;
+  }): Promise<WebhookSubscription> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      kind: input.kind,
+      url: input.url,
+      secret_hmac_key: input.secretHmacKey ?? null,
+      event_kinds_json: JSON.stringify(input.eventKinds ?? []),
+      active: input.active === false ? 0 : 1,
+      description: input.description ?? null,
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO webhook_subscription (id, org_id, kind, url, secret_hmac_key, event_kinds_json, active, description, created_at, updated_at) VALUES (@id, @org_id, @kind, @url, @secret_hmac_key, @event_kinds_json, @active, @description, @created_at, @updated_at)",
+      bind,
+    );
+    return mapWebhookSubscription({ ...bind, deleted_at: null });
+  }
+
+  async get(id: string): Promise<WebhookSubscription | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM webhook_subscription WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    return r.rows[0] ? mapWebhookSubscription(r.rows[0]) : null;
+  }
+
+  async listForOrg(orgId: string): Promise<WebhookSubscription[]> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM webhook_subscription WHERE org_id = $1 AND deleted_at IS NULL ORDER BY created_at",
+      [orgId],
+    );
+    return r.rows.map(mapWebhookSubscription);
+  }
+
+  async listActive(orgId?: string): Promise<WebhookSubscription[]> {
+    if (orgId) {
+      const r = await pgPositional(
+        this.pool,
+        "SELECT * FROM webhook_subscription WHERE org_id = $1 AND active = 1 AND deleted_at IS NULL ORDER BY created_at",
+        [orgId],
+      );
+      return r.rows.map(mapWebhookSubscription);
+    }
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM webhook_subscription WHERE active = 1 AND deleted_at IS NULL ORDER BY created_at",
+      [],
+    );
+    return r.rows.map(mapWebhookSubscription);
+  }
+
+  async update(
+    id: string,
+    patch: Partial<
+      Pick<
+        WebhookSubscription,
+        "url" | "secretHmacKey" | "eventKinds" | "active" | "description"
+      >
+    >,
+  ): Promise<WebhookSubscription> {
+    const existing = await this.get(id);
+    if (!existing) throw new StorageNotFoundError("webhook_subscription", id);
+    const bind = {
+      id: existing.id,
+      url: patch.url ?? existing.url,
+      secret_hmac_key:
+        patch.secretHmacKey !== undefined
+          ? patch.secretHmacKey
+          : existing.secretHmacKey,
+      event_kinds_json: JSON.stringify(patch.eventKinds ?? existing.eventKinds),
+      active:
+        patch.active !== undefined
+          ? patch.active
+            ? 1
+            : 0
+          : existing.active
+            ? 1
+            : 0,
+      description:
+        patch.description !== undefined ? patch.description : existing.description,
+      updated_at: nowIso(),
+    };
+    await pgQuery(
+      this.pool,
+      "UPDATE webhook_subscription SET url = @url, secret_hmac_key = @secret_hmac_key, event_kinds_json = @event_kinds_json, active = @active, description = @description, updated_at = @updated_at WHERE id = @id",
+      bind,
+    );
+    return mapWebhookSubscription({
+      ...bind,
+      org_id: existing.orgId,
+      kind: existing.kind,
+      created_at: existing.createdAt,
+      deleted_at: existing.deletedAt,
+    });
+  }
+
+  async softDelete(id: string): Promise<void> {
+    const now = nowIso();
+    const r = await pgPositional(
+      this.pool,
+      "UPDATE webhook_subscription SET deleted_at = $1, updated_at = $2 WHERE id = $3 AND deleted_at IS NULL",
+      [now, now, id],
+    );
+    if (r.rowCount === 0)
+      throw new StorageNotFoundError("webhook_subscription", id);
   }
 }

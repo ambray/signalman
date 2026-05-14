@@ -41,6 +41,8 @@ import type {
   Target,
   TargetConnection,
   TargetKind,
+  WebhookKind,
+  WebhookSubscription,
 } from "../types.js";
 
 // ── Repository interfaces ───────────────────────────────────────────
@@ -194,6 +196,38 @@ export interface HealthCheckRepo {
     deploymentId: string,
     opts?: { since?: string; limit?: number },
   ): Promise<HealthCheck[]>;
+}
+
+/**
+ * Repository for outbound webhook subscriptions (v0.4.0-2 / Epic 2).
+ * The event dispatcher in control-plane/events/dispatcher.ts walks
+ * this repo on every dispatched event and routes to the appropriate
+ * driver based on `kind`.
+ */
+export interface WebhookSubscriptionRepo {
+  create(input: {
+    orgId: string;
+    kind: WebhookKind;
+    url: string;
+    secretHmacKey?: string | null;
+    eventKinds?: string[];
+    active?: boolean;
+    description?: string | null;
+  }): Promise<WebhookSubscription>;
+  get(id: string): Promise<WebhookSubscription | null>;
+  listForOrg(orgId: string): Promise<WebhookSubscription[]>;
+  /** Active, undeleted subscriptions. The dispatcher uses this on every event. */
+  listActive(orgId?: string): Promise<WebhookSubscription[]>;
+  update(
+    id: string,
+    patch: Partial<
+      Pick<
+        WebhookSubscription,
+        "url" | "secretHmacKey" | "eventKinds" | "active" | "description"
+      >
+    >,
+  ): Promise<WebhookSubscription>;
+  softDelete(id: string): Promise<void>;
 }
 
 /**
@@ -424,6 +458,8 @@ export interface StorageDriver {
   readonly cloudCredentials: CloudCredentialsRepo;
   // v0.4.0-3 (Epic 3, WS3) — scheduled health checks:
   readonly healthSchedules: HealthScheduleRepo;
+  // v0.4.0-2 (Epic 2, WS3) — outbound webhook subscriptions:
+  readonly webhookSubscriptions: WebhookSubscriptionRepo;
 }
 
 /** Thrown by repos that are declared in this PR but not yet implemented. */

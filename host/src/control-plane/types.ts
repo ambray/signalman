@@ -226,6 +226,33 @@ export interface Run {
   deletedAt: string | null;
 }
 
+// ── Webhook subscriptions (v0.4.0-2) ────────────────────────────────
+
+export type WebhookKind = "generic" | "slack" | "email";
+
+/**
+ * Persisted webhook subscription. `eventKinds` is the wishlist of
+ * event kinds this subscription wants delivered; an empty array means
+ * "all kinds" (matches principle of least surprise — a fresh
+ * subscription gets everything until the operator narrows it).
+ *
+ * `secretHmacKey` is meaningful only for `kind='generic'`; Slack and
+ * email drivers ignore it.
+ */
+export interface WebhookSubscription {
+  id: string;
+  orgId: string;
+  kind: WebhookKind;
+  url: string;
+  secretHmacKey: string | null;
+  eventKinds: string[];
+  active: boolean;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+}
+
 // ── Health schedules (v0.4.0-3) ─────────────────────────────────────
 
 /**
