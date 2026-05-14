@@ -12,6 +12,7 @@ import type { StorageDriver } from "./driver.js";
 
 export type {
   ApiKeyRepo,
+  ApprovalRepo,
   ArtifactRepo,
   AuditLogRepo,
   DeploymentRepo,
@@ -19,6 +20,7 @@ export type {
   HealthScheduleRepo,
   OrgRepo,
   ProductRepo,
+  PromotionPolicyRepo,
   ReleaseRepo,
   RunRepo,
   ScenarioRepo,

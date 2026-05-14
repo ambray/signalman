@@ -150,4 +150,10 @@ export class ControlPlane {
   get webhookSubscriptions() {
     return this.storage.webhookSubscriptions;
   }
+  get promotionPolicies() {
+    return this.storage.promotionPolicies;
+  }
+  get approvals() {
+    return this.storage.approvals;
+  }
 }

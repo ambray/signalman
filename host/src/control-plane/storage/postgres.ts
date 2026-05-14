@@ -36,6 +36,8 @@ import pgPkg from "pg";
 import { newId, nowIso } from "../ids.js";
 import type {
   ApiKey,
+  Approval,
+  ApprovalStatus,
   Artifact,
   ArtifactKind,
   AuditLogEntry,
@@ -53,6 +55,8 @@ import type {
   Org,
   OrgTier,
   Product,
+  PromotionGateKind,
+  PromotionPolicy,
   Release,
   ReleaseStatus,
   Run,
@@ -67,6 +71,7 @@ import type {
 } from "../types.js";
 import {
   type ApiKeyRepo,
+  type ApprovalRepo,
   type ArtifactRepo,
   type AuditLogRepo,
   type CloudBudgetRepo,
@@ -78,6 +83,7 @@ import {
   type JobRepo,
   type OrgRepo,
   type ProductRepo,
+  type PromotionPolicyRepo,
   type ReleaseRepo,
   type RunRepo,
   type ScenarioRepo,
@@ -131,6 +137,8 @@ export class PostgresStorageDriver implements StorageDriver {
   readonly cloudCredentials: CloudCredentialsRepo;
   readonly healthSchedules: HealthScheduleRepo;
   readonly webhookSubscriptions: WebhookSubscriptionRepo;
+  readonly promotionPolicies: PromotionPolicyRepo;
+  readonly approvals: ApprovalRepo;
 
   constructor(opts: PostgresDriverOptions) {
     if (opts.pool) {
@@ -163,6 +171,8 @@ export class PostgresStorageDriver implements StorageDriver {
     this.cloudCredentials = new PgCloudCredentialsRepo(this.pool);
     this.healthSchedules = new PgHealthScheduleRepo(this.pool);
     this.webhookSubscriptions = new PgWebhookSubscriptionRepo(this.pool);
+    this.promotionPolicies = new PgPromotionPolicyRepo(this.pool);
+    this.approvals = new PgApprovalRepo(this.pool);
   }
 
   async migrate(): Promise<void> {
@@ -2054,5 +2064,334 @@ class PgWebhookSubscriptionRepo implements WebhookSubscriptionRepo {
     );
     if (r.rowCount === 0)
       throw new StorageNotFoundError("webhook_subscription", id);
+  }
+}
+
+// ── Promotion policy + approval repos (v0.4.0-1) ────────────────────
+
+function mapPromotionPolicy(row: SqlRow): PromotionPolicy {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    productId: row.product_id as string,
+    sourceTargetId: (row.source_target_id as string | null) ?? null,
+    destTargetId: row.dest_target_id as string,
+    gateKind: row.gate_kind as PromotionGateKind,
+    gateConfig: JSON.parse(row.gate_config_json as string) as Record<string, unknown>,
+    active: Number(row.active) === 1,
+    description: (row.description as string | null) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+class PgPromotionPolicyRepo implements PromotionPolicyRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async create(input: {
+    orgId: string;
+    productId: string;
+    sourceTargetId?: string | null;
+    destTargetId: string;
+    gateKind: PromotionGateKind;
+    gateConfig?: Record<string, unknown>;
+    active?: boolean;
+    description?: string | null;
+  }): Promise<PromotionPolicy> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      product_id: input.productId,
+      source_target_id: input.sourceTargetId ?? null,
+      dest_target_id: input.destTargetId,
+      gate_kind: input.gateKind,
+      gate_config_json: JSON.stringify(input.gateConfig ?? {}),
+      active: input.active === false ? 0 : 1,
+      description: input.description ?? null,
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO promotion_policy (id, org_id, product_id, source_target_id, dest_target_id, gate_kind, gate_config_json, active, description, created_at, updated_at) VALUES (@id, @org_id, @product_id, @source_target_id, @dest_target_id, @gate_kind, @gate_config_json, @active, @description, @created_at, @updated_at)",
+      bind,
+    );
+    return mapPromotionPolicy({ ...bind, deleted_at: null });
+  }
+
+  async get(id: string): Promise<PromotionPolicy | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM promotion_policy WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    return r.rows[0] ? mapPromotionPolicy(r.rows[0]) : null;
+  }
+
+  async listForOrg(orgId: string): Promise<PromotionPolicy[]> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM promotion_policy WHERE org_id = $1 AND deleted_at IS NULL ORDER BY created_at",
+      [orgId],
+    );
+    return r.rows.map(mapPromotionPolicy);
+  }
+
+  async listMatchingForProduct(input: {
+    productId: string;
+    sourceTargetId: string | null;
+  }): Promise<PromotionPolicy[]> {
+    if (input.sourceTargetId === null) {
+      const r = await pgPositional(
+        this.pool,
+        "SELECT * FROM promotion_policy WHERE product_id = $1 AND source_target_id IS NULL AND active = 1 AND deleted_at IS NULL ORDER BY created_at",
+        [input.productId],
+      );
+      return r.rows.map(mapPromotionPolicy);
+    }
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM promotion_policy WHERE product_id = $1 AND source_target_id = $2 AND active = 1 AND deleted_at IS NULL ORDER BY created_at",
+      [input.productId, input.sourceTargetId],
+    );
+    return r.rows.map(mapPromotionPolicy);
+  }
+
+  async update(
+    id: string,
+    patch: Partial<
+      Pick<
+        PromotionPolicy,
+        "gateKind" | "gateConfig" | "active" | "description" | "destTargetId" | "sourceTargetId"
+      >
+    >,
+  ): Promise<PromotionPolicy> {
+    const existing = await this.get(id);
+    if (!existing) throw new StorageNotFoundError("promotion_policy", id);
+    const bind = {
+      id: existing.id,
+      gate_kind: patch.gateKind ?? existing.gateKind,
+      gate_config_json: JSON.stringify(patch.gateConfig ?? existing.gateConfig),
+      active:
+        patch.active !== undefined
+          ? patch.active
+            ? 1
+            : 0
+          : existing.active
+            ? 1
+            : 0,
+      description:
+        patch.description !== undefined ? patch.description : existing.description,
+      dest_target_id: patch.destTargetId ?? existing.destTargetId,
+      source_target_id:
+        patch.sourceTargetId !== undefined
+          ? patch.sourceTargetId
+          : existing.sourceTargetId,
+      updated_at: nowIso(),
+    };
+    await pgQuery(
+      this.pool,
+      "UPDATE promotion_policy SET gate_kind = @gate_kind, gate_config_json = @gate_config_json, active = @active, description = @description, dest_target_id = @dest_target_id, source_target_id = @source_target_id, updated_at = @updated_at WHERE id = @id",
+      bind,
+    );
+    return mapPromotionPolicy({
+      ...bind,
+      org_id: existing.orgId,
+      product_id: existing.productId,
+      created_at: existing.createdAt,
+      deleted_at: existing.deletedAt,
+    });
+  }
+
+  async softDelete(id: string): Promise<void> {
+    const now = nowIso();
+    const r = await pgPositional(
+      this.pool,
+      "UPDATE promotion_policy SET deleted_at = $1, updated_at = $2 WHERE id = $3 AND deleted_at IS NULL",
+      [now, now, id],
+    );
+    if (r.rowCount === 0)
+      throw new StorageNotFoundError("promotion_policy", id);
+  }
+}
+
+function mapApproval(row: SqlRow): Approval {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    policyId: row.policy_id as string,
+    releaseId: row.release_id as string,
+    destTargetId: row.dest_target_id as string,
+    status: row.status as ApprovalStatus,
+    autoApproveAt: (row.auto_approve_at as string | null) ?? null,
+    decidedBy: (row.decided_by as string | null) ?? null,
+    decidedAt: (row.decided_at as string | null) ?? null,
+    reason: (row.reason as string | null) ?? null,
+    deployAttemptedAt: (row.deploy_attempted_at as string | null) ?? null,
+    deployOutcome: (row.deploy_outcome as string | null) ?? null,
+    deployDeploymentId: (row.deploy_deployment_id as string | null) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+class PgApprovalRepo implements ApprovalRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async create(input: {
+    orgId: string;
+    policyId: string;
+    releaseId: string;
+    destTargetId: string;
+    status: ApprovalStatus;
+    autoApproveAt?: string | null;
+  }): Promise<Approval> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      policy_id: input.policyId,
+      release_id: input.releaseId,
+      dest_target_id: input.destTargetId,
+      status: input.status,
+      auto_approve_at: input.autoApproveAt ?? null,
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO approval (id, org_id, policy_id, release_id, dest_target_id, status, auto_approve_at, created_at, updated_at) VALUES (@id, @org_id, @policy_id, @release_id, @dest_target_id, @status, @auto_approve_at, @created_at, @updated_at)",
+      bind,
+    );
+    return mapApproval({
+      ...bind,
+      decided_by: null,
+      decided_at: null,
+      reason: null,
+      deploy_attempted_at: null,
+      deploy_outcome: null,
+      deploy_deployment_id: null,
+      deleted_at: null,
+    });
+  }
+
+  async get(id: string): Promise<Approval | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM approval WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    return r.rows[0] ? mapApproval(r.rows[0]) : null;
+  }
+
+  async getForReleaseAndTarget(input: {
+    releaseId: string;
+    destTargetId: string;
+  }): Promise<Approval | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM approval WHERE release_id = $1 AND dest_target_id = $2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
+      [input.releaseId, input.destTargetId],
+    );
+    return r.rows[0] ? mapApproval(r.rows[0]) : null;
+  }
+
+  async listForOrg(
+    orgId: string,
+    opts: { status?: ApprovalStatus; limit?: number } = {},
+  ): Promise<Approval[]> {
+    const limit = opts.limit ?? 100;
+    if (opts.status) {
+      const r = await pgPositional(
+        this.pool,
+        "SELECT * FROM approval WHERE org_id = $1 AND status = $2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT $3",
+        [orgId, opts.status, limit],
+      );
+      return r.rows.map(mapApproval);
+    }
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM approval WHERE org_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT $2",
+      [orgId, limit],
+    );
+    return r.rows.map(mapApproval);
+  }
+
+  async listPendingAutoApprove(nowIsoStr: string): Promise<Approval[]> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM approval WHERE status = 'pending' AND auto_approve_at IS NOT NULL AND auto_approve_at <= $1 AND deleted_at IS NULL ORDER BY auto_approve_at",
+      [nowIsoStr],
+    );
+    return r.rows.map(mapApproval);
+  }
+
+  async update(
+    id: string,
+    patch: Partial<
+      Pick<
+        Approval,
+        | "status"
+        | "decidedBy"
+        | "decidedAt"
+        | "reason"
+        | "deployAttemptedAt"
+        | "deployOutcome"
+        | "deployDeploymentId"
+      >
+    >,
+  ): Promise<Approval> {
+    const existing = await this.get(id);
+    if (!existing) throw new StorageNotFoundError("approval", id);
+    const bind = {
+      id: existing.id,
+      status: patch.status ?? existing.status,
+      decided_by:
+        patch.decidedBy !== undefined ? patch.decidedBy : existing.decidedBy,
+      decided_at:
+        patch.decidedAt !== undefined ? patch.decidedAt : existing.decidedAt,
+      reason: patch.reason !== undefined ? patch.reason : existing.reason,
+      deploy_attempted_at:
+        patch.deployAttemptedAt !== undefined
+          ? patch.deployAttemptedAt
+          : existing.deployAttemptedAt,
+      deploy_outcome:
+        patch.deployOutcome !== undefined
+          ? patch.deployOutcome
+          : existing.deployOutcome,
+      deploy_deployment_id:
+        patch.deployDeploymentId !== undefined
+          ? patch.deployDeploymentId
+          : existing.deployDeploymentId,
+      updated_at: nowIso(),
+    };
+    await pgQuery(
+      this.pool,
+      "UPDATE approval SET status = @status, decided_by = @decided_by, decided_at = @decided_at, reason = @reason, deploy_attempted_at = @deploy_attempted_at, deploy_outcome = @deploy_outcome, deploy_deployment_id = @deploy_deployment_id, updated_at = @updated_at WHERE id = @id",
+      bind,
+    );
+    return mapApproval({
+      ...bind,
+      org_id: existing.orgId,
+      policy_id: existing.policyId,
+      release_id: existing.releaseId,
+      dest_target_id: existing.destTargetId,
+      auto_approve_at: existing.autoApproveAt,
+      created_at: existing.createdAt,
+      deleted_at: existing.deletedAt,
+    });
+  }
+
+  async softDelete(id: string): Promise<void> {
+    const now = nowIso();
+    const r = await pgPositional(
+      this.pool,
+      "UPDATE approval SET deleted_at = $1, updated_at = $2 WHERE id = $3 AND deleted_at IS NULL",
+      [now, now, id],
+    );
+    if (r.rowCount === 0) throw new StorageNotFoundError("approval", id);
   }
 }

@@ -42,12 +42,15 @@ import { validateBuildYaml, type BuildYaml, type Probe } from "../control-plane/
 import { runProbes, type ProbeResult } from "../control-plane/probes/index.js";
 import { loadConfig } from "../config.js";
 import type {
+  Approval,
   Artifact,
   Deployment,
   DeploymentHealthSummary,
   HealthCheck,
   HealthSchedule,
   Product,
+  PromotionGateKind,
+  PromotionPolicy,
   Release,
   Target,
   TargetConnection,
@@ -63,6 +66,12 @@ import {
   type HttpFetcher,
   type SignalmanEvent,
 } from "../control-plane/events/index.js";
+import {
+  onReleaseBuilt,
+  runPromotionTick,
+  type DeployInvoker,
+  type PromotionListenerOutcome,
+} from "../control-plane/promotion/index.js";
 
 // ── Lifecycle helper ────────────────────────────────────────────────
 
@@ -236,10 +245,33 @@ export async function runReleaseBuild(
         tag: result.release.tag,
         manifestSha256: result.release.manifestSha256,
       });
+      // Fire the auto-promotion listener — best effort so a failing
+      // promotion policy can't block the build from landing as ready.
+      await firePromotionListenerBestEffort(controlPlane, result.release);
     }
     return result;
   } finally {
     if (cleanup) await cleanup();
+  }
+}
+
+async function firePromotionListenerBestEffort(
+  controlPlane: ControlPlane,
+  release: Release,
+): Promise<PromotionListenerOutcome[]> {
+  try {
+    const deploy = createDefaultPromotionDeployInvoker(controlPlane);
+    return await onReleaseBuilt({ controlPlane, deploy }, release);
+  } catch (err) {
+    process.stderr.write(
+      JSON.stringify({
+        source: "signalman-promotion",
+        kind: "listener-error",
+        releaseId: release.id,
+        error: (err as Error).message,
+      }) + "\n",
+    );
+    return [];
   }
 }
 
@@ -275,6 +307,19 @@ export interface ReleaseShowResult {
   release: Release;
   product: Product;
   artifacts: Artifact[];
+  /** v0.4.0-1: attached promotion approvals across all dest targets. */
+  approvals?: Array<{
+    id: string;
+    policyId: string;
+    destTargetId: string;
+    destTargetName: string | null;
+    status: Approval["status"];
+    autoApproveAt: string | null;
+    decidedBy: string | null;
+    decidedAt: string | null;
+    deployOutcome: string | null;
+    deployDeploymentId: string | null;
+  }>;
 }
 
 export interface ReleaseVerifyResult {
@@ -372,7 +417,22 @@ export async function runReleaseShow(
     );
   }
   const artifacts = await controlPlane.artifacts.listForRelease(release.id);
-  return { release, product, artifacts };
+  const approvals = await runReleasePromotionState(controlPlane, {
+    releaseId: release.id,
+  });
+  const approvalSummary = approvals.map((entry) => ({
+    id: entry.approval.id,
+    policyId: entry.approval.policyId,
+    destTargetId: entry.approval.destTargetId,
+    destTargetName: entry.destTarget?.name ?? null,
+    status: entry.approval.status,
+    autoApproveAt: entry.approval.autoApproveAt,
+    decidedBy: entry.approval.decidedBy,
+    decidedAt: entry.approval.decidedAt,
+    deployOutcome: entry.approval.deployOutcome,
+    deployDeploymentId: entry.approval.deployDeploymentId,
+  }));
+  return { release, product, artifacts, approvals: approvalSummary };
 }
 
 // Git helpers extracted to control-plane/build/git.ts (PR 8b) so the
@@ -1479,4 +1539,326 @@ export function createSchedulerDispatcherBridge(
       probes: ev.outcome.probes,
     });
   };
+}
+
+// ── Promotion policy / approval verbs (v0.4.0-1 / Epic 1) ───────────
+
+export interface PromotionPolicyAddInput {
+  productName: string;
+  destTargetName: string;
+  gateKind: PromotionGateKind;
+  /** Optional source target name. Omit for the initial-tier policy. */
+  sourceTargetName?: string;
+  /** Free-form kind-specific config; e.g. `{ delay_seconds: 600 }` for time_delay. */
+  gateConfig?: Record<string, unknown>;
+  description?: string;
+}
+
+export interface PromotionPolicyListEntry {
+  policy: PromotionPolicy;
+  product: Product;
+  destTarget: Target;
+  sourceTarget: Target | null;
+}
+
+export async function runPromotionPolicyAdd(
+  controlPlane: ControlPlane,
+  input: PromotionPolicyAddInput,
+): Promise<PromotionPolicyListEntry> {
+  const orgId = await getActiveOrgId(controlPlane);
+  const product = await controlPlane.products.getByName(orgId, input.productName);
+  if (!product) throw new Error(`product not found: ${input.productName}`);
+  const destTarget = await controlPlane.targets.getByName(orgId, input.destTargetName);
+  if (!destTarget) throw new Error(`target not found: ${input.destTargetName}`);
+  let sourceTarget: Target | null = null;
+  let sourceTargetId: string | null = null;
+  if (input.sourceTargetName) {
+    sourceTarget = await controlPlane.targets.getByName(orgId, input.sourceTargetName);
+    if (!sourceTarget)
+      throw new Error(`source target not found: ${input.sourceTargetName}`);
+    sourceTargetId = sourceTarget.id;
+  }
+  if (input.gateKind === "time_delay") {
+    // Validate delay_seconds up front so a malformed config doesn't
+    // explode the listener later.
+    const raw = (input.gateConfig as { delay_seconds?: unknown } | undefined)?.delay_seconds;
+    const n = typeof raw === "number" ? raw : Number(raw);
+    if (!Number.isFinite(n) || n < 0) {
+      throw new Error(
+        "promotion add: time_delay gate requires { delay_seconds: N } in --gate-config",
+      );
+    }
+  }
+  const policy = await controlPlane.promotionPolicies.create({
+    orgId,
+    productId: product.id,
+    sourceTargetId,
+    destTargetId: destTarget.id,
+    gateKind: input.gateKind,
+    gateConfig: input.gateConfig ?? {},
+    description: input.description ?? null,
+  });
+  await controlPlane.auditLog.append({
+    orgId,
+    actor: "cli",
+    action: "promotion_policy.added",
+    entityType: "promotion_policy",
+    entityId: policy.id,
+    detail: {
+      productId: product.id,
+      destTargetId: destTarget.id,
+      sourceTargetId,
+      gateKind: policy.gateKind,
+    },
+  });
+  return { policy, product, destTarget, sourceTarget };
+}
+
+export async function runPromotionPolicyList(
+  controlPlane: ControlPlane,
+): Promise<PromotionPolicyListEntry[]> {
+  const orgId = await getActiveOrgId(controlPlane);
+  const policies = await controlPlane.promotionPolicies.listForOrg(orgId);
+  const out: PromotionPolicyListEntry[] = [];
+  for (const policy of policies) {
+    const product = await controlPlane.products.get(policy.productId);
+    const destTarget = await controlPlane.targets.get(policy.destTargetId);
+    if (!product || !destTarget) continue;
+    const sourceTarget = policy.sourceTargetId
+      ? await controlPlane.targets.get(policy.sourceTargetId)
+      : null;
+    out.push({ policy, product, destTarget, sourceTarget });
+  }
+  return out;
+}
+
+export async function runPromotionPolicyRemove(
+  controlPlane: ControlPlane,
+  input: { id: string },
+): Promise<void> {
+  const existing = await controlPlane.promotionPolicies.get(input.id);
+  if (!existing) throw new Error(`promotion policy not found: ${input.id}`);
+  await controlPlane.promotionPolicies.softDelete(existing.id);
+  await controlPlane.auditLog.append({
+    orgId: existing.orgId,
+    actor: "cli",
+    action: "promotion_policy.removed",
+    entityType: "promotion_policy",
+    entityId: existing.id,
+  });
+}
+
+export interface ApprovalEntry {
+  approval: Approval;
+  policy: PromotionPolicy | null;
+  release: Release | null;
+  destTarget: Target | null;
+}
+
+export async function runApprovalList(
+  controlPlane: ControlPlane,
+  input: { status?: Approval["status"] } = {},
+): Promise<ApprovalEntry[]> {
+  const orgId = await getActiveOrgId(controlPlane);
+  const approvals = await controlPlane.approvals.listForOrg(orgId, {
+    status: input.status,
+  });
+  const out: ApprovalEntry[] = [];
+  for (const a of approvals) {
+    const policy = await controlPlane.promotionPolicies.get(a.policyId);
+    const release = await controlPlane.releases.get(a.releaseId);
+    const destTarget = await controlPlane.targets.get(a.destTargetId);
+    out.push({ approval: a, policy, release, destTarget });
+  }
+  return out;
+}
+
+export interface ApprovalDecisionInput {
+  id: string;
+  decidedBy?: string;
+  reason?: string;
+}
+
+export interface ApprovalDecisionResult {
+  approval: Approval;
+  deployedDeploymentId?: string | null;
+  deployOutcome?: "success" | "failed";
+}
+
+export async function runPromotionApprove(
+  controlPlane: ControlPlane,
+  input: ApprovalDecisionInput,
+  options: { deploy?: DeployInvoker } = {},
+): Promise<ApprovalDecisionResult> {
+  const existing = await controlPlane.approvals.get(input.id);
+  if (!existing) throw new Error(`approval not found: ${input.id}`);
+  if (existing.status !== "pending") {
+    throw new Error(
+      `approval ${input.id} is ${existing.status}, not pending — refusing to re-approve`,
+    );
+  }
+  const policy = await controlPlane.promotionPolicies.get(existing.policyId);
+  if (!policy) throw new Error(`approval references missing policy ${existing.policyId}`);
+  const release = await controlPlane.releases.get(existing.releaseId);
+  if (!release) throw new Error(`approval references missing release ${existing.releaseId}`);
+  const nowIsoStr = new Date().toISOString();
+  await controlPlane.approvals.update(existing.id, {
+    status: "approved",
+    decidedBy: input.decidedBy ?? "cli",
+    decidedAt: nowIsoStr,
+    reason: input.reason ?? null,
+  });
+  await controlPlane.auditLog.append({
+    orgId: existing.orgId,
+    actor: input.decidedBy ?? "cli",
+    action: "approval.approved",
+    entityType: "approval",
+    entityId: existing.id,
+    detail: { reason: input.reason },
+  });
+  await fireEventBestEffort(controlPlane, {
+    kind: "promotion-approved",
+    orgId: existing.orgId,
+    at: nowIsoStr,
+    promotionId: existing.id,
+    approvalId: existing.id,
+    policyId: policy.id,
+    releaseId: release.id,
+    targetName: (await controlPlane.targets.get(existing.destTargetId))?.name ?? existing.destTargetId,
+  });
+  const fresh = await controlPlane.approvals.get(existing.id);
+  if (!fresh) throw new Error(`approval ${existing.id} vanished after approval`);
+  // Fire the deploy now that the gate is open.
+  const deploy = options.deploy ?? createDefaultPromotionDeployInvoker(controlPlane);
+  const invocation = await deploy({
+    releaseId: release.id,
+    destTargetId: existing.destTargetId,
+    approval: fresh,
+    policy,
+  });
+  const updated = await controlPlane.approvals.update(existing.id, {
+    deployAttemptedAt: nowIsoStr,
+    deployOutcome: invocation.outcome,
+    deployDeploymentId: invocation.deploymentId,
+  });
+  return {
+    approval: updated,
+    deployedDeploymentId: invocation.deploymentId,
+    deployOutcome: invocation.outcome,
+  };
+}
+
+export async function runPromotionReject(
+  controlPlane: ControlPlane,
+  input: ApprovalDecisionInput,
+): Promise<Approval> {
+  const existing = await controlPlane.approvals.get(input.id);
+  if (!existing) throw new Error(`approval not found: ${input.id}`);
+  if (existing.status !== "pending") {
+    throw new Error(
+      `approval ${input.id} is ${existing.status}, not pending — refusing to re-reject`,
+    );
+  }
+  const policy = await controlPlane.promotionPolicies.get(existing.policyId);
+  if (!policy) throw new Error(`approval references missing policy ${existing.policyId}`);
+  const nowIsoStr = new Date().toISOString();
+  const updated = await controlPlane.approvals.update(existing.id, {
+    status: "rejected",
+    decidedBy: input.decidedBy ?? "cli",
+    decidedAt: nowIsoStr,
+    reason: input.reason ?? null,
+  });
+  await controlPlane.auditLog.append({
+    orgId: existing.orgId,
+    actor: input.decidedBy ?? "cli",
+    action: "approval.rejected",
+    entityType: "approval",
+    entityId: existing.id,
+    detail: { reason: input.reason },
+  });
+  const target = await controlPlane.targets.get(existing.destTargetId);
+  await fireEventBestEffort(controlPlane, {
+    kind: "promotion-rejected",
+    orgId: existing.orgId,
+    at: nowIsoStr,
+    promotionId: existing.id,
+    approvalId: existing.id,
+    policyId: policy.id,
+    releaseId: existing.releaseId,
+    targetName: target?.name ?? existing.destTargetId,
+    reason: input.reason ?? null,
+  });
+  return updated;
+}
+
+/**
+ * Process due `time_delay` approvals. Returns the count dispatched.
+ * Exposed via `signalman promotion tick` and as an MCP tool so cron
+ * paths can prod it without a long-running daemon.
+ */
+export async function runPromotionTickVerb(
+  controlPlane: ControlPlane,
+  options: { deploy?: DeployInvoker } = {},
+): Promise<{ processed: number }> {
+  const deploy = options.deploy ?? createDefaultPromotionDeployInvoker(controlPlane);
+  const processed = await runPromotionTick({ controlPlane, deploy });
+  return { processed };
+}
+
+/**
+ * Default deploy invoker for the promotion listener / tick. Wraps
+ * `runReleaseDeploy` and captures success/failure as the typed shape
+ * the listener expects.
+ */
+export function createDefaultPromotionDeployInvoker(
+  controlPlane: ControlPlane,
+): DeployInvoker {
+  return async ({ releaseId, destTargetId }) => {
+    const target = await controlPlane.targets.get(destTargetId);
+    if (!target) {
+      return { deploymentId: null, outcome: "failed", errorMessage: "dest target missing" };
+    }
+    try {
+      const result = await runReleaseDeploy(
+        controlPlane,
+        {
+          targetName: target.name,
+          releaseId,
+          actor: "promotion",
+        },
+        { out: process.stderr },
+      );
+      return {
+        deploymentId: result.deployment.id,
+        outcome: result.deployment.status === "active" ? "success" : "failed",
+      };
+    } catch (err) {
+      return {
+        deploymentId: null,
+        outcome: "failed",
+        errorMessage: (err as Error).message,
+      };
+    }
+  };
+}
+
+/**
+ * Promotion-state lookup for `signalman release show`. Returns the
+ * approval rows attached to this release across all dest targets.
+ */
+export async function runReleasePromotionState(
+  controlPlane: ControlPlane,
+  input: { releaseId: string },
+): Promise<ApprovalEntry[]> {
+  const orgId = await getActiveOrgId(controlPlane);
+  const all = await controlPlane.approvals.listForOrg(orgId, { limit: 200 });
+  const relevant = all.filter((a) => a.releaseId === input.releaseId);
+  const out: ApprovalEntry[] = [];
+  for (const a of relevant) {
+    const policy = await controlPlane.promotionPolicies.get(a.policyId);
+    const release = await controlPlane.releases.get(a.releaseId);
+    const destTarget = await controlPlane.targets.get(a.destTargetId);
+    out.push({ approval: a, policy, release, destTarget });
+  }
+  return out;
 }

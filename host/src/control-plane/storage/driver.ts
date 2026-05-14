@@ -18,6 +18,8 @@
 
 import type {
   ApiKey,
+  Approval,
+  ApprovalStatus,
   Artifact,
   ArtifactKind,
   AuditLogEntry,
@@ -33,6 +35,8 @@ import type {
   Org,
   OrgTier,
   Product,
+  PromotionGateKind,
+  PromotionPolicy,
   Release,
   ReleaseStatus,
   Run,
@@ -196,6 +200,89 @@ export interface HealthCheckRepo {
     deploymentId: string,
     opts?: { since?: string; limit?: number },
   ): Promise<HealthCheck[]>;
+}
+
+/**
+ * Repository for promotion policies (v0.4.0-1 / Epic 1).
+ * A policy says "when a release of <product> lands at <source target>
+ * (or is freshly built when sourceTargetId is null), promote it onto
+ * <dest target> using <gate kind> semantics."
+ */
+export interface PromotionPolicyRepo {
+  create(input: {
+    orgId: string;
+    productId: string;
+    sourceTargetId?: string | null;
+    destTargetId: string;
+    gateKind: PromotionGateKind;
+    gateConfig?: Record<string, unknown>;
+    active?: boolean;
+    description?: string | null;
+  }): Promise<PromotionPolicy>;
+  get(id: string): Promise<PromotionPolicy | null>;
+  listForOrg(orgId: string): Promise<PromotionPolicy[]>;
+  /**
+   * Active policies matching `productId`. Optional `sourceTargetId`
+   * narrows to the ones whose source matches (or, when null is
+   * passed, the initial-tier ones).
+   */
+  listMatchingForProduct(input: {
+    productId: string;
+    sourceTargetId: string | null;
+  }): Promise<PromotionPolicy[]>;
+  update(
+    id: string,
+    patch: Partial<
+      Pick<
+        PromotionPolicy,
+        "gateKind" | "gateConfig" | "active" | "description" | "destTargetId" | "sourceTargetId"
+      >
+    >,
+  ): Promise<PromotionPolicy>;
+  softDelete(id: string): Promise<void>;
+}
+
+/**
+ * Repository for approval rows (v0.4.0-1 / Epic 1). One row per
+ * attempted promotion. Unique on (release_id, dest_target_id) while
+ * pending or post-deploy so a re-fire of the listener can't queue
+ * duplicates.
+ */
+export interface ApprovalRepo {
+  create(input: {
+    orgId: string;
+    policyId: string;
+    releaseId: string;
+    destTargetId: string;
+    status: ApprovalStatus;
+    autoApproveAt?: string | null;
+  }): Promise<Approval>;
+  get(id: string): Promise<Approval | null>;
+  getForReleaseAndTarget(input: {
+    releaseId: string;
+    destTargetId: string;
+  }): Promise<Approval | null>;
+  listForOrg(
+    orgId: string,
+    opts?: { status?: ApprovalStatus; limit?: number },
+  ): Promise<Approval[]>;
+  listPendingAutoApprove(nowIso: string): Promise<Approval[]>;
+  update(
+    id: string,
+    patch: Partial<
+      Pick<
+        Approval,
+        | "status"
+        | "decidedBy"
+        | "decidedAt"
+        | "reason"
+        | "deployAttemptedAt"
+        | "deployOutcome"
+        | "deployDeploymentId"
+      >
+    >,
+  ): Promise<Approval>;
+  softDelete(id: string): Promise<void>;
 }
 
 /**
@@ -460,6 +547,9 @@ export interface StorageDriver {
   readonly healthSchedules: HealthScheduleRepo;
   // v0.4.0-2 (Epic 2, WS3) — outbound webhook subscriptions:
   readonly webhookSubscriptions: WebhookSubscriptionRepo;
+  // v0.4.0-1 (Epic 1, WS3) — promotion policies + approvals:
+  readonly promotionPolicies: PromotionPolicyRepo;
+  readonly approvals: ApprovalRepo;
 }
 
 /** Thrown by repos that are declared in this PR but not yet implemented. */

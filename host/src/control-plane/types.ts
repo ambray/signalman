@@ -226,6 +226,50 @@ export interface Run {
   deletedAt: string | null;
 }
 
+// ── Promotion policies + approvals (v0.4.0-1) ───────────────────────
+
+export type PromotionGateKind = "auto" | "manual" | "time_delay";
+
+export interface PromotionPolicy {
+  id: string;
+  orgId: string;
+  productId: string;
+  /** `null` for the initial-tier policy (fires on release-built). */
+  sourceTargetId: string | null;
+  destTargetId: string;
+  gateKind: PromotionGateKind;
+  /** Free-form, kind-specific. e.g. `{ delay_seconds: 600 }` for time_delay. */
+  gateConfig: Record<string, unknown>;
+  active: boolean;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+}
+
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "auto_approved";
+
+export interface Approval {
+  id: string;
+  orgId: string;
+  policyId: string;
+  releaseId: string;
+  destTargetId: string;
+  status: ApprovalStatus;
+  /** Wall-clock at-or-after which `pending` flips to `auto_approved` for `time_delay`. */
+  autoApproveAt: string | null;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  reason: string | null;
+  deployAttemptedAt: string | null;
+  /** 'success' / 'failed' / null. */
+  deployOutcome: string | null;
+  deployDeploymentId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+}
+
 // ── Webhook subscriptions (v0.4.0-2) ────────────────────────────────
 
 export type WebhookKind = "generic" | "slack" | "email";
