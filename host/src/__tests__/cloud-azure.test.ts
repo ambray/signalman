@@ -137,12 +137,13 @@ describe("AzureBackend.provisionInstance — happy path", () => {
     });
     const handle = await backend.provisionInstance(fullConfig());
 
-    expect(handle).toEqual({
+    expect(handle).toMatchObject({
       id: "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/test-vm",
       backend: "azure",
       name: "test-vm",
       region: "eastus",
     });
+    expect(handle.network_mode).toBe("public_mtls");
     expect(vms.beginCreateOrUpdateAndWait).toHaveBeenCalledTimes(1);
     const [rg, name, params] = vms.beginCreateOrUpdateAndWait.mock.calls[0];
     expect(rg).toBe("rg");
@@ -217,6 +218,46 @@ describe("AzureBackend.provisionInstance — happy path", () => {
     const params = vms.beginCreateOrUpdateAndWait.mock.calls[0][2] as VirtualMachine;
     expect(params.networkProfile?.networkInterfaces?.[0]?.id).toBe(nicId);
     expect(params.networkProfile?.networkInterfaces?.[0]?.primary).toBe(true);
+  });
+
+  // ── v0.3.0-5 sub-task 6 (network modes) ─────────────────────
+  it("records azure_bastion mode on the handle when configured", async () => {
+    const { client, vms } = makeMockClient();
+    vms.beginCreateOrUpdateAndWait.mockResolvedValueOnce({
+      id: "/.../virtualMachines/bastion-vm",
+      name: "bastion-vm",
+    } as VirtualMachine);
+    const nicId =
+      "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/networkInterfaces/my-nic";
+    const backend = new AzureBackend({
+      subscriptionId: "sub",
+      resourceGroup: "rg",
+      region: "eastus",
+      client,
+    });
+    const handle = await backend.provisionInstance(
+      fullConfig({
+        network: { subnet_id: nicId, mode: "azure_bastion" },
+      }),
+    );
+    expect(handle.network_mode).toBe("azure_bastion");
+  });
+
+  it("refuses aws_ssm mode on Azure backend with invalid_config", async () => {
+    const { client } = makeMockClient();
+    const nicId =
+      "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/networkInterfaces/my-nic";
+    const backend = new AzureBackend({
+      subscriptionId: "sub",
+      resourceGroup: "rg",
+      region: "eastus",
+      client,
+    });
+    await expect(
+      backend.provisionInstance(
+        fullConfig({ network: { subnet_id: nicId, mode: "aws_ssm" } }),
+      ),
+    ).rejects.toThrowError(/aws_ssm/);
   });
 });
 

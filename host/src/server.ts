@@ -800,6 +800,15 @@ server.tool(
         subnet_id: z.string().optional(),
         security_group_ids: z.array(z.string()).optional(),
         assign_public_ip: z.boolean().optional(),
+        mode: z
+          .enum(["public_mtls", "aws_ssm", "azure_bastion"])
+          .optional()
+          .describe(
+            "Control-plane → guest reachability mode (sub-task 6). " +
+              "Defaults to 'public_mtls'. Use 'aws_ssm' (AWS only) or " +
+              "'azure_bastion' (Azure only) for zero-public-surface " +
+              "deployments. The backend records the mode on the handle.",
+          ),
       })
       .optional()
       .describe(
@@ -974,6 +983,58 @@ server.tool(
           stackName: params.stack_name,
           vars: params.vars,
           autoApprove: params.auto_approve,
+        });
+      }),
+    ),
+);
+
+// ── v0.3.0-5 sub-task 6: Network connection descriptor ───────────
+//
+// Operator + agent helper: given a handle (with its recorded
+// network_mode), return the addressing parameters a
+// control-plane client needs to reach the guest agent. The
+// actual tunnel implementation (SSM session-manager, Azure
+// Bastion port forwarding, raw TCP) is the caller's job; this
+// tool returns data, not connections.
+
+server.tool(
+  "signalman_cloud_connection_descriptor",
+  "Build a connection descriptor for reaching the guest agent on a cloud VM given its handle. The descriptor kind reflects the network mode the VM was provisioned with: public_mtls (returns port), aws_ssm (region + instance_id), azure_bastion (subscription_id + resource_group + vm_name). For public_mtls + no host, the caller fetches the IP via getInstanceIp and feeds it back. For azure_bastion, the operator passes subscription_id and resource_group hints (the handle alone doesn't carry them).",
+  {
+    handle: z
+      .object({
+        id: z.string(),
+        backend: z.enum(["aws", "azure"]),
+        name: z.string(),
+        region: z.string(),
+        network_mode: z
+          .enum(["public_mtls", "aws_ssm", "azure_bastion"])
+          .optional(),
+      })
+      .describe("Handle returned by signalman_cloud_provision or signalman_cloud_list."),
+    port: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("gRPC port (defaults to 443)."),
+    subscription_id: z
+      .string()
+      .optional()
+      .describe("Azure subscription id (required when mode=azure_bastion)."),
+    resource_group: z
+      .string()
+      .optional()
+      .describe("Azure resource group (required when mode=azure_bastion)."),
+  },
+  async (params) =>
+    withRecording("signalman_cloud_connection_descriptor", params, () =>
+      asCloudMcpResult(async () => {
+        const { getConnectionDescriptor } = await import("./cloud/connection.js");
+        return getConnectionDescriptor(params.handle as CloudInstanceHandle, {
+          port: params.port,
+          subscriptionId: params.subscription_id,
+          resourceGroup: params.resource_group,
         });
       }),
     ),

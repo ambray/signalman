@@ -81,6 +81,36 @@ export type CloudTargetKind =
   | "cloud_stack_test"
   | "k8s_test";
 
+/**
+ * How the control plane reaches the guest agent on a cloud VM
+ * (v0.3.0-5 sub-task 6, design §13.6).
+ *
+ * - `public_mtls` (default) — vendor assigns a public IP;
+ *   security group restricts inbound to gRPC port from the
+ *   control-plane host's IP; guest agent authenticates via
+ *   mutual TLS. Simplest setup, biggest attack surface — the
+ *   public IP is internet-reachable.
+ * - `aws_ssm` — no public IP; gRPC tunneled through AWS SSM
+ *   Session Manager. Requires the SSM agent in the AMI + an
+ *   IAM instance profile granting SSM Session Manager. Zero
+ *   public attack surface; setup cost is the SSM tunneling
+ *   client at the control plane.
+ * - `azure_bastion` — equivalent for Azure VMs via Azure
+ *   Bastion. Requires Bastion deployed in the VNet.
+ *
+ * The actual tunnel implementation (SSM `start-session
+ * --document-name AWS-StartPortForwardingSession`, Azure
+ * Bastion native-client port-forwarding) is a connection-time
+ * concern handled by the control-plane client; the backend
+ * exposes the network mode via the {@link CloudInstanceHandle}
+ * and the {@link CloudConnectionDescriptor} so callers know
+ * which tunneling protocol to use.
+ */
+export type NetworkMode = "public_mtls" | "aws_ssm" | "azure_bastion";
+
+/** Default network mode when omitted from {@link CloudInstanceConfig.network}. */
+export const DEFAULT_NETWORK_MODE: NetworkMode = "public_mtls";
+
 // ── Config + handle + status shapes ───────────────────────────────
 
 /**
@@ -163,8 +193,23 @@ export interface CloudInstanceConfig {
      * Whether to attach a public IP. Defaults to true for
      * `cloud_vm_test` (the orchestrator needs reachability for
      * the guest agent), false for cloud runners (which dial out).
+     *
+     * NB: when {@link mode} is `aws_ssm` or `azure_bastion`,
+     * the backend ignores this and forces no-public-IP — the
+     * whole point of those modes is to avoid the public surface.
      */
     assign_public_ip?: boolean;
+    /**
+     * Control-plane → guest reachability mode (sub-task 6).
+     * Defaults to {@link DEFAULT_NETWORK_MODE} (`public_mtls`)
+     * for back-compat with sub-tasks 2–5; opt into `aws_ssm` /
+     * `azure_bastion` for zero-public-surface deployments.
+     *
+     * The backend records the chosen mode on the resulting
+     * handle so callers can build the right connection
+     * descriptor at connect time.
+     */
+    mode?: NetworkMode;
   };
 }
 
@@ -194,7 +239,58 @@ export interface CloudInstanceHandle {
    * does not necessarily populate it on the returned handle.
    */
   tags?: Record<string, string>;
+  /**
+   * Network mode the instance was provisioned with (sub-task 6).
+   * Optional + informational; absent means "control plane should
+   * fall back to the back-compat `public_mtls` assumption".
+   * `provisionInstance` populates it from the config; `listInstances`
+   * may not (mode isn't a vendor tag) — callers that need this
+   * after a list-based recovery should treat absence as default.
+   */
+  network_mode?: NetworkMode;
 }
+
+/**
+ * Descriptor returned by `getConnectionDescriptor(handle)` — tells
+ * a control-plane client which tunneling protocol to use to reach
+ * the guest agent. Sub-task 6.
+ *
+ * The actual tunnel implementation (SSM session-manager, Azure
+ * Bastion port forwarding) is the caller's responsibility; this
+ * type carries only the addressing parameters.
+ */
+export type CloudConnectionDescriptor =
+  | {
+      kind: "public_mtls";
+      /** gRPC port to dial. Defaults to 443 for cloud-mTLS. */
+      port: number;
+      /**
+       * Public IP, if already resolved. Absent when the caller
+       * hasn't called {@link CloudBackend.getInstanceIp} yet —
+       * fetch it before connecting.
+       */
+      host?: string;
+    }
+  | {
+      kind: "aws_ssm";
+      /** AWS region the instance lives in. */
+      region: string;
+      /** EC2 instance id (e.g. `i-0abc...`). */
+      instance_id: string;
+      /** gRPC port to forward through SSM. Defaults to 443. */
+      port: number;
+    }
+  | {
+      kind: "azure_bastion";
+      /** Subscription id holding the VM + Bastion. */
+      subscription_id: string;
+      /** Resource group holding the VM. */
+      resource_group: string;
+      /** VM name. */
+      vm_name: string;
+      /** gRPC port to forward through Bastion. Defaults to 443. */
+      port: number;
+    };
 
 /** Runtime state of a cloud instance. */
 export type CloudInstanceState =

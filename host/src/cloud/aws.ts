@@ -65,6 +65,7 @@ import {
   type CloudInstanceState,
   type CloudInstanceStatus,
   DEFAULT_INSTANCE_TTL_MINUTES,
+  DEFAULT_NETWORK_MODE,
   SIGNALMAN_MANAGED_TAG_KEY,
   SIGNALMAN_MANAGED_TAG_VALUE,
   SIGNALMAN_ORG_TAG_KEY,
@@ -189,6 +190,23 @@ export class AwsBackend implements CloudBackend {
     // ── Build RunInstancesCommand ──
     const tags = buildInstanceTags(config, orgId, ttlMinutes);
 
+    // Resolve network mode (sub-task 6 — design §13.6). aws_ssm
+    // forces no-public-IP regardless of `assign_public_ip`; that's
+    // the whole point. azure_bastion on an AWS backend is a
+    // config error — surface it loudly.
+    const mode = config.network?.mode ?? DEFAULT_NETWORK_MODE;
+    if (mode === "azure_bastion") {
+      throw new CloudBackendError(
+        "invalid_config",
+        `AWS backend does not support network mode 'azure_bastion'. ` +
+          `Use 'public_mtls' or 'aws_ssm'.`,
+      );
+    }
+    const forceNoPublic = mode === "aws_ssm";
+    const effectiveAssignPublicIp = forceNoPublic
+      ? false
+      : config.network?.assign_public_ip;
+
     const runInput = {
       ImageId: config.image_ref,
       // The abstraction takes a free string; AWS SDK types it as a
@@ -201,13 +219,15 @@ export class AwsBackend implements CloudBackend {
       SubnetId: config.network?.subnet_id,
       SecurityGroupIds: config.network?.security_group_ids,
       // AWS treats undefined as "use subnet default"; we surface
-      // the abstraction's `assign_public_ip` only when set.
-      ...(config.network?.assign_public_ip !== undefined
+      // the abstraction's `assign_public_ip` only when set. When
+      // mode=aws_ssm we MUST explicitly set false so the subnet
+      // default (which might assign one) doesn't leak a public IP.
+      ...(effectiveAssignPublicIp !== undefined
         ? {
             NetworkInterfaces: [
               {
                 DeviceIndex: 0,
-                AssociatePublicIpAddress: config.network.assign_public_ip,
+                AssociatePublicIpAddress: effectiveAssignPublicIp,
                 SubnetId: config.network?.subnet_id,
                 Groups: config.network?.security_group_ids,
               },
@@ -246,6 +266,7 @@ export class AwsBackend implements CloudBackend {
       backend: "aws",
       name: config.name,
       region: this.region,
+      network_mode: mode,
     };
 
     // ── Poll until running ──

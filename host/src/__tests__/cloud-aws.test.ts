@@ -135,12 +135,16 @@ describe("AwsBackend.provisionInstance — happy path", () => {
     });
     const handle = await backend.provisionInstance(fullConfig());
 
-    expect(handle).toEqual({
+    // toMatchObject so the assertion remains valid when the
+    // backend adds the v0.3.0-5 sub-task 6 `network_mode` field
+    // to the handle.
+    expect(handle).toMatchObject({
       id: "i-0abc",
       backend: "aws",
       name: "test-vm",
       region: "us-east-1",
     });
+    expect(handle.network_mode).toBe("public_mtls");
     // First send was RunInstances; the next two were DescribeInstances.
     expect(send).toHaveBeenCalledTimes(3);
     expect(send.mock.calls[0][0]).toBeInstanceOf(RunInstancesCommand);
@@ -200,6 +204,88 @@ describe("AwsBackend.provisionInstance — happy path", () => {
     );
     expect(tagMap["signalman-ttl-minutes"]).toBe("120");
     expect(tagMap[SIGNALMAN_ORG_TAG_KEY]).toBe("org-1");
+  });
+
+  // ── v0.3.0-5 sub-task 6 (network modes) ─────────────────────
+  it("records network_mode on the handle (public_mtls when omitted)", async () => {
+    const { client, send } = makeMockClient();
+    send
+      .mockResolvedValueOnce({ Instances: [{ InstanceId: "i-nm" }] })
+      .mockResolvedValueOnce({
+        Reservations: [
+          { Instances: [{ InstanceId: "i-nm", State: { Name: "running" } }] },
+        ],
+      });
+    const backend = new AwsBackend({
+      region: "us-east-1",
+      client,
+      sleep: instantSleep(),
+    });
+    const handle = await backend.provisionInstance(fullConfig());
+    expect(handle.network_mode).toBe("public_mtls");
+  });
+
+  it("records aws_ssm mode on the handle when configured", async () => {
+    const { client, send } = makeMockClient();
+    send
+      .mockResolvedValueOnce({ Instances: [{ InstanceId: "i-ssm" }] })
+      .mockResolvedValueOnce({
+        Reservations: [
+          { Instances: [{ InstanceId: "i-ssm", State: { Name: "running" } }] },
+        ],
+      });
+    const backend = new AwsBackend({
+      region: "us-east-1",
+      client,
+      sleep: instantSleep(),
+    });
+    const handle = await backend.provisionInstance(
+      fullConfig({ network: { mode: "aws_ssm" } }),
+    );
+    expect(handle.network_mode).toBe("aws_ssm");
+  });
+
+  it("forces AssociatePublicIpAddress=false when mode=aws_ssm", async () => {
+    const { client, send } = makeMockClient();
+    send
+      .mockResolvedValueOnce({ Instances: [{ InstanceId: "i-ssm-np" }] })
+      .mockResolvedValueOnce({
+        Reservations: [
+          {
+            Instances: [{ InstanceId: "i-ssm-np", State: { Name: "running" } }],
+          },
+        ],
+      });
+    const backend = new AwsBackend({
+      region: "us-east-1",
+      client,
+      sleep: instantSleep(),
+    });
+    await backend.provisionInstance(
+      fullConfig({
+        // Even if the operator (or scenario config) sets
+        // assign_public_ip=true, aws_ssm mode forces it off.
+        network: { mode: "aws_ssm", assign_public_ip: true },
+      }),
+    );
+    const runCmd = send.mock.calls[0][0] as RunInstancesCommand;
+    const nic = runCmd.input.NetworkInterfaces?.[0];
+    expect(nic).toBeDefined();
+    expect(nic?.AssociatePublicIpAddress).toBe(false);
+  });
+
+  it("refuses azure_bastion mode on AWS backend with invalid_config", async () => {
+    const { client } = makeMockClient();
+    const backend = new AwsBackend({
+      region: "us-east-1",
+      client,
+      sleep: instantSleep(),
+    });
+    await expect(
+      backend.provisionInstance(
+        fullConfig({ network: { mode: "azure_bastion" } }),
+      ),
+    ).rejects.toThrowError(/azure_bastion/);
   });
 });
 

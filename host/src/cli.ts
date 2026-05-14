@@ -2415,8 +2415,98 @@ async function cmdCloud(args: ParsedArgs): Promise<number> {
       return await cmdCloudReaper(args);
     case "budget":
       return await cmdCloudBudget(args);
+    case "connection-descriptor":
+      return await cmdCloudConnectionDescriptor(args);
     default:
       usageError(`unknown cloud subcommand: ${sub}`);
+  }
+}
+
+/**
+ * `signalman cloud connection-descriptor` — build a connection
+ * descriptor for a given handle. Mirrors the
+ * signalman_cloud_connection_descriptor MCP tool. Sub-task 6.
+ *
+ * Operator usage:
+ *   signalman cloud connection-descriptor \
+ *     --provider aws --id i-0abc --name test --region us-east-1 \
+ *     [--network-mode aws_ssm] [--port 8443]
+ *
+ * For Azure with mode=azure_bastion, also pass:
+ *   --subscription-id <SUB> --resource-group <RG>
+ *
+ * Exported for tests.
+ */
+export async function cmdCloudConnectionDescriptor(
+  args: ParsedArgs,
+): Promise<number> {
+  const provider = args.options.get("provider");
+  const id = args.options.get("id");
+  const name = args.options.get("name");
+  const region = args.options.get("region");
+  if (!provider) usageError("cloud connection-descriptor requires --provider <aws|azure>");
+  if (!id) usageError("cloud connection-descriptor requires --id <INSTANCE_ID>");
+  if (!name) usageError("cloud connection-descriptor requires --name <VM_NAME>");
+  if (!region) usageError("cloud connection-descriptor requires --region <REGION>");
+  if (provider !== "aws" && provider !== "azure") {
+    usageError(`--provider must be 'aws' or 'azure', got: ${provider}`);
+  }
+  const networkMode = args.options.get("network-mode");
+  if (
+    networkMode !== undefined &&
+    networkMode !== "public_mtls" &&
+    networkMode !== "aws_ssm" &&
+    networkMode !== "azure_bastion"
+  ) {
+    usageError(
+      `--network-mode must be 'public_mtls', 'aws_ssm', or 'azure_bastion'`,
+    );
+  }
+  const portStr = args.options.get("port");
+  const port = portStr ? Number(portStr) : undefined;
+  if (port !== undefined && (!Number.isInteger(port) || port <= 0)) {
+    usageError("--port must be a positive integer");
+  }
+  const isJson = args.options.get("format") === "json";
+
+  const { getConnectionDescriptor } = await import("./cloud/connection.js");
+  try {
+    const descriptor = getConnectionDescriptor(
+      {
+        id: id!,
+        backend: provider as "aws" | "azure",
+        name: name!,
+        region: region!,
+        network_mode: networkMode as "public_mtls" | "aws_ssm" | "azure_bastion" | undefined,
+      },
+      {
+        port,
+        subscriptionId: args.options.get("subscription-id"),
+        resourceGroup: args.options.get("resource-group"),
+      },
+    );
+    if (isJson) {
+      process.stdout.write(JSON.stringify(descriptor, null, 2) + "\n");
+    } else {
+      process.stdout.write(
+        `Connection descriptor for ${provider}:${id}:\n` +
+          `  kind: ${descriptor.kind}\n` +
+          `  port: ${descriptor.port}\n` +
+          (descriptor.kind === "aws_ssm"
+            ? `  region:      ${descriptor.region}\n  instance_id: ${descriptor.instance_id}\n`
+            : descriptor.kind === "azure_bastion"
+              ? `  subscription_id: ${descriptor.subscription_id}\n  resource_group:  ${descriptor.resource_group}\n  vm_name:         ${descriptor.vm_name}\n`
+              : descriptor.host
+                ? `  host: ${descriptor.host}\n`
+                : `  host: (resolve via signalman_cloud_status before connecting)\n`),
+      );
+    }
+    return 0;
+  } catch (err) {
+    process.stderr.write(
+      `signalman: connection-descriptor failed: ${(err as Error).message}\n`,
+    );
+    return 4;
   }
 }
 
@@ -2827,7 +2917,7 @@ function printHelp(): void {
       "  api-key <subcommand>   (create, list, revoke)",
       "  runner <subcommand>    (register, start)",
       "  key <subcommand>       (generate, fingerprint — Ed25519 release signing)",
-      "  cloud <subcommand>     (reaper run/status, budget get/set/usage — cost guardrails)",
+      "  cloud <subcommand>     (reaper run/status, budget get/set/usage, connection-descriptor)",
       "  stack <subcommand>     (plan-cost — OpenTofu stack pre-flight cost estimate)",
       "",
       "Exit codes (per docs/design/p0-mcp-surface.md §5):",

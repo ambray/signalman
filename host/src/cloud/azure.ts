@@ -74,6 +74,7 @@ import {
   type CloudInstanceState,
   type CloudInstanceStatus,
   DEFAULT_INSTANCE_TTL_MINUTES,
+  DEFAULT_NETWORK_MODE,
   SIGNALMAN_MANAGED_TAG_KEY,
   SIGNALMAN_MANAGED_TAG_VALUE,
   SIGNALMAN_ORG_TAG_KEY,
@@ -197,6 +198,21 @@ export class AzureBackend implements CloudBackend {
       await gate.checkForConfig(config);
     }
 
+    // Network mode (sub-task 6 — design §13.6). aws_ssm on an
+    // Azure backend is a config error; surface it loudly. The
+    // public-IP vs no-public-IP wiring on Azure happens at NIC
+    // creation time (operator pre-creates the NIC); the backend
+    // just records the chosen mode on the handle so the control
+    // plane builds the right connection descriptor at connect time.
+    const mode = config.network?.mode ?? DEFAULT_NETWORK_MODE;
+    if (mode === "aws_ssm") {
+      throw new CloudBackendError(
+        "invalid_config",
+        `Azure backend does not support network mode 'aws_ssm'. ` +
+          `Use 'public_mtls' or 'azure_bastion'.`,
+      );
+    }
+
     const tags = buildAzureTags(config, orgId, ttlMinutes);
 
     const vmParams: VirtualMachine = {
@@ -236,6 +252,7 @@ export class AzureBackend implements CloudBackend {
       backend: "azure",
       name: config.name,
       region: this.region,
+      network_mode: mode,
     };
 
     // Record usage (best-effort, advisory; v0.3.0-5 sub-task 5).
