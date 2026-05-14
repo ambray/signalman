@@ -54,6 +54,12 @@ import {
 } from "../provisioning/ephemeral-vm.js";
 import { hyperVPsExec } from "../hypervisors/hyperv.js";
 import { resolveLayout } from "./project-layout.js";
+import {
+  aggregateAgentVersions,
+  aggregateVmLineageHashes,
+  classifyNetwork,
+  computeScenarioHash,
+} from "./envelope-hash.js";
 
 // ── P3.b retry helpers ────────────────────────────────────────────
 
@@ -305,6 +311,45 @@ export interface ScenarioResult {
   assertion_results: AssertionResult[];
   teardown_results: StepResult[];
   error?: string;
+  /**
+   * v0.3.0-3 — Hermetic envelope identity fields.
+   *
+   * Optional initially so existing consumers (JUnit report writer,
+   * audit log, etc.) don't break when an older scenario runs against
+   * a newer host. The orchestrator always populates them when it has
+   * the data; absent means the run predates v0.3.0-3 or capture
+   * failed mid-scenario.
+   */
+
+  /**
+   * 64-char lowercase hex SHA-256 over the canonical-JSON form of
+   * the scenario's setup.yaml + assertions.yaml + workflow.md
+   * content. Stable across whitespace/comment changes; sensitive to
+   * any semantic change. See `envelope-hash.ts` for the locked
+   * algorithm.
+   */
+  scenario_hash?: string;
+  /**
+   * Envelope-level VM lineage hash. For single-VM scenarios this
+   * equals the lone VM's `vm_lineage_hash`. For multi-VM scenarios
+   * it's the SHA-256 of the sorted-canonical-JSON of the per-VM
+   * hashes (order-independent). Populated only when at least one
+   * ephemeral VM was provisioned.
+   */
+  vm_lineage_hash?: string;
+  /**
+   * Guest-agent version(s) observed during the run. Single unique
+   * version → that string verbatim; multi-version → sorted-comma-
+   * joined unique list (e.g. `"0.1.5,0.2.1"`). Undefined when no
+   * agent responded.
+   */
+  agent_version?: string;
+  /**
+   * Network class label per VM, aggregated across the scenario.
+   * Single unique class → that string; multi → sorted-comma-joined.
+   * See `envelope-hash.ts` `classifyNetwork` for the per-VM rule.
+   */
+  network_class?: string;
 }
 
 // ── Template variable substitution ────────────────────────────────
@@ -934,6 +979,11 @@ export class ScenarioOrchestrator {
     // result is returned. One entry per ephemeral VM the scenario
     // declared; no entries when no scenario VM had `ephemeral: true`.
     const ephemeralRecords: EphemeralVmRecord[] = [];
+    // v0.3.0-3 — envelope identity fields. Populated incrementally
+    // through the run; embedded in the final ScenarioResult.
+    let scenarioHash: string | undefined;
+    const agentVersionsByVm = new Map<string, string | undefined>();
+    const networkClassesByVm = new Map<string, string>();
     // Hoisted so the post-run JUnit/report block (after the outer try)
     // can snapshot workflow step outputs into workflow-outputs.json for
     // post-mortem when assertions fail.
@@ -956,6 +1006,17 @@ export class ScenarioOrchestrator {
       scenarioName = scenarioConfig.name;
       assertScenarioCapabilities(scenarioConfig, workflowMarkdown);
 
+      // v0.3.0-3 — compute scenario_hash over the UNRESOLVED form
+      // (`loadResult.config`, not `scenarioConfig`). The hash is the
+      // scenario's identity; runtime parameter values feed the cache
+      // layer (v0.3.0-3 follow-up) separately so parameterised runs
+      // cache per-parameter-set without invalidating the scenario hash.
+      scenarioHash = computeScenarioHash({
+        setup: loadResult.config,
+        assertions: loadResult.assertions,
+        workflow: loadResult.workflowMarkdown,
+      });
+
       // Resolve VMs
       const vmDefs: VmDefinition[] = scenarioConfig.vms.map((vm) => ({
         name: vm.name,
@@ -974,6 +1035,24 @@ export class ScenarioOrchestrator {
         network: vm.network,
         kernel_debug: vm.kernel_debug,
       }));
+      // v0.3.0-3 — classify each VM's network. Done from vmDefs (not
+      // vmMap) so the class reflects the scenario's declared intent,
+      // not just the resolved backend handle. Per-VM classes are
+      // aggregated into the envelope-level `network_class` at result-
+      // construction time.
+      for (const def of vmDefs) {
+        networkClassesByVm.set(
+          def.name,
+          classifyNetwork({
+            network: def.network
+              ? { switch: def.network.switch, static_ip: def.network.static_ip }
+              : undefined,
+            pre_started: def.pre_started,
+            ephemeral: def.ephemeral,
+          }),
+        );
+      }
+
       const vmMap = await this.resolveVms(vmDefs, {
         scenarioSlug: slugifyScenarioName(scenarioName),
         runId: trace?.runId,
@@ -990,6 +1069,27 @@ export class ScenarioOrchestrator {
 
       // Wait for guest agents
       await this.waitForGuestAgents(vmMap, vmDefs);
+
+      // v0.3.0-3 — capture each guest agent's version for the envelope.
+      // One health RPC per VM, best-effort: a failure or missing client
+      // leaves that VM's slot as `undefined`, which `aggregateAgentVersions`
+      // filters out. Done after `waitForGuestAgents` so the clients are
+      // known-reachable.
+      await Promise.all(
+        vmDefs.map(async (def) => {
+          const client = this.guestClients.get(def.name);
+          if (!client) {
+            agentVersionsByVm.set(def.name, undefined);
+            return;
+          }
+          try {
+            const health = await client.health(5_000);
+            agentVersionsByVm.set(def.name, health.agentVersion);
+          } catch {
+            agentVersionsByVm.set(def.name, undefined);
+          }
+        }),
+      );
 
       // P9.2 — apply `software:` bundles BEFORE `setup:` runs so
       // setup steps can rely on the installed packages. Each bundle
@@ -1279,6 +1379,22 @@ export class ScenarioOrchestrator {
     }
 
     const durationMs = Date.now() - startTime;
+    // v0.3.0-3 — derive envelope-level identity fields from per-VM
+    // captures. Each helper handles the empty / single / multi cases
+    // explicitly so we don't leak empty strings or stray placeholder
+    // values into the envelope.
+    const envelopeVmLineageHash = aggregateVmLineageHashes(
+      ephemeralRecords.map((r) => r.vmLineageHash),
+    );
+    const envelopeAgentVersion = aggregateAgentVersions(
+      Array.from(agentVersionsByVm.values()),
+    );
+    const envelopeNetworkClass = aggregateAgentVersions(
+      // Reuse the same sorted-unique-comma-joined aggregation; the
+      // semantics match (set of stable string labels → one envelope
+      // string).
+      Array.from(networkClassesByVm.values()),
+    );
     const result: ScenarioResult = {
       name: scenarioName,
       status,
@@ -1287,6 +1403,10 @@ export class ScenarioOrchestrator {
       assertion_results: assertionResults,
       teardown_results: teardownResults,
       error,
+      scenario_hash: scenarioHash,
+      vm_lineage_hash: envelopeVmLineageHash || undefined,
+      agent_version: envelopeAgentVersion,
+      network_class: envelopeNetworkClass,
     };
 
     // Write JUnit XML report if an output directory is configured
