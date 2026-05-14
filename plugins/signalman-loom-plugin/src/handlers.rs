@@ -198,10 +198,41 @@ pub(crate) fn build_run_args_with_trace(args: &Value, trace_id: &str) -> LoomRes
     let id = require_string(args, "id")?;
     let mut a = vec!["run".to_string(), id];
     push_param_flags(&mut a, args.get("parameters"))?;
-    if let Some(nc) = args.get("network_class").and_then(Value::as_str) {
+    // v0.3.0 follow-up: input field renamed from `network_class` to
+    // `requested_network_class` so it doesn't collide with the
+    // OBSERVED `network_class` on the result envelope.  We accept
+    // both for backward compat:
+    //   - `requested_network_class` wins when present
+    //   - `network_class` (legacy) is accepted with a tracing-level
+    //     deprecation warning the operator sees in plugin logs
+    //   - declaring BOTH is a schema error (ambiguous intent)
+    let requested = args
+        .get("requested_network_class")
+        .and_then(Value::as_str);
+    let legacy = args.get("network_class").and_then(Value::as_str);
+    let nc = match (requested, legacy) {
+        (Some(r), None) => Some(r),
+        // Legacy alias accepted silently for back-compat. The schema's
+        // `description` field flags it DEPRECATED — that's the
+        // discoverable signal for MCP-tool browsers. A runtime
+        // warning would require adding a `tracing` dependency for
+        // one-line value; not worth it.
+        (None, Some(l)) => Some(l),
+        (Some(_), Some(_)) => {
+            return Err(LoomError::SchemaValidation(
+                "loom.signalman.run accepts exactly one of \
+                 requested_network_class OR network_class (legacy), \
+                 not both"
+                    .to_string(),
+            ));
+        }
+        (None, None) => None,
+    };
+    if let Some(nc) = nc {
         if !matches!(nc, "isolated" | "nat" | "internet") {
             return Err(LoomError::SchemaValidation(format!(
-                "loom.signalman.run.network_class must be one of [isolated,nat,internet]; got '{}'",
+                "loom.signalman.run.requested_network_class must be one of \
+                 [isolated,nat,internet]; got '{}'",
                 nc
             )));
         }
@@ -868,11 +899,11 @@ mod tests {
     const FAKE_TRACE: &str = "abcdef0123456789abcdef0123456789";
 
     #[test]
-    fn run_args_pass_network_class_when_valid() {
+    fn run_args_pass_requested_network_class_when_valid() {
         let a = build_run_args_with_trace(
             &json!({
                 "id": "x",
-                "network_class": "nat"
+                "requested_network_class": "nat"
             }),
             FAKE_TRACE,
         )
@@ -882,15 +913,78 @@ mod tests {
     }
 
     #[test]
-    fn run_args_reject_invalid_network_class() {
+    fn run_args_reject_invalid_requested_network_class() {
         let r = build_run_args_with_trace(
             &json!({
                 "id": "x",
-                "network_class": "wide-open"
+                "requested_network_class": "wide-open"
             }),
             FAKE_TRACE,
         );
         assert!(r.is_err());
+        // Error message must name the new field to guide migration.
+        let msg = r.unwrap_err().to_string();
+        assert!(
+            msg.contains("requested_network_class"),
+            "error message must name the canonical field; got {:?}",
+            msg
+        );
+    }
+
+    // ── v0.3.0 follow-up: legacy `network_class` input back-compat ──
+
+    #[test]
+    fn run_args_accept_legacy_network_class_input_for_backcompat() {
+        // Pre-v0.3.0 workflows that pass the old `network_class`
+        // input name continue to work; the alias resolves to the
+        // same `--network-class` CLI flag downstream.
+        let a = build_run_args_with_trace(
+            &json!({
+                "id": "x",
+                "network_class": "isolated"
+            }),
+            FAKE_TRACE,
+        )
+        .unwrap();
+        let joined = a.join(" ");
+        assert!(joined.contains("--network-class isolated"));
+    }
+
+    #[test]
+    fn run_args_reject_both_requested_and_legacy_network_class() {
+        // Declaring both is ambiguous: which intent wins? Refuse so
+        // the operator surfaces and migrates the workflow cleanly.
+        let r = build_run_args_with_trace(
+            &json!({
+                "id": "x",
+                "requested_network_class": "nat",
+                "network_class": "isolated"
+            }),
+            FAKE_TRACE,
+        );
+        assert!(r.is_err());
+        let msg = r.unwrap_err().to_string();
+        assert!(
+            msg.contains("not both"),
+            "error must surface the ambiguity; got {:?}",
+            msg
+        );
+    }
+
+    #[test]
+    fn run_args_prefer_requested_when_only_requested_present() {
+        // Sanity-check that the precedence rule lands the new name's
+        // value into the CLI args.
+        let a = build_run_args_with_trace(
+            &json!({
+                "id": "x",
+                "requested_network_class": "internet"
+            }),
+            FAKE_TRACE,
+        )
+        .unwrap();
+        let joined = a.join(" ");
+        assert!(joined.contains("--network-class internet"));
     }
 
     #[test]
@@ -1337,10 +1431,11 @@ mod tests {
     #[test]
     fn descriptor_from_empty_describe_response_still_includes_baseline_fields() {
         // Tolerance check: a describe response that lacks every optional
-        // field still produces a usable form (id + network_class + trace_id).
+        // field still produces a usable form
+        // (id + requested_network_class + trace_id).
         let d = descriptor_from_describe_response("scn", &json!({}));
         let names: Vec<&str> = d.fields.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, vec!["id", "network_class", "trace_id"]);
+        assert_eq!(names, vec!["id", "requested_network_class", "trace_id"]);
         assert_eq!(d.submit_tool, "loom.signalman.run");
     }
 

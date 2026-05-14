@@ -13,7 +13,7 @@
 //! ```ignore
 //! { "id": "mygroup/v2/scenario-name",
 //!   "parameters": { "vm": "endpoint-1", "verbose": true },
-//!   "network_class": "isolated" }
+//!   "requested_network_class": "isolated" }
 //! ```
 //!
 //! P5.4 closes this gap by deriving a [`ScenarioFormDescriptor`] from a
@@ -75,9 +75,9 @@ pub struct ScenarioFormDescriptor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FormField {
     /// Field name as it appears in the submitted JSON. Top-level fields
-    /// (`id`, `network_class`, `trace_id`) live at the document root;
-    /// scenario parameters use `parameters.<name>` so the TUI can build
-    /// the nested object without ambiguity.
+    /// (`id`, `requested_network_class`, `trace_id`) live at the
+    /// document root; scenario parameters use `parameters.<name>` so
+    /// the TUI can build the nested object without ambiguity.
     pub name: String,
     /// Human label for the form row.
     pub label: String,
@@ -235,7 +235,8 @@ pub struct ScenarioParameter<'a> {
 ///
 /// The returned descriptor always includes:
 ///   * a hidden-but-required `id` field pre-filled with `scenario_id`
-///   * a `network_class` select with the three Signalman-supported values
+///   * a `requested_network_class` select with the three
+///     Signalman-supported values
 ///   * a `trace_id` text field (optional) with a TraceId validator
 ///   * one field per declared scenario parameter, nested under `parameters.*`
 pub fn descriptor_for_scenario(
@@ -266,12 +267,17 @@ pub fn descriptor_for_scenario(
         validators: vec![FieldValidator::MinLength { min: 1 }],
     });
 
-    // Network class — Signalman enum from schemas::run_input.
+    // Requested network class — operator INTENT, enum mirrors
+    // schemas::run_input. The form binds to the canonical
+    // `requested_network_class` input name (v0.3.0 follow-up
+    // rename from `network_class`, which is now reserved for the
+    // OBSERVED envelope output field).
     fields.push(FormField {
-        name: "network_class".to_string(),
-        label: "Network class".to_string(),
+        name: "requested_network_class".to_string(),
+        label: "Requested network class".to_string(),
         help: Some(
-            "Reserved for P4 — declared, not enforced in v0.1.0.".to_string(),
+            "Operator intent for network isolation. Reserved for P4 \
+             — declared, not enforced today.".to_string(),
         ),
         kind: FieldKind::Select {
             options: vec![
@@ -455,7 +461,7 @@ mod tests {
         assert_eq!(d.id, "loom.signalman.run.mygroup/v2/scenario-a");
         assert_eq!(d.submit_tool, "loom.signalman.run");
         let names: Vec<&str> = d.fields.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, vec!["id", "network_class", "trace_id"]);
+        assert_eq!(names, vec!["id", "requested_network_class", "trace_id"]);
     }
 
     #[test]
@@ -467,9 +473,13 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_network_class_select_lists_signalman_enum_values() {
+    fn descriptor_requested_network_class_select_lists_signalman_enum_values() {
         let d = descriptor_for_scenario("scn", &ScenarioMeta { id: "scn", ..Default::default() });
-        let nc = d.fields.iter().find(|f| f.name == "network_class").unwrap();
+        let nc = d
+            .fields
+            .iter()
+            .find(|f| f.name == "requested_network_class")
+            .unwrap();
         match &nc.kind {
             FieldKind::Select { options } => {
                 let vals: Vec<&str> = options
@@ -478,7 +488,10 @@ mod tests {
                     .collect();
                 assert_eq!(vals, vec!["isolated", "nat", "internet"]);
             }
-            other => panic!("network_class must be a Select, got {:?}", other),
+            other => panic!(
+                "requested_network_class must be a Select, got {:?}",
+                other
+            ),
         }
     }
 
@@ -553,7 +566,7 @@ mod tests {
             names,
             vec![
                 "id",
-                "network_class",
+                "requested_network_class",
                 "trace_id",
                 "parameters.vm",
                 "parameters.verbose",
@@ -606,7 +619,7 @@ mod tests {
         // Three baseline fields, in stable order.
         assert_eq!(d.fields.len(), 3);
         assert_eq!(d.fields[0].name, "id");
-        assert_eq!(d.fields[1].name, "network_class");
+        assert_eq!(d.fields[1].name, "requested_network_class");
         assert_eq!(d.fields[2].name, "trace_id");
     }
 
@@ -662,8 +675,11 @@ mod tests {
         let d = descriptor_for_scenario("scn", &ScenarioMeta { id: "scn", ..Default::default() });
         let v = serde_json::to_value(&d).unwrap();
         let fields = v.get("fields").and_then(Value::as_array).unwrap();
-        // network_class is a Select; expect kind: "select" and options[].
-        let nc = fields.iter().find(|f| f["name"] == "network_class").unwrap();
+        // requested_network_class is a Select; expect kind: "select" and options[].
+        let nc = fields
+            .iter()
+            .find(|f| f["name"] == "requested_network_class")
+            .unwrap();
         assert_eq!(nc["kind"]["kind"], "select");
         assert!(nc["kind"]["options"].is_array());
         // trace_id is Text; expect kind: "text" with no extra fields.

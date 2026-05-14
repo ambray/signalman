@@ -134,7 +134,7 @@ checks), use the `loom.signalman.*` MCP tools rather than ad-hoc
 - `loom.signalman.list` — list available scenarios.
 - `loom.signalman.describe { scenario }` — show inputs + assertions.
 - `loom.signalman.plan { scenario, parameters? }` — dry-run preview.
-- `loom.signalman.run { scenario, parameters?, network_class? }` — execute.
+- `loom.signalman.run { scenario, parameters?, requested_network_class? }` — execute.
 - `loom.signalman.status { run_id }` — poll progress (or subscribe to
   `signalman.run.*` events on the EventBus for live updates).
 - `loom.signalman.record { run_id }` — fetch the full run envelope.

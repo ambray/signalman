@@ -120,10 +120,29 @@ pub fn run_input() -> Value {
                 "description": "Caller-supplied parameter overrides.",
                 "additionalProperties": true
             },
+            "requested_network_class": {
+                "type": "string",
+                "enum": ["isolated", "nat", "internet"],
+                "description":
+                    "v0.3.0 — operator INTENT for the network isolation \
+                     level the scenario should run on. Reserved for P4 \
+                     enforcement; declared but not yet enforced. \
+                     Distinct from the OUTPUT `network_class` field on \
+                     the result envelope (which records the OBSERVED \
+                     switch the VM ran on). Replaces the v0.1.0–v0.3.0-3 \
+                     input field `network_class`; that name now refers \
+                     unambiguously to the envelope output."
+            },
             "network_class": {
                 "type": "string",
                 "enum": ["isolated", "nat", "internet"],
-                "description": "Reserved for P4 — declared, not enforced in v0.1.0."
+                "description":
+                    "DEPRECATED v0.3.0 — old name for \
+                     requested_network_class (input intent). \
+                     Accepted for backward compatibility with workflows \
+                     authored before the v0.3.0 follow-up rename; will \
+                     be removed in a future minor. Use \
+                     requested_network_class for new code."
             },
             "trace_id": {
                 "type": "string",
@@ -555,18 +574,53 @@ mod tests {
     }
 
     #[test]
-    fn run_input_enumerates_network_classes() {
+    fn run_input_enumerates_requested_network_classes() {
+        // v0.3.0 follow-up: the input field is now
+        // `requested_network_class` (operator intent). The legacy
+        // `network_class` input name remains accepted for backward
+        // compat but uses the same enum; see
+        // run_input_accepts_legacy_network_class_for_backcompat.
         let s = run_input();
         let nc = s
             .get("properties")
-            .and_then(|p| p.get("network_class"))
-            .expect("network_class property");
+            .and_then(|p| p.get("requested_network_class"))
+            .expect("requested_network_class property");
         let variants = nc
             .get("enum")
             .and_then(Value::as_array)
             .expect("enum array");
         let names: Vec<&str> = variants.iter().filter_map(Value::as_str).collect();
         assert_eq!(names, vec!["isolated", "nat", "internet"]);
+    }
+
+    #[test]
+    fn run_input_accepts_legacy_network_class_for_backcompat() {
+        // The pre-v0.3.0-follow-up name `network_class` (input intent)
+        // remains accepted with the same enum. Documented as
+        // deprecated; will be removed in a future minor. See
+        // build_run_args for the runtime alias handling.
+        let s = run_input();
+        let nc = s
+            .get("properties")
+            .and_then(|p| p.get("network_class"))
+            .expect("legacy network_class property still accepted");
+        let variants = nc
+            .get("enum")
+            .and_then(Value::as_array)
+            .expect("enum array");
+        let names: Vec<&str> = variants.iter().filter_map(Value::as_str).collect();
+        assert_eq!(names, vec!["isolated", "nat", "internet"]);
+        // Description must call out deprecation so MCP-tool browsers
+        // see the migration path.
+        let desc = nc
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            desc.contains("DEPRECATED"),
+            "legacy network_class input must be marked DEPRECATED; got {:?}",
+            desc
+        );
     }
 
     #[test]

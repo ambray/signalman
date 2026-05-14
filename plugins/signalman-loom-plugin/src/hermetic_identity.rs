@@ -11,11 +11,13 @@
 //!
 //! - **Structural mirror, no derivation.** The extracted object has
 //!   exactly the same field names and values as the envelope's
-//!   identity fields. We do not rename `network_class` → `network`
-//!   here even though there is a separate `network_class` INPUT on
-//!   `loom.signalman.run` with different semantics; that naming
-//!   clash is documented and tracked as a v0.3.0-4 follow-up
-//!   (rename the input to `requested_network_class`).
+//!   identity fields. The v0.3.0-4 naming clash with the input
+//!   field `network_class` on `loom.signalman.run` was resolved by
+//!   the v0.3.0 follow-up rename — input is now
+//!   `requested_network_class` (intent), output stays
+//!   `network_class` (observation). The legacy input name is still
+//!   accepted for backward compat with a DEPRECATED schema tag; see
+//!   `schemas::run_input`.
 //! - **Returns `None` when the envelope is missing all four fields.**
 //!   Workflows that gate on `hermetic_identity` should treat
 //!   `Some(_)` as "envelope is at least partially identifiable" and
