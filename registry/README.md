@@ -32,6 +32,12 @@ See `docs/design/meta-build-system.md` §15 for the full design.
   `/v1/manifests/:name` (list versions). All routes require a federated
   bearer token (`sk_<prefix>_<secret>`) except `/v1/healthz`.
 
+  Namespaced manifest names (`team/svc`) MUST URL-encode the internal
+  `/` as `%2F` in path segments at v0.4.0; the bootstrap router treats
+  each segment as one path component. OCI distribution spec v1.1
+  compliance (which handles namespacing in-router) is deferred to
+  v0.4.x.
+
 ## Layout
 
 ```
