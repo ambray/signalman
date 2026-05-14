@@ -44,6 +44,7 @@ pub fn all_tool_registrations() -> Vec<McpToolRegistration> {
         register_run(),
         register_status(),
         register_record(),
+        register_record_finalize(),
         register_form_descriptor(),
     ]
 }
@@ -479,13 +480,20 @@ fn response_event_seq(response: &Value) -> Option<i64> {
         })
 }
 
-// ── record (v0.2.0 stub passthrough) ──────────────────────────────
+// ── record (v0.3.0-1) ────────────────────────────────────────────
 
 fn register_record() -> McpToolRegistration {
     McpToolRegistration {
         name: "loom.signalman.record".to_string(),
-        description: "[v0.2.0 stub] Capture next N MCP calls into .signalman/recordings/ as a candidate scenario. Returns not-implemented in v0.1.0."
-            .to_string(),
+        description:
+            "Start a durable record/replay capture session. Every \
+             subsequent MCP tool invocation in this server is appended \
+             to .signalman/recordings/<safe_name>/<recording_id>/calls.jsonl \
+             until the session expires (duration_seconds) or is \
+             explicitly finalised via loom.signalman.record_finalize. \
+             Returns the recording_id workflow nodes pass to \
+             record_finalize."
+                .to_string(),
         input_schema: schemas::record_input(),
         output_schema: schemas::record_output(),
         stability: STABILITY,
@@ -514,6 +522,76 @@ pub(crate) fn build_record_args(args: &Value) -> LoomResult<Vec<String>> {
 
 fn handle_record(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
     run_signalman(&build_record_args(&args)?)
+}
+
+// ── record_finalize (v0.3.0-1) ────────────────────────────────────
+
+fn register_record_finalize() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.record_finalize".to_string(),
+        description:
+            "Promote a record/replay capture session into a candidate \
+             scenario directory. Reads calls.jsonl from the recording, \
+             synthesises setup.yaml + workflow.md + assertions.yaml \
+             under .signalman/scenarios/<scenario_id>/, and returns the \
+             promoted paths plus per-call counts (captured / emitted / \
+             skipped / malformed). Pass either recording_id (from a \
+             prior loom.signalman.record) or an absolute recording_path."
+                .to_string(),
+        input_schema: schemas::record_finalize_input(),
+        output_schema: schemas::record_finalize_output(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_record_finalize),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_record_finalize_args(args: &Value) -> LoomResult<Vec<String>> {
+    let recording_id = args.get("recording_id").and_then(Value::as_str);
+    let recording_path = args.get("recording_path").and_then(Value::as_str);
+
+    // The CLI surfaces this error itself, but catching at the
+    // plugin layer means a malformed agent invocation gets a
+    // structured LoomError rather than a CLI subprocess failure
+    // string buried in stderr.
+    let target = match (recording_id, recording_path) {
+        (Some(id), None) => id.to_string(),
+        (None, Some(p)) => p.to_string(),
+        (Some(_), Some(_)) => {
+            return Err(LoomError::SchemaValidation(
+                "record_finalize accepts exactly one of recording_id \
+                 OR recording_path, not both"
+                    .to_string(),
+            ));
+        }
+        (None, None) => {
+            return Err(LoomError::SchemaValidation(
+                "record_finalize requires recording_id or recording_path"
+                    .to_string(),
+            ));
+        }
+    };
+
+    let mut a = vec![
+        "record".to_string(),
+        "finalize".to_string(),
+        target,
+    ];
+    if let Some(scenario_id) = args.get("scenario_id").and_then(Value::as_str) {
+        a.push("--scenario-id".to_string());
+        a.push(scenario_id.to_string());
+    }
+    if args.get("force").and_then(Value::as_bool).unwrap_or(false) {
+        a.push("--force".to_string());
+    }
+    a.push("--format".to_string());
+    a.push("json".to_string());
+    Ok(a)
+}
+
+fn handle_record_finalize(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_record_finalize_args(&args)?)
 }
 
 // ── form_descriptor (P5.4) ────────────────────────────────────────
@@ -1327,6 +1405,89 @@ mod tests {
         assert!(names.contains(&"parameters.ok"));
         // Only one parameter field plus the three baselines.
         assert_eq!(d.fields.len(), 4);
+    }
+
+    // ── v0.3.0-1: record_finalize arg builder ────────────────────────
+
+    #[test]
+    fn record_finalize_args_with_recording_id_emits_id_format_json() {
+        let args = build_record_finalize_args(&json!({
+            "recording_id": "rec_2026-01-01T00-00-00-000Z_abcdef"
+        }))
+        .expect("ok");
+        assert!(args.contains(&"record".to_string()));
+        assert!(args.contains(&"finalize".to_string()));
+        assert!(args.contains(&"rec_2026-01-01T00-00-00-000Z_abcdef".to_string()));
+        assert!(args.contains(&"--format".to_string()));
+        assert!(args.contains(&"json".to_string()));
+    }
+
+    #[test]
+    fn record_finalize_args_with_recording_path_emits_path() {
+        let args = build_record_finalize_args(&json!({
+            "recording_path": "C:\\src\\proj\\.signalman\\recordings\\foo\\rec_..."
+        }))
+        .expect("ok");
+        assert!(args
+            .iter()
+            .any(|a| a.contains(".signalman")));
+    }
+
+    #[test]
+    fn record_finalize_args_passes_scenario_id_override() {
+        let args = build_record_finalize_args(&json!({
+            "recording_id": "rec_2026-01-01T00-00-00-000Z_abcdef",
+            "scenario_id": "smoke/my-flow"
+        }))
+        .expect("ok");
+        let i = args.iter().position(|a| a == "--scenario-id").expect("flag");
+        assert_eq!(args[i + 1], "smoke/my-flow");
+    }
+
+    #[test]
+    fn record_finalize_args_passes_force_flag() {
+        let args = build_record_finalize_args(&json!({
+            "recording_id": "rec_x",
+            "force": true
+        }))
+        .expect("ok");
+        assert!(args.contains(&"--force".to_string()));
+    }
+
+    #[test]
+    fn record_finalize_args_omits_force_when_false() {
+        let args = build_record_finalize_args(&json!({
+            "recording_id": "rec_x",
+            "force": false
+        }))
+        .expect("ok");
+        assert!(!args.contains(&"--force".to_string()));
+    }
+
+    #[test]
+    fn record_finalize_args_rejects_neither_id_nor_path() {
+        let err = build_record_finalize_args(&json!({})).unwrap_err();
+        assert!(
+            matches!(err, LoomError::SchemaValidation(_)),
+            "expected SchemaValidation, got {:?}",
+            err
+        );
+        assert!(err.to_string().contains("recording_id"));
+    }
+
+    #[test]
+    fn record_finalize_args_rejects_both_id_and_path() {
+        let err = build_record_finalize_args(&json!({
+            "recording_id": "rec_x",
+            "recording_path": "/abs/p"
+        }))
+        .unwrap_err();
+        assert!(
+            matches!(err, LoomError::SchemaValidation(_)),
+            "expected SchemaValidation, got {:?}",
+            err
+        );
+        assert!(err.to_string().contains("not both"));
     }
 
     // ── v0.3.0-4: hermetic_identity promotion ────────────────────────

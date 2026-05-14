@@ -530,6 +530,58 @@ assertions:
     pattern: "ProcessName"
 ```
 
+### Record / Replay (v0.3.0+)
+
+The agent-first differentiator: turn an ad-hoc agent investigation
+into a reusable, hermetic scenario without hand-writing YAML.
+
+Four-step workflow, runnable through the Loom-fronted MCP surface
+or the direct CLI:
+
+```bash
+# 1. Start a recording session. Captures every subsequent MCP tool
+#    call into .signalman/recordings/<safe_name>/<recording_id>/calls.jsonl
+#    until the session expires (default 10 min) or is finalised.
+loom.signalman.record { "name": "my-flow" }
+#    or via CLI:
+#    signalman record my-flow
+
+# 2. Do agent-style work. Every loom.signalman.* (or signalman_* MCP)
+#    invocation is wrapped in withRecording() and appended to calls.jsonl.
+#    Sensitive params (tokens, passwords, API keys) are redacted on
+#    capture; max array / object / string sizes are bounded.
+
+# 3. Promote the recording into a candidate scenario. Reads calls.jsonl,
+#    synthesises setup.yaml + workflow.md + assertions.yaml under
+#    .signalman/scenarios/<scenario_id>/, returns the promoted paths.
+loom.signalman.record_finalize { "recording_id": "rec_..." }
+#    or via CLI:
+#    signalman record finalize rec_<id> [--scenario-id smoke/my-flow] [--force]
+
+# 4. Operator reviews the synthesised scenario. The current synthesiser
+#    emits placeholders for VM template, network class, and assertions —
+#    review the promoted files before committing:
+#      - vms[]:    template / network / pre_started flags
+#      - workflow: selectors, waits, expected outputs
+#      - assertions: pass/fail criteria from observed behaviour
+```
+
+The synthesised scenario is marked `tags: [recorded, candidate]` so
+it's discoverable but obviously promotion-pending. Once reviewed +
+committed, it joins the normal scenario library and re-runs through
+`signalman run <id>` like any other scenario.
+
+Locked design (see `docs/design/v0.3.0-1-record-replay.md`):
+
+- Append-only `calls.jsonl` capture — recording never changes tool
+  semantics; a broken disk or stale path costs capture fidelity, not
+  scenario execution.
+- Param/result redaction at capture time — sensitive keys
+  (`token`, `password`, `secret`, `auth`, `api_key`, `bearer`,
+  `private_key`) replaced before persistence.
+- Recording-id format: `rec_<iso-ts>_<hex>` so concurrent recordings
+  can't collide on disk.
+
 ### Result Envelope (v0.3.0+)
 
 Every `signalman run` produces a `ScenarioResult` envelope on stdout

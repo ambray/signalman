@@ -184,15 +184,14 @@ mod tests {
     }
 
     #[test]
-    fn registers_seven_mcp_tools_with_loom_namespace() {
+    fn registers_all_mcp_tools_with_loom_namespace() {
         // P5.4 added `loom.signalman.form_descriptor` so the TUI can
         // request a guided form for a scenario without learning the
-        // Signalman parameter format. When Loom adds direct
-        // `PluginHandles.forms` registration we may retire this verb,
-        // but keeping it as an MCP tool also lets agents introspect
-        // forms — useful for "ask the human" tool plans.
+        // Signalman parameter format.
+        // v0.3.0-1 added `loom.signalman.record_finalize` so the full
+        // record-then-promote workflow runs through Loom without
+        // dropping to direct CLI for the finalize step.
         let regs = handlers::all_tool_registrations();
-        assert_eq!(regs.len(), 7, "exactly seven verbs registered");
         let names: Vec<&str> = regs.iter().map(|r| r.name.as_str()).collect();
         for expected in &[
             "loom.signalman.list",
@@ -201,6 +200,7 @@ mod tests {
             "loom.signalman.run",
             "loom.signalman.status",
             "loom.signalman.record",
+            "loom.signalman.record_finalize",
             "loom.signalman.form_descriptor",
         ] {
             assert!(
@@ -209,5 +209,10 @@ mod tests {
                 expected,
             );
         }
+        assert_eq!(
+            regs.len(),
+            8,
+            "exactly eight verbs registered (six core + form_descriptor + record_finalize)"
+        );
     }
 }

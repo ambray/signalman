@@ -19,16 +19,18 @@ fn signalman_plugin_appears_in_loom_inventory() {
 }
 
 #[test]
-fn signalman_plugin_initialize_returns_seven_mcp_tools() {
+fn signalman_plugin_initialize_returns_all_mcp_tools() {
     // P5.1 shipped six verbs; P5.4 added `loom.signalman.form_descriptor`
-    // for descriptor-backed TUI forms — total seven.
+    // for descriptor-backed TUI forms; v0.3.0-1 added
+    // `loom.signalman.record_finalize` so the record-then-promote
+    // workflow runs end-to-end through Loom — total eight.
     //
     // We can't construct a real PluginContext here (it requires concrete
     // services), so we only verify the registration count surface via the
     // public re-export.
     use signalman_loom_plugin::handlers;
     let regs = handlers::all_tool_registrations();
-    assert_eq!(regs.len(), 7);
+    assert_eq!(regs.len(), 8);
     for reg in &regs {
         assert!(
             reg.name.starts_with("loom.signalman."),

@@ -287,11 +287,20 @@ pub fn record_input() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "name": { "type": "string", "description": "Scenario name to record under." },
+            "name": {
+                "type": "string",
+                "description":
+                    "Recording name. Used as the safe-name directory under \
+                     .signalman/recordings/. 1-100 characters; sanitised to \
+                     [a-z0-9_.-] internally."
+            },
             "duration_seconds": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Max recording duration; default 600s. Stub in v0.1.0."
+                "maximum": 86_400,
+                "description":
+                    "Max recording duration before the session auto-expires. \
+                     Defaults to 600 (10 min). Range: 1-86400 (24h)."
             }
         },
         "required": ["name"],
@@ -299,13 +308,93 @@ pub fn record_input() -> Value {
     })
 }
 
+/// v0.3.0-1 — `RecordResult` shape returned by `signalman record`.
+///
+/// Replaces the v0.1.0 `{ status, message }` stub. Mirrors the
+/// host-side `RecordResult` interface in
+/// `host/src/verbs/record.ts`. Workflow nodes use `recording_id` to
+/// later invoke `loom.signalman.record_finalize`.
 pub fn record_output() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "status": { "type": "string" },
-            "message": { "type": "string" }
-        }
+            "status":           { "type": "string", "enum": ["recording"] },
+            "recording_id":     { "type": "string" },
+            "name":             { "type": "string" },
+            "safe_name":        { "type": "string" },
+            "started_at":       { "type": "string", "format": "date-time" },
+            "expires_at":       { "type": "string", "format": "date-time" },
+            "duration_seconds": { "type": "integer" },
+            "recording_path":   { "type": "string" },
+            "state_path":       { "type": "string" },
+            "calls_path":       { "type": "string" },
+            "message":          { "type": "string" }
+        },
+        "required": ["status", "recording_id", "name", "recording_path"]
+    })
+}
+
+// ── record_finalize (v0.3.0-1) ────────────────────────────────────
+
+/// Input shape for `loom.signalman.record_finalize`.
+///
+/// One of `recording_id` or `recording_path` must be supplied; the
+/// plugin shells out to `signalman record finalize` which resolves
+/// the recording state.
+pub fn record_finalize_input() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "recording_id": {
+                "type": "string",
+                "description":
+                    "Recording id from a previous loom.signalman.record. \
+                     Must match the pattern rec_<iso-ts>_<hex>. Mutually \
+                     exclusive with recording_path."
+            },
+            "recording_path": {
+                "type": "string",
+                "description":
+                    "Absolute path to the recording directory or its \
+                     state.json. Mutually exclusive with recording_id."
+            },
+            "scenario_id": {
+                "type": "string",
+                "description":
+                    "Override the scenario id under .signalman/scenarios/. \
+                     Defaults to the recording's safe_name. Must be a safe \
+                     relative path (no .. / no absolute / no //)."
+            },
+            "force": {
+                "type": "boolean",
+                "description":
+                    "Overwrite the target .signalman/scenarios/<id>/ if it \
+                     already exists. Defaults to false (refuse + error)."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+/// Output shape for `loom.signalman.record_finalize`. Mirrors the
+/// host-side `RecordFinalizeResult` interface.
+pub fn record_finalize_output() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "status":              { "type": "string", "enum": ["finalized"] },
+            "recording_id":        { "type": "string" },
+            "scenario_id":         { "type": "string" },
+            "scenario_path":       { "type": "string" },
+            "setup_path":          { "type": "string" },
+            "workflow_path":       { "type": "string" },
+            "assertions_path":     { "type": "string" },
+            "captured_call_count": { "type": "integer" },
+            "emitted_tool_blocks": { "type": "integer" },
+            "skipped_call_count":  { "type": "integer" },
+            "malformed_line_count":{ "type": "integer" }
+        },
+        "required": ["status", "recording_id", "scenario_id", "scenario_path"]
     })
 }
 
@@ -327,6 +416,7 @@ mod tests {
             run_input(),
             status_input(),
             record_input(),
+            record_finalize_input(),
             form_descriptor_input(),
         ] {
             schema_is_object(&schema);
@@ -348,9 +438,97 @@ mod tests {
             run_output(),
             status_output(),
             record_output(),
+            record_finalize_output(),
             form_descriptor_output(),
         ] {
             schema_is_object(&schema);
+        }
+    }
+
+    // ── v0.3.0-1 record/replay schema contract ──────────────────────
+
+    #[test]
+    fn record_output_declares_recording_id_as_required() {
+        let s = record_output();
+        let req: Vec<&str> = s
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        assert!(
+            req.contains(&"recording_id"),
+            "record_output must require recording_id so workflow nodes \
+             can invoke record_finalize"
+        );
+    }
+
+    #[test]
+    fn record_output_status_enum_pins_recording_state() {
+        let s = record_output();
+        let status_enum = s
+            .pointer("/properties/status/enum")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert_eq!(status_enum, vec!["recording"]);
+    }
+
+    #[test]
+    fn record_finalize_input_accepts_recording_id_or_path() {
+        // Both are optional individually; CLI validation enforces
+        // that at least one is present. Schema-level we allow either
+        // to be supplied + reject unknown fields.
+        let s = record_finalize_input();
+        let props = s
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("properties object");
+        assert!(props.contains_key("recording_id"));
+        assert!(props.contains_key("recording_path"));
+        assert!(props.contains_key("scenario_id"));
+        assert!(props.contains_key("force"));
+        // No required[] at the schema layer — the CLI surfaces the
+        // "one of recording_id/recording_path" error with a more
+        // actionable message than JSON Schema's anyOf would.
+        assert!(s.get("required").is_none());
+    }
+
+    #[test]
+    fn record_finalize_output_pins_finalized_status() {
+        let s = record_finalize_output();
+        let status_enum = s
+            .pointer("/properties/status/enum")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert_eq!(status_enum, vec!["finalized"]);
+    }
+
+    #[test]
+    fn record_finalize_output_required_carries_the_promotion_paths() {
+        let s = record_finalize_output();
+        let req: Vec<&str> = s
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        for expected in ["status", "recording_id", "scenario_id", "scenario_path"] {
+            assert!(
+                req.contains(&expected),
+                "record_finalize_output must require {}: {:?}",
+                expected,
+                req
+            );
         }
     }
 
