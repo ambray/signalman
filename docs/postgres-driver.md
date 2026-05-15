@@ -57,6 +57,61 @@ migrations into per-driver subdirectories or write a small adapter in
 the migration runner. We deliberately resisted both for v0.3.0 because
 the current schema fits the portable subset cleanly.
 
+### Split-migration pattern for CHECK-constraint changes
+
+One case has already forced a per-driver split: enlarging a CHECK
+constraint on the `target.kind` column. SQLite cannot modify a CHECK
+constraint in place — it requires a full table-recreation dance
+(create-new + copy + drop-old + rename) that has to preserve every
+foreign-key reference. Postgres can do it with a single
+`ALTER TABLE ... DROP CONSTRAINT / ADD CONSTRAINT` pair.
+
+When this difference would have made one `.sql` file unmaintainable,
+the migration runner picks the right variant based on driver kind by
+suffix:
+
+```
+0050_target_kind_k8s.pg.sql       -- Postgres path: ALTER TABLE
+0050_target_kind_k8s.sqlite.sql   -- SQLite path:   recreate target table
+0072_target_kind_cloud.pg.sql     -- Postgres path: ALTER TABLE
+0072_target_kind_cloud.sqlite.sql -- SQLite path:   recreate target table
+```
+
+The runner looks for `<id>_<name>.<driver>.sql` first and falls back
+to `<id>_<name>.sql` when no variant is present. This keeps the bulk
+of migrations driver-agnostic while giving an escape valve for the
+narrow set of operations SQLite can't do in place.
+
+### Tables added since v0.3.0
+
+The doc was authored at the v0.3.0 cut. The following tables have
+landed in v0.3.x and v0.4.x; all of them use the portable type
+choices above and run verbatim on both drivers:
+
+| Migration | Tables | Purpose |
+|---|---|---|
+| `0040_cloud_budgets.sql` | `cloud_org_budget`, `cloud_org_usage` | Per-org monthly cloud cost gate + per-instance usage ledger (see [cost guardrails](design/meta-build-system.md#135-cloud-cost-control)). |
+| `0041_cloud_credentials.sql` | `cloud_org_credential` | AES-256-GCM ciphertext for per-org AWS / Azure credentials (key from `SIGNALMAN_CRED_KEY`). |
+| `0050_target_kind_k8s.*.sql` | _(constraint change)_ | Adds `k8s_test` / `k8s_demo` to the `target.kind` CHECK. |
+| `0060_health_schedule.sql` | `health_schedule` | WS3 Epic 3 — periodic re-runs of `health check` against a target. The scheduler tick selects on a partial index over `(last_run_at) WHERE deleted_at IS NULL AND active = 1`. |
+| `0065_webhook_subscription.sql` | `webhook_subscription` | WS3 Epic 2 — outbound notification subscribers. `kind ∈ {generic, slack, email}`. Generic delivery is HMAC-SHA256 signed with `secret_hmac_key`. |
+| `0070_promotion_policy.sql` | `promotion_policy`, `approval` | WS3 Epic 1 — auto-promotion + approval gates. `gate_kind ∈ {auto, manual, time_delay}`. The `approval` table has a partial unique index `(release_id, dest_target_id)` to prevent duplicate in-flight promotions. |
+| `0071_promotion_health_gate.sql` | _(extends `promotion_policy`)_ | Optional health-probe gating between source and dest targets. |
+| `0072_target_kind_cloud.*.sql` | _(constraint change)_ | Adds `cloud_vm` / `cloud_stack` to the `target.kind` CHECK. |
+
+The `cloud_org_*` tables and `cloud_org_credential` are reserved
+under the 0040–0049 migration block — see the comment in
+`0040_cloud_budgets.sql` for the block-allocation convention. WS3
+intentionally picked 0060+ to leave room for follow-on cloud work
+in 0040–0049 and WS2 k8s work in 0050–0059.
+
+Repo-level access is uniform: every new table is exposed via a
+`*Repo` class on the storage driver that returns plain row records,
+and every CHECK-enumerated status / kind column maps to a TypeScript
+string-union type in `storage/types.ts` so verb code gets a
+narrowed type without round-tripping through the database to
+discover it.
+
 ## What's tested in CI vs operator-validated
 
 CI runs the Postgres driver tests against
