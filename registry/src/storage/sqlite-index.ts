@@ -262,6 +262,68 @@ export class SqliteManifestIndex {
       .run(name, version);
   }
 
+  // ── Forensic summary (WS6 wave-3 M10.5) ───────────────────────
+
+  /**
+   * Aggregate counts of manifests by (kind, provenance.source).
+   * Powers the forensic-summary API: "what's in my registry and
+   * where did it come from."
+   *
+   * Returns rows with `kind`, `source`, and `count` — one row per
+   * (kind, source) combination present in the catalog. Empty array
+   * when the registry is empty.
+   */
+  manifestCountsByKindAndSource(): Array<{
+    kind: ManifestKind;
+    source: string;
+    count: number;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT kind,
+                json_extract(provenance_json, '$.source') AS source,
+                COUNT(*) AS count
+         FROM manifest
+         GROUP BY kind, source`,
+      )
+      .all() as Array<{
+      kind: ManifestKind;
+      source: string | null;
+      count: number;
+    }>;
+    return rows.map((r) => ({
+      kind: r.kind,
+      source: r.source ?? "unknown",
+      count: r.count,
+    }));
+  }
+
+  /**
+   * Aggregate blob counts grouped by the provenance.upstreamUrl
+   * of any manifest that references the blob. Useful for "what
+   * came from crates.io" forensics.
+   *
+   * Note: a single blob can be referenced by multiple manifests
+   * with different provenances; the count here is "manifests
+   * referencing the blob from this upstream", not "distinct
+   * blobs by upstream."
+   */
+  artifactsByUpstream(): Array<{ upstreamUrl: string; count: number }> {
+    const rows = this.db
+      .prepare(
+        `SELECT json_extract(provenance_json, '$.upstreamUrl') AS upstream,
+                COUNT(*) AS count
+         FROM manifest
+         WHERE json_extract(provenance_json, '$.source') = 'proxy_cache'
+         GROUP BY upstream
+         ORDER BY count DESC`,
+      )
+      .all() as Array<{ upstream: string | null; count: number }>;
+    return rows
+      .filter((r): r is { upstream: string; count: number } => !!r.upstream)
+      .map((r) => ({ upstreamUrl: r.upstream, count: r.count }));
+  }
+
   // ── Virtual upstream config (WS6 wave-3 M10.4) ────────────────
 
   /**

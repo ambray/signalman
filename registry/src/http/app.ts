@@ -46,6 +46,7 @@ import {
   proxyCargoSparseIndex,
   type UpstreamFetch,
 } from "../cargo/virtual.js";
+import { mountForensicRoutes } from "./forensic.js";
 
 const VERSION = "0.0.1";
 const DEFAULT_BLOB_MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5 GiB
@@ -272,6 +273,12 @@ export function buildApp(opts: AppOptions): Router {
   // aren't sqlite-backed get a degraded experience (publish works;
   // yank routes 503).
   mountCargoPublishRoutes(router, {
+    storage,
+    index: idxStorage.index,
+  });
+
+  // ── Forensic + provenance (WS6 wave-3 M10.5) ───────────────────
+  mountForensicRoutes(router, {
     storage,
     index: idxStorage.index,
   });
