@@ -12,45 +12,60 @@ levels; this doc tells contributors which level a new test belongs at,
 so additions don't pile onto the unit base by default.
 
 This doc is intentionally repo-aware. Every example is a file that
-exists at the UI browser MCP contract milestone. When the file
-naming or assertion style drifts, update this doc — it is meant to track
-the codebase, not to describe an idealized testing world.
+exists in the current tree (2026-05, post WS3/4/5/6 + Wave-3). When
+the file naming or assertion style drifts, update this doc — it is
+meant to track the codebase, not to describe an idealized testing
+world.
 
-## Current state
+## Current state (2026-05)
 
-Counted at the browser workflow scenario milestone from the test source itself (vitest
-`it`/`test` calls and Rust `#[test]`/`#[tokio::test]` attributes); the
-ROADMAP-quoted top-line numbers come from the same counting method.
+Counted from the test source itself (vitest `it`/`test` calls and
+Rust `#[test]`/`#[tokio::test]` attributes). Numbers are static
+source counts — vitest run-time expansion of parameterized blocks
+(`it.each`, `describe.each`) typically produces 10–15% more cases at
+run time than this static count.
 
-| Language       | Level                       | Files | Tests | Location |
-|----------------|-----------------------------|-------|-------|----------|
-| TypeScript     | unit + smoke (in-process)   | 47    | 1057  | `host/src/__tests__/` |
-| TypeScript     | verb integration (in-process) | 5   | 55    | `host/src/verbs/__tests__/` |
-| Rust (guest)   | unit (mod tests)            | 9     | 133   | `guest/src/*.rs` `#[cfg(test)] mod tests` |
-| Rust (service) | unit + integration          | 8     | 110   | `service/src/*.rs`, `service/tests/*.rs` |
-| Rust (plugin)  | unit + integration          | 11    | 135   | `plugins/signalman-loom-plugin/src/*.rs`, `plugins/signalman-loom-plugin/tests/` |
+| Language       | Level                         | Files | Tests | Location |
+|----------------|-------------------------------|------:|------:|----------|
+| TypeScript     | unit + smoke (in-process)     | 137   | ~2400 | `host/src/__tests__/` |
+| TypeScript     | verb integration (in-process) | 5     | 55    | `host/src/verbs/__tests__/` |
+| TypeScript     | registry (in-process)         | 14    | ~250  | `registry/src/**/*.test.ts` |
+| Rust (guest)   | unit (mod tests)              | ~10   | ~150  | `guest/src/*.rs` `#[cfg(test)] mod tests` |
+| Rust (service) | unit + integration            | ~10   | ~140  | `service/src/*.rs`, `service/tests/*.rs` |
+| Rust (plugin)  | unit + integration            | ~13   | ~180  | `plugins/signalman-loom-plugin/src/*.rs`, `plugins/signalman-loom-plugin/tests/` |
 
-Totals: **1112 TypeScript** test cases across 52 files, **378 Rust**
-test cases across 28 files. ROADMAP.md reports `151 Rust + 769 TS = 920`
-as an older rounded headline — the per-call count above is the more
-granular number, and the per-class split here counts `it(...)`
-invocations from the test sources directly rather than the post-vitest
-run-time count (parameterized blocks expand at runtime). The 2026-05-09
-host coverage run expanded to **1169** vitest cases across **52** files.
+Totals: **~2700 TypeScript** test cases across 156 files, **~470 Rust**
+test cases across 33 files. (The doc-original 2026-04 counts were
+**1112 TS / 378 Rust** — the ~2x growth reflects WS3 promotion/webhook/
+scheduler, WS4 cross-platform parity, WS5 registry, WS6 cloud + k8s,
+and Wave-3 hardening all shipping into the same source tree.)
 
-Two files are smoke tests within `host/src/__tests__/`:
-`scenario-validation.test.ts` (4 cases — walks every scenario directory
-and validates schemas) and `proto-shape.test.ts` (7 cases — pins the
-v1 proto `oneof` shape). They are part of the 27-file row above; called
-out here because the "When to add a smoke test" section below references
-them.
+### What's been added since the 2026-04 audit
 
-Test counts on this branch are *static* (counted from source); CI does
-not yet measure or enforce them. P7.1 turns on the
-`service-windows` job that runs `cargo test --workspace`, and P7.2/D1
-adds the first real cross-process integration test (`host TS ↔ service
-Rust` over the wire). Until then, "tests pass on a contributor's
-machine" is the verification surface.
+Each of these brought a sizable test surface; they all live in
+`host/src/__tests__/` (verb-level slices in `host/src/verbs/__tests__/`)
+unless noted:
+
+| Surface | Notable test files |
+|---|---|
+| **WS3 — Auto-promotion (Epic 1)** | `promotion-policy.test.ts`, `promotion-health-gate.test.ts`, `cli-promotion.test.ts`, `server-promotion-tools.test.ts` |
+| **WS3 — Webhooks (Epic 2)** | `webhook-dispatcher.test.ts`, `webhook-hmac.test.ts`, `webhook-slack.test.ts`, `webhook-e2e.test.ts` |
+| **WS3 — Scheduled health (Epic 3)** | `health-scheduler.test.ts`, `health-scheduler-integration.test.ts`, `health-verbs.test.ts` |
+| **WS4 — Cross-platform parity** | `tart-backend.test.ts`, `libvirt-backend.test.ts`, `libvirt-argv.test.ts`, plus guest-side `platform/` unit tests |
+| **WS5 — Registry** | `registry/src/**/*.test.ts` (14 files), plus host-side `signalman-registry-blob.test.ts`, `cloud-registry.test.ts` |
+| **WS6 — Cloud + k8s** | `cloud-{aws,azure,connection,cost,credentials,deploy,dialers,plan-cost,reaper,registry,tofu,types}.test.ts`, `k8s-{driver,helm,kubectl,executor-integration}.test.ts`, `runner-deploy-k8s.test.ts`, `cli-cloud-*.test.ts`, `server-{cloud,k8s}-tools.test.ts` |
+| **Release-signing (cross-wave)** | `signing.test.ts`, `release-signing-e2e.test.ts` |
+
+Two files remain the canonical **smoke tests** within
+`host/src/__tests__/`: `scenario-validation.test.ts` (walks every
+scenario directory and validates schemas) and `proto-shape.test.ts`
+(pins the v1 proto `oneof` shape). The "When to add a smoke test"
+section below still references them.
+
+Test counts on this branch are *static* (counted from source). CI
+does run the host + registry vitest suites and `cargo test --workspace`
+on PR, but does not yet enforce a coverage gate — see the
+[Coverage](#coverage) section below for the current local numbers.
 
 ## The five test classes
 
@@ -292,26 +307,92 @@ Signalman.
 ## Coverage
 
 The product target is **80% line coverage minimum**, with critical
-paths at **95%+**. Critical paths are: `host/src/scenarios/orchestrator.ts`,
-`host/src/scenarios/assertions.ts`, `host/src/sanitize.ts`,
-`host/src/output/envelope.ts`, the guest gRPC handlers
-(`guest/src/service.rs`), and the plugin state store
-(`plugins/signalman-loom-plugin/src/state.rs`).
+paths at **95%+**. Critical paths grew with each wave; the current
+list is:
 
-As of the UI browser MCP contract milestone, **coverage measurement is not wired into CI**.
-The tooling exists and can be run locally, and the current host run is
-above the product target: `npm --prefix host run coverage` reports
-**86.79% statements / 80.46% branches** across 1169 vitest cases.
+- `host/src/scenarios/orchestrator.ts`, `host/src/scenarios/assertions.ts`
+- `host/src/sanitize.ts`, `host/src/output/envelope.ts`
+- `host/src/control-plane/build/signing.ts` (Ed25519 release signing)
+- `host/src/control-plane/events/{dispatcher,hmac,slack}.ts` (WS3 webhooks)
+- `host/src/control-plane/promotion/listener.ts` (WS3 auto-promotion)
+- `host/src/control-plane/scheduler/runner.ts` (WS3 scheduled health)
+- `host/src/control-plane/cloud/credentials.ts` (per-org AES-GCM creds)
+- `host/src/control-plane/storage/{sqlite,postgres}.ts` (storage drivers)
+- `registry/src/manifest/signing.ts`, `registry/src/http/forensic.ts`
+- The guest gRPC handlers (`guest/src/service.rs`) and the
+  guest `Platform` trait impls (`guest/src/platform/`)
+- The plugin state store (`plugins/signalman-loom-plugin/src/state.rs`)
 
-- TypeScript: `cd host && npx vitest run --coverage`. The
-  `@vitest/coverage-v8` package is already in `host/package.json`
-  devDependencies.
+CI runs both the host vitest suite and `cargo test --workspace` on PR,
+but **coverage thresholds are not yet enforced in CI**. The tooling
+exists and can be run locally:
+
+- TypeScript host: `npm --prefix host run coverage`. The most recent
+  local run reports **>85% statements / >80% branches** across the
+  full ~2400-case host suite.
+- TypeScript registry: `npm --prefix registry run coverage`. The
+  registry suite gates at the WS3 product targets (80% lines, 95% on
+  signing / forensic paths).
 - Rust: `cargo install cargo-llvm-cov` (one-time, per machine), then
   `cargo llvm-cov --workspace --html` and open
   `target/llvm-cov/html/index.html`.
 
-When P7 wires coverage into CI, this section will document the
-threshold gate and the badge URL.
+Threshold enforcement in CI is gated on the OSS-hygiene trio epic
+(see [STATUS.md](STATUS.md)) — once that lands, this section will
+document the per-package thresholds, the badge URL, and the gate
+that blocks PRs that regress coverage on a critical path.
+
+## New test patterns since v0.2.0
+
+A few patterns are worth calling out so future contributors copy from
+the right canonical example rather than inventing a parallel shape:
+
+### Storage drivers: pg-mem + better-sqlite3
+
+`host/src/__tests__/postgres-storage.test.ts` runs the full
+`StorageDriver` contract against [`pg-mem`](https://github.com/oguimbal/pg-mem),
+an in-memory Postgres-compatible engine. Two semantics are
+`it.skip("[integration only] …")` because pg-mem doesn't faithfully
+emulate `SELECT … FOR UPDATE SKIP LOCKED` or concurrent-claim under
+real connection pooling — see [postgres-driver.md](postgres-driver.md)
+for the operator-validated escape path. SQLite tests run against
+real `better-sqlite3` with a tempdir-backed file.
+
+### Cloud backends: provider SDK mocks at the boundary
+
+`host/src/__tests__/cloud-aws.test.ts` and `cloud-azure.test.ts`
+mock the AWS SDK / Azure SDK clients at the **client object** boundary
+(not the HTTP layer). The pattern: `vi.mock("@aws-sdk/client-ec2",
+...)` returns a fake `EC2Client` whose `send()` method is a `vi.fn()`.
+This keeps tests fast and deterministic. LocalStack / Azurite is the
+operator-validated path for "did we get the SDK call right" — out of
+scope for CI in v0.4.x.
+
+### Hypervisor backends: argv shape + CLI-mock
+
+Each `HypervisorBackend` impl has a paired argv test (`libvirt-argv.test.ts`,
+`tart-backend.test.ts`) that asserts the exact subprocess argv the
+backend would invoke for each lifecycle verb. The dispatcher is
+`vi.mock("node:child_process")`'d so no real `virsh` / `tart` / `vmrun`
+binary is required in CI. Real-backend smoke testing happens on
+operator hosts — see [bootstrap.md §5–§6](bootstrap.md).
+
+### Webhook signature verification
+
+`webhook-hmac.test.ts` exercises HMAC-SHA256 over the canonical JSON
+payload using `crypto.timingSafeEqual` for constant-time compare. The
+test asserts both the success path and the negative path (modified
+body, wrong key, wrong header format). Copy this pattern when adding
+any new outbound-signed surface.
+
+### Scheduler tick + fake clock
+
+`health-scheduler-integration.test.ts` is the canonical example of
+how to drive a time-based listener (the scheduler ticks every minute
+looking for `last_run_at` older than `interval_seconds`). Use the
+`fakeNowAfter(schedule, offsetMs)` helper which anchors the fake
+clock to the row's real `createdAt` — naive `vi.setSystemTime()` will
+race with the row insert and produce flaky tests.
 
 ## Gated E2E lane (preview — P7.3 D4)
 
