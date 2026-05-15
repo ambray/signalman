@@ -29,6 +29,7 @@
 import type { ControlPlane } from "../index.js";
 import type {
   Approval,
+  PromotionHealthGate,
   PromotionPolicy,
   Release,
 } from "../types.js";
@@ -62,6 +63,7 @@ export interface PromotionListenerOutcome {
    *   - 'auto_deployed' — gate=auto, deploy fired.
    *   - 'queued_manual' — gate=manual, approval is pending.
    *   - 'queued_time_delay' — gate=time_delay, approval pending until autoApproveAt.
+   *   - 'queued_health_gate' — policy has a health_gate; approval pending until source-tier health passes (WS6 M7).
    *   - 'duplicate' — an approval already existed for this (release, dest).
    *   - 'inactive_policy' — policy was inactive (shouldn't happen given the SQL filter).
    *   - 'deploy_failed' — auto gate fired but deploy threw.
@@ -70,6 +72,7 @@ export interface PromotionListenerOutcome {
     | "auto_deployed"
     | "queued_manual"
     | "queued_time_delay"
+    | "queued_health_gate"
     | "duplicate"
     | "deploy_failed";
   detail?: string;
@@ -152,6 +155,35 @@ export async function firePolicy(
   }
   const nowDate = opts.now ? opts.now() : new Date();
   const nowIsoStr = nowDate.toISOString();
+
+  // WS6 M7: source-tier health gate. When the policy has
+  // `gate_config.health_gate` AND a non-null source_target_id (i.e.
+  // this is a tier-to-tier policy), defer auto / time_delay firing
+  // until the source-tier health gate opens. Manual policies still
+  // queue as before — operator approval is the explicit gate and
+  // overrides the health gate.
+  const healthGate = readHealthGate(policy);
+  if (healthGate && policy.sourceTargetId && policy.gateKind !== "manual") {
+    const autoApproveAt =
+      policy.gateKind === "time_delay"
+        ? new Date(nowDate.getTime() + readDelaySeconds(policy) * 1000).toISOString()
+        : null;
+    const approval = await opts.controlPlane.approvals.create({
+      orgId: policy.orgId,
+      policyId: policy.id,
+      releaseId: release.id,
+      destTargetId: policy.destTargetId,
+      status: "pending",
+      autoApproveAt,
+      requiresHealthGate: true,
+    });
+    return {
+      policyId: policy.id,
+      approvalId: approval.id,
+      action: "queued_health_gate",
+      detail: `min_pass_count=${healthGate.min_pass_count} window_minutes=${healthGate.window_minutes}${autoApproveAt ? ` auto_approve_at=${autoApproveAt}` : ""}`,
+    };
+  }
 
   if (policy.gateKind === "auto") {
     const approval = await opts.controlPlane.approvals.create({
@@ -284,6 +316,92 @@ export function decideGate(policy: PromotionPolicy): "auto_deploy" | "queue_manu
   }
 }
 
+/**
+ * WS6 M7: parse `gate_config.health_gate` if present + valid. Returns
+ * null when the field is absent OR the shape is invalid; the listener
+ * treats null as "no health gate." Invalid shapes log to stderr at
+ * fire time so the operator sees the misconfiguration without the
+ * listener crashing the whole tick.
+ */
+export function readHealthGate(policy: PromotionPolicy): PromotionHealthGate | null {
+  const raw = (policy.gateConfig as { health_gate?: unknown }).health_gate;
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    console.error(
+      `[promotion] policy ${policy.id} health_gate must be an object; got ${typeof raw}`,
+    );
+    return null;
+  }
+  const obj = raw as { min_pass_count?: unknown; window_minutes?: unknown };
+  const minRaw = obj.min_pass_count;
+  const winRaw = obj.window_minutes;
+  const min = typeof minRaw === "number" ? minRaw : Number(minRaw);
+  const win = typeof winRaw === "number" ? winRaw : Number(winRaw);
+  if (!Number.isFinite(min) || min < 1 || !Number.isInteger(min)) {
+    console.error(
+      `[promotion] policy ${policy.id} health_gate.min_pass_count must be a positive integer; got ${JSON.stringify(minRaw)}`,
+    );
+    return null;
+  }
+  if (!Number.isFinite(win) || win < 1 || !Number.isInteger(win)) {
+    console.error(
+      `[promotion] policy ${policy.id} health_gate.window_minutes must be a positive integer; got ${JSON.stringify(winRaw)}`,
+    );
+    return null;
+  }
+  return { min_pass_count: min, window_minutes: win };
+}
+
+/**
+ * WS6 M7: pure decision — given the last N health checks on the
+ * source deployment (newest-first) plus the gate config + "now", say
+ * whether the gate is open. Tests drive this directly.
+ *
+ * Returns:
+ *   - `{ open: true }` when all N most-recent checks are `pass` AND
+ *     the newest is within `window_minutes` of `now`.
+ *   - `{ open: false, reason }` otherwise; the reason is operator-
+ *     facing detail for the approval audit trail.
+ *
+ * Note: we require ALL of the most-recent N to be `pass`, not "N
+ * passes overall." A single recent `fail` re-closes the gate even if
+ * the operator amassed many passes earlier — flaky sources shouldn't
+ * auto-promote.
+ */
+export function isHealthGateOpen(
+  recentChecks: { status: "pass" | "fail" | "degraded"; at: string }[],
+  gate: PromotionHealthGate,
+  nowMs: number,
+): { open: true } | { open: false; reason: string } {
+  if (recentChecks.length < gate.min_pass_count) {
+    return {
+      open: false,
+      reason: `only ${recentChecks.length}/${gate.min_pass_count} checks recorded`,
+    };
+  }
+  const slice = recentChecks.slice(0, gate.min_pass_count);
+  const firstNonPass = slice.find((c) => c.status !== "pass");
+  if (firstNonPass) {
+    return {
+      open: false,
+      reason: `recent check at ${firstNonPass.at} was ${firstNonPass.status}`,
+    };
+  }
+  const newest = slice[0];
+  const newestMs = Date.parse(newest.at);
+  if (!Number.isFinite(newestMs)) {
+    return { open: false, reason: `newest check has unparseable at: ${newest.at}` };
+  }
+  const windowMs = gate.window_minutes * 60 * 1000;
+  if (nowMs - newestMs > windowMs) {
+    return {
+      open: false,
+      reason: `newest check (${newest.at}) is older than window_minutes=${gate.window_minutes}`,
+    };
+  }
+  return { open: true };
+}
+
 /** Read `delay_seconds` from a time_delay policy. Validates >= 0. */
 export function readDelaySeconds(policy: PromotionPolicy): number {
   const raw = (policy.gateConfig as { delay_seconds?: unknown }).delay_seconds;
@@ -316,18 +434,35 @@ export function approvalsDueForAutoApprove(
 }
 
 /**
- * Periodic tick: find pending approvals whose `autoApproveAt` has
- * elapsed, flip them to `auto_approved`, and trigger their deploys.
- * Returns the count of approvals dispatched.
+ * Periodic tick: find pending approvals whose gate has opened, flip
+ * them to `auto_approved`, and trigger their deploys. Returns the
+ * count of approvals dispatched.
+ *
+ * Two enumeration paths in priority order:
+ *   1. `listPendingAutoApprove(nowIso)` — time-delay approvals whose
+ *      `auto_approve_at` has elapsed. Fires unconditionally (the
+ *      operator opted into time-based release at policy creation).
+ *   2. `listPendingHealthGated()` — health-gated approvals (WS6 M7).
+ *      For each, look up the source-target's active deployment for
+ *      THIS release, check recent health checks, fire only if the
+ *      gate is open. If the same approval also has `auto_approve_at`
+ *      AND it has elapsed, we still gate on health — the AND means
+ *      "both conditions must hold."
  */
 export async function runPromotionTick(
   opts: PromotionListenerOptions,
 ): Promise<number> {
   const nowDate = opts.now ? opts.now() : new Date();
   const nowIsoStr = nowDate.toISOString();
+  const nowMs = nowDate.getTime();
+
+  // Path 1: time-delay approvals (existing behaviour).
+  // Skip health-gated ones from this path; they're handled below
+  // with an AND of (time-delay elapsed + health gate open).
   const due = await opts.controlPlane.approvals.listPendingAutoApprove(nowIsoStr);
   let dispatched = 0;
   for (const approval of due) {
+    if (approval.requiresHealthGate) continue; // handled in path 2
     const policy = await opts.controlPlane.promotionPolicies.get(approval.policyId);
     if (!policy) continue;
     const release = await opts.controlPlane.releases.get(approval.releaseId);
@@ -343,5 +478,56 @@ export async function runPromotionTick(
     await dispatchDeploy(opts, policy, fresh, release);
     dispatched += 1;
   }
+
+  // Path 2: health-gated approvals (WS6 M7).
+  const healthGated = await opts.controlPlane.approvals.listPendingHealthGated();
+  for (const approval of healthGated) {
+    const policy = await opts.controlPlane.promotionPolicies.get(approval.policyId);
+    if (!policy) continue;
+    if (!policy.sourceTargetId) continue; // shouldn't happen (listener guards) but be defensive
+    const gate = readHealthGate(policy);
+    if (!gate) continue; // operator removed the gate from the policy; the row is stale
+    // AND condition: if the approval also carries a time-delay
+    // auto_approve_at, that must have elapsed too.
+    if (approval.autoApproveAt && Date.parse(approval.autoApproveAt) > nowMs) {
+      continue;
+    }
+    const release = await opts.controlPlane.releases.get(approval.releaseId);
+    if (!release) continue;
+    // Look up the source-target's active deployment.
+    const sourceDeployment = await opts.controlPlane.deployments.getActiveForTarget(
+      policy.sourceTargetId,
+    );
+    if (!sourceDeployment) continue; // source not yet active; keep waiting
+    if (sourceDeployment.releaseId !== release.id) {
+      // The source has been overwritten with a different release;
+      // this approval will never gate-open. Leave pending; an
+      // operator may want to investigate or use signalman_promotion_approve
+      // to override.
+      continue;
+    }
+    const recent = await opts.controlPlane.healthChecks.listForDeployment(
+      sourceDeployment.id,
+      { limit: gate.min_pass_count },
+    );
+    // listForDeployment returns newest-first; isHealthGateOpen expects that.
+    const decision = isHealthGateOpen(
+      recent.map((c) => ({ status: c.status, at: c.checkedAt })),
+      gate,
+      nowMs,
+    );
+    if (!decision.open) continue;
+    await opts.controlPlane.approvals.update(approval.id, {
+      status: "auto_approved",
+      decidedBy: "system",
+      decidedAt: nowIsoStr,
+      reason: `health_gate opened (min_pass_count=${gate.min_pass_count} window_minutes=${gate.window_minutes})`,
+    });
+    const fresh = await opts.controlPlane.approvals.get(approval.id);
+    if (!fresh) continue;
+    await dispatchDeploy(opts, policy, fresh, release);
+    dispatched += 1;
+  }
+
   return dispatched;
 }

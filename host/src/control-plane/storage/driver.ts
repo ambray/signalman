@@ -273,6 +273,8 @@ export interface ApprovalRepo {
     destTargetId: string;
     status: ApprovalStatus;
     autoApproveAt?: string | null;
+    /** WS6 M7: marks the approval as waiting on a source-tier health gate. */
+    requiresHealthGate?: boolean;
   }): Promise<Approval>;
   get(id: string): Promise<Approval | null>;
   getForReleaseAndTarget(input: {
@@ -284,6 +286,12 @@ export interface ApprovalRepo {
     opts?: { status?: ApprovalStatus; limit?: number },
   ): Promise<Approval[]>;
   listPendingAutoApprove(nowIso: string): Promise<Approval[]>;
+  /**
+   * WS6 M7: pending approvals whose `requires_health_gate` is set.
+   * The promotion tick walks these on every pass and checks whether
+   * the source-tier health-gate has opened.
+   */
+  listPendingHealthGated(): Promise<Approval[]>;
   update(
     id: string,
     patch: Partial<

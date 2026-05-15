@@ -6,9 +6,11 @@ export {
   approvalsDueForAutoApprove,
   decideGate,
   firePolicy,
+  isHealthGateOpen,
   onReleaseBuilt,
   onReleaseDeployed,
   readDelaySeconds,
+  readHealthGate,
   runPromotionTick,
 } from "./listener.js";
 export type {

@@ -265,9 +265,39 @@ export interface Approval {
   /** 'success' / 'failed' / null. */
   deployOutcome: string | null;
   deployDeploymentId: string | null;
+  /**
+   * WS6 M7: when true, the listener queued this approval and is
+   * waiting on a source-tier health gate (defined in the policy's
+   * gate_config.health_gate). The promotion tick checks recent health
+   * checks on the source deployment and fires the deploy once
+   * `min_pass_count` passes accrue inside the `window_minutes` window.
+   * Operator-driven `signalman_promotion_approve` overrides this and
+   * fires regardless of health state.
+   */
+  requiresHealthGate: boolean;
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
+}
+
+/**
+ * WS6 M7: health-gate shape on `PromotionPolicy.gateConfig.health_gate`.
+ * Optional; absent means "no health gate, fire on listener as usual."
+ * Only applies to tier-to-tier policies (`sourceTargetId` non-null);
+ * initial-tier policies ignore it because there's no source to check.
+ */
+export interface PromotionHealthGate {
+  /**
+   * The most-recent N health checks on the source deployment must all
+   * be `pass` for the gate to open. Minimum 1.
+   */
+  min_pass_count: number;
+  /**
+   * The newest of those N checks must be within this many minutes of
+   * "now" — protects against an old set of stale passes opening the
+   * gate after the source has gone quiet. Minimum 1.
+   */
+  window_minutes: number;
 }
 
 // ── Webhook subscriptions (v0.4.0-2) ────────────────────────────────

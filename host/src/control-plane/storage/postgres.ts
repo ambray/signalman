@@ -2266,6 +2266,8 @@ function mapApproval(row: SqlRow): Approval {
     deployAttemptedAt: (row.deploy_attempted_at as string | null) ?? null,
     deployOutcome: (row.deploy_outcome as string | null) ?? null,
     deployDeploymentId: (row.deploy_deployment_id as string | null) ?? null,
+    // WS6 M7: pre-migration rows have undefined; coerce to false.
+    requiresHealthGate: ((row.requires_health_gate as number | undefined) ?? 0) === 1,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
     deletedAt: (row.deleted_at as string | null) ?? null,
@@ -2282,6 +2284,7 @@ class PgApprovalRepo implements ApprovalRepo {
     destTargetId: string;
     status: ApprovalStatus;
     autoApproveAt?: string | null;
+    requiresHealthGate?: boolean;
   }): Promise<Approval> {
     const now = nowIso();
     const bind = {
@@ -2292,12 +2295,13 @@ class PgApprovalRepo implements ApprovalRepo {
       dest_target_id: input.destTargetId,
       status: input.status,
       auto_approve_at: input.autoApproveAt ?? null,
+      requires_health_gate: input.requiresHealthGate ? 1 : 0,
       created_at: now,
       updated_at: now,
     };
     await pgQuery(
       this.pool,
-      "INSERT INTO approval (id, org_id, policy_id, release_id, dest_target_id, status, auto_approve_at, created_at, updated_at) VALUES (@id, @org_id, @policy_id, @release_id, @dest_target_id, @status, @auto_approve_at, @created_at, @updated_at)",
+      "INSERT INTO approval (id, org_id, policy_id, release_id, dest_target_id, status, auto_approve_at, requires_health_gate, created_at, updated_at) VALUES (@id, @org_id, @policy_id, @release_id, @dest_target_id, @status, @auto_approve_at, @requires_health_gate, @created_at, @updated_at)",
       bind,
     );
     return mapApproval({
@@ -2359,6 +2363,15 @@ class PgApprovalRepo implements ApprovalRepo {
       this.pool,
       "SELECT * FROM approval WHERE status = 'pending' AND auto_approve_at IS NOT NULL AND auto_approve_at <= $1 AND deleted_at IS NULL ORDER BY auto_approve_at",
       [nowIsoStr],
+    );
+    return r.rows.map(mapApproval);
+  }
+
+  async listPendingHealthGated(): Promise<Approval[]> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM approval WHERE status = 'pending' AND requires_health_gate = 1 AND deleted_at IS NULL ORDER BY created_at",
+      [],
     );
     return r.rows.map(mapApproval);
   }

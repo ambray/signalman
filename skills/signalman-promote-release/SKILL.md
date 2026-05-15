@@ -93,6 +93,48 @@ signalman promotion tick
 - `signalman release show <release_id>` now includes an `approvals` array surfacing the per-target promotion state.
 - Approval/rejection emits `promotion-approved` / `promotion-rejected` webhook events (Epic 2). Pair this skill with `signalman webhook add --events promotion-approved,promotion-rejected --kind slack ...` to mirror decisions into chat.
 
+### Source-tier health gate (WS6 M7)
+
+A **tier-to-tier** policy (one with `--source <target>`) can require
+that the source-tier deployment has accrued N consecutive recent
+health-check passes before auto-promotion fires. Configure via
+`gate_config.health_gate`:
+
+```bash
+signalman promotion add \
+  --product p \
+  --source test --dest demo \
+  --gate auto \
+  --gate-config '{"health_gate":{"min_pass_count":3,"window_minutes":30}}'
+```
+
+Behaviour:
+
+- **gate=auto + health_gate** — listener queues a `pending` approval
+  with `requires_health_gate=true` instead of firing. The promotion
+  tick checks recent health checks on the source-tier deployment for
+  this release each pass; once the last N checks are all `pass` AND
+  the newest is within `window_minutes` of now, the tick flips the
+  approval to `auto_approved` and fires the deploy.
+- **gate=time_delay + health_gate** — the approval carries BOTH
+  `auto_approve_at` AND `requires_health_gate=true`. The tick fires
+  only when both have cleared (delay elapsed AND health passing).
+- **gate=manual + health_gate** — health gate is **ignored**. Manual
+  approval is the explicit operator gate; the gate doesn't add a
+  precondition. The skill warns operators not to combine them
+  expecting AND semantics.
+- **Initial-tier (no `--source`) + health_gate** — health gate is
+  **ignored** (no source deployment to check against).
+- **A single recent `fail` reopens the gate.** Flaky sources don't
+  auto-promote — the most-recent N must be uniformly `pass`.
+- **A stale source (no recent checks) keeps the approval pending.** If
+  the source has been quiet longer than `window_minutes`, the gate
+  stays closed until fresh checks land. Pair with
+  `signalman_schedule_add` on the source to ensure heartbeats.
+- **Operator approve always overrides.** `signalman_promotion_approve`
+  fires the deploy regardless of gate state — useful for "I trust
+  the source; ship it now."
+
 ### Approver allow-list (honour-system)
 
 Add an `approvers` array to a manual policy's gate config to require `--decided-by` matches one of the listed identities:
