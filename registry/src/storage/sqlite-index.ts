@@ -40,6 +40,17 @@ import {
   validateManifestName,
   validateManifestVersion,
 } from "../types.js";
+import { canonicalManifestBytes } from "../signing.js";
+
+/**
+ * Wrapper used by setCargoYanked: re-canonicalize a manifest after
+ * mutating cargoMetadata.yanked in-place. The signing module's
+ * canonicalManifestBytes strips `signature` before serializing,
+ * which is exactly what we want here.
+ */
+function canonicalManifestBytesForRow(m: Manifest): Buffer {
+  return canonicalManifestBytes(m);
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MIGRATIONS_DIR = path.join(__dirname, "migrations");
@@ -249,6 +260,51 @@ export class SqliteManifestIndex {
     this.db
       .prepare(`DELETE FROM manifest WHERE name = ? AND version = ?`)
       .run(name, version);
+  }
+
+  // ── Cargo yank state (WS6 wave-3 M10.3) ───────────────────────
+
+  /**
+   * Toggle the yanked flag on a cargo manifest row. The flag lives
+   * inside `cargo_metadata_json`; we mutate the JSON in-place AND
+   * clear the row's signature (since the canonical bytes change,
+   * the original signature is no longer verifiable).
+   *
+   * Throws `MANIFEST_NOT_FOUND` when the row is absent OR when the
+   * row's kind != 'cargo'.
+   */
+  setCargoYanked(name: string, version: string, yanked: boolean): void {
+    validateManifestName(name);
+    validateManifestVersion(version);
+    const row = this.fetchRow(name, version);
+    if (!row || row.kind !== "cargo" || !row.cargo_metadata_json) {
+      throw new RegistryError(
+        REGISTRY_ERROR_CODES.MANIFEST_NOT_FOUND,
+        `cargo crate ${name}@${version} not found`,
+      );
+    }
+    const meta = JSON.parse(row.cargo_metadata_json) as CargoManifestMetadata;
+    if (meta.yanked === yanked) {
+      // Idempotent no-op.
+      return;
+    }
+    meta.yanked = yanked;
+    const newMetaJson = JSON.stringify(meta);
+    // Recompute canonical bytes for the row so getCanonicalBytes
+    // reflects the post-yank state. We use a sorted-keys
+    // serializer that mirrors the signing module's canonicalize.
+    const manifest = rowToManifest({ ...row, cargo_metadata_json: newMetaJson });
+    const canonical = canonicalManifestBytesForRow(manifest);
+    this.db
+      .prepare(
+        `UPDATE manifest
+         SET cargo_metadata_json = ?,
+             canonical_bytes = ?,
+             signature_b64 = NULL,
+             signed_by = NULL
+         WHERE name = ? AND version = ?`,
+      )
+      .run(newMetaJson, canonical, name, version);
   }
 
   // ── Audit log (WS6 wave-3 M10) ────────────────────────────────

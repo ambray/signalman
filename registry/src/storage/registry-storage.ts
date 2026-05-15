@@ -22,6 +22,7 @@ import {
   type Blob,
   type ListedManifest,
   type Manifest,
+  type Provenance,
   type RegistryStorage,
 } from "../types.js";
 
@@ -81,7 +82,10 @@ export class LocalFsRegistryStorage implements RegistryStorage {
     );
   }
 
-  async putManifest(manifest: Manifest): Promise<Manifest> {
+  async putManifest(
+    manifest: Manifest,
+    provenance?: Provenance,
+  ): Promise<Manifest> {
     // Reject manifests that pin blobs the registry has never seen.
     // Catches accidental cross-registry refs and the order-of-ops
     // bug where a CI script uploads the manifest before the blobs.
@@ -95,7 +99,12 @@ export class LocalFsRegistryStorage implements RegistryStorage {
       }
     }
     const canonical = canonicalManifestBytes(manifest);
-    return this.index.putManifest(manifest, canonical);
+    return this.index.putManifest(manifest, canonical, provenance);
+  }
+
+  /** WS6 wave-3 (M10.1): row-side provenance. */
+  async getProvenance(name: string, version: string): Promise<Provenance | null> {
+    return this.index.getProvenance(name, version);
   }
 
   async getManifest(name: string, version: string): Promise<Manifest | null> {

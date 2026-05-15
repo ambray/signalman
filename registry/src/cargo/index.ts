@@ -37,3 +37,11 @@ export {
   serializeIndexEntry,
   type MountCargoReadOptions,
 } from "./read.js";
+
+export {
+  mountCargoPublishRoutes,
+  parsePublishBody,
+  publishMetadataToStored,
+  type CargoPublishMetadata,
+  type MountCargoPublishOptions,
+} from "./publish.js";

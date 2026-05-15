@@ -40,6 +40,7 @@ import {
 } from "../types.js";
 import type { LocalFsRegistryStorage } from "../storage/registry-storage.js";
 import { mountCargoReadRoutes } from "../cargo/index.js";
+import { mountCargoPublishRoutes } from "../cargo/publish.js";
 
 const VERSION = "0.0.1";
 const DEFAULT_BLOB_MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5 GiB
@@ -215,13 +216,22 @@ export function buildApp(opts: AppOptions): Router {
     return { status: 204, body: null };
   });
 
-  // ── Cargo facade (WS6 wave-3 M10.2) ────────────────────────────
+  // ── Cargo facade (WS6 wave-3 M10.2 + M10.3) ────────────────────
   //
-  // Per-org sparse-index + download routes. Publish + yank land in
-  // M10.3; virtual-registry pull-through in M10.4.
+  // Per-org sparse-index + download + publish + yank routes.
+  // Virtual-registry pull-through lands in M10.4.
   mountCargoReadRoutes(router, {
     storage,
     publicBaseUrl: opts.publicBaseUrl,
+  });
+  // Publish + yank need direct access to the SqliteManifestIndex
+  // for setCargoYanked + appendAuditEntry. Storage backings that
+  // aren't sqlite-backed get a degraded experience (publish works;
+  // yank routes 503).
+  const idxStorage = storage as Partial<LocalFsRegistryStorage>;
+  mountCargoPublishRoutes(router, {
+    storage,
+    index: idxStorage.index,
   });
 
   return router;
