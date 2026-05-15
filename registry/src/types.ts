@@ -119,6 +119,52 @@ export interface CargoDependency {
 }
 
 /**
+ * v0.1.1 (npm facade): npm-specific manifest metadata.
+ *
+ * Serialized into the manifest's `npmMetadata` field when
+ * `kind === 'npm'`. The packument endpoint reads from this shape
+ * to assemble the per-package version document the npm client
+ * expects.
+ *
+ * Field names match npm's packument JSON verbatim where
+ * convenient (matches the cargo-spec alignment we did in M10.1).
+ * Scoped packages carry the `@scope/name` form in `name`.
+ */
+export interface NpmManifestMetadata {
+  /** Package name. Scoped form: `@scope/name`. */
+  name: string;
+  /** Semver string. */
+  version: string;
+  /** sha512 integrity hash in the SRI form `sha512-<base64>`. */
+  integrity?: string;
+  /** sha1 shasum (npm's legacy tarball integrity field). */
+  shasum?: string;
+  /** Tarball URL, served by this registry (rewritten on read). */
+  tarball?: string;
+  /** Runtime dependencies. */
+  dependencies?: Record<string, string>;
+  /** Dev-only dependencies (informational; not installed in prod). */
+  devDependencies?: Record<string, string>;
+  /** Peer dependencies (npm warns if missing). */
+  peerDependencies?: Record<string, string>;
+  /** Optional dependencies (failure ignored). */
+  optionalDependencies?: Record<string, string>;
+  /** Engines (node version etc). */
+  engines?: Record<string, string>;
+  /** Free-form npm metadata fields the operator's packument carried. */
+  description?: string;
+  keywords?: string[];
+  homepage?: string;
+  license?: string;
+  /** "main" entry point. */
+  main?: string;
+  /** package.json `bin` field — either a string path or { name → path } map. */
+  bin?: string | Record<string, string>;
+  /** Operator-published deprecation message. Surfaces in `npm install` output. */
+  deprecated?: string;
+}
+
+/**
  * WS6 wave-3 carve-out #9 (M10): provenance metadata.
  *
  * Every artifact ingested into the registry carries provenance —
@@ -198,6 +244,11 @@ export interface Manifest {
    * Operator-signed content; absent for other kinds.
    */
   cargoMetadata?: CargoManifestMetadata;
+  /**
+   * v0.1.1 (npm facade): npm-specific metadata when `kind === 'npm'`.
+   * Operator-signed content; absent for other kinds.
+   */
+  npmMetadata?: NpmManifestMetadata;
   /** ISO-8601 UTC timestamp when the manifest was first written. */
   createdAt: string;
 }
@@ -368,10 +419,14 @@ export function formatBlobRef(ref: BlobRef): string {
 
 // Validation helpers --------------------------------------------------
 
-// Names: lowercase letters/digits with `.`, `_`, `-`, `/` separators.
-// Must start + end alphanumeric. Up to 255 chars total. Slash allows
-// namespaced names like `org/foo`.
-const NAME_RE = /^[a-z0-9](?:[a-z0-9._/-]{0,253}[a-z0-9])?$/;
+// Names: lowercase letters/digits with `.`, `_`, `-`, `/`, `@`
+// separators. Must start + end alphanumeric OR `@<scope-start>`
+// (npm scoped names use `@scope/name`). Up to 255 chars total.
+//
+// The slash allows namespaced names like `org/foo` (cargo) +
+// `npm/<org>/<package>`. The `@` allows scoped npm packages like
+// `npm/<org>/@scope/name`.
+const NAME_RE = /^(?:@[a-z0-9][a-z0-9._-]{0,62}\/[a-z0-9][a-z0-9._/-]{0,189}[a-z0-9]|[a-z0-9](?:[a-z0-9._/@-]{0,253}[a-z0-9])?)$/;
 
 export function validateManifestName(name: string): void {
   if (!NAME_RE.test(name)) {

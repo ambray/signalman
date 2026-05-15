@@ -36,6 +36,7 @@ import {
   type Manifest,
   type ManifestKind,
   type ManifestSignature,
+  type NpmManifestMetadata,
   type Provenance,
   validateManifestName,
   validateManifestVersion,
@@ -78,6 +79,8 @@ interface ManifestRow {
   kind: ManifestKind;
   provenance_json: string | null;
   cargo_metadata_json: string | null;
+  // v0.1.1 (npm facade):
+  npm_metadata_json: string | null;
 }
 
 interface BlobRow {
@@ -168,8 +171,8 @@ export class SqliteManifestIndex {
         `INSERT INTO manifest (
            name, version, media_type, blobs_json, annotations_json,
            signature_b64, signed_by, canonical_bytes, created_at,
-           kind, provenance_json, cargo_metadata_json
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           kind, provenance_json, cargo_metadata_json, npm_metadata_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.name,
@@ -184,6 +187,7 @@ export class SqliteManifestIndex {
         kindForRow,
         JSON.stringify(provenance),
         input.cargoMetadata ? JSON.stringify(input.cargoMetadata) : null,
+        input.npmMetadata ? JSON.stringify(input.npmMetadata) : null,
       );
     return {
       ...input,
@@ -620,7 +624,7 @@ export class SqliteManifestIndex {
       .prepare(
         `SELECT name, version, media_type, blobs_json, annotations_json,
                 signature_b64, signed_by, canonical_bytes, created_at,
-                kind, provenance_json, cargo_metadata_json
+                kind, provenance_json, cargo_metadata_json, npm_metadata_json
          FROM manifest
          WHERE name = ? AND version = ?`,
       )
@@ -643,6 +647,9 @@ function rowToManifest(row: ManifestRow): Manifest {
   const cargoMetadata: CargoManifestMetadata | undefined = row.cargo_metadata_json
     ? (JSON.parse(row.cargo_metadata_json) as CargoManifestMetadata)
     : undefined;
+  const npmMetadata: NpmManifestMetadata | undefined = row.npm_metadata_json
+    ? (JSON.parse(row.npm_metadata_json) as NpmManifestMetadata)
+    : undefined;
   // WS6 wave-3 (M10): only surface `kind` when the row actually
   // recorded a non-default value, so v0.4.0 manifests round-trip
   // signature-compatible.
@@ -656,6 +663,7 @@ function rowToManifest(row: ManifestRow): Manifest {
     ...(annotations ? { annotations } : {}),
     ...(signature ? { signature } : {}),
     ...(cargoMetadata ? { cargoMetadata } : {}),
+    ...(npmMetadata ? { npmMetadata } : {}),
     createdAt: row.created_at,
   };
 }

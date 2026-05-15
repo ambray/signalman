@@ -46,6 +46,11 @@ import {
   proxyCargoSparseIndex,
   type UpstreamFetch,
 } from "../cargo/virtual.js";
+import {
+  mountNpmReadRoutes,
+  mountNpmPublishRoutes,
+} from "../npm/index.js";
+import { proxyNpmPackument, proxyNpmTarball } from "../npm/virtual.js";
 import { mountForensicRoutes } from "./forensic.js";
 
 const VERSION = "0.0.1";
@@ -277,6 +282,40 @@ export function buildApp(opts: AppOptions): Router {
     index: idxStorage.index,
   });
 
+  // ── Npm facade (v0.1.1) ────────────────────────────────────────
+  //
+  // Same shape as the cargo facade: read (packument + tarball) +
+  // publish (PUT /<package>) + virtual pull-through against
+  // npmjs.com when configured.
+  const npmProxyOpts =
+    idxStorage.index !== undefined
+      ? {
+          storage,
+          index: idxStorage.index,
+          ...(opts.virtualUpstreamFetch ? { fetch: opts.virtualUpstreamFetch } : {}),
+          ...(opts.virtualResignPrivateKeyPem
+            ? { signingPrivateKeyPem: opts.virtualResignPrivateKeyPem }
+            : {}),
+          ...(opts.publicBaseUrl ? { publicBaseUrl: opts.publicBaseUrl } : {}),
+        }
+      : null;
+  mountNpmReadRoutes(router, {
+    storage,
+    publicBaseUrl: opts.publicBaseUrl,
+    ...(npmProxyOpts
+      ? {
+          proxyPackument: (org, packageName) =>
+            proxyNpmPackument(npmProxyOpts, org, packageName),
+          proxyTarball: (org, packageName, version) =>
+            proxyNpmTarball(npmProxyOpts, org, packageName, version),
+        }
+      : {}),
+  });
+  mountNpmPublishRoutes(router, {
+    storage,
+    index: idxStorage.index,
+  });
+
   // ── Forensic + provenance (WS6 wave-3 M10.5) ───────────────────
   mountForensicRoutes(router, {
     storage,
@@ -384,6 +423,10 @@ function parseManifestBody(
     obj.cargoMetadata && typeof obj.cargoMetadata === "object"
       ? (obj.cargoMetadata as import("../types.js").CargoManifestMetadata)
       : undefined;
+  const npmMetadata =
+    obj.npmMetadata && typeof obj.npmMetadata === "object"
+      ? (obj.npmMetadata as import("../types.js").NpmManifestMetadata)
+      : undefined;
   return {
     name: expectedName,
     version: expectedVersion,
@@ -393,6 +436,7 @@ function parseManifestBody(
     ...(annotations ? { annotations } : {}),
     ...(signature ? { signature } : {}),
     ...(cargoMetadata ? { cargoMetadata } : {}),
+    ...(npmMetadata ? { npmMetadata } : {}),
     createdAt,
   };
 }

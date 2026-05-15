@@ -18,6 +18,7 @@ export type {
   ManifestSignature,
   ManifestWithProvenance,
   ListedManifest,
+  NpmManifestMetadata,
   Provenance,
   RegistryStorage,
   RegistryErrorCode,

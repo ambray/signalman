@@ -1,7 +1,7 @@
 # `@signalman/registry` roadmap
 
-**Current version:** `0.1.0` (M10 cargo facade + virtual registry +
-forensic surface; **2026-05-15**).
+**Current version:** `0.1.1` (cargo + npm facades + virtual registry
++ forensic surface; **2026-05-15**).
 **Source-of-truth design:** `docs/design/meta-build-system.md` §15 +
 `docs/audit/capability-matrix-2026-05-wave3.md` for the operator-
 facing bootstrap vision.
@@ -46,20 +46,43 @@ substrate.
 
 ## v0.1.x — close the bootstrap loop
 
-### v0.1.1 — npm protocol facade (next milestone)
+### v0.1.1 — npm protocol facade ✅ SHIPPED (2026-05-15)
 
 Same shape as the cargo facade, different protocol:
 
-- Routes: `/npm/<org>/-/v1/search`, `/npm/<org>/<package>`,
-  `/npm/<org>/<package>/-/<package>-<version>.tgz`
-- Publish via `PUT /npm/<org>/<package>` with the npm publish JSON
+- Routes: `/npm/<org>/<package>` (packument),
+  `/npm/<org>/<package>/-/<basename>-<version>.tgz` (tarball),
+  `PUT /npm/<org>/<package>` (publish)
 - Per-org namespacing (matches GitHub Packages' npm registry)
-- Virtual-upstream pull-through against npmjs.com
-- Per-package provenance + audit-log entries
+- Virtual-upstream pull-through against npmjs.com with Ed25519
+  re-signing on cache write
+- Scoped + unscoped package names supported (URL-encoded slash in
+  scope separator)
+- Per-package provenance + audit-log entries (`action: 'upload'`
+  for publish; `action: 'proxy_cache'` for upstream pulls)
 
-**Closes**: `@signalman/host` becomes `npm install`-able from a
-self-hosted registry. Foundation for "all signalman CI/CD self-
-hosted."
+**Status**: `@signalman/host` becomes `npm install`-able from a
+self-hosted registry. The cargo + npm pair gets signalman CI/CD
+half-way to "all self-hosted" (still need OCI for container images
++ security integration for scanners).
+
+**Operator surface**:
+- Skill: `signalman-npm-bootstrap`
+- CLI: existing `signalman-registry virtual {add,list,remove}` +
+  `audit` + `forensic` verbs work for `--kind npm` exactly like
+  cargo (the operator surface is protocol-agnostic)
+- HTTP: `/npm/<org>/...` routes mounted in the buildApp router
+
+**Storage**: new `npm_metadata_json` column on the manifest table
+(migration `0003_npm_metadata.sql`). Existing rows unaffected.
+
+**Not in v0.1.1**:
+- Mutable `dist-tags` (`latest` / `staging`) beyond auto-`latest`
+  on newest version — explicit tag rotation lands in v0.1.4
+- Unpublish endpoint (npm typically disables this server-side
+  for security; we follow the conservative default)
+- npm audit endpoint (`POST /-/v1/security/audits`) — feeds the
+  v0.1.3 OSV-integration milestone
 
 ### v0.1.2 — OCI distribution spec v1.1
 
