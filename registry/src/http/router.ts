@@ -90,13 +90,25 @@ export class Router {
     options: RouteOptions = {},
   ): void {
     const paramNames: string[] = [];
+    // WS6 wave-3 (M10.2): support two param shapes:
+    //   `:name` matches a single path segment (no slashes), as before.
+    //   `*name` matches the rest of the path (slashes included). This
+    //   is needed for cargo's sparse-index layout where the crate
+    //   name's first 2-4 chars become path components — the depth
+    //   varies by name length and can't be captured with single-
+    //   segment params.
+    // `*` is not in the regex-escape char class below, so the literal
+    // remains in the escaped string for the param-substitution pass.
     const escaped = path.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
     const pattern = new RegExp(
       "^" +
-        escaped.replace(/:([a-z_][a-z0-9_]*)/gi, (_match, name: string) => {
-          paramNames.push(name);
-          return "([^/]+)";
-        }) +
+        escaped.replace(
+          /([:*])([a-z_][a-z0-9_]*)/gi,
+          (_match, kind: string, name: string) => {
+            paramNames.push(name);
+            return kind === "*" ? "(.+)" : "([^/]+)";
+          },
+        ) +
         "$",
     );
     this.routes.push({ method, pattern, paramNames, handler, options });

@@ -39,6 +39,7 @@ import {
   type RegistryStorage,
 } from "../types.js";
 import type { LocalFsRegistryStorage } from "../storage/registry-storage.js";
+import { mountCargoReadRoutes } from "../cargo/index.js";
 
 const VERSION = "0.0.1";
 const DEFAULT_BLOB_MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5 GiB
@@ -49,6 +50,13 @@ export interface AppOptions {
   auth?: AuthOptions;
   /** Override the blob upload cap; default 5 GiB. */
   blobMaxBytes?: number;
+  /**
+   * WS6 wave-3 (M10.2): public base URL of this registry, used to
+   * build `dl` + `api` URLs in cargo's index/config.json. Defaults
+   * to `""` (relative URLs). Production callers should set this to
+   * their externally-resolvable URL.
+   */
+  publicBaseUrl?: string;
 }
 
 export function buildApp(opts: AppOptions): Router {
@@ -205,6 +213,15 @@ export function buildApp(opts: AppOptions): Router {
     validateManifestVersion(version);
     await storage.deleteManifest(name, version);
     return { status: 204, body: null };
+  });
+
+  // ── Cargo facade (WS6 wave-3 M10.2) ────────────────────────────
+  //
+  // Per-org sparse-index + download routes. Publish + yank land in
+  // M10.3; virtual-registry pull-through in M10.4.
+  mountCargoReadRoutes(router, {
+    storage,
+    publicBaseUrl: opts.publicBaseUrl,
   });
 
   return router;
