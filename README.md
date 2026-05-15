@@ -1,24 +1,41 @@
 # Signalman
 
-**Agent-first DevOps platform: VM scenario runner + tag-driven release-lifecycle control plane.**
+**Agent-first DevOps platform: VM scenario runner + tag-driven release-lifecycle control plane + standalone artifact registry.**
 
-Signalman is two complementary halves that share storage, auth, and CLI:
+Signalman is three complementary halves that share storage, auth, and CLI:
 
 1. **Scenario runner (v0.1.x)** — executes hermetic VM-backed test scenarios
-   (Hyper-V primary; Tart/VMware fallback) for security, compliance, and CI
-   workflows. LLM agents drive it through [Loom](https://github.com/ambray/loom);
-   CI pipelines drive it through the native CLI.
-2. **Meta build system (v0.2.x — v0.3.x)** — a tag-driven release pipeline for
-   an externally-developed product. Builds a deterministic release from a git
-   tag, signs the manifest with Ed25519, stages artifacts into a
-   content-addressed blob store, deploys atomically to a target VM, and
-   rolls back on demand. The control plane runs in-process for local mode or
-   as a networked HTTP service for self-hosted / shared-runner deployments.
+   (Hyper-V primary on Windows; Tart on macOS; libvirt + vmrun on
+   Linux/cross-platform; VMware as legacy fallback) for security, compliance,
+   and CI workflows. LLM agents drive it through
+   [Loom](https://github.com/ambray/loom); CI pipelines drive it through the
+   native CLI. Guest agent is cross-platform — Windows / Linux / macOS — via
+   a `Platform` trait dispatched at compile time.
+2. **Meta build system (v0.2.x — v0.4.x)** — a tag-driven release pipeline
+   for an externally-developed product. Builds a deterministic release from
+   a git tag, signs the manifest with Ed25519, stages artifacts into a
+   content-addressed blob store, deploys atomically to a target (VM, cloud
+   VM, Kubernetes cluster, or Docker stack), and rolls back on demand. The
+   control plane runs in-process for local mode or as a networked HTTP
+   service for self-hosted / shared-runner deployments. Layered operator
+   features include cloud-provider integration (AWS + Azure, ephemeral
+   instances + OpenTofu stacks), Kubernetes deploy via `kubectl` / Helm,
+   auto-promotion with approval gates, outbound webhooks (generic / Slack /
+   email), and scheduled health checks.
+3. **Artifact registry (`@signalman/registry`, v0.1.x)** — standalone OSS
+   product spun out of the meta-build blob catalog. Speaks cargo
+   sparse-index and npm protocols today (OCI / Maven / pip / Helm queued).
+   Each manifest carries provenance metadata (`source: upload | proxy_cache
+   | manifest_create`). Virtual upstreams pull-through public registries
+   with Ed25519 re-signing on cache write. Forensic + provenance HTTP API
+   answers "what's in my registry and where did it come from" and an
+   immutable audit log answers "who did what when".
 
-Both halves multiplex through one MCP server, one CLI, and one storage layer
-(pluggable SQLite | Postgres, pluggable local-FS | S3 blobs). Single-tenant by
-default; multi-tenant scoping (`org_id` on every row, Bearer-token API keys)
-is wired through the schema but not surfaced operationally.
+All three multiplex through one MCP server, one CLI surface (per binary),
+and one storage layer (pluggable SQLite | Postgres, pluggable local-FS | S3
+blobs). Single-tenant by default; per-org scoping (`org_id` on every row,
+Bearer-token API keys, per-org credentials at rest, per-org cost guardrails)
+is wired through the schema and surfaced via the operator CLI.
 
 Website: [signalman.dev](https://signalman.dev)
 
@@ -42,46 +59,67 @@ Website: [signalman.dev](https://signalman.dev)
            |  (shells to CLI / MCP)       |
            +-------------+----------------+
                          v
-+---------------------------------------------+
-| Signalman host (TypeScript, one process)    |
-|                                             |
-|  Verb surface (CLI + MCP, single contract)  |
-|  - Scenarios: list/describe/plan/run/       |
-|    record/status                            |
-|  - Meta build: product/release/target/      |
-|    deployment/health + key/api-key/runner   |
-|                                             |
-|  Control plane (in-process or `serve`d)     |
-|  - Release catalog, deployment ledger,      |
-|    scenario index, artifact metadata,       |
-|    audit log, tenant model                  |
-|  - HTTP API on node:http, bearer-token auth |
-|  - StorageDriver (SQLite | Postgres)        |
-|  - BlobDriver (local FS | S3)               |
-|  - Ed25519 manifest signing                 |
-|  - Job queue → release.build jobs           |
-|                                             |
-|  Runner workers (in-process or remote)      |
-|  - Poll the control plane, claim jobs       |
-|  - Clone product repo at tag, run the       |
-|    declared build steps, upload artifacts   |
-|  - Stateless; many workers per control plane|
-+---------------------+-----------------------+
-                      | mTLS gRPC
-            +---------+-----------+
-            |                     |
-+-----------v---------+ +---------v-----------+
-| Hyper-V service     | | Hypervisor backends |
-| (Rust, MSI-install) | | Tart (mac) /        |
-| Privileged Hyper-V  | | VMware (legacy)     |
-| cmdlets over mTLS   | +----------+----------+
-+----------+----------+            |
-           |                       |
-   +-------v-------+       +-------v-------+
-   | Guest Agent   |  ...  | Guest Agent   |
-   | (per VM)      |       | (per VM)      |
-   | proc / cmd /  |       | proc / cmd /  |
-   | file / verify |       | file / verify |
++--------------------------------------------------+   +--------------------------------+
+| Signalman host (TypeScript, one process)         |   | @signalman/registry            |
+|                                                  |   |   (separate binary)            |
+|  Verb surface (CLI + MCP, single contract)       |   |                                |
+|  - Scenarios:   list/describe/plan/run/          |   |  Verb surface                  |
+|    record/status                                 |   |  - serve, audit, forensic,     |
+|  - Meta build:  product/release/target/          |   |    virtual, keygen, verify     |
+|    deployment/health + key/api-key/runner        |   |                                |
+|  - Cloud:       cloud {provision/terminate/      |   |  HTTP                          |
+|    status/list/creds/budget/usage/reaper/        |   |  - /v1/blobs/:sha256           |
+|    connection-descriptor},                       |   |  - /v1/manifests/...           |
+|    stack {apply/destroy/plan-cost}               |   |  - /v1/audit/{query,append}    |
+|  - Kubernetes: k8s {deploy/rollback/status},     |   |  - /v1/forensic/{manifest,...} |
+|    runner deploy-k8s                             |   |  - /cargo/<org>/...            |
+|  - Operations: promotion {add/approve/reject/    |   |  - /npm/<org>/...              |
+|    tick}, webhook {add/list/test},               |   |                                |
+|    schedule {add/run-once/start}                 |   |  Storage                       |
+|                                                  |   |  - ManifestIndex (SQLite)      |
+|  Control plane (in-process or `serve`d)          |   |  - RegistryBlobs (local-FS|S3) |
+|  - Release catalog, deployment ledger,           |   |  - Virtual-upstream cache      |
+|    scenario index, artifact metadata,            |   |  - Audit log + Provenance      |
+|    audit log, tenant model                       |   |                                |
+|  - Promotion policies + approval ledger          |   |  Acts as a BlobDriver behind   |
+|  - Webhook subscriptions + event dispatcher      |   |  @signalman/host (registry-    |
+|  - Scheduled health probes                       |   |  blob-driver) — same artifact  |
+|  - Cloud cost guardrails + per-org credentials   |   |  pipeline, externalized store. |
+|  - HTTP API on node:http, bearer-token auth      |   +--------------------------------+
+|  - StorageDriver (SQLite | Postgres)             |
+|  - BlobDriver (local-FS | S3 | signalman-registry)
+|  - Ed25519 manifest signing                      |
+|  - Job queue → release.build jobs                |
+|                                                  |
+|  Runner workers (in-process or remote)           |
+|  - Poll the control plane, claim jobs            |
+|  - Clone product repo at tag, run declared       |
+|    build steps, upload artifacts                 |
+|  - Stateless; many workers per control plane     |
+|  - Multi-transport deploy: script / ssh / winrm  |
+|    / docker / cloud (SSM | Bastion tunneling)    |
++----------+--------------------+---------+--------+
+           |                    |         |
+   mTLS gRPC      cloud SDK / kubectl     | OpenTofu (HCL stacks)
+           |                    |         |
++----------v----------+ +-------v---------v---+ +----------------------+
+| Hyper-V service     | | Hypervisor backends | | Cloud + k8s backends |
+| (Rust, MSI-install) | | Hyper-V (Win)       | | AWS / Azure SDK      |
+| Privileged Hyper-V  | | Tart (macOS)        | | (cloud_vm_test)      |
+| cmdlets over mTLS   | | libvirt (Linux)     | | OpenTofu             |
++----------+----------+ | vmrun (cross-plat)  | | (cloud_stack_test)   |
+           |            | VMware (legacy)     | | kubectl + Helm       |
+           |            +----------+----------+ | (k8s_test)           |
+           |                       |            +-----------+----------+
+           |                       |                        |
+   +-------v-------+       +-------v-------+       +--------v---------+
+   | Guest Agent   |  ...  | Guest Agent   |  ...  | Pods / Cloud VMs |
+   | (per VM)      |       | (per VM)      |       | (deploy targets) |
+   | Platform trait:       | Platform trait:       +------------------+
+   |  Windows full UI/     |  Linux: SYSTEM via
+   |  browser surface;     |  passwordless sudo;
+   |  Linux/macOS proc /   |  macOS: brew + AX
+   |  cmd / file / net.    |  driver (planned)
    +---------------+       +---------------+
 ```
 
@@ -95,10 +133,18 @@ Website: [signalman.dev](https://signalman.dev)
   for small fleets; Postgres + S3 for larger ones (see
   [docs/postgres-driver.md](docs/postgres-driver.md)).
 
+The registry is a **third runtime** that can co-exist with either shape:
+operators run `signalman-registry serve` as a separate process (or behind a
+fronting proxy), and `@signalman/host`'s `signalman-registry` BlobDriver
+points artifact storage at it. The registry can also serve cargo/npm
+clients directly, so a single Signalman deployment can be the registry of
+record for the org's CI/CD pipeline. See `registry/README.md` for the
+standalone scope and `docs/supply-chain.md` for the bootstrap-from-signalman
+story.
+
 The Loom-fronted topology is the default agent surface in v0.1.x for the
-scenario half; the meta build verbs (`signalman release build`, `release
-deploy`, `release rollback`, `release verify`, etc.) are CLI/HTTP-first and
-don't depend on Loom.
+scenario half; the meta build, cloud, k8s, registry, promotion, webhook,
+and scheduled-health verbs are CLI/HTTP-first and don't depend on Loom.
 
 ## Components
 
@@ -120,16 +166,29 @@ Includes pluggable hypervisor backends.
 - **Hyper-V** (Windows) — primary backend since 2026-04; required when
   the guest agent needs to run as SYSTEM with `SeTcbPrivilege` (Hyper-V
   integration services expose this cleanly, where VMware's tooling
-  pipes through a less-privileged service account)
+  pipes through a less-privileged service account).
 - **Tart** (macOS on Apple Silicon) — first Mac runner backend for macOS VM
   lifecycle and command execution through Apple's Virtualization.framework;
-  see [docs/mac-virtualization.md](docs/mac-virtualization.md). macOS guests run
-  the normal Signalman guest agent; `scripts/macos/install-guest-agent.sh`
-  installs it as a LaunchDaemon for unattended file and command operations.
-- **VMware Workstation** (Windows/Linux) — fallback, deprioritized; receives
-  no new feature work
-- Cross-platform daemons (libvirt on Linux, first-party Swift helper on macOS)
-  — v0.3.0+
+  see [docs/mac-virtualization.md](docs/mac-virtualization.md). macOS guests
+  run the normal Signalman guest agent under the new `Platform` trait;
+  `scripts/macos/install-guest-agent.sh` installs it as a LaunchDaemon for
+  unattended file and command operations.
+- **libvirt** (Linux) — `virsh`-wrapping backend in
+  `host/src/hypervisors/libvirt.ts`. Drives qemu/KVM through the standard
+  libvirt API. Shipped in v0.4.0-4; primary backend on Linux developer hosts
+  and Linux CI runners.
+- **vmrun** (cross-platform; Windows / Linux / macOS) — parallel-track
+  VMware Workstation/Fusion driver in `host/src/hypervisors/vmrun.ts`.
+  Shipped in v0.4.0-4 as an injectable-exec, stable-error-code alternative
+  to the legacy `vmware.ts`. The two converge in a future release (see
+  the carve-out list in `docs/audit/capability-matrix-2026-05-wave3.md`).
+- **VMware Workstation** (Windows/Linux, legacy) — kept working but
+  deprioritized; converges with vmrun.ts above when a production scenario
+  exercises the parallel-track driver end-to-end.
+- **Cloud VMs** (AWS + Azure) — not hypervisors per se but registered as
+  deploy targets via `cloud_vm_test` / `cloud_stack_test` target kinds
+  with SDK-backed lifecycle (provision, terminate, status, cost-reaper).
+  See the Quick Start §"Cloud providers" below.
 
 ### Hyper-V Control-Plane Service (`service/`)
 Rust crate that brokers privileged Hyper-V cmdlets via mTLS gRPC, eliminating
@@ -139,16 +198,31 @@ a dedicated service account with minimum Hyper-V Admin privileges. Named-pipe
 
 ### Guest Agent (`guest/`)
 Rust agent that runs inside each VM and exposes process control, command
-execution, file operations, and network/filesystem verification primitives over
-gRPC with bearer-token authentication and optional mTLS.
-Scenario file transfer uses this agent in chunks, so Mac/Tart runs do not depend
-on hypervisor-specific shared folders.
+execution, file operations, and network/filesystem verification primitives
+over gRPC with bearer-token authentication and optional mTLS. Scenario file
+transfer uses this agent in chunks, so Mac/Tart and Linux/libvirt runs do
+not depend on hypervisor-specific shared folders.
 
-UI automation and browser automation RPCs ship as proto placeholders
-returning `unimplemented` in v0.1.0 — they graduate when a real
-consumer needs them. Scenarios in the meantime rely on command-output
-assertions and the network/file-access probes the agent already
-implements.
+**Cross-platform via the `Platform` trait** (v0.4.0-4): per-OS modules under
+`guest/src/platform/{windows,linux,macos,other}.rs` implement
+platform-specific behaviour behind a common trait the service layer
+dispatches through. Per-platform status:
+
+- **Windows** — full surface: proc / cmd / file / net / **UI automation +
+  browser automation** via the in-VM UIA sidecar (`guest/src/ui_sidecar.rs`).
+  SYSTEM-elevation via Hyper-V integration services + `SeTcbPrivilege`.
+- **Linux** — proc / cmd / file / net implemented; SYSTEM-elevation via
+  passwordless `sudo -n` (operator configures sudoers on the guest);
+  package install routes through `apt` / `dnf` / `yum` (auto-detected).
+  UI / browser RPCs return `Status::unimplemented` (no portable AX
+  equivalent).
+- **macOS** — proc / cmd / file / net implemented; package install routes
+  through `brew`. UI / browser RPCs return `Status::unimplemented` until
+  the AppleScript + Accessibility API driver lands (planned —
+  `MacosPlatform::supports_ui_automation()` is the capability flip).
+- **Other / fallback** — unconditional `Status::unimplemented` with a
+  canonical message; the trait contract keeps the proto v1 surface stable
+  across new OSes joining later.
 
 ### Scenarios (`.signalman/scenarios/`, `examples/`)
 Test definitions using a two-layer approach:
@@ -165,10 +239,15 @@ in-process for local mode and as an HTTP service (`signalman serve`) for
 self-hosted/shared-runner deployments.
 
 - **Schema** — products, releases, artifacts, targets, deployments,
-  health checks, audit log, organisations, API keys, jobs. ULID PKs,
-  ISO-8601 timestamps, partial unique indexes for soft-deletion. Same
-  migration files run verbatim against SQLite and Postgres
-  (`host/src/control-plane/storage/migrations/`).
+  health checks, audit log, organisations, API keys, jobs, runners,
+  **promotion policies + approvals** (v0.4.0-1), **webhook subscriptions**
+  (v0.4.0-2), **scheduled health probes** (v0.4.0-3), **cloud
+  org-budgets + usage + credentials** (v0.3.0-5). ULID PKs, ISO-8601
+  timestamps, partial unique indexes for soft-deletion. Same migration
+  files run verbatim against SQLite and Postgres
+  (`host/src/control-plane/storage/migrations/`); a `.pg.sql` /
+  `.sqlite.sql` suffix carries dialect-specific variants where
+  CHECK-constraint rewrites diverge.
 - **Storage drivers** — `SqliteStorageDriver` (node:sqlite, default) and
   `PostgresStorageDriver` (`pg`, opt-in via config). Identical repository
   interface; the verb code never knows which is underneath. See
@@ -190,12 +269,53 @@ self-hosted/shared-runner deployments.
   exposed as `signalman release verify` and as the `verifyManifest`
   helper.
 
-### Runner workers (`host/src/runner/`) — v0.3.0a
+### Runner workers (`host/src/runner/`) — v0.3.0a + WS6 wave-3
 Stateless workers that poll the control plane for `release.build` jobs,
 claim them atomically, clone the product repo at the release's tag, run
 the build executor against an `HttpControlPlane` shim, and upload the
 resulting artifacts. Started via `signalman runner start --name
 <worker>`; many workers can share one control plane.
+
+**Multi-transport deploy** (`signalman runner deploy ...`): runners can
+be brought up over `script` (operator-provided bash), `ssh` (SSH-key auth),
+`winrm` (PowerShell-over-HTTPS), `docker` (container runtime on a remote
+host), or `cloud` (provision an instance and dial it via SSM / Bastion).
+Each transport carries a uniform `RunnerDeployResult` envelope so CI
+pipelines drive any of them through the same verb. See the operator
+walkthrough in `docs/bootstrap.md` and the integration-test scaffolding
+in `host/src/__tests__/runner-deploy.integration.test.ts` (gated on
+`SIGNALMAN_INTEGRATION_TESTS=1`).
+
+### Artifact registry (`registry/`) — v0.1.x
+Standalone OSS product (`@signalman/registry`) that the meta-build
+catalog talks to via a stable HTTP contract. Ships its own binary
+(`signalman-registry serve`) and its own CLI verbs (`audit`, `forensic`,
+`virtual`, `keygen`, `verify`).
+
+- **Manifest store** — content-addressed blobs + a separate manifest
+  table keyed by `(org, kind, name, version)`. `kind` is the
+  discriminator: `generic` (v0.4.0), `cargo` (M10.2+), `npm` (v0.1.1)
+  today; `oci` / `maven` / `pip` / `helm` queued (`registry/ROADMAP.md`).
+- **Cargo facade** — sparse-index protocol at `/cargo/<org>/...`.
+  `cargo publish` + `cargo install` work against per-org sparse
+  indexes; virtual upstreams transparently mirror crates.io with
+  optional Ed25519 re-signing on cache write.
+- **npm facade** — `/npm/<org>/<package>` packuments + tarballs;
+  scoped + unscoped names; virtual-upstream pull-through against
+  npmjs.com with re-signing. `@signalman/host` becomes
+  `npm install`-able from a self-hosted registry.
+- **Provenance + forensic API** — every manifest carries
+  `provenance: {source, upstream_url?, signed_by?, ...}`. The
+  `/v1/forensic/manifest/<name>/<version>` HTTP API answers "where did
+  this artifact come from" in one call; `/v1/audit/query` returns the
+  audit-log trail filtered by action / org / actor.
+- **As a host BlobDriver** — `@signalman/host` ships a
+  `signalman-registry` BlobDriver; pointing the host's blob config at
+  a registry URL routes every artifact write through the registry's
+  storage layer (with provenance + signing for free).
+
+See `registry/README.md` for the package scope and
+`docs/supply-chain.md` for the bootstrap-from-signalman vision.
 
 ## Quick Start
 
@@ -373,6 +493,232 @@ signalman key fingerprint ~/.signalman/keys/signing.pub
 # if the fingerprint or signature don't match.
 signalman release verify <release-id> \
   --public-key ~/.signalman/keys/signing.pub
+```
+
+### Cloud providers (AWS + Azure)
+
+Provision ephemeral cloud VMs as scenario hosts or deploy targets, and
+apply OpenTofu stacks for multi-resource cloud infrastructure. See
+`docs/design/v0.3.0-5-cloud-providers.md` for the full design.
+
+```bash
+# 1. Configure per-org credentials at rest (AES-256-GCM, key from
+#    SIGNALMAN_CRED_KEY env var). Plaintext NEVER appears on argv.
+export SIGNALMAN_CRED_KEY=$(openssl rand -base64 32)
+signalman cloud creds set --provider aws \
+  --plaintext-json '{"access_key_id":"AKIA...","secret_access_key":"..."}'
+
+# 2. Set a monthly budget guardrail (per-org, in cents). The reaper
+#    auto-terminates instances when projected spend exceeds the limit.
+signalman cloud budget set --monthly-cents-limit 5000 --soft-warn-pct 80
+
+# 3. Provision an ephemeral cloud VM. TTL enforced by the reaper.
+signalman cloud provision --provider aws \
+  --region us-east-1 --instance-type t3.micro \
+  --image-ref ami-0c55b159cbfafe1f0 \
+  --name ci-runner-1 --ttl-minutes 60
+
+# 4. Apply a multi-resource stack via OpenTofu.
+signalman stack apply \
+  --stack-name prod-net --module-path ./infra/network \
+  --var environment=prod
+
+# 5. Use cloud VMs as deploy targets — register with cloud_vm_test kind
+#    and a connection descriptor that names the dial transport (public
+#    mTLS for direct access, aws_ssm or azure_bastion for tunneled).
+signalman cloud connection-descriptor \
+  --provider aws --network-mode aws_ssm \
+  --instance-id i-0123abc > target.json
+signalman target add --name prod-host --kind cloud_vm_test \
+  --connection "$(cat target.json)"
+
+# 6. Inspect cost + usage at any time.
+signalman cloud usage --org-id <id>
+signalman cloud reaper status
+```
+
+### Kubernetes (deploy target + runner substrate)
+
+Deploy releases to Kubernetes clusters via `kubectl` or Helm, and run
+remote runners as in-cluster pods. See
+`docs/design/meta-build-system.md` §14 (v0.3.0-6).
+
+```bash
+# Apply a release's k8s manifest to a namespace. Driver is auto-detected
+# from the bundle (Helm chart vs raw manifest) or explicit via --driver.
+signalman k8s deploy \
+  --bundle-uri ./manifests/myapp/  --namespace prod \
+  --cluster-context prod-cluster --release-name myapp
+
+# Roll back to a prior Helm revision.
+signalman k8s rollback \
+  --release-id <id> --namespace prod --to-revision 3 --driver helm
+
+# Probe the live state of a release in a namespace.
+signalman k8s status --namespace prod --release-name myapp
+
+# Deploy a runner pod into a cluster.
+signalman runner deploy-k8s \
+  --manifest ./runner.yaml --namespace runners \
+  --selector app.kubernetes.io/name=signalman-runner \
+  --wait-timeout-ms 120000
+```
+
+The k8s deploy path is deliberately separate from `signalman release
+deploy` — k8s manifests don't fit the per-target Deployment-row model
+the VM-deploy path uses. Both paths emit `release-deployed` webhook
+events on success (see §"Webhooks + notifications" below).
+
+### Auto-promotion + approval gates
+
+Tag → tier → tier release flow with configurable approval semantics.
+A `promotion_policy` says "when a release of product P lands at source
+target S, promote it onto dest target D using gate G." See
+`docs/design/meta-build-system.md` §12 (v0.4.0-1) and the
+`signalman-promote-release` skill.
+
+```bash
+# 1. Define a policy. Three gate kinds:
+#      auto       — fire deploy immediately on release-built / -deployed
+#      manual     — create a pending approval row; operator must approve
+#      time_delay — pending until auto_approve_at elapses; tick advances
+signalman promotion add \
+  --product myapp --dest demo --gate auto
+
+signalman promotion add \
+  --product myapp --source demo --dest prod --gate manual \
+  --gate-config '{"approvers":["alice@example","bob@example"]}'
+
+# 2. Inspect pending approvals.
+signalman promotion approvals --status pending --format json
+
+# 3. Approve / reject a pending approval. The verb fires the deploy on
+#    approve, records the decision on the approval row + audit log,
+#    and emits a promotion-approved (or -rejected) webhook event.
+signalman promotion approve <approval-id> \
+  --decided-by alice --reason "smoke tests green"
+signalman promotion reject <approval-id> --reason "rollback in progress"
+
+# 4. Process due time-delay approvals (cron-friendly).
+signalman promotion tick
+```
+
+The approver allow-list (`gate_config.approvers`) is **honour-system**:
+`--decided-by` is caller-supplied, not authenticated. Deployments that
+need real RBAC are expected to front the OSS control plane with an
+external identity / policy layer
+(`signalman-cloud:docs/contracts/promotion-approvers.md`).
+
+### Webhooks + notifications
+
+Outbound HTTP / Slack / email notifications on release / deployment /
+health / promotion state changes. See
+`docs/design/meta-build-system.md` §13 (v0.4.0-2).
+
+```bash
+# 1. Register a generic webhook (POST JSON body, optional HMAC-SHA256
+#    signature header X-Signalman-Signature).
+signalman webhook add --kind generic \
+  --url https://hooks.example.com/signalman \
+  --secret <hmac-key> --events release-built,deployment-rolled-back
+
+# 2. Slack incoming webhook (URL-authenticated; HMAC field ignored).
+signalman webhook add --kind slack \
+  --url https://hooks.slack.com/services/T.../B.../X... \
+  --events health-failed,promotion-rejected
+
+# 3. Email (mailto: URL; SMTP transport from SIGNALMAN_SMTP_URL env;
+#    absent = silent skip).
+signalman webhook add --kind email \
+  --url mailto:oncall@example.com \
+  --events release-built,deployment-rolled-back
+
+# 4. Test a subscription with a synthetic event before relying on it.
+signalman webhook test <id>
+
+# 5. List + remove.
+signalman webhook list --format json
+signalman webhook remove <id>
+```
+
+Event kinds: `release-built`, `release-deployed`,
+`deployment-rolled-back`, `health-failed`, `promotion-approved`,
+`promotion-rejected`. Empty `--events` = subscribe to all. Failed
+deliveries are audit-logged but never block the upstream pipeline.
+
+### Scheduled health checks
+
+Periodic re-runs of the existing `health check` verb against each
+target's active deployment, without an operator pulling the trigger.
+See `docs/design/meta-build-system.md` §12 and the
+`signalman-schedule-health` skill.
+
+```bash
+# 1. Add a schedule. Interval floor is 60s.
+signalman schedule add \
+  --target prod-host --interval-seconds 300 --probes smoke,latency
+
+# 2. List schedules.
+signalman schedule list --format json
+
+# 3. Run a single tick on demand (CI-friendly; doesn't start a daemon).
+signalman schedule run-once
+
+# 4. Run the scheduler daemon (Ctrl-C to stop).
+signalman schedule start --tick-ms 60000
+
+# 5. Disable / re-enable / remove.
+signalman schedule disable <id>
+signalman schedule enable <id>
+signalman schedule remove <id>
+```
+
+Each tick lands a row in the existing `health_check` table — scheduled
+runs and operator-triggered runs share the same history. A failed
+probe also fires the `health-failed` webhook event.
+
+### Artifact registry (`signalman-registry`)
+
+The standalone registry binary is a separate component (see
+`registry/README.md`). Quickstart for an operator running it
+alongside the host:
+
+```bash
+# 1. Start the registry process. Defaults to SQLite + local-FS
+#    blobs under <data-dir>/registry/.
+signalman-registry serve --host 0.0.0.0 --port 9876 \
+  --data-dir ~/.signalman/registry
+
+# 2. Configure a virtual upstream (e.g., crates.io passthrough).
+signalman-registry virtual add \
+  --kind cargo --upstream-url https://index.crates.io/ \
+  --org myorg --re-sign
+
+# 3. Point cargo at the per-org sparse index.
+cat > .cargo/config.toml <<EOF
+[registries.myorg]
+index = "sparse+http://localhost:9876/cargo/myorg/"
+EOF
+
+# 4. Publish + install through the registry. `cargo publish` and
+#    `cargo install` work transparently.
+cargo publish --registry myorg
+cargo install --registry myorg my-crate
+
+# 5. Inspect provenance + audit log of an artifact.
+signalman-registry forensic manifest --name my-crate --version 1.0.0
+signalman-registry audit query --action upload --since 24h
+```
+
+Point `@signalman/host` at the registry by setting its blob driver:
+
+```yaml
+# .signalman/config.yaml
+controlPlane:
+  blobs:
+    driver: signalman-registry
+    baseUrl: http://localhost:9876
+    bearerToken: sk_XXXXXXXX_YYYYYYYYYYYYYYYYYYYYYYYYYY
 ```
 
 ### Hyper-V control-plane service (Windows host)
