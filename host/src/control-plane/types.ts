@@ -123,7 +123,25 @@ export type TargetKind =
   | "docker_test"
   | "docker_demo"
   | "k8s_test"
-  | "k8s_demo";
+  | "k8s_demo"
+  /**
+   * WS6 M8: cloud-VM deploy target — connection carries a
+   * CloudInstanceHandle (`{ provider, region, instance_id, name,
+   * network_mode? }`). Deploy reuses `installBundle` via the public
+   * IP returned by `cloudBackend.getInstanceIp(handle)`. SSM /
+   * Bastion network modes raise `unsupported_network_mode` until the
+   * v0.3.x tunneling drivers ship.
+   */
+  | "cloud_vm"
+  /**
+   * WS6 M8: cloud-stack deploy target — connection carries
+   * `{ stack_name, module_path, image_var_name?, extra_vars? }`.
+   * Deploy invokes `TofuDriver.applyModule` with the per-release
+   * variables `release_tag`, `release_id`, `release_commit_sha`
+   * always set, plus `<image_var_name>=<release.tag>` if the
+   * operator named one.
+   */
+  | "cloud_stack";
 
 /** JSON shape of `target.connection`. Intentionally permissive — the
  * exact required fields vary per `kind` and are validated by the

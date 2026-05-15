@@ -754,6 +754,16 @@ function isK8sTargetKind(kind: TargetKind): boolean {
   return kind === "k8s_test" || kind === "k8s_demo";
 }
 
+/**
+ * WS6 M8: true when a target kind is one of the cloud-routed kinds.
+ * Used by {@link runReleaseDeploy} to dispatch away from both the
+ * hypervisor backend and the k8s driver. Each cloud kind has its own
+ * adapter (`runCloudVmReleaseDeploy` / `runCloudStackReleaseDeploy`).
+ */
+function isCloudTargetKind(kind: TargetKind): boolean {
+  return kind === "cloud_vm" || kind === "cloud_stack";
+}
+
 export async function runReleaseDeploy(
   controlPlane: ControlPlane,
   input: ReleaseDeployInput,
@@ -792,6 +802,35 @@ export async function runReleaseDeploy(
       actor: input.actor,
       out: options.out,
     });
+  }
+
+  // WS6 M8: cloud_vm + cloud_stack route to the cloud adapters.
+  if (isCloudTargetKind(target.kind)) {
+    const result = await runCloudReleaseDeploy(controlPlane, {
+      orgId,
+      releaseId,
+      target,
+      actor: input.actor,
+      out: options.out,
+    });
+    await fireEventBestEffort(controlPlane, {
+      kind: "release-deployed",
+      orgId,
+      at: new Date().toISOString(),
+      deploymentId: result.deployment.id,
+      releaseId: result.release.id,
+      targetName: result.target.name,
+      status: result.deployment.status,
+      healthSummary: {
+        total: result.healthSummary.total,
+        pass: result.healthSummary.pass,
+        fail: result.healthSummary.fail,
+      },
+    });
+    if (result.deployment.status === "active") {
+      await fireTierToTierPromotionBestEffort(controlPlane, result.release, target.id);
+    }
+    return result;
   }
 
   const backend = options.backend ?? (await defaultDeployBackend());
@@ -879,6 +918,23 @@ export async function runReleaseRollback(
       actor: input.actor,
       out: options.out,
     });
+  }
+
+  // WS6 M8: cloud rollback semantics differ enough by kind that we
+  // intentionally do not auto-route. `cloud_stack` would need to
+  // re-apply the previous-release vars (operator can drive
+  // `signalman release deploy --release <prior>` instead), and
+  // `cloud_vm` rollback would require the same reachability + re-
+  // install dance as deploy. Rolling these in scope-creeps M8 past
+  // the deploy story; refuse explicitly so the operator gets a
+  // clear pointer to the supported workflow.
+  if (isCloudTargetKind(target.kind)) {
+    throw new Error(
+      `release rollback against ${target.kind} targets is not yet supported. ` +
+        `Re-deploy the prior release with 'signalman release deploy ` +
+        `--release <prior-release-id> --target ${target.name}' instead. ` +
+        `Tracked for a future milestone.`,
+    );
   }
 
   const backend = options.backend ?? (await defaultDeployBackend());
@@ -1406,6 +1462,499 @@ export async function runK8sReleaseRollback(
       degraded: 0,
     },
   };
+}
+
+// ── WS6 M8 — cloud_vm + cloud_stack deploy adapters ─────────────────
+//
+// Two cloud-routed target kinds, both with their own deploy semantic:
+//
+//   * cloud_vm:    target.connection carries a CloudInstanceHandle
+//                  shape ({ provider, region, instance_id, name,
+//                  network_mode? }). Deploy resolves the public IP
+//                  via the cloud backend, runs a guest-agent
+//                  reachability probe at port 443, records the
+//                  Deployment row as active. Today only
+//                  `public_mtls` network mode is dialable — the
+//                  SSM / Bastion tunneling drivers are v0.3.x
+//                  follow-ups (the descriptor contract from sub-task
+//                  6 is in place; the dialer side is not).
+//
+//   * cloud_stack: target.connection carries
+//                  { stack_name, module_path, image_var_name?,
+//                    extra_vars? }. Deploy invokes
+//                  TofuDriver.applyModule with the per-release
+//                  variables `release_tag`, `release_id`,
+//                  `release_commit_sha` always set, plus
+//                  `<image_var_name>=<release.tag>` when the
+//                  operator named one. The stack's HCL template
+//                  controls how those vars become actual cloud
+//                  resources — Signalman is intentionally agnostic
+//                  to the template shape.
+//
+// Both share the same control-plane lifecycle as the VM / k8s
+// adapters: create Deployment row, audit-log start, perform the
+// kind-specific operation, record health-check result, finalise.
+
+interface RunCloudReleaseDeployArgs {
+  orgId: string;
+  releaseId: string;
+  target: Target;
+  actor?: string;
+  out?: NodeJS.WritableStream;
+  /** Injectable for tests; production omits. */
+  cloudBackendResolver?: (
+    kind: import("../cloud/types.js").CloudBackendKind,
+  ) => Promise<import("../cloud/types.js").CloudBackend>;
+  /** Injectable for tests; production omits. */
+  tofuDriverFactory?: () => import("../cloud/tofu.js").TofuDriver;
+  /** Injectable reachability probe (host, port) -> {ok, detail}. */
+  reachabilityProbe?: (host: string, port: number) => Promise<{ ok: boolean; detail: string }>;
+}
+
+interface CloudVmConnectionShape {
+  provider: import("../cloud/types.js").CloudBackendKind;
+  region: string;
+  instance_id: string;
+  name: string;
+  network_mode?: import("../cloud/types.js").NetworkMode;
+  guest_agent_port?: number;
+}
+
+interface CloudStackConnectionShape {
+  stack_name: string;
+  module_path: string;
+  image_var_name?: string;
+  extra_vars?: Record<string, string | number | boolean>;
+}
+
+/**
+ * Parse a cloud_vm target's connection JSON. Throws operator-friendly
+ * errors when required fields are missing.
+ */
+export function readCloudVmConnection(target: Target): CloudVmConnectionShape {
+  const c = target.connection;
+  const provider = c.provider as unknown;
+  if (provider !== "aws" && provider !== "azure") {
+    throw new Error(
+      `cloud_vm target '${target.name}': connection.provider must be 'aws' or 'azure' (got ${JSON.stringify(provider)})`,
+    );
+  }
+  if (typeof c.region !== "string" || c.region.length === 0) {
+    throw new Error(`cloud_vm target '${target.name}': connection.region must be a non-empty string`);
+  }
+  if (typeof c.instance_id !== "string" || c.instance_id.length === 0) {
+    throw new Error(`cloud_vm target '${target.name}': connection.instance_id must be a non-empty string`);
+  }
+  if (typeof c.name !== "string" || c.name.length === 0) {
+    throw new Error(`cloud_vm target '${target.name}': connection.name must be a non-empty string`);
+  }
+  const mode = c.network_mode as unknown;
+  if (mode !== undefined && mode !== "public_mtls" && mode !== "aws_ssm" && mode !== "azure_bastion") {
+    throw new Error(
+      `cloud_vm target '${target.name}': connection.network_mode must be one of public_mtls / aws_ssm / azure_bastion (got ${JSON.stringify(mode)})`,
+    );
+  }
+  const port = c.guest_agent_port as unknown;
+  if (port !== undefined && (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535)) {
+    throw new Error(
+      `cloud_vm target '${target.name}': connection.guest_agent_port must be an integer in [1, 65535]`,
+    );
+  }
+  return {
+    provider,
+    region: c.region,
+    instance_id: c.instance_id,
+    name: c.name,
+    network_mode: mode as CloudVmConnectionShape["network_mode"],
+    guest_agent_port: port as number | undefined,
+  };
+}
+
+/** Parse a cloud_stack target's connection JSON. */
+export function readCloudStackConnection(target: Target): CloudStackConnectionShape {
+  const c = target.connection;
+  if (typeof c.stack_name !== "string" || c.stack_name.length === 0) {
+    throw new Error(`cloud_stack target '${target.name}': connection.stack_name must be a non-empty string`);
+  }
+  if (typeof c.module_path !== "string" || c.module_path.length === 0) {
+    throw new Error(`cloud_stack target '${target.name}': connection.module_path must be a non-empty string`);
+  }
+  const imageVar = c.image_var_name as unknown;
+  if (imageVar !== undefined && (typeof imageVar !== "string" || imageVar.length === 0)) {
+    throw new Error(
+      `cloud_stack target '${target.name}': connection.image_var_name must be a non-empty string when set`,
+    );
+  }
+  const extra = c.extra_vars as unknown;
+  if (extra !== undefined && (typeof extra !== "object" || extra === null || Array.isArray(extra))) {
+    throw new Error(
+      `cloud_stack target '${target.name}': connection.extra_vars must be a JSON object when set`,
+    );
+  }
+  return {
+    stack_name: c.stack_name,
+    module_path: c.module_path,
+    image_var_name: imageVar as string | undefined,
+    extra_vars: extra as Record<string, string | number | boolean> | undefined,
+  };
+}
+
+/**
+ * Default TCP-connect reachability probe — connects to (host, port)
+ * with a 5s timeout. Returns ok=true if the SYN/SYN-ACK lands, false
+ * otherwise. Production callers omit the override; tests inject a
+ * deterministic stub.
+ */
+async function defaultReachabilityProbe(
+  host: string,
+  port: number,
+): Promise<{ ok: boolean; detail: string }> {
+  const net = await import("node:net");
+  return await new Promise((resolve) => {
+    const socket = new net.Socket();
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve({ ok: false, detail: `tcp-connect timeout to ${host}:${port}` });
+    }, 5000);
+    socket.once("connect", () => {
+      clearTimeout(timer);
+      socket.end();
+      resolve({ ok: true, detail: `tcp-connect ok to ${host}:${port}` });
+    });
+    socket.once("error", (err) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve({ ok: false, detail: `tcp-connect failed to ${host}:${port}: ${err.message}` });
+    });
+    socket.connect(port, host);
+  });
+}
+
+/**
+ * WS6 M8: cloud-routed release deploy. Dispatches on target.kind:
+ *   - cloud_vm    → runCloudVmReleaseDeploy
+ *   - cloud_stack → runCloudStackReleaseDeploy
+ * Caller is `runReleaseDeploy` after isCloudTargetKind checks pass.
+ */
+export async function runCloudReleaseDeploy(
+  controlPlane: ControlPlane,
+  args: RunCloudReleaseDeployArgs,
+): Promise<RunDeployResult> {
+  if (args.target.kind === "cloud_vm") return runCloudVmReleaseDeploy(controlPlane, args);
+  if (args.target.kind === "cloud_stack") return runCloudStackReleaseDeploy(controlPlane, args);
+  throw new Error(`runCloudReleaseDeploy: unsupported target.kind ${args.target.kind}`);
+}
+
+async function runCloudVmReleaseDeploy(
+  controlPlane: ControlPlane,
+  args: RunCloudReleaseDeployArgs,
+): Promise<RunDeployResult> {
+  const actor = args.actor ?? "cli";
+  const out = args.out ?? process.stderr;
+  const conn = readCloudVmConnection(args.target);
+
+  const release = await controlPlane.releases.get(args.releaseId);
+  if (!release) throw new Error(`release not found: ${args.releaseId}`);
+  if (release.status !== "ready") {
+    throw new Error(`release ${release.id} is not ready (status=${release.status})`);
+  }
+  const artifacts = await controlPlane.artifacts.listForRelease(release.id);
+
+  // network_mode guard. Only public_mtls is dialable today; SSM /
+  // Bastion descriptors are queued for the v0.3.x tunneling driver
+  // pass. Surface the misconfig before creating a Deployment row.
+  const mode = conn.network_mode ?? "public_mtls";
+  if (mode !== "public_mtls") {
+    throw new Error(
+      `cloud_vm deploy: network_mode='${mode}' has no dialable transport yet ` +
+        `(SSM / Bastion tunneling drivers are deferred to v0.3.x). ` +
+        `Set the target's network_mode to 'public_mtls' or re-provision the ` +
+        `instance with that mode.`,
+    );
+  }
+
+  const previousActive = await controlPlane.deployments.getActiveForTarget(args.target.id);
+  const deployment = await controlPlane.deployments.create({
+    orgId: args.orgId,
+    releaseId: release.id,
+    targetId: args.target.id,
+    previousDeploymentId: previousActive?.id,
+  });
+  await controlPlane.auditLog.append({
+    orgId: args.orgId,
+    actor,
+    action: "release.deploy.started",
+    entityType: "deployment",
+    entityId: deployment.id,
+    detail: {
+      releaseId: release.id,
+      targetId: args.target.id,
+      kind: args.target.kind,
+      provider: conn.provider,
+      instance_id: conn.instance_id,
+    },
+  });
+  await controlPlane.deployments.update(deployment.id, {
+    status: "deploying",
+    startedAt: new Date().toISOString(),
+  });
+  out.write(
+    `[release deploy] cloud_vm '${args.target.name}' → ${conn.provider}/${conn.region}/${conn.instance_id}\n`,
+  );
+
+  try {
+    const resolver =
+      args.cloudBackendResolver ??
+      (async (kind) => {
+        const { getCloudBackend } = await import("../cloud/registry.js");
+        return getCloudBackend(kind);
+      });
+    const backend = await resolver(conn.provider);
+    const handle: import("../cloud/types.js").CloudInstanceHandle = {
+      id: conn.instance_id,
+      backend: conn.provider,
+      name: conn.name,
+      region: conn.region,
+      network_mode: mode,
+    };
+    const ip = await backend.getInstanceIp(handle);
+    if (!ip) {
+      throw new Error(
+        `cloud_vm deploy: backend returned no public IP for ${conn.instance_id} ` +
+          `(instance may not be running or may have no public network interface)`,
+      );
+    }
+
+    const probe = args.reachabilityProbe ?? defaultReachabilityProbe;
+    const port = conn.guest_agent_port ?? 443;
+    const reach = await probe(ip, port);
+
+    await controlPlane.healthChecks.append({
+      deploymentId: deployment.id,
+      probeName: "cloud_vm_reachable",
+      status: reach.ok ? "pass" : "fail",
+      detail: reach.detail,
+    });
+
+    if (!reach.ok) {
+      throw new Error(`cloud_vm_reachable probe failed: ${reach.detail}`);
+    }
+
+    const nowIsoStr = new Date().toISOString();
+    const healthSummary: DeploymentHealthSummary = {
+      total: 1,
+      pass: 1,
+      fail: 0,
+      degraded: 0,
+      lastCheckedAt: nowIsoStr,
+    };
+
+    if (previousActive) {
+      await controlPlane.deployments.update(previousActive.id, { status: "superseded" });
+    }
+    const finalized = await controlPlane.deployments.update(deployment.id, {
+      status: "active",
+      completedAt: nowIsoStr,
+      healthSummary,
+    });
+    await controlPlane.auditLog.append({
+      orgId: args.orgId,
+      actor,
+      action: "release.deploy.completed",
+      entityType: "deployment",
+      entityId: deployment.id,
+      detail: {
+        releaseId: release.id,
+        targetId: args.target.id,
+        supersededId: previousActive?.id,
+        ip,
+        port,
+      },
+    });
+    return {
+      deployment: finalized,
+      release,
+      target: args.target,
+      artifacts,
+      healthSummary,
+    };
+  } catch (err) {
+    const current = await controlPlane.deployments.get(deployment.id);
+    if (current && current.status !== "failed") {
+      await controlPlane.deployments.update(deployment.id, {
+        status: "failed",
+        completedAt: new Date().toISOString(),
+      });
+      await controlPlane.auditLog.append({
+        orgId: args.orgId,
+        actor,
+        action: "release.deploy.failed",
+        entityType: "deployment",
+        entityId: deployment.id,
+        detail: {
+          releaseId: release.id,
+          targetId: args.target.id,
+          error: (err as Error).message,
+        },
+      });
+    }
+    throw err;
+  }
+}
+
+async function runCloudStackReleaseDeploy(
+  controlPlane: ControlPlane,
+  args: RunCloudReleaseDeployArgs,
+): Promise<RunDeployResult> {
+  const actor = args.actor ?? "cli";
+  const out = args.out ?? process.stderr;
+  const conn = readCloudStackConnection(args.target);
+
+  const release = await controlPlane.releases.get(args.releaseId);
+  if (!release) throw new Error(`release not found: ${args.releaseId}`);
+  if (release.status !== "ready") {
+    throw new Error(`release ${release.id} is not ready (status=${release.status})`);
+  }
+  const artifacts = await controlPlane.artifacts.listForRelease(release.id);
+
+  const previousActive = await controlPlane.deployments.getActiveForTarget(args.target.id);
+  const deployment = await controlPlane.deployments.create({
+    orgId: args.orgId,
+    releaseId: release.id,
+    targetId: args.target.id,
+    previousDeploymentId: previousActive?.id,
+  });
+  await controlPlane.auditLog.append({
+    orgId: args.orgId,
+    actor,
+    action: "release.deploy.started",
+    entityType: "deployment",
+    entityId: deployment.id,
+    detail: {
+      releaseId: release.id,
+      targetId: args.target.id,
+      kind: args.target.kind,
+      stack_name: conn.stack_name,
+      module_path: conn.module_path,
+    },
+  });
+  await controlPlane.deployments.update(deployment.id, {
+    status: "deploying",
+    startedAt: new Date().toISOString(),
+  });
+  out.write(
+    `[release deploy] cloud_stack '${args.target.name}' → stack=${conn.stack_name} module=${conn.module_path}\n`,
+  );
+
+  try {
+    const driverFactory =
+      args.tofuDriverFactory ??
+      (() => {
+        // Dynamic import + new TofuDriver from cwd. Production wires
+        // through this; tests inject a stub.
+        const TofuDriverClass = require("../cloud/tofu.js").TofuDriver;
+        return new TofuDriverClass({ projectRoot: process.cwd() });
+      });
+    const driver = driverFactory();
+
+    // Compose the deploy variables. release_tag / release_id /
+    // release_commit_sha are ALWAYS set; the operator's TF template
+    // references whichever of those it needs. image_var_name is an
+    // operator-named convenience alias that ALSO receives release.tag
+    // — useful for templates that pin an AMI / image SKU by tag.
+    const vars: Record<string, string | number | boolean> = {
+      ...(conn.extra_vars ?? {}),
+      release_tag: release.tag,
+      release_id: release.id,
+      release_commit_sha: release.commitSha,
+    };
+    if (conn.image_var_name) {
+      vars[conn.image_var_name] = release.tag;
+    }
+
+    const result = await driver.applyModule({
+      stackName: conn.stack_name,
+      modulePath: conn.module_path,
+      vars,
+    });
+
+    await controlPlane.healthChecks.append({
+      deploymentId: deployment.id,
+      probeName: "stack_apply",
+      status: "pass",
+      detail:
+        `add=${result.changeSummary.add} change=${result.changeSummary.change} ` +
+        `destroy=${result.changeSummary.destroy} durationMs=${result.durationMs}`,
+    });
+
+    const nowIsoStr = new Date().toISOString();
+    const healthSummary: DeploymentHealthSummary = {
+      total: 1,
+      pass: 1,
+      fail: 0,
+      degraded: 0,
+      lastCheckedAt: nowIsoStr,
+    };
+
+    if (previousActive) {
+      await controlPlane.deployments.update(previousActive.id, { status: "superseded" });
+    }
+    const finalized = await controlPlane.deployments.update(deployment.id, {
+      status: "active",
+      completedAt: nowIsoStr,
+      healthSummary,
+    });
+    await controlPlane.auditLog.append({
+      orgId: args.orgId,
+      actor,
+      action: "release.deploy.completed",
+      entityType: "deployment",
+      entityId: deployment.id,
+      detail: {
+        releaseId: release.id,
+        targetId: args.target.id,
+        supersededId: previousActive?.id,
+        stack_name: conn.stack_name,
+        outputs: result.outputs,
+        change_summary: result.changeSummary,
+      },
+    });
+    return {
+      deployment: finalized,
+      release,
+      target: args.target,
+      artifacts,
+      healthSummary,
+    };
+  } catch (err) {
+    await controlPlane.healthChecks.append({
+      deploymentId: deployment.id,
+      probeName: "stack_apply",
+      status: "fail",
+      detail: (err as Error).message,
+    });
+    const current = await controlPlane.deployments.get(deployment.id);
+    if (current && current.status !== "failed") {
+      await controlPlane.deployments.update(deployment.id, {
+        status: "failed",
+        completedAt: new Date().toISOString(),
+      });
+      await controlPlane.auditLog.append({
+        orgId: args.orgId,
+        actor,
+        action: "release.deploy.failed",
+        entityType: "deployment",
+        entityId: deployment.id,
+        detail: {
+          releaseId: release.id,
+          targetId: args.target.id,
+          stack_name: conn.stack_name,
+          error: (err as Error).message,
+        },
+      });
+    }
+    throw err;
+  }
 }
 
 // ── Direct K8s verbs (MCP + CLI entry points) ───────────────────────
