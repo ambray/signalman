@@ -69,7 +69,8 @@ This is the operator's working list. Items are ordered by **recommended sequence
 **Closure tracker**:
 - Batch 1 (`678a44b`): ✅ #1 (M8 cloud_vm install-bundle), ✅ #2 (M8 cloud rollback), ✅ #5 (SSM/Bastion tunneling dialers).
 - Batch 2 (parallel-agent batch): ✅ #3 (M9 integration test scaffolding), ✅ #4 (Packer golden-image scaffolding), ✅ #6 (Loom plugin Rust handlers).
-- **Remaining: #7, #8, #9 only.** All three are genuinely blocked on external environments (real Mac dev host / live scenario run on vmrun.ts / WS5 scope re-open).
+- **Batch 3 — M10 wave** (`8b8f8c9` → `59bdfd9` + M10.6): ✅ #9 (WS5 registry hardening — re-scoped to cargo facade + virtual registry + forensic API as the bootstrap-enabling subset).
+- **Remaining: #7, #8 only.** Both blocked on external environments (real Mac dev host / live scenario run on vmrun.ts).
 
 > Symbol legend:
 > ✅ **Done** — shipped to main.
@@ -206,22 +207,36 @@ Plus a one-release deprecation window where both `hypervisor.backend = "vmware"`
 
 **Why eighth**: 🚧 **Precondition** (per ROADMAP): vmrun.ts must have seen at least one production scenario run end-to-end. Today (2026-05-15) it has only the unit + integration fixtures. **Don't merge until proven in a real scenario.**
 
-### 9. WS5 registry hardening 🆕
+### 9. ✅ WS5 registry hardening — **CLOSED in M10 wave (2026-05-15)**
 
-**What's there now**: WS5 shipped the OSS scaffolding for `@signalman/registry`: generic blob + manifest types, `LocalFsBlobStore`, SQLite manifest catalog, Ed25519 signing, HTTP API, CLI (`registry serve|verify|keygen`), and the `signalman-registry` BlobDriver in `@signalman/host` that proves federation.
+Re-scoped from "registry hardening" to **bootstrap-enabling subset of the WS5 roadmap**. The cargo facade + virtual registry + forensic API are now operator-ready; the remaining WS5 roadmap items (npm/OCI/maven facades, mutable tags, RBAC, vulnerability scanning) are queued in `registry/ROADMAP.md` v0.1.x and beyond as their own milestones.
 
-**What's missing** (per `registry/ROADMAP.md`):
-- **v0.4.1**: OCI distribution spec v1.1 compliance.
-- **v0.4.2**: Mutable tags + retention/GC.
-- **v0.4.3**: Operational hardening.
-- **v0.4.4**: RBAC + cloud federation.
-- **v0.4.x**: Protocol facades, virtual registries, vulnerability scanning.
+**Shipped in M10** (commits `8b8f8c9`, `6731445`, `6a155af`, `ac15dda`, `59bdfd9`, M10.6):
 
-**Entry point**: `registry/ROADMAP.md` is the canonical roadmap.
+| Phase | Title | Commit |
+|---|---|---|
+| M10.1 | Manifest `kind` discriminator + Provenance + audit log + migration | `8b8f8c9` |
+| M10.2 | Cargo sparse-index read path + per-org namespacing | `6731445` |
+| M10.3 | Cargo publish + yank + audit-log on writes | `6a155af` |
+| M10.4 | Cargo virtual-registry pull-through + re-signing | `ac15dda` |
+| M10.5 | Forensic + provenance HTTP API | `59bdfd9` |
+| M10.6 | Operator surface (CLI verbs + skill) + ROADMAP refresh | (this batch) |
 
-**Size**: multi-PR. Each `v0.4.x` line is its own milestone with its own design surface.
+**Operator surface now reachable**:
+- `cargo publish` / `cargo install` against per-org sparse indexes
+- Virtual upstreams transparently mirror crates.io with optional re-signing
+- Every artifact carries provenance (`source: upload | proxy_cache | manifest_create`) — answers "what's in my registry and where did it come from"
+- Immutable audit log with filtered query API — answers "who did what when"
 
-**Why last**: ✋ **Explicit scope boundary**: this is WS5's roadmap, not WS6's. Reopening WS5 requires its own kickoff and capacity planning. Tracked here for completeness, not for immediate action.
+**Coverage**: registry package at 87% lines / 80% branches / 96% functions across 220+ tests (post-M10.6). All above 80/70/80/80 thresholds.
+
+**What's queued for v0.1.x** (per `registry/ROADMAP.md` refresh):
+- **v0.1.1**: npm protocol facade — `@signalman/host` becomes `npm install`-able
+- **v0.1.2**: OCI distribution spec — `docker pull` against a Signalman registry
+- **v0.1.3**: Security integration — OSV + Veracode / Sonatype firewall passthroughs
+- **v0.1.4**: Mutable tags + retention/GC
+
+These together close the **"bootstrap signalman from signalman"** loop end-to-end (the operator's CI publishes; their CD pulls; supply-chain provenance is a single HTTP call away). See `registry/ROADMAP.md` §"What 'bootstrap signalman from signalman' looks like end-state" for the day-0-to-day-3 walkthrough.
 
 ### Out-of-scope (won't fix unless operator explicitly requests)
 

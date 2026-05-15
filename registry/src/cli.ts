@@ -153,6 +153,17 @@ export async function runCli(
         return done(stdout, stderr, 0);
       }
 
+      // WS6 wave-3 M10.6 — virtual / audit / forensic verbs.
+      case "virtual": {
+        return await runVirtualVerb(rest, out, err);
+      }
+      case "audit": {
+        return await runAuditVerb(rest, out, err);
+      }
+      case "forensic": {
+        return await runForensicVerb(rest, out, err);
+      }
+
       default: {
         err(`unknown verb: ${verb}`);
         err(usage());
@@ -165,6 +176,213 @@ export async function runCli(
   }
 }
 
+// ── WS6 wave-3 M10.6 — virtual / audit / forensic CLI verbs ──────
+
+async function runVirtualVerb(
+  rest: string[],
+  out: (s: string) => void,
+  err: (s: string) => void,
+): Promise<CliResult> {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const localOut = (s: string) => {
+    out(s);
+    stdout.push(s);
+  };
+  const localErr = (s: string) => {
+    err(s);
+    stderr.push(s);
+  };
+  const [sub, ...subRest] = rest;
+  if (!sub) {
+    localErr("usage: signalman-registry virtual <add|list|remove> ...");
+    return done(stdout, stderr, 2);
+  }
+  switch (sub) {
+    case "add": {
+      const args = parseFlags(
+        subRest,
+        ["storage-root", "org", "kind", "upstream", "allow", "deny"],
+        ["resign"],
+      );
+      const storageRoot = args.flags["storage-root"];
+      const org = args.flags.org;
+      const kind = args.flags.kind;
+      const upstream = args.flags.upstream;
+      if (!storageRoot || !org || !kind || !upstream) {
+        localErr(
+          "usage: signalman-registry virtual add --storage-root <p> --org <o> --kind <k> --upstream <url> [--resign] [--allow <glob>...] [--deny <glob>...]",
+        );
+        return done(stdout, stderr, 2);
+      }
+      if (!["cargo", "npm", "oci", "maven", "pip", "helm"].includes(kind)) {
+        localErr(`unknown kind: ${kind}`);
+        return done(stdout, stderr, 2);
+      }
+      const storage = LocalFsRegistryStorage.fromRoot(storageRoot);
+      try {
+        const config: Record<string, unknown> = {};
+        if (args.flags.resign !== undefined) config.resign_on_cache = true;
+        if (args.flags.allow) config.allow_patterns = args.flags.allow.split(",");
+        if (args.flags.deny) config.deny_patterns = args.flags.deny.split(",");
+        const row = storage.index.addVirtualUpstream({
+          org,
+          kind: kind as "cargo" | "npm" | "oci" | "maven" | "pip" | "helm",
+          upstreamUrl: upstream,
+          config,
+        });
+        localOut(JSON.stringify(row, null, 2));
+        return done(stdout, stderr, 0);
+      } finally {
+        storage.close();
+      }
+    }
+    case "list": {
+      const args = parseFlags(
+        subRest,
+        ["storage-root", "org", "kind"],
+        ["include-disabled"],
+      );
+      const storageRoot = args.flags["storage-root"];
+      const org = args.flags.org;
+      if (!storageRoot || !org) {
+        localErr(
+          "usage: signalman-registry virtual list --storage-root <p> --org <o> [--kind <k>] [--include-disabled]",
+        );
+        return done(stdout, stderr, 2);
+      }
+      const storage = LocalFsRegistryStorage.fromRoot(storageRoot);
+      try {
+        const rows = storage.index.listVirtualUpstreams({
+          org,
+          ...(args.flags.kind ? { kind: args.flags.kind as "cargo" | "npm" | "oci" | "maven" | "pip" | "helm" } : {}),
+          includeDisabled: args.flags["include-disabled"] !== undefined,
+        });
+        localOut(JSON.stringify(rows, null, 2));
+        return done(stdout, stderr, 0);
+      } finally {
+        storage.close();
+      }
+    }
+    case "remove": {
+      const args = parseFlags(subRest, ["storage-root", "id"]);
+      const storageRoot = args.flags["storage-root"];
+      const id = args.flags.id;
+      if (!storageRoot || !id) {
+        localErr(
+          "usage: signalman-registry virtual remove --storage-root <p> --id <id>",
+        );
+        return done(stdout, stderr, 2);
+      }
+      const storage = LocalFsRegistryStorage.fromRoot(storageRoot);
+      try {
+        storage.index.removeVirtualUpstream(id);
+        localOut(`removed virtual upstream ${id}`);
+        return done(stdout, stderr, 0);
+      } finally {
+        storage.close();
+      }
+    }
+    default: {
+      localErr(`unknown virtual subcommand: ${sub}`);
+      return done(stdout, stderr, 2);
+    }
+  }
+}
+
+async function runAuditVerb(
+  rest: string[],
+  out: (s: string) => void,
+  err: (s: string) => void,
+): Promise<CliResult> {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const args = parseFlags(rest, [
+    "storage-root",
+    "action",
+    "entity-type",
+    "entity-id",
+    "actor",
+    "since",
+    "limit",
+  ]);
+  const storageRoot = args.flags["storage-root"];
+  if (!storageRoot) {
+    err("usage: signalman-registry audit --storage-root <p> [--action <a>] [--entity-type <t>] [--entity-id <id>] [--actor <a>] [--since <iso>] [--limit <n>]");
+    stderr.push("usage error");
+    return done(stdout, stderr, 2);
+  }
+  const limit = args.flags.limit ? Number(args.flags.limit) : 200;
+  if (!Number.isInteger(limit) || limit < 1) {
+    err(`bad --limit: ${args.flags.limit}`);
+    stderr.push("bad limit");
+    return done(stdout, stderr, 2);
+  }
+  const storage = LocalFsRegistryStorage.fromRoot(storageRoot);
+  try {
+    const entries = storage.index.listAuditEntries({
+      ...(args.flags.action ? { action: args.flags.action as never } : {}),
+      ...(args.flags["entity-type"] ? { entityType: args.flags["entity-type"] as never } : {}),
+      ...(args.flags["entity-id"] ? { entityId: args.flags["entity-id"] } : {}),
+      ...(args.flags.actor ? { actor: args.flags.actor } : {}),
+      ...(args.flags.since ? { since: args.flags.since } : {}),
+      limit,
+    });
+    out(JSON.stringify(entries, null, 2));
+    stdout.push(JSON.stringify(entries, null, 2));
+    return done(stdout, stderr, 0);
+  } finally {
+    storage.close();
+  }
+}
+
+async function runForensicVerb(
+  rest: string[],
+  out: (s: string) => void,
+  err: (s: string) => void,
+): Promise<CliResult> {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const [sub, ...subRest] = rest;
+  if (!sub) {
+    err("usage: signalman-registry forensic <summary|upstreams> ...");
+    return done(stdout, stderr, 2);
+  }
+  const args = parseFlags(subRest, ["storage-root"]);
+  const storageRoot = args.flags["storage-root"];
+  if (!storageRoot) {
+    err("usage: signalman-registry forensic <summary|upstreams> --storage-root <p>");
+    return done(stdout, stderr, 2);
+  }
+  const storage = LocalFsRegistryStorage.fromRoot(storageRoot);
+  try {
+    if (sub === "summary") {
+      const counts = storage.index.manifestCountsByKindAndSource();
+      const byKind: Record<string, Record<string, number>> = {};
+      let total = 0;
+      for (const r of counts) {
+        byKind[r.kind] ??= {};
+        byKind[r.kind][r.source] = r.count;
+        total += r.count;
+      }
+      const body = { total_manifests: total, by_kind: byKind, raw: counts };
+      out(JSON.stringify(body, null, 2));
+      stdout.push(JSON.stringify(body, null, 2));
+      return done(stdout, stderr, 0);
+    }
+    if (sub === "upstreams") {
+      const rows = storage.index.artifactsByUpstream();
+      out(JSON.stringify(rows, null, 2));
+      stdout.push(JSON.stringify(rows, null, 2));
+      return done(stdout, stderr, 0);
+    }
+    err(`unknown forensic subcommand: ${sub}`);
+    return done(stdout, stderr, 2);
+  } finally {
+    storage.close();
+  }
+}
+
 function done(stdout: string[], stderr: string[], exitCode: number): CliResult {
   return { exitCode, stdout: stdout.join("\n"), stderr: stderr.join("\n") };
 }
@@ -174,15 +392,23 @@ interface ParsedFlags {
   positional: string[];
 }
 
-function parseFlags(args: string[], allowed: readonly string[]): ParsedFlags {
+function parseFlags(
+  args: string[],
+  allowed: readonly string[],
+  booleans: readonly string[] = [],
+): ParsedFlags {
   const flags: Record<string, string | undefined> = {};
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a.startsWith("--")) {
       const name = a.slice(2);
-      if (!allowed.includes(name)) {
+      if (!allowed.includes(name) && !booleans.includes(name)) {
         throw new Error(`unknown flag: --${name}`);
+      }
+      if (booleans.includes(name)) {
+        flags[name] = "true";
+        continue;
       }
       const next = args[i + 1];
       if (!next || next.startsWith("--")) {
@@ -213,6 +439,23 @@ function usage(): string {
     "      Generate an Ed25519 keypair. Prints both keys + fingerprint",
     "      to stdout; with --out-dir, writes registry-signing.pub.pem",
     "      and registry-signing.key.pem (mode 600) into the directory.",
+    "",
+    "  virtual add --storage-root <p> --org <o> --kind <k> --upstream <url>",
+    "              [--resign] [--allow <glob>] [--deny <glob>]",
+    "      Register a virtual-upstream row. The registry proxies + caches",
+    "      <kind> requests for <org> against <url> on local miss.",
+    "",
+    "  virtual list --storage-root <p> --org <o> [--kind <k>] [--include-disabled]",
+    "  virtual remove --storage-root <p> --id <id>",
+    "",
+    "  audit --storage-root <p> [--action <a>] [--entity-type <t>]",
+    "        [--entity-id <id>] [--actor <a>] [--since <iso>] [--limit <n>]",
+    "      Query the immutable audit log. Filters AND-combine.",
+    "",
+    "  forensic summary --storage-root <p>",
+    "      Manifest counts grouped by (kind, provenance.source).",
+    "  forensic upstreams --storage-root <p>",
+    "      Per-upstream counts of proxy_cache manifests.",
   ].join("\n");
 }
 
