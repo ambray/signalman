@@ -44,7 +44,14 @@ describe("SqliteManifestIndex", () => {
     expect(stored.name).toBe("demo/svc");
     expect(stored.version).toBe("1.0.0");
     const got = idx.getManifest("demo/svc", "1.0.0");
+    // WS6 wave-3 (M10): the manifest body round-trips byte-identical
+    // (signature contract). `kind` is omitted when 'generic' so old
+    // v0.4.0 manifests round-trip; provenance lives as a sibling on
+    // the row, queryable via `getProvenance`.
     expect(got).toEqual(m);
+    expect(got?.kind).toBeUndefined();
+    const prov = idx.getProvenance("demo/svc", "1.0.0");
+    expect(prov?.source).toBe("manifest_create");
   });
 
   it("returns null for an unknown manifest", () => {
@@ -183,5 +190,176 @@ describe("SqliteManifestIndex", () => {
     // Reassign so the afterEach close() is a no-op on a fresh
     // instance rather than double-closing the original.
     idx = new SqliteManifestIndex({ path: ":memory:" });
+  });
+});
+
+// ── WS6 wave-3 (M10): kind, provenance, audit log ───────────────────
+
+describe("SqliteManifestIndex — WS6 wave-3 M10", () => {
+  let idx: SqliteManifestIndex;
+  beforeEach(() => {
+    idx = new SqliteManifestIndex({ path: ":memory:" });
+  });
+  afterEach(() => idx.close());
+
+  it("stores + returns explicit kind: 'cargo' on round-trip", () => {
+    const m: Manifest = {
+      ...makeManifest({ name: "cargo/acme/mycrate", version: "1.0.0" }),
+      kind: "cargo",
+      cargoMetadata: {
+        name: "mycrate",
+        vers: "1.0.0",
+        deps: [],
+        cksum: "f".repeat(64),
+        yanked: false,
+      },
+    };
+    idx.putManifest(m, canonicalize(m));
+    const got = idx.getManifest("cargo/acme/mycrate", "1.0.0");
+    expect(got?.kind).toBe("cargo");
+    expect(got?.cargoMetadata?.name).toBe("mycrate");
+    expect(got?.cargoMetadata?.cksum).toBe("f".repeat(64));
+  });
+
+  it("preserves signed canonical bytes byte-for-byte (no kind/provenance leak)", () => {
+    // Operator constructs manifest WITHOUT kind. Server stores it.
+    // Canonical bytes pulled back must equal the operator's input.
+    const m = makeManifest();
+    const operatorCanonical = canonicalize(m);
+    idx.putManifest(m, operatorCanonical);
+    const stored = idx.getCanonicalBytes("demo/svc", "1.0.0");
+    expect(stored).not.toBeNull();
+    expect(stored!.equals(operatorCanonical)).toBe(true);
+    // The returned manifest body must be byte-equal to the input.
+    const got = idx.getManifest("demo/svc", "1.0.0");
+    expect(got).toEqual(m);
+  });
+
+  it("provenance defaults to 'manifest_create' when caller omits it", () => {
+    const m = makeManifest();
+    idx.putManifest(m, canonicalize(m));
+    const prov = idx.getProvenance("demo/svc", "1.0.0");
+    expect(prov?.source).toBe("manifest_create");
+    expect(prov?.fetchedAt).toBeTruthy();
+  });
+
+  it("provenance accepts explicit 'proxy_cache' from caller", () => {
+    const m = makeManifest();
+    idx.putManifest(m, canonicalize(m), {
+      source: "proxy_cache",
+      upstreamUrl: "https://crates.io/api/v1/crates/x/1.0.0/download",
+      fetchedAt: "2026-05-15T00:00:00.000Z",
+      fetchedBy: "abcdef0123456789",
+    });
+    const prov = idx.getProvenance("demo/svc", "1.0.0");
+    expect(prov?.source).toBe("proxy_cache");
+    expect(prov?.upstreamUrl).toMatch(/crates\.io/);
+  });
+
+  it("listManifestVersions surfaces kind in results", () => {
+    const generic = makeManifest({ name: "x", version: "1.0.0" });
+    const cargoM: Manifest = {
+      ...makeManifest({ name: "x", version: "2.0.0" }),
+      kind: "cargo",
+      cargoMetadata: {
+        name: "x",
+        vers: "2.0.0",
+        deps: [],
+        cksum: "f".repeat(64),
+        yanked: false,
+      },
+    };
+    idx.putManifest(generic, canonicalize(generic));
+    idx.putManifest(cargoM, canonicalize(cargoM));
+    const list = idx.listManifestVersions("x");
+    expect(list).toHaveLength(2);
+    const v2 = list.find((l) => l.version === "2.0.0");
+    expect(v2?.kind).toBe("cargo");
+    const v1 = list.find((l) => l.version === "1.0.0");
+    expect(v1?.kind).toBe("generic");
+  });
+});
+
+describe("SqliteManifestIndex — audit log", () => {
+  let idx: SqliteManifestIndex;
+  beforeEach(() => {
+    idx = new SqliteManifestIndex({ path: ":memory:" });
+  });
+  afterEach(() => idx.close());
+
+  it("appendAuditEntry round-trips through listAuditEntries", () => {
+    const entry = idx.appendAuditEntry({
+      action: "upload",
+      entityType: "manifest",
+      entityId: "demo/svc@1.0.0",
+      actor: "abc1234",
+      detail: { bytes: 1234 },
+    });
+    expect(entry.id).toBeTruthy();
+    expect(entry.action).toBe("upload");
+    const list = idx.listAuditEntries();
+    expect(list).toHaveLength(1);
+    expect(list[0].entityId).toBe("demo/svc@1.0.0");
+    expect(list[0].detail).toEqual({ bytes: 1234 });
+  });
+
+  it("filters by action + entityType (AND-combined)", () => {
+    idx.appendAuditEntry({
+      action: "upload",
+      entityType: "manifest",
+      entityId: "a",
+      actor: "x",
+    });
+    idx.appendAuditEntry({
+      action: "proxy_cache",
+      entityType: "manifest",
+      entityId: "b",
+      actor: "x",
+    });
+    idx.appendAuditEntry({
+      action: "upload",
+      entityType: "blob",
+      entityId: "c",
+      actor: "x",
+    });
+    const uploads = idx.listAuditEntries({ action: "upload" });
+    expect(uploads.map((e) => e.entityId).sort()).toEqual(["a", "c"]);
+    const manifestUploads = idx.listAuditEntries({
+      action: "upload",
+      entityType: "manifest",
+    });
+    expect(manifestUploads.map((e) => e.entityId)).toEqual(["a"]);
+  });
+
+  it("filters by since timestamp", () => {
+    idx.appendAuditEntry({
+      action: "upload",
+      entityType: "manifest",
+      entityId: "old",
+      actor: "x",
+    });
+    // Wait one ms to ensure timestamps differ
+    const cutoff = new Date(Date.now() + 1).toISOString();
+    idx.appendAuditEntry({
+      action: "upload",
+      entityType: "manifest",
+      entityId: "new",
+      actor: "x",
+    });
+    const recent = idx.listAuditEntries({ since: cutoff });
+    expect(recent.every((e) => e.createdAt >= cutoff)).toBe(true);
+  });
+
+  it("honours limit (default 200; explicit cap)", () => {
+    for (let i = 0; i < 5; i++) {
+      idx.appendAuditEntry({
+        action: "upload",
+        entityType: "manifest",
+        entityId: `m${i}`,
+        actor: "x",
+      });
+    }
+    const limited = idx.listAuditEntries({ limit: 2 });
+    expect(limited).toHaveLength(2);
   });
 });

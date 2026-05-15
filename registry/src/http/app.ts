@@ -289,13 +289,34 @@ function parseManifestBody(
   const signature = parseSignatureBody(obj.signature);
   const createdAt =
     typeof obj.createdAt === "string" ? obj.createdAt : new Date().toISOString();
+  // WS6 wave-3 (M10): accept optional `kind` + `cargoMetadata` from
+  // the request body. These ARE operator-signed content (the
+  // canonical bytes the operator signs include them when present),
+  // so we surface them verbatim without defaulting. Old v0.4.0
+  // manifests omit `kind` entirely; the storage layer treats absent
+  // == 'generic' on row insert + read.
+  //
+  // NOTE: `provenance` is intentionally NOT parsed from the request
+  // body. It's server-side metadata, not operator-signed content.
+  // The HTTP layer sets provenance on `putManifest`'s second arg.
+  const kind =
+    typeof obj.kind === "string" &&
+    (obj.kind === "generic" || obj.kind === "cargo" || obj.kind === "npm" || obj.kind === "oci")
+      ? (obj.kind as import("../types.js").ManifestKind)
+      : undefined;
+  const cargoMetadata =
+    obj.cargoMetadata && typeof obj.cargoMetadata === "object"
+      ? (obj.cargoMetadata as import("../types.js").CargoManifestMetadata)
+      : undefined;
   return {
     name: expectedName,
     version: expectedVersion,
     mediaType,
+    ...(kind ? { kind } : {}),
     blobs: parsedBlobs,
     ...(annotations ? { annotations } : {}),
     ...(signature ? { signature } : {}),
+    ...(cargoMetadata ? { cargoMetadata } : {}),
     createdAt,
   };
 }

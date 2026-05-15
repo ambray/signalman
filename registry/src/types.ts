@@ -58,11 +58,110 @@ export interface ManifestSignature {
   signedBy: string;
 }
 
+/**
+ * WS6 wave-3 carve-out #9 (M10): discriminator for the manifest's
+ * protocol-specific shape. The base `Manifest` carries the fields
+ * common to every kind; per-kind metadata lives in `<kind>Metadata`
+ * sub-fields. This lets one storage backend host generic, cargo,
+ * npm, and OCI artifacts without per-format tables.
+ *
+ * - `generic` — back-compat with v0.4.0 (the only kind that existed).
+ *   No protocol-specific metadata.
+ * - `cargo` — Rust crate. Carries `cargoMetadata` with deps,
+ *   features, yanked state, and the canonical crate-name/version
+ *   that the sparse index serves.
+ * - `npm` — npm package. (Schema reserved; M11 ships the impl.)
+ * - `oci` — OCI image manifest. (Schema reserved; v0.4.1 in the
+ *   WS5 ROADMAP.)
+ */
+export type ManifestKind = "generic" | "cargo" | "npm" | "oci";
+
+/**
+ * WS6 wave-3 carve-out #9 (M10): cargo-specific metadata.
+ * Serialized into the manifest's `cargoMetadata` field when
+ * `kind === 'cargo'`. The cargo sparse-index handler reads
+ * directly from this shape; no separate `cargo_crate_version`
+ * table.
+ *
+ * Field names match the cargo registry-protocol JSON shape (see
+ * https://doc.rust-lang.org/cargo/reference/registry-index.html)
+ * so the index handler can pass them through with minimal rewriting.
+ */
+export interface CargoManifestMetadata {
+  /** The crate name, lowercase normalised. */
+  name: string;
+  /** Semver string. */
+  vers: string;
+  /** Direct dependencies. */
+  deps: CargoDependency[];
+  /** sha256 of the .crate tarball (hex). Mirrors `cargoMetadata.cksum` in cargo's index. */
+  cksum: string;
+  /** Optional features map (name → required deps/features). */
+  features?: Record<string, string[]>;
+  /** True when this version is yanked from the index. */
+  yanked: boolean;
+  /** Optional MSRV (`cargo:rust_version`). */
+  rust_version?: string;
+  /** Optional alternate links (homepage, docs, repository). Informational. */
+  links?: string;
+}
+
+export interface CargoDependency {
+  name: string;
+  req: string;
+  features: string[];
+  optional: boolean;
+  default_features: boolean;
+  target?: string | null;
+  kind?: "dev" | "build" | "normal";
+  registry?: string | null;
+  package?: string;
+}
+
+/**
+ * WS6 wave-3 carve-out #9 (M10): provenance metadata.
+ *
+ * Every artifact ingested into the registry carries provenance —
+ * "where did this come from?". This powers the forensic / SBOM
+ * surface the operator can query via `GET /v1/provenance/<sha256>`.
+ *
+ * - `source` is the discriminator: how this artifact got here.
+ * - For `proxy_cache` entries, `upstreamUrl` + `fetchedAt` capture
+ *   the upstream identity; `originalSignature` (if present) carries
+ *   the upstream's signature verbatim; the registry's own
+ *   `Manifest.signature` (if present) is the operator's re-sign.
+ * - For `upload` entries, `fetchedBy` carries the actor token id.
+ *
+ * The forensic API answers "what's in my registry and where did it
+ * come from"; long-term this links into the host's deployments
+ * table so an operator can trace any deployment back to the
+ * artifacts it pulled.
+ */
+export interface Provenance {
+  source: "upload" | "proxy_cache" | "manifest_create" | "migration";
+  /** For `proxy_cache`: the upstream URL the bytes were fetched from. */
+  upstreamUrl?: string;
+  /** ISO-8601 when the bytes entered our registry. */
+  fetchedAt: string;
+  /** Token-id fragment of the actor who triggered ingest (16 hex chars). */
+  fetchedBy?: string;
+  /**
+   * For `proxy_cache`: the original upstream signature (if any),
+   * preserved verbatim alongside our re-sign for audit purposes.
+   */
+  originalSignature?: ManifestSignature;
+}
+
 export interface Manifest {
   /**
    * Manifest name. Lowercase alphanumeric plus `-`, `_`, `.`, `/`;
    * 1-255 chars. The slash is allowed so namespaced names
    * (`org/foo`, `team/svc/sub`) survive the registry-to-OCI port.
+   *
+   * For cargo: prefer org-namespaced shape `cargo/<org>/<crate>`
+   * to keep multi-tenant collisions impossible. The cargo handler
+   * does this automatically; direct manifest writers pick their
+   * own prefix.
    */
   name: string;
   /**
@@ -72,6 +171,18 @@ export interface Manifest {
   version: string;
   /** Media type identifier; namespaces the manifest schema. */
   mediaType: string;
+  /**
+   * WS6 wave-3 (M10): protocol-specific discriminator. Operator-
+   * signed content; old v0.4.0 manifests omit this field and the
+   * storage layer surfaces them as `kind: 'generic'` on read.
+   *
+   * **Signing contract**: when present, this field is included in
+   * the canonical bytes that the operator signs. The server MUST
+   * preserve the operator's canonical bytes byte-for-byte; it does
+   * NOT re-canonicalize on write. Cargo / npm / OCI handlers
+   * always set this field explicitly.
+   */
+  kind?: ManifestKind;
   /** Blob refs the manifest pins. May be empty for metadata-only manifests. */
   blobs: BlobRef[];
   /** Optional key/value annotations. Free-form. */
@@ -82,14 +193,37 @@ export interface Manifest {
    * are accepted by the v0.4.0 server but flagged by the verify CLI.
    */
   signature?: ManifestSignature;
+  /**
+   * WS6 wave-3 (M10): cargo-specific metadata when `kind === 'cargo'`.
+   * Operator-signed content; absent for other kinds.
+   */
+  cargoMetadata?: CargoManifestMetadata;
   /** ISO-8601 UTC timestamp when the manifest was first written. */
   createdAt: string;
+}
+
+/**
+ * WS6 wave-3 (M10): a manifest paired with the server's row-side
+ * metadata. The HTTP pull endpoint returns this shape on
+ * `GET /v1/manifests/<name>/<version>` so the operator can see the
+ * provenance without it bleeding into the operator-signed `Manifest`
+ * canonical bytes.
+ *
+ * Signing contract: `provenance` is server-side metadata. It is NEVER
+ * part of the canonical bytes the operator signed; the verify path
+ * MUST NOT include it in the bytes it feeds to `verifyManifest`.
+ */
+export interface ManifestWithProvenance {
+  manifest: Manifest;
+  provenance: Provenance;
 }
 
 export interface ListedManifest {
   name: string;
   version: string;
   mediaType: string;
+  /** WS6 wave-3 (M10): protocol discriminator. */
+  kind: ManifestKind;
   createdAt: string;
   signed: boolean;
 }
@@ -118,11 +252,22 @@ export interface RegistryStorage {
    * same `(name, version)` with identical content is a no-op,
    * different content is `MANIFEST_EXISTS` (RegistryError). The
    * server-side handler decides whether to allow overwrite via RBAC.
+   *
+   * WS6 wave-3 (M10): caller MAY supply explicit `provenance` for
+   * cache-fill / proxy-pull paths. When absent, the storage layer
+   * records `source: 'manifest_create'` at the current timestamp.
    */
-  putManifest(manifest: Manifest): Promise<Manifest>;
+  putManifest(manifest: Manifest, provenance?: Provenance): Promise<Manifest>;
 
   /** Returns null if the (name, version) pair is unknown. */
   getManifest(name: string, version: string): Promise<Manifest | null>;
+
+  /**
+   * WS6 wave-3 (M10): fetch row-side provenance for an existing
+   * manifest. The forensic API uses this; the standard GET also
+   * surfaces it as a sibling alongside the manifest body.
+   */
+  getProvenance?(name: string, version: string): Promise<Provenance | null>;
 
   /** List versions of a given manifest name, newest first. */
   listManifestVersions(name: string): Promise<ListedManifest[]>;

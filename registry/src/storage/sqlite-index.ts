@@ -31,9 +31,12 @@ import {
   RegistryError,
   type Blob,
   type BlobRef,
+  type CargoManifestMetadata,
   type ListedManifest,
   type Manifest,
+  type ManifestKind,
   type ManifestSignature,
+  type Provenance,
   validateManifestName,
   validateManifestVersion,
 } from "../types.js";
@@ -60,6 +63,10 @@ interface ManifestRow {
   signed_by: string | null;
   canonical_bytes: Buffer;
   created_at: string;
+  // WS6 wave-3 (M10):
+  kind: ManifestKind;
+  provenance_json: string | null;
+  cargo_metadata_json: string | null;
 }
 
 interface BlobRow {
@@ -105,7 +112,11 @@ export class SqliteManifestIndex {
    * present with different content; an identical re-put is a no-op
    * and returns the previously-stored row.
    */
-  putManifest(input: Manifest, canonicalBytes: Buffer): Manifest {
+  putManifest(
+    input: Manifest,
+    canonicalBytes: Buffer,
+    explicitProvenance?: Provenance,
+  ): Manifest {
     validateManifestName(input.name);
     validateManifestVersion(input.version);
     if (input.mediaType.length === 0) {
@@ -127,12 +138,27 @@ export class SqliteManifestIndex {
     }
 
     const createdAt = input.createdAt || this.now().toISOString();
+    // WS6 wave-3 (M10): kind comes from the operator-signed manifest
+    // verbatim; the storage layer stores null when absent so
+    // back-compat v0.4.0 manifests round-trip unchanged. The row's
+    // `kind` column has DEFAULT 'generic' on the SQL side; we pass
+    // input.kind so the row records exactly what the operator wrote.
+    const kindForRow = input.kind ?? "generic";
+    // WS6 wave-3 (M10): provenance lives on the row, NOT in the
+    // manifest's canonical bytes. The default is 'manifest_create' at
+    // current time; cache-fill and proxy paths supply explicit
+    // provenance via the `provenance` parameter on putManifest.
+    const provenance: Provenance = explicitProvenance ?? {
+      source: "manifest_create",
+      fetchedAt: createdAt,
+    };
     this.db
       .prepare(
         `INSERT INTO manifest (
            name, version, media_type, blobs_json, annotations_json,
-           signature_b64, signed_by, canonical_bytes, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           signature_b64, signed_by, canonical_bytes, created_at,
+           kind, provenance_json, cargo_metadata_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.name,
@@ -144,11 +170,29 @@ export class SqliteManifestIndex {
         input.signature?.signedBy ?? null,
         canonicalBytes,
         createdAt,
+        kindForRow,
+        JSON.stringify(provenance),
+        input.cargoMetadata ? JSON.stringify(input.cargoMetadata) : null,
       );
     return {
       ...input,
       createdAt,
     };
+  }
+
+  /**
+   * WS6 wave-3 (M10): fetch row-side provenance.
+   */
+  getProvenance(name: string, version: string): Provenance | null {
+    validateManifestName(name);
+    validateManifestVersion(version);
+    const row = this.db
+      .prepare(
+        `SELECT provenance_json FROM manifest WHERE name = ? AND version = ?`,
+      )
+      .get(name, version) as { provenance_json: string | null } | undefined;
+    if (!row || !row.provenance_json) return null;
+    return JSON.parse(row.provenance_json) as Provenance;
   }
 
   getManifest(name: string, version: string): Manifest | null {
@@ -175,7 +219,7 @@ export class SqliteManifestIndex {
     validateManifestName(name);
     const rows = this.db
       .prepare(
-        `SELECT name, version, media_type, created_at,
+        `SELECT name, version, media_type, kind, created_at,
                 CASE WHEN signature_b64 IS NULL THEN 0 ELSE 1 END AS signed
          FROM manifest
          WHERE name = ?
@@ -185,6 +229,7 @@ export class SqliteManifestIndex {
       name: string;
       version: string;
       media_type: string;
+      kind: ManifestKind;
       created_at: string;
       signed: number;
     }>;
@@ -192,6 +237,7 @@ export class SqliteManifestIndex {
       name: r.name,
       version: r.version,
       mediaType: r.media_type,
+      kind: r.kind,
       createdAt: r.created_at,
       signed: r.signed === 1,
     }));
@@ -203,6 +249,115 @@ export class SqliteManifestIndex {
     this.db
       .prepare(`DELETE FROM manifest WHERE name = ? AND version = ?`)
       .run(name, version);
+  }
+
+  // ── Audit log (WS6 wave-3 M10) ────────────────────────────────
+
+  /**
+   * Append an audit-log entry. Immutable by convention — no UPDATE
+   * or DELETE handlers. The forensic API reads via
+   * `listAuditEntries`.
+   */
+  appendAuditEntry(input: {
+    action: AuditAction;
+    entityType: AuditEntityType;
+    entityId: string;
+    actor: string;
+    detail?: Record<string, unknown>;
+  }): RegistryAuditEntry {
+    const id = newAuditId();
+    const createdAt = this.now().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO registry_audit_log (
+           id, action, entity_type, entity_id, actor, detail_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.action,
+        input.entityType,
+        input.entityId,
+        input.actor,
+        input.detail ? JSON.stringify(input.detail) : null,
+        createdAt,
+      );
+    return {
+      id,
+      action: input.action,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      actor: input.actor,
+      detail: input.detail,
+      createdAt,
+    };
+  }
+
+  /**
+   * List audit-log entries newest-first. Filters AND-combine.
+   */
+  listAuditEntries(
+    opts: {
+      action?: AuditAction;
+      entityType?: AuditEntityType;
+      entityId?: string;
+      actor?: string;
+      since?: string;
+      limit?: number;
+    } = {},
+  ): RegistryAuditEntry[] {
+    const limit = opts.limit ?? 200;
+    const where: string[] = [];
+    const args: Array<string> = [];
+    if (opts.action) {
+      where.push("action = ?");
+      args.push(opts.action);
+    }
+    if (opts.entityType) {
+      where.push("entity_type = ?");
+      args.push(opts.entityType);
+    }
+    if (opts.entityId) {
+      where.push("entity_id = ?");
+      args.push(opts.entityId);
+    }
+    if (opts.actor) {
+      where.push("actor = ?");
+      args.push(opts.actor);
+    }
+    if (opts.since) {
+      where.push("created_at >= ?");
+      args.push(opts.since);
+    }
+    const whereClause = where.length === 0 ? "" : `WHERE ${where.join(" AND ")}`;
+    const rows = this.db
+      .prepare(
+        `SELECT id, action, entity_type, entity_id, actor, detail_json, created_at
+         FROM registry_audit_log
+         ${whereClause}
+         ORDER BY created_at DESC
+         LIMIT ?`,
+      )
+      .all(...args, limit) as Array<{
+      id: string;
+      action: AuditAction;
+      entity_type: AuditEntityType;
+      entity_id: string;
+      actor: string;
+      detail_json: string | null;
+      created_at: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      action: r.action,
+      entityType: r.entity_type,
+      entityId: r.entity_id,
+      actor: r.actor,
+      detail: r.detail_json
+        ? (JSON.parse(r.detail_json) as Record<string, unknown>)
+        : undefined,
+      createdAt: r.created_at,
+    }));
   }
 
   // ── Blob mirror operations ────────────────────────────────────
@@ -236,7 +391,8 @@ export class SqliteManifestIndex {
     return this.db
       .prepare(
         `SELECT name, version, media_type, blobs_json, annotations_json,
-                signature_b64, signed_by, canonical_bytes, created_at
+                signature_b64, signed_by, canonical_bytes, created_at,
+                kind, provenance_json, cargo_metadata_json
          FROM manifest
          WHERE name = ? AND version = ?`,
       )
@@ -256,15 +412,57 @@ function rowToManifest(row: ManifestRow): Manifest {
       signedBy: row.signed_by,
     };
   }
+  const cargoMetadata: CargoManifestMetadata | undefined = row.cargo_metadata_json
+    ? (JSON.parse(row.cargo_metadata_json) as CargoManifestMetadata)
+    : undefined;
+  // WS6 wave-3 (M10): only surface `kind` when the row actually
+  // recorded a non-default value, so v0.4.0 manifests round-trip
+  // signature-compatible.
+  const includeKind = row.kind && row.kind !== "generic";
   return {
     name: row.name,
     version: row.version,
     mediaType: row.media_type,
+    ...(includeKind ? { kind: row.kind } : {}),
     blobs,
     ...(annotations ? { annotations } : {}),
     ...(signature ? { signature } : {}),
+    ...(cargoMetadata ? { cargoMetadata } : {}),
     createdAt: row.created_at,
   };
+}
+
+// ── Audit log types (WS6 wave-3 M10) ────────────────────────────────
+
+export type AuditAction =
+  | "upload"
+  | "proxy_cache"
+  | "manifest_create"
+  | "yank"
+  | "unyank";
+
+export type AuditEntityType =
+  | "blob"
+  | "manifest"
+  | "cargo_crate"
+  | "virtual_upstream";
+
+export interface RegistryAuditEntry {
+  id: string;
+  action: AuditAction;
+  entityType: AuditEntityType;
+  entityId: string;
+  actor: string;
+  detail?: Record<string, unknown>;
+  createdAt: string;
+}
+
+function newAuditId(): string {
+  // Same Crockford-base32 ULID shape as the host. Cheap; we don't
+  // import the host's ulid helper to avoid a cross-package coupling.
+  const bytes = Buffer.alloc(16);
+  for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+  return bytes.toString("hex");
 }
 
 // ── Migration runner (mirrors host) ─────────────────────────────────

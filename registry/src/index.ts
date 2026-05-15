@@ -11,9 +11,14 @@
 export type {
   Blob,
   BlobRef,
+  CargoDependency,
+  CargoManifestMetadata,
   Manifest,
+  ManifestKind,
   ManifestSignature,
+  ManifestWithProvenance,
   ListedManifest,
+  Provenance,
   RegistryStorage,
   RegistryErrorCode,
 } from "./types.js";
@@ -41,7 +46,12 @@ export type { Keypair, SignedManifest } from "./signing.js";
 export { LocalFsBlobStore } from "./storage/local-fs.js";
 export type { LocalFsBlobStoreOptions } from "./storage/local-fs.js";
 export { SqliteManifestIndex } from "./storage/sqlite-index.js";
-export type { SqliteManifestIndexOptions } from "./storage/sqlite-index.js";
+export type {
+  AuditAction,
+  AuditEntityType,
+  RegistryAuditEntry,
+  SqliteManifestIndexOptions,
+} from "./storage/sqlite-index.js";
 export { LocalFsRegistryStorage } from "./storage/registry-storage.js";
 export type { LocalFsRegistryStorageOptions } from "./storage/registry-storage.js";
 
