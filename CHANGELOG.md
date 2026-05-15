@@ -216,10 +216,9 @@ registry, treat this as a wire-breaking change.
 ### Docs
 
 - README, ROADMAP, design docs, gated-E2E workflow comment, and
-  service smoke-test runbook scrubbed of references to product-
-  specific scenario names (`silo-validation`, `sandbox-enforcement`,
-  `cursor-restrict`) and Ospiri-niche positioning framing
-  ("Windows kernel-driver / ETW / WFP / silo CI"). v0.2.0 release
+  service smoke-test runbook genericized: removed product-
+  specific scenario names and niche-positioning framing in favor
+  of general-purpose capability descriptions. v0.2.0 release
   notes (this file at §0.2.0) are deliberately preserved as a
   historical record.
 

@@ -28,12 +28,9 @@ GitHub's community-profile checklist will show one missing item.
 
 Closed:
 
-1. ✅ **Git history rewrite to scrub prior product-specific
-   references.** Done 2026-05-12 via `git filter-repo`. `git log -S
-   "ospiri" --all` returns zero. Pre-rewrite mirror + literal `.git`
-   backup at
-   `/c/Users/ucale/source/repos/signalman-backup-pre-history-rewrite-2026-05-12/`
-   preserved for recovery cherry-picks if ever needed.
+1. ✅ **Git history genericization pass.** Done 2026-05-12. Pre-pass
+   mirror clone of the repo is preserved for recovery cherry-picks
+   if ever needed.
 2. ✅ **Version-pin bump strategy.** v0.2.0 carries v0.2 + v0.3
    scopes in one tag (decided 2026-05-12).
 
