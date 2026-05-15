@@ -44,6 +44,7 @@ import { loadConfig } from "../config.js";
 import type {
   Approval,
   Artifact,
+  AuditLogEntry,
   Deployment,
   DeploymentHealthSummary,
   HealthCheck,
@@ -626,6 +627,104 @@ export async function runTargetEdit(
     },
   });
   return updated;
+}
+
+// ── WS6 M5 — audit log verbs (P2 closure) ──────────────────────────
+//
+// The audit log has lived behind HTTP-only routes (GET /v1/audit,
+// POST /v1/audit) since v0.2.0. Operators couldn't answer "what
+// happened to deployment X" without curl-ing the HTTP API. M5
+// surfaces the same read + append paths as CLI verbs + MCP tools
+// without changing the underlying storage shape.
+
+export interface AuditQueryInput {
+  /** ISO-8601 lower bound on createdAt. Returned entries are newest-first; rows older than this are dropped. */
+  since?: string;
+  /** Filter by exact entity_type (e.g. "target", "release", "runner"). */
+  entityType?: string;
+  /** Filter by exact entity_id. */
+  entityId?: string;
+  /** Filter by exact actor (e.g. "cli", "ci"). */
+  actor?: string;
+  /** Filter by exact action (e.g. "target.edited", "release.deploy"). */
+  action?: string;
+  /** Max entries to return. Default unbounded; the repo respects this for performance. */
+  limit?: number;
+}
+
+/**
+ * WS6 M5 — list audit-log entries for the active org, newest first.
+ *
+ * The repo layer supports entityType + entityId + limit natively;
+ * actor + action + since filters are applied at the verb layer
+ * (post-filter, since the storage interface doesn't yet index on
+ * them). For high-volume audit queries the operator should
+ * narrow with entity_type or entity_id first.
+ */
+export async function runAuditQuery(
+  controlPlane: ControlPlane,
+  input: AuditQueryInput = {},
+): Promise<AuditLogEntry[]> {
+  const orgId = await getActiveOrgId(controlPlane);
+  // Repo handles entityType + entityId + limit; we apply the rest
+  // on the returned rows.
+  const repoLimit = input.limit;
+  let entries = await controlPlane.auditLog.listForOrg(orgId, {
+    entityType: input.entityType,
+    entityId: input.entityId,
+    limit: repoLimit,
+  });
+  if (input.actor !== undefined) {
+    entries = entries.filter((e) => e.actor === input.actor);
+  }
+  if (input.action !== undefined) {
+    entries = entries.filter((e) => e.action === input.action);
+  }
+  if (input.since !== undefined) {
+    const sinceMs = Date.parse(input.since);
+    if (Number.isNaN(sinceMs)) {
+      throw new Error(`audit query: --since must be ISO-8601 (got '${input.since}')`);
+    }
+    entries = entries.filter((e) => Date.parse(e.createdAt) >= sinceMs);
+  }
+  return entries;
+}
+
+export interface AuditAppendInput {
+  actor: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  detail?: Record<string, unknown>;
+}
+
+/**
+ * WS6 M5 — append a new audit-log entry. Audit log is immutable —
+ * there is no update or delete; the repo's append is the only
+ * write path.
+ *
+ * Operator-driven appends complement the executor-driven appends
+ * (build / deploy / target edit / runner deregister auto-emit).
+ * Useful for: documenting an out-of-band gesture ("manually
+ * restarted target X"), recording a postmortem decision, etc.
+ */
+export async function runAuditAppend(
+  controlPlane: ControlPlane,
+  input: AuditAppendInput,
+): Promise<AuditLogEntry> {
+  if (input.actor.length === 0) throw new Error("audit append: actor must be non-empty");
+  if (input.action.length === 0) throw new Error("audit append: action must be non-empty");
+  if (input.entityType.length === 0) throw new Error("audit append: entity_type must be non-empty");
+  if (input.entityId.length === 0) throw new Error("audit append: entity_id must be non-empty");
+  const orgId = await getActiveOrgId(controlPlane);
+  return controlPlane.auditLog.append({
+    orgId,
+    actor: input.actor,
+    action: input.action,
+    entityType: input.entityType,
+    entityId: input.entityId,
+    detail: input.detail,
+  });
 }
 
 // ── Release deploy / rollback verbs (PR 3) ──────────────────────────

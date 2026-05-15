@@ -38,6 +38,8 @@ import { recordMcpCall, runRecord, runRecordFinalize } from "./verbs/record.js";
 import { createDefaultExecutor } from "./verbs/default-executor.js";
 import {
   createDefaultProbeInvoker,
+  runAuditAppend,
+  runAuditQuery,
   runHealthCheck,
   runHealthHistory,
   runProductAdd,
@@ -2398,6 +2400,137 @@ server.tool(
     withRecording("signalman_promotion_tick", params, async () =>
       asMcpResult(await withControlPlane((cp) => runPromotionTickVerb(cp))),
     ),
+);
+
+// ── WS6 M5 — audit log surface (P2 closure) ───────────────────────
+
+server.tool(
+  "signalman_audit_query",
+  "List audit-log entries for the active org, newest-first. Filters are AND-combined: `entity_type` + `entity_id` narrow to a specific entity; `actor` + `action` filter by who/what; `since` is an ISO-8601 lower bound on createdAt. The repo handles entity-* + limit natively; actor/action/since are applied post-filter. For high-volume queries, narrow by entity_type or entity_id first. The audit log is immutable; this is read-only.",
+  {
+    since: z
+      .string()
+      .optional()
+      .describe(
+        "ISO-8601 lower bound on createdAt (e.g. '2026-05-01T00:00:00Z'). Entries older than this are dropped.",
+      ),
+    entity_type: z
+      .string()
+      .optional()
+      .describe("Filter by exact entity_type (e.g. 'target', 'release', 'runner', 'deployment')."),
+    entity_id: z
+      .string()
+      .optional()
+      .describe("Filter by exact entity_id (typically a ULID or name)."),
+    actor: z
+      .string()
+      .optional()
+      .describe("Filter by exact actor (e.g. 'cli', 'ci', 'scheduler', or a user identifier)."),
+    action: z
+      .string()
+      .optional()
+      .describe("Filter by exact action (e.g. 'target.edited', 'release.deploy', 'runner.deregistered')."),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(1000)
+      .optional()
+      .describe("Max entries to return. Default unbounded (the repo caps internally for performance)."),
+  },
+  async (params) =>
+    withRecording("signalman_audit_query", params, async () => {
+      const p = params as {
+        since?: string;
+        entity_type?: string;
+        entity_id?: string;
+        actor?: string;
+        action?: string;
+        limit?: number;
+      };
+      const entries = await withControlPlane((cp) =>
+        runAuditQuery(cp, {
+          since: p.since,
+          entityType: p.entity_type,
+          entityId: p.entity_id,
+          actor: p.actor,
+          action: p.action,
+          limit: p.limit,
+        }),
+      );
+      return asMcpResult({
+        entries: entries.map((e) => ({
+          id: e.id,
+          org_id: e.orgId,
+          actor: e.actor,
+          action: e.action,
+          entity_type: e.entityType,
+          entity_id: e.entityId,
+          detail: e.detail,
+          at: e.at,
+          created_at: e.createdAt,
+        })),
+      });
+    }),
+);
+
+server.tool(
+  "signalman_audit_append",
+  "Append a new audit-log entry. The audit log is immutable — there is no update or delete; this is the only operator-driven write path. Use for documenting out-of-band gestures (e.g. 'manually restarted target X', postmortem decisions) that complement the executor-driven appends (build / deploy / target edit / runner deregister auto-emit).",
+  {
+    actor: z
+      .string()
+      .min(1)
+      .describe("Who is performing the action (e.g. 'cli', 'ci', or an operator identifier)."),
+    action: z
+      .string()
+      .min(1)
+      .describe("What is being done (e.g. 'incident.restart', 'manual.intervention')."),
+    entity_type: z
+      .string()
+      .min(1)
+      .describe("Kind of thing being acted on (e.g. 'target', 'release', 'runner')."),
+    entity_id: z
+      .string()
+      .min(1)
+      .describe("ULID or canonical name of the entity."),
+    detail: z
+      .record(z.unknown())
+      .optional()
+      .describe("Free-form structured detail blob. Stored verbatim; no schema enforced."),
+  },
+  async (params) =>
+    withRecording("signalman_audit_append", params, async () => {
+      const p = params as {
+        actor: string;
+        action: string;
+        entity_type: string;
+        entity_id: string;
+        detail?: Record<string, unknown>;
+      };
+      const entry = await withControlPlane((cp) =>
+        runAuditAppend(cp, {
+          actor: p.actor,
+          action: p.action,
+          entityType: p.entity_type,
+          entityId: p.entity_id,
+          detail: p.detail,
+        }),
+      );
+      return asMcpResult({
+        entry: {
+          id: entry.id,
+          org_id: entry.orgId,
+          actor: entry.actor,
+          action: entry.action,
+          entity_type: entry.entityType,
+          entity_id: entry.entityId,
+          detail: entry.detail,
+          at: entry.at,
+          created_at: entry.createdAt,
+        },
+      });
+    }),
 );
 
 // ── Start Server ──────────────────────────────────────────────────

@@ -89,6 +89,9 @@ import {
   // WS6 M3:
   runRunnerList,
   runRunnerDeregister,
+  // WS6 M5:
+  runAuditQuery,
+  runAuditAppend,
 } from "./verbs/control-plane.js";
 import { runSchedulerTick, startScheduler } from "./control-plane/scheduler/index.js";
 // PR 6 — `signalman serve` HTTP control plane.
@@ -4282,6 +4285,147 @@ async function cmdPromotionApprovals(args: ParsedArgs): Promise<number> {
   }
 }
 
+// ── audit (WS6 M5 — P2 audit log surface) ─────────────────────────
+
+async function cmdAudit(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) usageError("audit requires a subcommand (query, append)");
+  switch (sub) {
+    case "query":
+      return await cmdAuditQuery(args);
+    case "append":
+      return await cmdAuditAppend(args);
+    default:
+      usageError(`unknown audit subcommand: ${sub}`);
+  }
+}
+
+async function cmdAuditQuery(args: ParsedArgs): Promise<number> {
+  const since = args.options.get("since");
+  const entityType = args.options.get("entity-type");
+  const entityId = args.options.get("entity-id");
+  const actor = args.options.get("actor");
+  const action = args.options.get("action");
+  const limitRaw = args.options.get("limit");
+  const limit = limitRaw ? parseInt(limitRaw, 10) : undefined;
+  if (
+    limitRaw !== undefined &&
+    (Number.isNaN(limit!) || limit! < 1 || limit! > 1000)
+  ) {
+    usageError(
+      `audit query: --limit must be a positive integer <= 1000 (got '${limitRaw}')`,
+    );
+  }
+  const format = args.options.get("format");
+  try {
+    const entries = await withControlPlane((cp) =>
+      runAuditQuery(cp, {
+        since,
+        entityType,
+        entityId,
+        actor,
+        action,
+        limit,
+      }),
+    );
+    if (format === "json") {
+      emitJson(
+        entries.map((e) => ({
+          id: e.id,
+          org_id: e.orgId,
+          actor: e.actor,
+          action: e.action,
+          entity_type: e.entityType,
+          entity_id: e.entityId,
+          detail: e.detail,
+          at: e.at,
+          created_at: e.createdAt,
+        })),
+      );
+      return 0;
+    }
+    if (entries.length === 0) {
+      process.stdout.write("(no audit entries match)\n");
+      return 0;
+    }
+    emitTable(
+      entries.map((e) => ({
+        created_at: e.createdAt,
+        actor: e.actor,
+        action: e.action,
+        entity_type: e.entityType,
+        entity_id: e.entityId,
+        id: e.id,
+      })),
+    );
+    return 0;
+  } catch (err) {
+    console.error(`signalman audit query: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdAuditAppend(args: ParsedArgs): Promise<number> {
+  const actor = args.options.get("actor");
+  const action = args.options.get("action");
+  const entityType = args.options.get("entity-type");
+  const entityId = args.options.get("entity-id");
+  const detailRaw = args.options.get("detail");
+  if (!actor) usageError("audit append requires --actor <NAME>");
+  if (!action) usageError("audit append requires --action <NAME>");
+  if (!entityType) usageError("audit append requires --entity-type <KIND>");
+  if (!entityId) usageError("audit append requires --entity-id <ID>");
+  let detail: Record<string, unknown> | undefined;
+  if (detailRaw !== undefined) {
+    try {
+      const parsed = JSON.parse(detailRaw);
+      if (
+        parsed === null ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed)
+      ) {
+        usageError(`audit append: --detail must be a JSON object`);
+      }
+      detail = parsed as Record<string, unknown>;
+    } catch {
+      usageError(`audit append: --detail must be valid JSON`);
+    }
+  }
+  const format = args.options.get("format");
+  try {
+    const entry = await withControlPlane((cp) =>
+      runAuditAppend(cp, {
+        actor,
+        action,
+        entityType,
+        entityId,
+        detail,
+      }),
+    );
+    if (format === "json") {
+      emitJson({
+        id: entry.id,
+        org_id: entry.orgId,
+        actor: entry.actor,
+        action: entry.action,
+        entity_type: entry.entityType,
+        entity_id: entry.entityId,
+        detail: entry.detail,
+        at: entry.at,
+        created_at: entry.createdAt,
+      });
+      return 0;
+    }
+    process.stdout.write(
+      `Appended audit entry ${entry.id} (${entry.actor} ${entry.action} ${entry.entityType}/${entry.entityId})\n`,
+    );
+    return 0;
+  } catch (err) {
+    console.error(`signalman audit append: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 async function main(argv: string[]): Promise<number> {
@@ -4346,6 +4490,8 @@ async function main(argv: string[]): Promise<number> {
         return await cmdCloud(args);
       case "stack":
         return await cmdStack(args);
+      case "audit":
+        return await cmdAudit(args);
       default:
         usageError(`unknown verb: ${verb}`);
     }
@@ -4402,6 +4548,7 @@ function printHelp(): void {
       "  key <subcommand>       (generate, fingerprint — Ed25519 release signing)",
       "  cloud <subcommand>     (provision, terminate, status, list, backends, reaper, budget, creds, connection-descriptor)",
       "  stack <subcommand>     (apply, destroy, plan-cost — OpenTofu stack lifecycle)",
+      "  audit <subcommand>     (query, append — immutable audit log)",
       "",
       "Exit codes (per docs/design/p0-mcp-surface.md §5):",
       "  0  pass        2  workflow fail        4  infra error",
