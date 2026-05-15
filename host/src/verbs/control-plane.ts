@@ -920,21 +920,23 @@ export async function runReleaseRollback(
     });
   }
 
-  // WS6 M8: cloud rollback semantics differ enough by kind that we
-  // intentionally do not auto-route. `cloud_stack` would need to
-  // re-apply the previous-release vars (operator can drive
-  // `signalman release deploy --release <prior>` instead), and
-  // `cloud_vm` rollback would require the same reachability + re-
-  // install dance as deploy. Rolling these in scope-creeps M8 past
-  // the deploy story; refuse explicitly so the operator gets a
-  // clear pointer to the supported workflow.
+  // WS6 wave-3 carve-out #2: cloud rollback. Both cloud kinds share
+  // the "redeploy the prior release" semantic — neither has a
+  // backend-native rollback (cloud_vm has no checkpoint; cloud_stack
+  // doesn't track prior var sets). We resolve the prior active
+  // deployment for the target, then re-fire the deploy path with the
+  // older release id. The dispatcher reuses runCloudReleaseDeploy
+  // and emits `release.rollback.*` audit events alongside the
+  // standard `release.deploy.*` ones so operators can distinguish
+  // intent.
   if (isCloudTargetKind(target.kind)) {
-    throw new Error(
-      `release rollback against ${target.kind} targets is not yet supported. ` +
-        `Re-deploy the prior release with 'signalman release deploy ` +
-        `--release <prior-release-id> --target ${target.name}' instead. ` +
-        `Tracked for a future milestone.`,
-    );
+    return runCloudReleaseRollback(controlPlane, {
+      orgId,
+      target,
+      toReleaseId: input.toReleaseId,
+      actor: input.actor,
+      out: options.out,
+    });
   }
 
   const backend = options.backend ?? (await defaultDeployBackend());
@@ -1509,6 +1511,31 @@ interface RunCloudReleaseDeployArgs {
   tofuDriverFactory?: () => import("../cloud/tofu.js").TofuDriver;
   /** Injectable reachability probe (host, port) -> {ok, detail}. */
   reachabilityProbe?: (host: string, port: number) => Promise<{ ok: boolean; detail: string }>;
+  /**
+   * WS6 wave-3 carve-out #1: injectable install-bundle invoker.
+   * Production wires through `installBundle` over a GuestAgentClient
+   * built on the cloud IP. Tests inject a stub that records the
+   * Bundle + connection it would have used without doing the real
+   * install. Called only when the target's `install_bundle_path`
+   * connection field is set.
+   */
+  installBundleInvoker?: (input: {
+    host: string;
+    port: number;
+    bundle: import("../provisioning/bundle-types.js").Bundle;
+    vmName: string;
+  }) => Promise<import("../provisioning/install-bundle.js").InstallBundleResult>;
+  /**
+   * WS6 wave-3 carve-out #5: injectable dialer factory for
+   * non-`public_mtls` network modes. Production uses
+   * `defaultDialerFor(descriptor)` from `host/src/cloud/dialers`;
+   * tests inject a stub that returns a `DialerHandle` whose
+   * `localPort` the caller can dial directly without spawning a
+   * real `aws ssm` / `az network bastion` subprocess.
+   */
+  dialerFactory?: (
+    descriptor: import("../cloud/types.js").CloudConnectionDescriptor,
+  ) => Promise<import("../cloud/dialers/index.js").DialerHandle>;
 }
 
 interface CloudVmConnectionShape {
@@ -1518,6 +1545,39 @@ interface CloudVmConnectionShape {
   name: string;
   network_mode?: import("../cloud/types.js").NetworkMode;
   guest_agent_port?: number;
+  /**
+   * WS6 wave-3 carve-out #1: optional install-bundle path. When set,
+   * the deploy executor parses the YAML at this path AFTER the
+   * reachability probe passes, builds a GuestAgentClient over the
+   * cloud IP, and runs the install-bundle DAG against the instance.
+   * Absent = today's behaviour (reachability + deployment row only;
+   * operator drives any install themselves).
+   *
+   * The path is resolved on the host filesystem (the operator's
+   * machine running `signalman release deploy`), NOT on the cloud
+   * VM. Bundle artifact references in the YAML are still fetched
+   * by the guest agent on the remote host per the bundle's source
+   * fields.
+   */
+  install_bundle_path?: string;
+  /**
+   * WS6 wave-3 carve-out #5: optional tunneling options for
+   * non-`public_mtls` network modes. Required when
+   * `network_mode` is `aws_ssm` (operator MAY set `aws_profile`)
+   * or `azure_bastion` (operator MUST set
+   * `azure_bastion_name`, `azure_subscription_id`, and
+   * `azure_resource_group` — the bastion-name can't be inferred
+   * from the cloud handle alone). The dialer (`host/src/cloud/dialers`)
+   * uses these to invoke `aws ssm start-session` / `az network
+   * bastion tunnel` and exposes a local TCP port that the deploy
+   * executor uses in place of the VM's public IP.
+   */
+  tunnel_options?: {
+    aws_profile?: string;
+    azure_bastion_name?: string;
+    azure_subscription_id?: string;
+    azure_resource_group?: string;
+  };
 }
 
 interface CloudStackConnectionShape {
@@ -1560,6 +1620,22 @@ export function readCloudVmConnection(target: Target): CloudVmConnectionShape {
       `cloud_vm target '${target.name}': connection.guest_agent_port must be an integer in [1, 65535]`,
     );
   }
+  const bundlePath = c.install_bundle_path as unknown;
+  if (bundlePath !== undefined && (typeof bundlePath !== "string" || bundlePath.length === 0)) {
+    throw new Error(
+      `cloud_vm target '${target.name}': connection.install_bundle_path must be a non-empty string when set`,
+    );
+  }
+  const tunnelOpts = c.tunnel_options as unknown;
+  let parsedTunnel: CloudVmConnectionShape["tunnel_options"];
+  if (tunnelOpts !== undefined) {
+    if (typeof tunnelOpts !== "object" || tunnelOpts === null || Array.isArray(tunnelOpts)) {
+      throw new Error(
+        `cloud_vm target '${target.name}': connection.tunnel_options must be a JSON object when set`,
+      );
+    }
+    parsedTunnel = tunnelOpts as CloudVmConnectionShape["tunnel_options"];
+  }
   return {
     provider,
     region: c.region,
@@ -1567,6 +1643,8 @@ export function readCloudVmConnection(target: Target): CloudVmConnectionShape {
     name: c.name,
     network_mode: mode as CloudVmConnectionShape["network_mode"],
     guest_agent_port: port as number | undefined,
+    install_bundle_path: bundlePath as string | undefined,
+    tunnel_options: parsedTunnel,
   };
 }
 
@@ -1660,17 +1738,27 @@ async function runCloudVmReleaseDeploy(
   }
   const artifacts = await controlPlane.artifacts.listForRelease(release.id);
 
-  // network_mode guard. Only public_mtls is dialable today; SSM /
-  // Bastion descriptors are queued for the v0.3.x tunneling driver
-  // pass. Surface the misconfig before creating a Deployment row.
+  // WS6 wave-3 carve-out #5: all three network modes are now
+  // dialable. `public_mtls` uses the VM's public IP directly;
+  // `aws_ssm` and `azure_bastion` open a local-socket tunnel via
+  // the dialer (`host/src/cloud/dialers`) and the deploy executor
+  // dials 127.0.0.1:<localPort> instead. Required tunnel_options
+  // are validated before creating the Deployment row so the
+  // operator doesn't end up with a half-recorded deploy.
   const mode = conn.network_mode ?? "public_mtls";
-  if (mode !== "public_mtls") {
-    throw new Error(
-      `cloud_vm deploy: network_mode='${mode}' has no dialable transport yet ` +
-        `(SSM / Bastion tunneling drivers are deferred to v0.3.x). ` +
-        `Set the target's network_mode to 'public_mtls' or re-provision the ` +
-        `instance with that mode.`,
-    );
+  if (mode === "azure_bastion") {
+    if (
+      !conn.tunnel_options?.azure_bastion_name ||
+      !conn.tunnel_options?.azure_subscription_id ||
+      !conn.tunnel_options?.azure_resource_group
+    ) {
+      throw new Error(
+        `cloud_vm deploy: network_mode='azure_bastion' requires ` +
+          `connection.tunnel_options.{azure_bastion_name, azure_subscription_id, ` +
+          `azure_resource_group}. The Bastion host name is not inferable from ` +
+          `the cloud handle alone — set it on the target row.`,
+      );
+    }
   }
 
   const previousActive = await controlPlane.deployments.getActiveForTarget(args.target.id);
@@ -1702,6 +1790,9 @@ async function runCloudVmReleaseDeploy(
     `[release deploy] cloud_vm '${args.target.name}' → ${conn.provider}/${conn.region}/${conn.instance_id}\n`,
   );
 
+  // Hoisted out of the try so the catch block can also close it.
+  let dialerHandle: import("../cloud/dialers/index.js").DialerHandle | null = null;
+
   try {
     const resolver =
       args.cloudBackendResolver ??
@@ -1717,17 +1808,50 @@ async function runCloudVmReleaseDeploy(
       region: conn.region,
       network_mode: mode,
     };
-    const ip = await backend.getInstanceIp(handle);
-    if (!ip) {
-      throw new Error(
-        `cloud_vm deploy: backend returned no public IP for ${conn.instance_id} ` +
-          `(instance may not be running or may have no public network interface)`,
-      );
+
+    // For public_mtls: dial the cloud IP directly.
+    // For aws_ssm / azure_bastion: open a tunnel via the dialer and
+    // dial 127.0.0.1:<localPort> instead. The dialer handle is
+    // tracked (hoisted above the try block) so we can close the
+    // tunnel after install-bundle finishes (or on any error path
+    // below).
+    const port = conn.guest_agent_port ?? 443;
+    let dialAddress: string;
+    let dialPort: number;
+
+    if (mode === "public_mtls") {
+      const ip = await backend.getInstanceIp(handle);
+      if (!ip) {
+        throw new Error(
+          `cloud_vm deploy: backend returned no public IP for ${conn.instance_id} ` +
+            `(instance may not be running or may have no public network interface)`,
+        );
+      }
+      dialAddress = ip;
+      dialPort = port;
+    } else {
+      const { getConnectionDescriptor } = await import("../cloud/connection.js");
+      const descriptor = getConnectionDescriptor(handle, {
+        port,
+        subscriptionId: conn.tunnel_options?.azure_subscription_id,
+        resourceGroup: conn.tunnel_options?.azure_resource_group,
+        bastionName: conn.tunnel_options?.azure_bastion_name,
+        awsProfile: conn.tunnel_options?.aws_profile,
+      });
+      const factory =
+        args.dialerFactory ??
+        (async (desc) => {
+          const { defaultDialerFor } = await import("../cloud/dialers/index.js");
+          return defaultDialerFor(desc).open(desc);
+        });
+      out.write(`[release deploy] cloud_vm '${args.target.name}' opening ${mode} tunnel...\n`);
+      dialerHandle = await factory(descriptor);
+      dialAddress = "127.0.0.1";
+      dialPort = dialerHandle.localPort;
     }
 
     const probe = args.reachabilityProbe ?? defaultReachabilityProbe;
-    const port = conn.guest_agent_port ?? 443;
-    const reach = await probe(ip, port);
+    const reach = await probe(dialAddress, dialPort);
 
     await controlPlane.healthChecks.append({
       deploymentId: deployment.id,
@@ -1740,14 +1864,86 @@ async function runCloudVmReleaseDeploy(
       throw new Error(`cloud_vm_reachable probe failed: ${reach.detail}`);
     }
 
+    // WS6 wave-3 carve-out #1: run install-bundle if the target
+    // declared one. The bundle YAML lives on the operator's host
+    // filesystem; we parse it locally, then dispatch installBundle
+    // against a GuestAgentClient that dials the cloud IP. Each
+    // package gets its own health-check row so the operator can
+    // see per-package install state in `signalman_health_history`.
+    let installSummary: { total: number; pass: number; fail: number } | null = null;
+    if (conn.install_bundle_path) {
+      out.write(`[release deploy] running install-bundle from ${conn.install_bundle_path}...\n`);
+      const { parseBundle } = await import("../provisioning/bundle-types.js");
+      const yamlMod = await import("yaml");
+      const fspMod = await import("node:fs/promises");
+      const yamlText = await fspMod.readFile(conn.install_bundle_path, "utf-8");
+      const bundle = parseBundle(yamlMod.parse(yamlText));
+
+      const invoker =
+        args.installBundleInvoker ??
+        (async (input) => {
+          const { GuestAgentClient } = await import("../guest/client.js");
+          const { installBundle } = await import(
+            "../provisioning/install-bundle.js"
+          );
+          const client = new GuestAgentClient(input.host, input.port);
+          // installBundle takes a HypervisorBackend reserved for future
+          // use; pass a no-op stub since cloud_vm is not hypervisor-
+          // backed.
+          const stubBackend = {} as unknown as import(
+            "../hypervisors/interface.js"
+          ).HypervisorBackend;
+          return installBundle(stubBackend, client, input.vmName, input.bundle);
+        });
+
+      const installResult = await invoker({
+        host: dialAddress,
+        port: dialPort,
+        bundle,
+        vmName: args.target.name,
+      });
+      installSummary = {
+        total: installResult.totalPackages,
+        pass: installResult.installed + installResult.skipped,
+        fail: installResult.failed,
+      };
+
+      for (const pkg of installResult.perPackageResults) {
+        await controlPlane.healthChecks.append({
+          deploymentId: deployment.id,
+          probeName: `install:${pkg.package}`,
+          status: pkg.status === "installed" || pkg.status === "skipped" ? "pass" : "fail",
+          detail:
+            pkg.error
+              ? `${pkg.source}: ${pkg.error}`
+              : `${pkg.source}: ${pkg.status} (${pkg.durationMs}ms)`,
+        });
+      }
+
+      if (installResult.failed > 0) {
+        throw new Error(
+          `install-bundle failed: ${installResult.failed}/${installResult.totalPackages} packages errored ` +
+            `(first failure: ${installResult.perPackageResults.find((p) => p.status === "failed")?.error ?? "unknown"})`,
+        );
+      }
+    }
+
     const nowIsoStr = new Date().toISOString();
-    const healthSummary: DeploymentHealthSummary = {
-      total: 1,
-      pass: 1,
-      fail: 0,
-      degraded: 0,
-      lastCheckedAt: nowIsoStr,
-    };
+    const healthSummary: DeploymentHealthSummary = installSummary
+      ? {
+          total: 1 + installSummary.total,
+          pass: 1 + installSummary.pass,
+          fail: installSummary.fail,
+          degraded: 0,
+          lastCheckedAt: nowIsoStr,
+        }
+      : {
+          total: 1,
+          pass: 1,
+          fail: 0,
+          degraded: 0,
+          lastCheckedAt: nowIsoStr,
+        };
 
     if (previousActive) {
       await controlPlane.deployments.update(previousActive.id, { status: "superseded" });
@@ -1767,10 +1963,23 @@ async function runCloudVmReleaseDeploy(
         releaseId: release.id,
         targetId: args.target.id,
         supersededId: previousActive?.id,
-        ip,
-        port,
+        network_mode: mode,
+        dial_address: dialAddress,
+        dial_port: dialPort,
+        install_bundle: installSummary,
       },
     });
+    // Close the tunnel if one was opened. Best-effort — a stuck
+    // tunnel-close shouldn't fail the deploy.
+    if (dialerHandle) {
+      try {
+        await dialerHandle.close();
+      } catch (closeErr) {
+        out.write(
+          `[release deploy] WARNING: tunnel close failed: ${(closeErr as Error).message}\n`,
+        );
+      }
+    }
     return {
       deployment: finalized,
       release,
@@ -1779,6 +1988,10 @@ async function runCloudVmReleaseDeploy(
       healthSummary,
     };
   } catch (err) {
+    // Close the tunnel on error too.
+    if (dialerHandle) {
+      try { await dialerHandle.close(); } catch { /* best-effort */ }
+    }
     const current = await controlPlane.deployments.get(deployment.id);
     if (current && current.status !== "failed") {
       await controlPlane.deployments.update(deployment.id, {
@@ -1847,15 +2060,14 @@ async function runCloudStackReleaseDeploy(
   );
 
   try {
-    const driverFactory =
-      args.tofuDriverFactory ??
-      (() => {
-        // Dynamic import + new TofuDriver from cwd. Production wires
-        // through this; tests inject a stub.
-        const TofuDriverClass = require("../cloud/tofu.js").TofuDriver;
-        return new TofuDriverClass({ projectRoot: process.cwd() });
-      });
-    const driver = driverFactory();
+    const driver = args.tofuDriverFactory
+      ? args.tofuDriverFactory()
+      : await (async () => {
+          // Dynamic import + new TofuDriver from cwd. Production wires
+          // through this; tests inject a stub via args.tofuDriverFactory.
+          const { TofuDriver } = await import("../cloud/tofu.js");
+          return new TofuDriver({ projectRoot: process.cwd() });
+        })();
 
     // Compose the deploy variables. release_tag / release_id /
     // release_commit_sha are ALWAYS set; the operator's TF template
@@ -1953,6 +2165,130 @@ async function runCloudStackReleaseDeploy(
         },
       });
     }
+    throw err;
+  }
+}
+
+// WS6 wave-3 carve-out #2: cloud release rollback.
+//
+// Both cloud kinds share the "redeploy the prior release" semantic.
+// Neither has a backend-native rollback today: cloud_vm has no
+// VM-snapshot equivalent (cloud snapshots are slow + per-vendor),
+// and cloud_stack doesn't track the prior var set inside the
+// Tofu state. So rollback = identify the prior active deployment
+// for this target, then run the deploy path against that older
+// release. The dispatcher reuses runCloudReleaseDeploy so all the
+// install-bundle / Tofu-apply machinery stays in one place.
+//
+// Audit-log marker: emits `release.rollback.*` entries WRAPPING the
+// standard `release.deploy.*` entries the inner deploy emits — so an
+// operator scanning the audit log can distinguish "I asked for
+// rollback" from "I asked for deploy of release N (which happens to
+// be older)."
+
+interface RunCloudReleaseRollbackArgs {
+  orgId: string;
+  target: Target;
+  toReleaseId?: string;
+  actor?: string;
+  out?: NodeJS.WritableStream;
+  /** Injectable for tests (forwarded to runCloudReleaseDeploy). */
+  cloudBackendResolver?: (
+    kind: import("../cloud/types.js").CloudBackendKind,
+  ) => Promise<import("../cloud/types.js").CloudBackend>;
+  tofuDriverFactory?: () => import("../cloud/tofu.js").TofuDriver;
+  reachabilityProbe?: (host: string, port: number) => Promise<{ ok: boolean; detail: string }>;
+}
+
+export async function runCloudReleaseRollback(
+  controlPlane: ControlPlane,
+  args: RunCloudReleaseRollbackArgs,
+): Promise<RunDeployResult> {
+  const actor = args.actor ?? "cli";
+  const out = args.out ?? process.stderr;
+
+  // Resolve the rollback target release. Caller can pin via
+  // toReleaseId; otherwise we take the prior-active deployment's
+  // release for this target.
+  let toReleaseId = args.toReleaseId;
+  if (!toReleaseId) {
+    const active = await controlPlane.deployments.getActiveForTarget(args.target.id);
+    if (!active) {
+      throw new Error(
+        `cloud rollback: target '${args.target.name}' has no active deployment to roll back from`,
+      );
+    }
+    if (!active.previousDeploymentId) {
+      throw new Error(
+        `cloud rollback: target '${args.target.name}' has no prior deployment ` +
+          `(this is the first deploy; nothing to roll back to). Re-run a manual ` +
+          `release deploy with the desired release id explicitly.`,
+      );
+    }
+    const prior = await controlPlane.deployments.get(active.previousDeploymentId);
+    if (!prior) {
+      throw new Error(
+        `cloud rollback: prior deployment ${active.previousDeploymentId} not found ` +
+          `(audit-log inconsistency; investigate before retrying)`,
+      );
+    }
+    toReleaseId = prior.releaseId;
+  }
+
+  await controlPlane.auditLog.append({
+    orgId: args.orgId,
+    actor,
+    action: "release.rollback.started",
+    entityType: "target",
+    entityId: args.target.id,
+    detail: {
+      kind: args.target.kind,
+      toReleaseId,
+      requested: args.toReleaseId ?? null,
+    },
+  });
+
+  out.write(
+    `[release rollback] ${args.target.kind} '${args.target.name}' → release ${toReleaseId}\n`,
+  );
+
+  try {
+    const result = await runCloudReleaseDeploy(controlPlane, {
+      orgId: args.orgId,
+      releaseId: toReleaseId,
+      target: args.target,
+      actor,
+      out: args.out,
+      cloudBackendResolver: args.cloudBackendResolver,
+      tofuDriverFactory: args.tofuDriverFactory,
+      reachabilityProbe: args.reachabilityProbe,
+    });
+    await controlPlane.auditLog.append({
+      orgId: args.orgId,
+      actor,
+      action: "release.rollback.completed",
+      entityType: "target",
+      entityId: args.target.id,
+      detail: {
+        kind: args.target.kind,
+        toReleaseId,
+        deploymentId: result.deployment.id,
+      },
+    });
+    return result;
+  } catch (err) {
+    await controlPlane.auditLog.append({
+      orgId: args.orgId,
+      actor,
+      action: "release.rollback.failed",
+      entityType: "target",
+      entityId: args.target.id,
+      detail: {
+        kind: args.target.kind,
+        toReleaseId,
+        error: (err as Error).message,
+      },
+    });
     throw err;
   }
 }

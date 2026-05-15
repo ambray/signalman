@@ -119,6 +119,7 @@ describe("signalman cloud connection-descriptor — CLI surface", () => {
           "network-mode": "azure_bastion",
           "subscription-id": "sub-X",
           "resource-group": "rg-Y",
+          "bastion-name": "bastion-Z",
           format: "json",
         }),
       );
@@ -128,10 +129,12 @@ describe("signalman cloud connection-descriptor — CLI surface", () => {
         subscription_id: string;
         resource_group: string;
         vm_name: string;
+        bastion_name: string;
       };
       expect(parsed.kind).toBe("azure_bastion");
       expect(parsed.subscription_id).toBe("sub-X");
       expect(parsed.resource_group).toBe("rg-Y");
+      expect(parsed.bastion_name).toBe("bastion-Z");
       expect(parsed.vm_name).toBe("test");
     } finally {
       capture.restore();

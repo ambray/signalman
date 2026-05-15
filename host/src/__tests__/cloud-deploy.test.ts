@@ -55,6 +55,7 @@ import {
   readCloudStackConnection,
   readCloudVmConnection,
   runCloudReleaseDeploy,
+  runCloudReleaseRollback,
   runReleaseDeploy,
   runReleaseRollback,
 } from "../verbs/control-plane.js";
@@ -385,24 +386,35 @@ describe("runCloudReleaseDeploy — cloud_vm", () => {
     ).rejects.toThrow(/no public IP/);
   });
 
-  it("aws_ssm network_mode: refuses BEFORE creating a Deployment row", async () => {
+  it("aws_ssm network_mode: dials via SSM tunnel + uses local port for reachability", async () => {
+    // WS6 wave-3 carve-out #5: aws_ssm mode now works via a dialer.
     const target = await makeCloudVmTarget({ network_mode: "aws_ssm" });
     const release = await makeReadyRelease();
-    await expect(
-      runCloudReleaseDeploy(cp, {
-        orgId: org.id,
-        releaseId: release.id,
-        target,
-        cloudBackendResolver: async () => fakeCloudBackend(),
-        reachabilityProbe: async () => ({ ok: true, detail: "ok" }),
+    let tunnelClosed = false;
+    let probedAddress: { host: string; port: number } | null = null;
+    const result = await runCloudReleaseDeploy(cp, {
+      orgId: org.id,
+      releaseId: release.id,
+      target,
+      cloudBackendResolver: async () => fakeCloudBackend(),
+      reachabilityProbe: async (host, port) => {
+        probedAddress = { host, port };
+        return { ok: true, detail: "ok" };
+      },
+      dialerFactory: async () => ({
+        localPort: 51234,
+        close: async () => { tunnelClosed = true; },
       }),
-    ).rejects.toThrow(/network_mode='aws_ssm'.*no dialable transport/);
-    // No Deployment row should exist for this target — fail-fast before create.
-    const deps = await cp.deployments.listForTarget(target.id);
-    expect(deps).toEqual([]);
+    });
+    expect(result.deployment.status).toBe("active");
+    expect(probedAddress).toEqual({ host: "127.0.0.1", port: 51234 });
+    expect(tunnelClosed).toBe(true);
   });
 
-  it("azure_bastion network_mode: same refusal", async () => {
+  it("azure_bastion mode: requires tunnel_options before creating a Deployment row", async () => {
+    // azure_bastion needs azure_subscription_id / azure_resource_group
+    // / azure_bastion_name; without them the executor refuses BEFORE
+    // creating a Deployment row.
     const target = await makeCloudVmTarget({ network_mode: "azure_bastion" });
     const release = await makeReadyRelease();
     await expect(
@@ -413,7 +425,47 @@ describe("runCloudReleaseDeploy — cloud_vm", () => {
         cloudBackendResolver: async () => fakeCloudBackend(),
         reachabilityProbe: async () => ({ ok: true, detail: "ok" }),
       }),
-    ).rejects.toThrow(/network_mode='azure_bastion'/);
+    ).rejects.toThrow(/azure_bastion.*tunnel_options/);
+    const deps = await cp.deployments.listForTarget(target.id);
+    expect(deps).toEqual([]);
+  });
+
+  it("azure_bastion with tunnel_options: dials via Bastion tunnel", async () => {
+    const target = await cp.targets.create({
+      orgId: org.id,
+      name: "az-cloud-vm",
+      kind: "cloud_vm",
+      connection: {
+        provider: "azure",
+        region: "eastus",
+        instance_id: "/subs/X/rg/Y/vm/test",
+        name: "test",
+        network_mode: "azure_bastion",
+        tunnel_options: {
+          azure_subscription_id: "sub-X",
+          azure_resource_group: "rg-Y",
+          azure_bastion_name: "bastion-Z",
+        },
+      },
+    });
+    const release = await makeReadyRelease();
+    let probedAddress: { host: string; port: number } | null = null;
+    const result = await runCloudReleaseDeploy(cp, {
+      orgId: org.id,
+      releaseId: release.id,
+      target,
+      cloudBackendResolver: async () => fakeCloudBackend(),
+      reachabilityProbe: async (host, port) => {
+        probedAddress = { host, port };
+        return { ok: true, detail: "ok" };
+      },
+      dialerFactory: async () => ({
+        localPort: 51900,
+        close: async () => {},
+      }),
+    });
+    expect(result.deployment.status).toBe("active");
+    expect(probedAddress).toEqual({ host: "127.0.0.1", port: 51900 });
   });
 
   it("previous active deployment is superseded on success", async () => {
@@ -590,17 +642,319 @@ describe("runReleaseDeploy dispatcher routes cloud kinds", () => {
     ).rejects.toThrow();
   });
 
-  it("cloud_stack rollback refuses with operator pointer", async () => {
+  it("cloud_stack rollback with no prior deployment: refuses with clear error", async () => {
     await makeCloudStackTarget();
+    // Top-level runReleaseRollback resolves the target by name; the
+    // cloud rollback path then refuses because there's no active
+    // deployment to roll back from.
     await expect(
       runReleaseRollback(cp, { targetName: "cloud-stack-target" }),
-    ).rejects.toThrow(/not yet supported.*Re-deploy the prior release/s);
+    ).rejects.toThrow(/no active deployment to roll back from/);
   });
 
-  it("cloud_vm rollback refuses with operator pointer", async () => {
+  it("cloud_vm rollback with no prior deployment: refuses with clear error", async () => {
     await makeCloudVmTarget();
     await expect(
       runReleaseRollback(cp, { targetName: "cloud-vm-target" }),
-    ).rejects.toThrow(/not yet supported.*Re-deploy the prior release/s);
+    ).rejects.toThrow(/no active deployment to roll back from/);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────
+// WS6 wave-3 carve-out #1: install-bundle integration for cloud_vm
+// ────────────────────────────────────────────────────────────────────
+
+describe("runCloudReleaseDeploy — cloud_vm install-bundle integration", () => {
+  async function writeBundle(filename: string, body: string): Promise<string> {
+    const p = path.join(dataDir, filename);
+    await fs.writeFile(p, body, "utf-8");
+    return p;
+  }
+
+  async function makeCloudVmTargetWithBundle(bundlePath: string): Promise<Target> {
+    return cp.targets.create({
+      orgId: org.id,
+      name: "cloud-vm-with-bundle",
+      kind: "cloud_vm",
+      connection: {
+        provider: "aws",
+        region: "us-east-1",
+        instance_id: "i-bundle",
+        name: "scenario-bundle",
+        install_bundle_path: bundlePath,
+      },
+    });
+  }
+
+  it("runs install-bundle after reachability passes; per-package health checks recorded", async () => {
+    const bundlePath = await writeBundle("bundle.yaml",
+      "apiVersion: signalman.dev/v1alpha1\nkind: Bundle\nmetadata:\n  name: test-bundle\npackages:\n  - id: GitHub.cli\n    source: winget\n  - id: jq\n    source: choco\n",
+    );
+    const target = await makeCloudVmTargetWithBundle(bundlePath);
+    const release = await makeReadyRelease();
+    const invokerCalls: Array<{ host: string; port: number; bundle: unknown }> = [];
+    const result = await runCloudReleaseDeploy(cp, {
+      orgId: org.id,
+      releaseId: release.id,
+      target,
+      cloudBackendResolver: async () => fakeCloudBackend(),
+      reachabilityProbe: async () => ({ ok: true, detail: "ok" }),
+      installBundleInvoker: async (input) => {
+        invokerCalls.push({ host: input.host, port: input.port, bundle: input.bundle });
+        return {
+          vmName: input.vmName,
+          totalPackages: 2,
+          installed: 2,
+          skipped: 0,
+          failed: 0,
+          perPackageResults: [
+            { package: "GitHub.cli", source: "winget", status: "installed", durationMs: 100 },
+            { package: "jq", source: "choco", status: "installed", durationMs: 50 },
+          ],
+          durationMs: 150,
+        };
+      },
+    });
+    expect(result.deployment.status).toBe("active");
+    expect(invokerCalls).toHaveLength(1);
+    expect(invokerCalls[0].host).toBe("203.0.113.42");
+    expect(result.healthSummary.total).toBe(3); // 1 reachable + 2 packages
+    expect(result.healthSummary.pass).toBe(3);
+    const checks = await cp.healthChecks.listForDeployment(result.deployment.id);
+    const probeNames = checks.map((c) => c.probeName).sort();
+    expect(probeNames).toContain("cloud_vm_reachable");
+    expect(probeNames).toContain("install:GitHub.cli");
+    expect(probeNames).toContain("install:jq");
+  });
+
+  it("install-bundle failure marks deployment failed; per-package health records the failure", async () => {
+    const bundlePath = await writeBundle("bundle.yaml",
+      "apiVersion: signalman.dev/v1alpha1\nkind: Bundle\nmetadata:\n  name: t\npackages:\n  - id: jq\n    source: choco\n",
+    );
+    const target = await makeCloudVmTargetWithBundle(bundlePath);
+    const release = await makeReadyRelease();
+    await expect(
+      runCloudReleaseDeploy(cp, {
+        orgId: org.id,
+        releaseId: release.id,
+        target,
+        cloudBackendResolver: async () => fakeCloudBackend(),
+        reachabilityProbe: async () => ({ ok: true, detail: "ok" }),
+        installBundleInvoker: async (input) => ({
+          vmName: input.vmName,
+          totalPackages: 1,
+          installed: 0,
+          skipped: 0,
+          failed: 1,
+          perPackageResults: [
+            {
+              package: "jq",
+              source: "choco",
+              status: "failed",
+              error: "choco not installed on remote",
+              durationMs: 20,
+            },
+          ],
+          durationMs: 20,
+        }),
+      }),
+    ).rejects.toThrow(/install-bundle failed.*choco not installed/);
+    const entries = await cp.auditLog.listForOrg(org.id, { entityType: "deployment" });
+    expect(entries.some((e) => e.action === "release.deploy.failed")).toBe(true);
+  });
+
+  it("install_bundle_path omitted: today's behaviour (reachability only)", async () => {
+    const target = await makeCloudVmTarget();
+    const release = await makeReadyRelease();
+    let invokerCalled = false;
+    const result = await runCloudReleaseDeploy(cp, {
+      orgId: org.id,
+      releaseId: release.id,
+      target,
+      cloudBackendResolver: async () => fakeCloudBackend(),
+      reachabilityProbe: async () => ({ ok: true, detail: "ok" }),
+      installBundleInvoker: async () => {
+        invokerCalled = true;
+        return {
+          vmName: "x",
+          totalPackages: 0,
+          installed: 0,
+          skipped: 0,
+          failed: 0,
+          perPackageResults: [],
+          durationMs: 0,
+        };
+      },
+    });
+    expect(result.deployment.status).toBe("active");
+    expect(invokerCalled).toBe(false);
+    expect(result.healthSummary.total).toBe(1);
+  });
+
+  it("malformed bundle YAML: parseBundle throws BundleValidationError", async () => {
+    const bundlePath = await writeBundle("bundle.yaml",
+      "apiVersion: signalman.dev/v1alpha1\nkind: Bundle\nmetadata:\n  name: t\npackages:\n  - id: jq\n    source: NOT_A_REAL_SOURCE\n",
+    );
+    const target = await makeCloudVmTargetWithBundle(bundlePath);
+    const release = await makeReadyRelease();
+    await expect(
+      runCloudReleaseDeploy(cp, {
+        orgId: org.id,
+        releaseId: release.id,
+        target,
+        cloudBackendResolver: async () => fakeCloudBackend(),
+        reachabilityProbe: async () => ({ ok: true, detail: "ok" }),
+      }),
+    ).rejects.toThrow();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────
+// WS6 wave-3 carve-out #2: cloud release rollback
+// ────────────────────────────────────────────────────────────────────
+
+describe("runCloudReleaseRollback", () => {
+  it("rolls cloud_stack back to the prior release via re-apply", async () => {
+    const target = await makeCloudStackTarget();
+    const r1 = await makeReadyRelease("v0.0.1");
+    const r2 = await makeReadyRelease("v0.0.2");
+
+    // Deploy v0.0.1 → active
+    await runCloudReleaseDeploy(cp, {
+      orgId: org.id,
+      releaseId: r1.id,
+      target,
+      tofuDriverFactory: () => fakeTofuDriver(),
+    });
+    // Deploy v0.0.2 → supersedes v0.0.1
+    await runCloudReleaseDeploy(cp, {
+      orgId: org.id,
+      releaseId: r2.id,
+      target,
+      tofuDriverFactory: () => fakeTofuDriver(),
+    });
+
+    // Rollback (calling the cloud-specific helper so we can inject
+    // the same stubs the deploy used)
+    const rollback = await runCloudReleaseRollback(cp, {
+      orgId: org.id,
+      target,
+      tofuDriverFactory: () => fakeTofuDriver(),
+    });
+    expect(rollback.deployment.releaseId).toBe(r1.id);
+    const entries = await cp.auditLog.listForOrg(org.id, { entityType: "target" });
+    expect(entries.some((e) => e.action === "release.rollback.started")).toBe(true);
+    expect(entries.some((e) => e.action === "release.rollback.completed")).toBe(true);
+  });
+
+  it("explicit toReleaseId pins the rollback target", async () => {
+    const target = await makeCloudStackTarget();
+    const r1 = await makeReadyRelease("v0.0.1");
+    const r2 = await makeReadyRelease("v0.0.2");
+    const r3 = await makeReadyRelease("v0.0.3");
+    await runCloudReleaseDeploy(cp, {
+      orgId: org.id, releaseId: r1.id, target,
+      tofuDriverFactory: () => fakeTofuDriver(),
+    });
+    await runCloudReleaseDeploy(cp, {
+      orgId: org.id, releaseId: r2.id, target,
+      tofuDriverFactory: () => fakeTofuDriver(),
+    });
+    await runCloudReleaseDeploy(cp, {
+      orgId: org.id, releaseId: r3.id, target,
+      tofuDriverFactory: () => fakeTofuDriver(),
+    });
+    // Rollback explicitly to r1, skipping r2
+    const rollback = await runCloudReleaseRollback(cp, {
+      orgId: org.id,
+      target,
+      toReleaseId: r1.id,
+      tofuDriverFactory: () => fakeTofuDriver(),
+    });
+    expect(rollback.deployment.releaseId).toBe(r1.id);
+  });
+
+  it("rollback with no prior deployment: clear error", async () => {
+    const target = await makeCloudStackTarget();
+    await expect(
+      runCloudReleaseRollback(cp, {
+        orgId: org.id,
+        target,
+        tofuDriverFactory: () => fakeTofuDriver(),
+      }),
+    ).rejects.toThrow(/no active deployment to roll back from/);
+  });
+
+  it("rollback with only one deploy: refuses (no prior)", async () => {
+    const target = await makeCloudStackTarget();
+    const r1 = await makeReadyRelease("v0.0.1");
+    await runCloudReleaseDeploy(cp, {
+      orgId: org.id, releaseId: r1.id, target,
+      tofuDriverFactory: () => fakeTofuDriver(),
+    });
+    await expect(
+      runCloudReleaseRollback(cp, {
+        orgId: org.id,
+        target,
+        tofuDriverFactory: () => fakeTofuDriver(),
+      }),
+    ).rejects.toThrow(/no prior deployment/);
+  });
+
+  it("rolls cloud_vm back via re-deploy (reachability + supersede)", async () => {
+    const target = await makeCloudVmTarget();
+    const r1 = await makeReadyRelease("v0.0.1");
+    const r2 = await makeReadyRelease("v0.0.2");
+
+    await runCloudReleaseDeploy(cp, {
+      orgId: org.id, releaseId: r1.id, target,
+      cloudBackendResolver: async () => fakeCloudBackend(),
+      reachabilityProbe: async () => ({ ok: true, detail: "ok" }),
+    });
+    await runCloudReleaseDeploy(cp, {
+      orgId: org.id, releaseId: r2.id, target,
+      cloudBackendResolver: async () => fakeCloudBackend(),
+      reachabilityProbe: async () => ({ ok: true, detail: "ok" }),
+    });
+
+    const rollback = await runCloudReleaseRollback(cp, {
+      orgId: org.id,
+      target,
+      cloudBackendResolver: async () => fakeCloudBackend(),
+      reachabilityProbe: async () => ({ ok: true, detail: "ok" }),
+    });
+    expect(rollback.deployment.releaseId).toBe(r1.id);
+    expect(rollback.deployment.status).toBe("active");
+    // The original deploy that was active before rollback fired
+    // should now be superseded.
+    const allDeploys = await cp.deployments.listForTarget(target.id);
+    const v2Deploy = allDeploys.find(
+      (d) => d.releaseId === r2.id && d.id !== rollback.deployment.id,
+    );
+    expect(v2Deploy?.status).toBe("superseded");
+  });
+
+  it("failed rollback audits release.rollback.failed", async () => {
+    const target = await makeCloudStackTarget();
+    const r1 = await makeReadyRelease("v0.0.1");
+    const r2 = await makeReadyRelease("v0.0.2");
+    await runCloudReleaseDeploy(cp, {
+      orgId: org.id, releaseId: r1.id, target,
+      tofuDriverFactory: () => fakeTofuDriver(),
+    });
+    await runCloudReleaseDeploy(cp, {
+      orgId: org.id, releaseId: r2.id, target,
+      tofuDriverFactory: () => fakeTofuDriver(),
+    });
+    await expect(
+      runCloudReleaseRollback(cp, {
+        orgId: org.id,
+        target,
+        tofuDriverFactory: () =>
+          fakeTofuDriver({ throwOnApply: new Error("rollback apply failed") }),
+      }),
+    ).rejects.toThrow();
+    const entries = await cp.auditLog.listForOrg(org.id, { entityType: "target" });
+    expect(entries.some((e) => e.action === "release.rollback.failed")).toBe(true);
   });
 });

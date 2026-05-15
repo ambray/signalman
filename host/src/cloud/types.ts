@@ -279,6 +279,12 @@ export type CloudConnectionDescriptor =
       instance_id: string;
       /** gRPC port to forward through SSM. Defaults to 443. */
       port: number;
+      /**
+       * WS6 wave-3: optional AWS named profile for the dialer's
+       * `aws ssm start-session --profile` invocation. When absent
+       * the AWS CLI uses the default credential chain.
+       */
+      profile?: string;
     }
   | {
       kind: "azure_bastion";
@@ -290,6 +296,14 @@ export type CloudConnectionDescriptor =
       vm_name: string;
       /** gRPC port to forward through Bastion. Defaults to 443. */
       port: number;
+      /**
+       * WS6 wave-3: Bastion host name. Required by
+       * `az network bastion tunnel --name`. A resource group can
+       * host multiple Bastions, so this can't be inferred from
+       * `resource_group` alone. The descriptor builder takes it
+       * as an explicit option.
+       */
+      bastion_name: string;
     };
 
 /** Runtime state of a cloud instance. */

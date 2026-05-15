@@ -72,10 +72,11 @@ describe("getConnectionDescriptor — unit", () => {
     });
   });
 
-  it("builds azure_bastion descriptor from Azure handle + subscription/RG opts", () => {
+  it("builds azure_bastion descriptor from Azure handle + subscription/RG/bastion opts", () => {
     const d = getConnectionDescriptor(azureHandle("azure_bastion"), {
       subscriptionId: "sub-X",
       resourceGroup: "rg-Y",
+      bastionName: "bastion-Z",
     });
     expect(d).toEqual({
       kind: "azure_bastion",
@@ -83,6 +84,7 @@ describe("getConnectionDescriptor — unit", () => {
       resource_group: "rg-Y",
       vm_name: "test",
       port: 443,
+      bastion_name: "bastion-Z",
     });
   });
 
@@ -110,6 +112,7 @@ describe("getConnectionDescriptor — unit", () => {
     expect(() =>
       getConnectionDescriptor(azureHandle("azure_bastion"), {
         resourceGroup: "rg-Y",
+        bastionName: "b",
       }),
     ).toThrowError(/subscriptionId/);
   });
@@ -118,8 +121,18 @@ describe("getConnectionDescriptor — unit", () => {
     expect(() =>
       getConnectionDescriptor(azureHandle("azure_bastion"), {
         subscriptionId: "sub-X",
+        bastionName: "b",
       }),
     ).toThrowError(/resourceGroup/);
+  });
+
+  it("rejects azure_bastion mode without bastionName (WS6 wave-3)", () => {
+    expect(() =>
+      getConnectionDescriptor(azureHandle("azure_bastion"), {
+        subscriptionId: "sub-X",
+        resourceGroup: "rg-Y",
+      }),
+    ).toThrowError(/bastionName/);
   });
 });
 
@@ -142,6 +155,7 @@ describe("withResolvedHost — populating public IP after fetch", () => {
     const base = getConnectionDescriptor(azureHandle("azure_bastion"), {
       subscriptionId: "X",
       resourceGroup: "Y",
+      bastionName: "Z",
     });
     const result = withResolvedHost(base, "1.2.3.4");
     expect(result).toBe(base);

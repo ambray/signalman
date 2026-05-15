@@ -3455,6 +3455,8 @@ export async function cmdCloudConnectionDescriptor(
         port,
         subscriptionId: args.options.get("subscription-id"),
         resourceGroup: args.options.get("resource-group"),
+        bastionName: args.options.get("bastion-name"),
+        awsProfile: args.options.get("aws-profile"),
       },
     );
     if (isJson) {

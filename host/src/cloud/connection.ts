@@ -56,6 +56,16 @@ export function getConnectionDescriptor(
     port?: number;
     subscriptionId?: string;
     resourceGroup?: string;
+    /**
+     * WS6 wave-3: AWS named profile to thread through to the dialer.
+     * Forwarded verbatim onto `aws_ssm` descriptors when set.
+     */
+    awsProfile?: string;
+    /**
+     * WS6 wave-3: Bastion host name. Required for `azure_bastion`
+     * descriptors — `az network bastion tunnel --name` needs it.
+     */
+    bastionName?: string;
   } = {},
 ): CloudConnectionDescriptor {
   const port = opts.port ?? DEFAULT_CONNECTION_PORT;
@@ -76,6 +86,7 @@ export function getConnectionDescriptor(
         region: handle.region,
         instance_id: handle.id,
         port,
+        ...(opts.awsProfile ? { profile: opts.awsProfile } : {}),
       };
     case "azure_bastion": {
       if (handle.backend !== "azure") {
@@ -98,12 +109,20 @@ export function getConnectionDescriptor(
             "backend's known config).",
         );
       }
+      if (!opts.bastionName) {
+        throw new Error(
+          "azure_bastion connection descriptor requires opts.bastionName " +
+            "(`az network bastion tunnel` needs the Bastion host name; " +
+            "a resource group can hold multiple Bastions so it can't be inferred).",
+        );
+      }
       return {
         kind: "azure_bastion",
         subscription_id: opts.subscriptionId,
         resource_group: opts.resourceGroup,
         vm_name: handle.name,
         port,
+        bastion_name: opts.bastionName,
       };
     }
     default: {
