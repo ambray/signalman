@@ -37,9 +37,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use loom_core::{LoomError, LoomResult};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
-use crate::events::{EventEmitter, RunEventKind, emit_run_event};
+use crate::events::{emit_run_event, EventEmitter, RunEventKind};
 
 /// Lifecycle state for a tracked run. JSON-serialised in the state file
 /// under `status`. Forward-compatible: unknown variants on load become
@@ -653,9 +653,15 @@ mod tests {
     fn record_lost_does_not_downgrade_finished_runs() {
         let (store, _dir) = store();
         store.record_started("r1", None, None).unwrap();
-        store.record_finished("r1", &json!({ "result": "pass" })).unwrap();
+        store
+            .record_finished("r1", &json!({ "result": "pass" }))
+            .unwrap();
         let kept = store.record_lost("r1", "post-hoc").unwrap().unwrap();
-        assert_eq!(kept.status, RunStatus::Finished, "Finished must not regress to Lost");
+        assert_eq!(
+            kept.status,
+            RunStatus::Finished,
+            "Finished must not regress to Lost"
+        );
     }
 
     #[test]
@@ -691,15 +697,20 @@ mod tests {
     #[test]
     fn run_id_validation_rejects_path_traversal_and_separators() {
         let (store, _dir) = store();
-        for bad in ["", "../escape", "..", ".", ".hidden", "a/b", "a\\b", "with\0null"] {
+        for bad in [
+            "",
+            "../escape",
+            "..",
+            ".",
+            ".hidden",
+            "a/b",
+            "a\\b",
+            "with\0null",
+        ] {
             let r = store.record_started(bad, None, None);
             assert!(r.is_err(), "expected rejection for run_id '{}'", bad);
         }
-        for bad in [
-            "../../etc/passwd",
-            "/absolute",
-            "C:\\Windows\\evil",
-        ] {
+        for bad in ["../../etc/passwd", "/absolute", "C:\\Windows\\evil"] {
             let r = store.load(bad);
             assert!(r.is_err(), "load('{}') should fail validation", bad);
         }
@@ -825,9 +836,18 @@ mod tests {
 
         let _store = RunStateStore::new(parent.path()).unwrap();
 
-        assert!(!runs_dir.join("r1.json.tmp.42").exists(), "orphan must be swept");
-        assert!(!runs_dir.join("r2.json.tmp.99999").exists(), "orphan must be swept");
-        assert!(runs_dir.join("r3.json").exists(), "real state file must survive");
+        assert!(
+            !runs_dir.join("r1.json.tmp.42").exists(),
+            "orphan must be swept"
+        );
+        assert!(
+            !runs_dir.join("r2.json.tmp.99999").exists(),
+            "orphan must be swept"
+        );
+        assert!(
+            runs_dir.join("r3.json").exists(),
+            "real state file must survive"
+        );
         assert!(
             runs_dir.join("backup.tmp.note").exists(),
             "non-pid-suffixed file must NOT match the strict pattern",
@@ -843,19 +863,17 @@ mod tests {
         let (store, _dir) = store();
         let (emitter, mock) = mock_emitter();
         store
-            .record_started_with_emitter(
-                "r1",
-                Some("scn"),
-                Some("trace-abc"),
-                Some(&emitter),
-            )
+            .record_started_with_emitter("r1", Some("scn"), Some("trace-abc"), Some(&emitter))
             .unwrap();
         let events = mock.published();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "signalman.run.started");
         assert_eq!(events[0].run_id, "r1");
         assert_eq!(
-            events[0].labels.get("signalman-trace-id").map(String::as_str),
+            events[0]
+                .labels
+                .get("signalman-trace-id")
+                .map(String::as_str),
             Some("trace-abc")
         );
     }
@@ -901,11 +919,7 @@ mod tests {
             .record_started_with_emitter("r1", Some("scn"), None, Some(&emitter))
             .unwrap();
         store
-            .record_finished_with_emitter(
-                "r1",
-                &json!({ "result": "fail" }),
-                Some(&emitter),
-            )
+            .record_finished_with_emitter("r1", &json!({ "result": "fail" }), Some(&emitter))
             .unwrap();
         let finished = mock.filter_by_kind("signalman.run.finished");
         assert_eq!(finished.len(), 1);
@@ -947,7 +961,9 @@ mod tests {
         let (store, _dir) = store();
         let (emitter, mock) = mock_emitter();
         store.record_started("r1", None, None).unwrap();
-        store.record_finished("r1", &json!({ "result": "pass" })).unwrap();
+        store
+            .record_finished("r1", &json!({ "result": "pass" }))
+            .unwrap();
         store
             .record_lost_with_emitter("r1", "post-hoc", Some(&emitter))
             .unwrap();

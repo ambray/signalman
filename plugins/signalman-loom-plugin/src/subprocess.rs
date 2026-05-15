@@ -73,7 +73,10 @@ pub fn program_basename(program: &OsStr) -> String {
 /// Validates `program` against [`SUBPROCESS_ALLOWLIST`].
 pub fn check_allowlist(program: &OsStr) -> LoomResult<()> {
     let basename = program_basename(program);
-    if SUBPROCESS_ALLOWLIST.iter().any(|allowed| basename == *allowed) {
+    if SUBPROCESS_ALLOWLIST
+        .iter()
+        .any(|allowed| basename == *allowed)
+    {
         Ok(())
     } else {
         Err(LoomError::PluginRuntime(format!(
@@ -169,8 +172,14 @@ mod tests {
     #[test]
     fn program_basename_strips_extension_and_path() {
         assert_eq!(program_basename(OsStr::new("signalman")), "signalman");
-        assert_eq!(program_basename(OsStr::new("/usr/bin/signalman")), "signalman");
-        assert_eq!(program_basename(&OsString::from("C:\\Program Files\\nodejs\\node.exe")), "node");
+        assert_eq!(
+            program_basename(OsStr::new("/usr/bin/signalman")),
+            "signalman"
+        );
+        assert_eq!(
+            program_basename(&OsString::from("C:\\Program Files\\nodejs\\node.exe")),
+            "node"
+        );
         assert_eq!(program_basename(OsStr::new("NODE.EXE")), "node");
     }
 

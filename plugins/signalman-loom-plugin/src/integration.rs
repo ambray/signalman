@@ -49,8 +49,8 @@
 
 use loom_core::LoomResult;
 use loom_plugin_api::{
-    AgentIntegrationProvider, AgentTarget, IntegrationBundle, IntegrationDescriptor,
-    RuleFileKind, RuleSupplement,
+    AgentIntegrationProvider, AgentTarget, IntegrationBundle, IntegrationDescriptor, RuleFileKind,
+    RuleSupplement,
 };
 
 /// Marker string written into every rule-supplement block. Loom uses
@@ -237,11 +237,7 @@ mod tests {
             3,
             "one supplement per RuleFileKind",
         );
-        let kinds: Vec<RuleFileKind> = bundle
-            .rule_supplements
-            .iter()
-            .map(|s| s.file)
-            .collect();
+        let kinds: Vec<RuleFileKind> = bundle.rule_supplements.iter().map(|s| s.file).collect();
         assert!(kinds.contains(&RuleFileKind::ClaudeMd));
         assert!(kinds.contains(&RuleFileKind::AgentsMd));
         assert!(kinds.contains(&RuleFileKind::CursorRules));

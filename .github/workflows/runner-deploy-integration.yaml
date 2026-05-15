@@ -1,0 +1,150 @@
+# WS6 wave-3 carve-out #3 — runner-deploy live integration tests.
+#
+# The M9 runner-deploy multi-transport surface
+# (host/src/runner/deploy/) ships with 45 unit tests covering every
+# argv shape. This workflow exercises the transports against real
+# external targets (containerised sshd, local docker daemon, real
+# cloud creds when present).
+#
+# Triggers:
+#   - workflow_dispatch (manual)
+#   - schedule: weekly Sunday 03:00 UTC (golden-image refresh
+#     cadence matches infra/packer)
+#   - PRs touching the runner-deploy contract
+#
+# The integration test file
+# (host/src/__tests__/runner-deploy.integration.test.ts) self-skips
+# when SIGNALMAN_INTEGRATION_TESTS is unset, so this workflow is the
+# only thing that flips it on. See
+# host/test-fixtures/runner-deploy/README.md for the operator-side
+# checklist of env vars + secrets each transport leg consumes.
+
+name: runner-deploy-integration
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 0"
+  pull_request:
+    paths:
+      - "host/src/runner/deploy/**"
+      - "host/src/__tests__/runner-deploy.integration.test.ts"
+      - "host/test-fixtures/runner-deploy/**"
+      - ".github/workflows/runner-deploy-integration.yaml"
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: host/package-lock.json
+
+      - name: Install host dependencies
+        working-directory: host
+        run: npm ci || npm install
+
+      - name: Type check
+        working-directory: host
+        run: npx tsc --noEmit
+
+      - name: Generate throwaway SSH keypair for sshd fixture
+        run: |
+          mkdir -p host/test-fixtures/runner-deploy/fixtures
+          ssh-keygen -t ed25519 -N "" \
+            -f host/test-fixtures/runner-deploy/fixtures/id_int \
+            -C "signalman-integration-${GITHUB_RUN_ID}"
+          cp host/test-fixtures/runner-deploy/fixtures/id_int.pub \
+             host/test-fixtures/runner-deploy/fixtures/authorized_keys
+          chmod 600 host/test-fixtures/runner-deploy/fixtures/id_int
+
+      - name: Start sshd fixture
+        working-directory: host/test-fixtures/runner-deploy
+        run: |
+          docker compose up -d
+          # Give sshd time to bind on 127.0.0.1:2222 before tests dial.
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 2222; then
+              echo "sshd is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "sshd never came up; dumping compose logs"
+          docker compose logs
+          exit 1
+
+      - name: Run integration tests (script + ssh + docker legs)
+        working-directory: host
+        env:
+          SIGNALMAN_INTEGRATION_TESTS: "1"
+          SIGNALMAN_INTEGRATION_SSH_IDENTITY: ${{ github.workspace }}/host/test-fixtures/runner-deploy/fixtures/id_int
+          SIGNALMAN_INTEGRATION_SSH_HOST: "127.0.0.1"
+          SIGNALMAN_INTEGRATION_SSH_PORT: "2222"
+        run: npx vitest run src/__tests__/runner-deploy.integration.test.ts
+
+      - name: Tear down sshd fixture
+        if: always()
+        working-directory: host/test-fixtures/runner-deploy
+        run: docker compose down --volumes
+
+      - name: Upload integration logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runner-deploy-integration-logs
+          path: |
+            host/test-fixtures/runner-deploy/*.log
+          if-no-files-found: ignore
+
+  # Cloud transport leg — separate job, gated on creds being present.
+  # Forked-PR builds don't have access to secrets; the `if:` clause
+  # below makes this job a no-op there.
+  cloud-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    # Skip when secrets are absent (e.g. fork PRs) by checking a
+    # repo-environment variable that's set when secrets are available.
+    # See https://docs.github.com/en/actions/learn-github-actions/contexts#secrets-context
+    if: |
+      vars.SIGNALMAN_HAS_CLOUD_CREDS == 'true'
+    needs: integration
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: host/package-lock.json
+
+      - name: Install host dependencies
+        working-directory: host
+        run: npm ci || npm install
+
+      - name: Run cloud integration leg
+        working-directory: host
+        env:
+          SIGNALMAN_INTEGRATION_TESTS: "1"
+          SIGNALMAN_INTEGRATION_CLOUD_OPT_IN: "1"
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          # Filter to only the cloud-integration describe block so we
+          # don't repeat the script/ssh/docker legs.
+          npx vitest run src/__tests__/runner-deploy.integration.test.ts \
+            -t "CloudTransport"

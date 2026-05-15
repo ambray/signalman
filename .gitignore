@@ -76,3 +76,8 @@ certs/*.crt
 .loom/review/
 # END LOOM generated-artifacts
 .commit-msg-temp.txt
+
+# WS6 wave-3 carve-out #3 — runner-deploy integration fixtures.
+# Throwaway SSH keypairs the integration tests generate locally.
+# Never commit.
+host/test-fixtures/runner-deploy/fixtures/

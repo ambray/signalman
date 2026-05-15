@@ -33,11 +33,14 @@ fn meta() -> McpToolMeta {
     }
 }
 
-/// Returns all seven [`McpToolRegistration`] entries the plugin exposes.
+/// Returns all [`McpToolRegistration`] entries the plugin exposes.
 /// P5.4 added `loom.signalman.form_descriptor` for the TUI's guided
-/// scenario-launch form.
+/// scenario-launch form. v0.3.0-5 sub-task 6 adds the cloud + stack +
+/// reaper + budget + creds surface (17 handlers); the inventory now
+/// totals 25 registrations.
 pub fn all_tool_registrations() -> Vec<McpToolRegistration> {
     vec![
+        // ── v0.1.0 + v0.3.0-1 scenario surface ─────────────────────
         register_list(),
         register_describe(),
         register_plan(),
@@ -46,6 +49,28 @@ pub fn all_tool_registrations() -> Vec<McpToolRegistration> {
         register_record(),
         register_record_finalize(),
         register_form_descriptor(),
+        // ── v0.3.0-5 sub-task 6: cloud VM surface ──────────────────
+        register_cloud_provision(),
+        register_cloud_terminate(),
+        register_cloud_status(),
+        register_cloud_list(),
+        register_cloud_backends(),
+        register_cloud_connection_descriptor(),
+        // ── v0.3.0-5 reaper ────────────────────────────────────────
+        register_reaper_run_once(),
+        register_reaper_status(),
+        // ── v0.3.0-5 cost guardrails ───────────────────────────────
+        register_budget_get(),
+        register_budget_set(),
+        register_budget_usage(),
+        // ── v0.3.0-5 OpenTofu stack lifecycle ──────────────────────
+        register_stack_apply(),
+        register_stack_destroy(),
+        register_stack_plan_cost(),
+        // ── v0.3.0-5 per-org credentials ───────────────────────────
+        register_creds_set(),
+        register_creds_get(),
+        register_creds_remove(),
     ]
 }
 
@@ -206,9 +231,7 @@ pub(crate) fn build_run_args_with_trace(args: &Value, trace_id: &str) -> LoomRes
     //   - `network_class` (legacy) is accepted with a tracing-level
     //     deprecation warning the operator sees in plugin logs
     //   - declaring BOTH is a schema error (ambiguous intent)
-    let requested = args
-        .get("requested_network_class")
-        .and_then(Value::as_str);
+    let requested = args.get("requested_network_class").and_then(Value::as_str);
     let legacy = args.get("network_class").and_then(Value::as_str);
     let nc = match (requested, legacy) {
         (Some(r), None) => Some(r),
@@ -333,9 +356,7 @@ pub fn finalize_run_start_with_emitter(
 /// field. Returns the response unchanged otherwise (pre-v0.3.0-3
 /// signalman, or a run that failed before populating identity).
 fn promote_hermetic_identity(mut response: Value) -> Value {
-    let identity = response
-        .get("envelope")
-        .and_then(extract_hermetic_identity);
+    let identity = response.get("envelope").and_then(extract_hermetic_identity);
     if let Some(id) = identity {
         if let Some(obj) = response.as_object_mut() {
             obj.insert("hermetic_identity".to_string(), id);
@@ -516,15 +537,14 @@ fn response_event_seq(response: &Value) -> Option<i64> {
 fn register_record() -> McpToolRegistration {
     McpToolRegistration {
         name: "loom.signalman.record".to_string(),
-        description:
-            "Start a durable record/replay capture session. Every \
+        description: "Start a durable record/replay capture session. Every \
              subsequent MCP tool invocation in this server is appended \
              to .signalman/recordings/<safe_name>/<recording_id>/calls.jsonl \
              until the session expires (duration_seconds) or is \
              explicitly finalised via loom.signalman.record_finalize. \
              Returns the recording_id workflow nodes pass to \
              record_finalize."
-                .to_string(),
+            .to_string(),
         input_schema: schemas::record_input(),
         output_schema: schemas::record_output(),
         stability: STABILITY,
@@ -560,15 +580,14 @@ fn handle_record(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
 fn register_record_finalize() -> McpToolRegistration {
     McpToolRegistration {
         name: "loom.signalman.record_finalize".to_string(),
-        description:
-            "Promote a record/replay capture session into a candidate \
+        description: "Promote a record/replay capture session into a candidate \
              scenario directory. Reads calls.jsonl from the recording, \
              synthesises setup.yaml + workflow.md + assertions.yaml \
              under .signalman/scenarios/<scenario_id>/, and returns the \
              promoted paths plus per-call counts (captured / emitted / \
              skipped / malformed). Pass either recording_id (from a \
              prior loom.signalman.record) or an absolute recording_path."
-                .to_string(),
+            .to_string(),
         input_schema: schemas::record_finalize_input(),
         output_schema: schemas::record_finalize_output(),
         stability: STABILITY,
@@ -598,17 +617,12 @@ pub(crate) fn build_record_finalize_args(args: &Value) -> LoomResult<Vec<String>
         }
         (None, None) => {
             return Err(LoomError::SchemaValidation(
-                "record_finalize requires recording_id or recording_path"
-                    .to_string(),
+                "record_finalize requires recording_id or recording_path".to_string(),
             ));
         }
     };
 
-    let mut a = vec![
-        "record".to_string(),
-        "finalize".to_string(),
-        target,
-    ];
+    let mut a = vec!["record".to_string(), "finalize".to_string(), target];
     if let Some(scenario_id) = args.get("scenario_id").and_then(Value::as_str) {
         a.push("--scenario-id".to_string());
         a.push(scenario_id.to_string());
@@ -764,6 +778,1106 @@ fn parameter_owned_from_value(v: &Value) -> Option<ParameterOwned> {
             .or_else(|| v.get("description").and_then(Value::as_str))
             .map(str::to_string),
     })
+}
+
+// ──────────────────────────────────────────────────────────────────
+// v0.3.0-5 sub-task 6 — cloud + stack + reaper + budget + creds
+// ──────────────────────────────────────────────────────────────────
+//
+// Every handler in this section shells out to a `signalman cloud …`
+// or `signalman stack …` CLI verb. The schemas are hand-rolled inline
+// (rather than living in `schemas::`) because the cloud surface is
+// large and the helpers are small enough that inlining keeps the
+// register / build / handle triple visually adjacent.
+//
+// Validation principles:
+//   * Required fields are caught here via [`require_string`] so we
+//     return a structured [`LoomError::SchemaValidation`] rather than
+//     bubbling up a CLI subprocess failure.
+//   * Enum-shaped fields (provider, backend, network_mode) are
+//     checked at the plugin boundary so we never spend a subprocess
+//     on a typo.
+//   * Cost-relevant fields (`monthly_cap_cents`, `ttl_minutes`) are
+//     bounded here too — defense in depth alongside the CLI's own
+//     `Number.isInteger && > 0` checks.
+
+fn permissive_object_schema() -> Value {
+    json!({ "type": "object", "additionalProperties": true })
+}
+
+fn provider_property() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["aws", "azure"],
+        "description": "Cloud backend. One of 'aws' or 'azure'."
+    })
+}
+
+fn network_mode_property() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["public_mtls", "aws_ssm", "azure_bastion"],
+        "description":
+            "Network mode the descriptor / provisioned VM should use. \
+             Defaults to 'public_mtls' (mTLS over public IP). \
+             'aws_ssm' uses AWS Systems Manager Session Manager; \
+             'azure_bastion' uses Azure Bastion."
+    })
+}
+
+fn require_provider(args: &Value) -> LoomResult<String> {
+    let p = require_string(args, "provider")?;
+    if p != "aws" && p != "azure" {
+        return Err(LoomError::SchemaValidation(format!(
+            "provider must be 'aws' or 'azure'; got '{}'",
+            p
+        )));
+    }
+    Ok(p)
+}
+
+fn require_backend(args: &Value) -> LoomResult<String> {
+    // Creds CLI uses --backend with the same enum as --provider.
+    let b = require_string(args, "backend")?;
+    if b != "aws" && b != "azure" {
+        return Err(LoomError::SchemaValidation(format!(
+            "backend must be 'aws' or 'azure'; got '{}'",
+            b
+        )));
+    }
+    Ok(b)
+}
+
+fn optional_network_mode(args: &Value) -> LoomResult<Option<String>> {
+    let Some(mode) = args.get("network_mode").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if !matches!(mode, "public_mtls" | "aws_ssm" | "azure_bastion") {
+        return Err(LoomError::SchemaValidation(format!(
+            "network_mode must be one of [public_mtls, aws_ssm, azure_bastion]; \
+             got '{}'",
+            mode
+        )));
+    }
+    Ok(Some(mode.to_string()))
+}
+
+/// Push every entry of `vars: { k: v }` to `into` as repeated
+/// `--param k=v` flags. Mirrors [`push_param_flags`] but with no
+/// nested-object handling — used by both `stack apply / plan-cost` (for
+/// OpenTofu vars) and `cloud list / provision` (for tags).
+fn push_kv_param_flags(into: &mut Vec<String>, map: Option<&Value>, field: &str) -> LoomResult<()> {
+    let Some(obj) = map.and_then(Value::as_object) else {
+        return Ok(());
+    };
+    for (k, v) in obj {
+        let scalar = match v {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Null => continue,
+            _ => {
+                return Err(LoomError::SchemaValidation(format!(
+                    "{}.{} must be a scalar (string/number/bool); objects and \
+                     arrays are not supported by signalman's --param parser",
+                    field, k
+                )));
+            }
+        };
+        if k.contains('=') {
+            return Err(LoomError::SchemaValidation(format!(
+                "{} key '{}' must not contain '=' (CLI ambiguity with --param k=v)",
+                field, k
+            )));
+        }
+        into.push("--param".to_string());
+        into.push(format!("{}={}", k, scalar));
+    }
+    Ok(())
+}
+
+// ── cloud_provision ───────────────────────────────────────────────
+
+/// Build the `loom.signalman.cloud_provision` registration. Operators
+/// invoke this with phrases like "provision a VM on AWS in us-east-1"
+/// or "spin up an Azure test instance for org acme".
+fn register_cloud_provision() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.cloud_provision".to_string(),
+        description: "Provision a cloud VM via the configured backend. \
+             Returns the instance handle (id, name, region, network_mode). \
+             Use this to 'provision a VM on AWS' or 'spin up an Azure \
+             test instance'. Cost-bounded — set ttl_minutes for auto-reap \
+             and org_id for per-org budget attribution."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "provider": provider_property(),
+                "region": { "type": "string", "description": "Cloud region (e.g. 'us-east-1', 'eastus')." },
+                "instance_type": { "type": "string", "description": "SKU / instance type (e.g. 't3.small', 'Standard_B2s')." },
+                "image_ref": { "type": "string", "description": "Provider-specific image id / URN." },
+                "name": { "type": "string", "description": "Friendly tag — used as the Name tag (AWS) or VM name (Azure)." },
+                "ttl_minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional auto-reap deadline in minutes. Reaper sweeps terminate instances past their TTL."
+                },
+                "org_id": { "type": "string", "description": "Optional org id; usage rows attach to it for budget attribution." },
+                "network_mode": network_mode_property()
+            },
+            "required": ["provider", "region", "instance_type", "image_ref", "name"],
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_cloud_provision),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_cloud_provision_args(args: &Value) -> LoomResult<Vec<String>> {
+    let provider = require_provider(args)?;
+    let region = require_string(args, "region")?;
+    let instance_type = require_string(args, "instance_type")?;
+    let image_ref = require_string(args, "image_ref")?;
+    let name = require_string(args, "name")?;
+    let mut a = vec![
+        "cloud".to_string(),
+        "provision".to_string(),
+        "--provider".to_string(),
+        provider,
+        "--region".to_string(),
+        region,
+        "--instance-type".to_string(),
+        instance_type,
+        "--image-ref".to_string(),
+        image_ref,
+        "--name".to_string(),
+        name,
+    ];
+    if let Some(ttl) = args.get("ttl_minutes").and_then(Value::as_i64) {
+        if ttl <= 0 {
+            return Err(LoomError::SchemaValidation(
+                "ttl_minutes must be a positive integer".to_string(),
+            ));
+        }
+        a.push("--ttl-minutes".to_string());
+        a.push(ttl.to_string());
+    }
+    if let Some(org) = args.get("org_id").and_then(Value::as_str) {
+        a.push("--org-id".to_string());
+        a.push(org.to_string());
+    }
+    if let Some(mode) = optional_network_mode(args)? {
+        a.push("--network-mode".to_string());
+        a.push(mode);
+    }
+    a.push("--format".to_string());
+    a.push("json".to_string());
+    Ok(a)
+}
+
+fn handle_cloud_provision(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_cloud_provision_args(&args)?)
+}
+
+// ── cloud_terminate ───────────────────────────────────────────────
+
+fn register_cloud_terminate() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.cloud_terminate".to_string(),
+        description: "Terminate a cloud VM previously provisioned via Signalman. \
+             Idempotent — repeat sweeps are safe. Use for 'tear down my \
+             test instance' / 'kill the AWS VM <id>'."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "provider": provider_property(),
+                "id": { "type": "string", "description": "Instance id returned by cloud_provision." },
+                "name": { "type": "string", "description": "Friendly name supplied at provision time." },
+                "region": { "type": "string", "description": "Cloud region the instance lives in." }
+            },
+            "required": ["provider", "id", "name", "region"],
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_cloud_terminate),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_cloud_terminate_args(args: &Value) -> LoomResult<Vec<String>> {
+    let provider = require_provider(args)?;
+    let id = require_string(args, "id")?;
+    let name = require_string(args, "name")?;
+    let region = require_string(args, "region")?;
+    Ok(vec![
+        "cloud".to_string(),
+        "terminate".to_string(),
+        "--provider".to_string(),
+        provider,
+        "--id".to_string(),
+        id,
+        "--name".to_string(),
+        name,
+        "--region".to_string(),
+        region,
+        "--format".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn handle_cloud_terminate(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_cloud_terminate_args(&args)?)
+}
+
+// ── cloud_status ──────────────────────────────────────────────────
+
+fn register_cloud_status() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.cloud_status".to_string(),
+        description: "Fetch the live status of a cloud VM (state, public_ip, \
+             private_ip, reason). Use to 'check if the VM is ready' \
+             or 'wait for the AWS instance to be running'."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "provider": provider_property(),
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "region": { "type": "string" }
+            },
+            "required": ["provider", "id", "name", "region"],
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_cloud_status),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_cloud_status_args(args: &Value) -> LoomResult<Vec<String>> {
+    let provider = require_provider(args)?;
+    let id = require_string(args, "id")?;
+    let name = require_string(args, "name")?;
+    let region = require_string(args, "region")?;
+    Ok(vec![
+        "cloud".to_string(),
+        "status".to_string(),
+        "--provider".to_string(),
+        provider,
+        "--id".to_string(),
+        id,
+        "--name".to_string(),
+        name,
+        "--region".to_string(),
+        region,
+        "--format".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn handle_cloud_status(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_cloud_status_args(&args)?)
+}
+
+// ── cloud_list ────────────────────────────────────────────────────
+
+fn register_cloud_list() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.cloud_list".to_string(),
+        description: "List Signalman-managed VMs on the given provider. Use to \
+             'show all running AWS instances' or 'find Signalman VMs \
+             tagged env=ci'. Tag filters intersect."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "provider": provider_property(),
+                "tags": {
+                    "type": "object",
+                    "description":
+                        "Optional tag filter map. Repeated as --param k=v \
+                         which the CLI promotes onto --tag intersection.",
+                    "additionalProperties": true
+                }
+            },
+            "required": ["provider"],
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_cloud_list),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_cloud_list_args(args: &Value) -> LoomResult<Vec<String>> {
+    let provider = require_provider(args)?;
+    let mut a = vec![
+        "cloud".to_string(),
+        "list".to_string(),
+        "--provider".to_string(),
+        provider,
+    ];
+    push_kv_param_flags(&mut a, args.get("tags"), "tags")?;
+    a.push("--format".to_string());
+    a.push("json".to_string());
+    Ok(a)
+}
+
+fn handle_cloud_list(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_cloud_list_args(&args)?)
+}
+
+// ── cloud_backends ────────────────────────────────────────────────
+
+fn register_cloud_backends() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.cloud_backends".to_string(),
+        description: "List cloud backends registered in this Signalman process. \
+             Use to answer 'which cloud providers does Signalman support?' \
+             or to verify backend registration before provisioning."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_cloud_backends),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_cloud_backends_args(_args: &Value) -> LoomResult<Vec<String>> {
+    Ok(vec![
+        "cloud".to_string(),
+        "backends".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn handle_cloud_backends(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_cloud_backends_args(&args)?)
+}
+
+// ── cloud_connection_descriptor ───────────────────────────────────
+
+fn register_cloud_connection_descriptor() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.cloud_connection_descriptor".to_string(),
+        description: "Build a connection descriptor for an existing cloud VM. \
+             Returns kind/port/host or kind=aws_ssm/azure_bastion + the \
+             vendor-specific fields a client needs to dial in. Use to \
+             'show how to connect to the AWS VM' before SSH-ing or \
+             before invoking a probe."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "provider": provider_property(),
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "region": { "type": "string" },
+                "network_mode": network_mode_property(),
+                "subscription_id": { "type": "string", "description": "Azure-only: subscription containing the VM." },
+                "resource_group": { "type": "string", "description": "Azure-only: resource group containing the VM." },
+                "bastion_name": { "type": "string", "description": "Azure-only: Bastion resource name." },
+                "aws_profile": { "type": "string", "description": "AWS-only: profile name passed through to the Session Manager client." }
+            },
+            "required": ["provider", "id", "name", "region"],
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_cloud_connection_descriptor),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_cloud_connection_descriptor_args(args: &Value) -> LoomResult<Vec<String>> {
+    let provider = require_provider(args)?;
+    let id = require_string(args, "id")?;
+    let name = require_string(args, "name")?;
+    let region = require_string(args, "region")?;
+    let mut a = vec![
+        "cloud".to_string(),
+        "connection-descriptor".to_string(),
+        "--provider".to_string(),
+        provider,
+        "--id".to_string(),
+        id,
+        "--name".to_string(),
+        name,
+        "--region".to_string(),
+        region,
+    ];
+    if let Some(mode) = optional_network_mode(args)? {
+        a.push("--network-mode".to_string());
+        a.push(mode);
+    }
+    for (json_key, cli_flag) in &[
+        ("subscription_id", "--subscription-id"),
+        ("resource_group", "--resource-group"),
+        ("bastion_name", "--bastion-name"),
+        ("aws_profile", "--aws-profile"),
+    ] {
+        if let Some(v) = args.get(*json_key).and_then(Value::as_str) {
+            a.push((*cli_flag).to_string());
+            a.push(v.to_string());
+        }
+    }
+    a.push("--format".to_string());
+    a.push("json".to_string());
+    Ok(a)
+}
+
+fn handle_cloud_connection_descriptor(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_cloud_connection_descriptor_args(&args)?)
+}
+
+// ── reaper_run_once ───────────────────────────────────────────────
+
+fn register_reaper_run_once() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.reaper_run_once".to_string(),
+        description: "Force a TTL sweep across every registered cloud backend. \
+             Terminates instances past their ttl_minutes and returns \
+             per-backend inspect/terminate counts. Use to 'force a \
+             reaper sweep now' or 'clean up expired test VMs'."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_reaper_run_once),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_reaper_run_once_args(_args: &Value) -> LoomResult<Vec<String>> {
+    Ok(vec![
+        "cloud".to_string(),
+        "reaper".to_string(),
+        "run".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn handle_reaper_run_once(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_reaper_run_once_args(&args)?)
+}
+
+// ── reaper_status ─────────────────────────────────────────────────
+
+fn register_reaper_status() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.reaper_status".to_string(),
+        description: "Return the last reaper sweep result (start/finish, total \
+             terminated, per-backend stats) and whether a sweep is \
+             currently running. Use to 'show the latest reaper run' or \
+             'is the reaper still working?'."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_reaper_status),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_reaper_status_args(_args: &Value) -> LoomResult<Vec<String>> {
+    Ok(vec![
+        "cloud".to_string(),
+        "reaper".to_string(),
+        "status".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn handle_reaper_status(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_reaper_status_args(&args)?)
+}
+
+// ── budget_get ────────────────────────────────────────────────────
+
+fn register_budget_get() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.budget_get".to_string(),
+        description: "Show the current monthly budget for an org (limit, soft \
+             warn pct, current month usage). Use to 'check the cloud \
+             budget for org acme' or 'how much have we burned this \
+             month?'."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "org_id": {
+                    "type": "string",
+                    "description":
+                        "Organisation id. CLI maps this to its --org flag; \
+                         we accept org_id at the JSON boundary for \
+                         consistency with the rest of the cloud surface."
+                }
+            },
+            "required": ["org_id"],
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_budget_get),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_budget_get_args(args: &Value) -> LoomResult<Vec<String>> {
+    let org = require_string(args, "org_id")?;
+    Ok(vec![
+        "cloud".to_string(),
+        "budget".to_string(),
+        "get".to_string(),
+        "--org".to_string(),
+        org,
+        "--format".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn handle_budget_get(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_budget_get_args(&args)?)
+}
+
+// ── budget_set ────────────────────────────────────────────────────
+
+fn register_budget_set() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.budget_set".to_string(),
+        description: "Set or update an org's monthly budget cap (in cents). \
+             Use to 'cap org acme at $50/month' (monthly_cap_cents = 5000) \
+             or 'update the test org budget to 1000 cents'. \
+             Crossing the cap returns budget_exceeded on subsequent \
+             provision calls."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "org_id": { "type": "string" },
+                "monthly_cap_cents": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description":
+                        "Monthly limit in cents. Forwarded to --monthly-cents \
+                         at the CLI layer."
+                }
+            },
+            "required": ["org_id", "monthly_cap_cents"],
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_budget_set),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_budget_set_args(args: &Value) -> LoomResult<Vec<String>> {
+    let org = require_string(args, "org_id")?;
+    let cents = args
+        .get("monthly_cap_cents")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| {
+            LoomError::SchemaValidation(
+                "missing required field 'monthly_cap_cents' (expected positive integer)"
+                    .to_string(),
+            )
+        })?;
+    if cents <= 0 {
+        return Err(LoomError::SchemaValidation(
+            "monthly_cap_cents must be a positive integer".to_string(),
+        ));
+    }
+    Ok(vec![
+        "cloud".to_string(),
+        "budget".to_string(),
+        "set".to_string(),
+        "--org".to_string(),
+        org,
+        "--monthly-cents".to_string(),
+        cents.to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn handle_budget_set(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_budget_set_args(&args)?)
+}
+
+// ── budget_usage ──────────────────────────────────────────────────
+
+fn register_budget_usage() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.budget_usage".to_string(),
+        description: "List per-instance cost rows for an org's current month. \
+             Use to 'break down cloud spend by instance' or 'show what \
+             my CI runners cost this month'."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "org_id": { "type": "string" }
+            },
+            "required": ["org_id"],
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_budget_usage),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_budget_usage_args(args: &Value) -> LoomResult<Vec<String>> {
+    let org = require_string(args, "org_id")?;
+    Ok(vec![
+        "cloud".to_string(),
+        "budget".to_string(),
+        "usage".to_string(),
+        "--org".to_string(),
+        org,
+        "--format".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn handle_budget_usage(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_budget_usage_args(&args)?)
+}
+
+// ── stack_apply ───────────────────────────────────────────────────
+
+fn register_stack_apply() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.stack_apply".to_string(),
+        description: "Apply an OpenTofu module to bring up (or reconcile) a stack. \
+             Returns the workspace path, change summary, and module \
+             outputs. Use to 'apply the dev-cluster stack' or 'tofu apply \
+             my module'. vars are forwarded as -var k=v."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "stack_name": { "type": "string", "description": "Logical stack name; one workspace per name under .signalman/stacks/." },
+                "module_path": { "type": "string", "description": "Path to the OpenTofu module root (directory holding *.tf)." },
+                "vars": {
+                    "type": "object",
+                    "description":
+                        "OpenTofu input variables, k=scalar. Forwarded \
+                         as repeated --param k=v.",
+                    "additionalProperties": true
+                }
+            },
+            "required": ["stack_name", "module_path"],
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_stack_apply),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_stack_apply_args(args: &Value) -> LoomResult<Vec<String>> {
+    let stack_name = require_string(args, "stack_name")?;
+    let module_path = require_string(args, "module_path")?;
+    let mut a = vec![
+        "stack".to_string(),
+        "apply".to_string(),
+        "--stack-name".to_string(),
+        stack_name,
+        "--module-path".to_string(),
+        module_path,
+    ];
+    push_kv_param_flags(&mut a, args.get("vars"), "vars")?;
+    a.push("--format".to_string());
+    a.push("json".to_string());
+    Ok(a)
+}
+
+fn handle_stack_apply(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_stack_apply_args(&args)?)
+}
+
+// ── stack_destroy ─────────────────────────────────────────────────
+
+fn register_stack_destroy() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.stack_destroy".to_string(),
+        description: "Destroy a previously-applied OpenTofu stack. Idempotent \
+             (returns alreadyEmpty when the workspace is gone). Use to \
+             'tear down the dev-cluster stack' or 'tofu destroy this \
+             environment'."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "stack_name": { "type": "string" },
+                "module_path": {
+                    "type": "string",
+                    "description":
+                        "Kept for API symmetry with stack_apply / \
+                         stack_plan_cost; not consumed by the CLI's \
+                         destroy verb today but accepted so calling \
+                         workflows can pass the same triple."
+                }
+            },
+            "required": ["stack_name", "module_path"],
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_stack_destroy),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_stack_destroy_args(args: &Value) -> LoomResult<Vec<String>> {
+    let stack_name = require_string(args, "stack_name")?;
+    // module_path is required at the JSON layer for symmetry; CLI
+    // destroy doesn't read it (workspace is keyed on stack_name).
+    let _module_path = require_string(args, "module_path")?;
+    Ok(vec![
+        "stack".to_string(),
+        "destroy".to_string(),
+        "--stack-name".to_string(),
+        stack_name,
+        "--format".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn handle_stack_destroy(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_stack_destroy_args(&args)?)
+}
+
+// ── stack_plan_cost ───────────────────────────────────────────────
+
+fn register_stack_plan_cost() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.stack_plan_cost".to_string(),
+        description: "Pre-flight cost estimate for an OpenTofu module. Returns \
+             change summary, estimated monthly cents, and per-resource \
+             SKU costs. Use to 'estimate what this stack will cost' \
+             before stack_apply."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "stack_name": { "type": "string" },
+                "module_path": { "type": "string" },
+                "vars": {
+                    "type": "object",
+                    "description": "OpenTofu input variables (forwarded as --param k=v).",
+                    "additionalProperties": true
+                }
+            },
+            "required": ["stack_name", "module_path"],
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_stack_plan_cost),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_stack_plan_cost_args(args: &Value) -> LoomResult<Vec<String>> {
+    let stack_name = require_string(args, "stack_name")?;
+    let module_path = require_string(args, "module_path")?;
+    let mut a = vec![
+        "stack".to_string(),
+        "plan-cost".to_string(),
+        "--stack-name".to_string(),
+        stack_name,
+        "--module-path".to_string(),
+        module_path,
+    ];
+    push_kv_param_flags(&mut a, args.get("vars"), "vars")?;
+    a.push("--format".to_string());
+    a.push("json".to_string());
+    Ok(a)
+}
+
+fn handle_stack_plan_cost(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_stack_plan_cost_args(&args)?)
+}
+
+// ── creds_set ─────────────────────────────────────────────────────
+
+fn register_creds_set() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.creds_set".to_string(),
+        description: "Store an AWS or Azure credential at rest for an org. \
+             The plaintext_json field carries the secret bundle: \
+             AWS = {access_key_id, secret_access_key, session_token?}; \
+             Azure = {tenant_id, client_id, client_secret}. Use to \
+             'configure AWS creds for org acme' or 'add Azure SP for \
+             tenant X'. Plaintext is never persisted unencrypted."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "org_id": { "type": "string" },
+                "backend": {
+                    "type": "string",
+                    "enum": ["aws", "azure"],
+                    "description": "Cloud backend the credential is for."
+                },
+                "plaintext_json": {
+                    "type": "object",
+                    "description":
+                        "Secret bundle. Shape depends on backend: \
+                         AWS requires access_key_id + secret_access_key \
+                         (session_token optional); Azure requires \
+                         tenant_id + client_id + client_secret.",
+                    "additionalProperties": true
+                }
+            },
+            "required": ["org_id", "backend", "plaintext_json"],
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_creds_set),
+        meta: meta(),
+    }
+}
+
+/// Translate the JSON credential bundle into the CLI's per-backend
+/// argv flags. Deviation from the task spec: the CLI does NOT accept
+/// a `--plaintext-json` blob — it takes split flags (--access-key-id,
+/// --secret-access-key, --session-token / --tenant-id, --client-id,
+/// --client-secret). The plugin layer keeps the agent-facing shape
+/// uniform (one plaintext_json field) and splits to flags here so we
+/// don't paper a JSON blob through argv.
+pub(crate) fn build_creds_set_args(args: &Value) -> LoomResult<Vec<String>> {
+    let org = require_string(args, "org_id")?;
+    let backend = require_backend(args)?;
+    let bundle = args
+        .get("plaintext_json")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            LoomError::SchemaValidation(
+                "missing required field 'plaintext_json' (expected object)".to_string(),
+            )
+        })?;
+
+    let mut a = vec![
+        "cloud".to_string(),
+        "creds".to_string(),
+        "set".to_string(),
+        "--org".to_string(),
+        org,
+        "--backend".to_string(),
+        backend.clone(),
+    ];
+
+    match backend.as_str() {
+        "aws" => {
+            let access_key_id = bundle
+                .get("access_key_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    LoomError::SchemaValidation(
+                        "plaintext_json.access_key_id is required for backend='aws'".to_string(),
+                    )
+                })?;
+            let secret_access_key = bundle
+                .get("secret_access_key")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    LoomError::SchemaValidation(
+                        "plaintext_json.secret_access_key is required for backend='aws'"
+                            .to_string(),
+                    )
+                })?;
+            a.push("--access-key-id".to_string());
+            a.push(access_key_id.to_string());
+            a.push("--secret-access-key".to_string());
+            a.push(secret_access_key.to_string());
+            if let Some(token) = bundle.get("session_token").and_then(Value::as_str) {
+                a.push("--session-token".to_string());
+                a.push(token.to_string());
+            }
+        }
+        "azure" => {
+            let tenant_id = bundle
+                .get("tenant_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    LoomError::SchemaValidation(
+                        "plaintext_json.tenant_id is required for backend='azure'".to_string(),
+                    )
+                })?;
+            let client_id = bundle
+                .get("client_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    LoomError::SchemaValidation(
+                        "plaintext_json.client_id is required for backend='azure'".to_string(),
+                    )
+                })?;
+            let client_secret = bundle
+                .get("client_secret")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    LoomError::SchemaValidation(
+                        "plaintext_json.client_secret is required for backend='azure'".to_string(),
+                    )
+                })?;
+            a.push("--tenant-id".to_string());
+            a.push(tenant_id.to_string());
+            a.push("--client-id".to_string());
+            a.push(client_id.to_string());
+            a.push("--client-secret".to_string());
+            a.push(client_secret.to_string());
+        }
+        // require_backend already restricted to aws|azure.
+        _ => unreachable!(),
+    }
+    a.push("--format".to_string());
+    a.push("json".to_string());
+    Ok(a)
+}
+
+fn handle_creds_set(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_creds_set_args(&args)?)
+}
+
+// ── creds_get ─────────────────────────────────────────────────────
+
+fn register_creds_get() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.creds_get".to_string(),
+        description: "Fetch the credential metadata for an org/backend pair. \
+             NEVER returns plaintext; only a redacted hint, encryption \
+             method, and timestamps. Use to 'check if AWS creds are \
+             configured for org acme' or 'show the credential hint'."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "org_id": { "type": "string" },
+                "backend": { "type": "string", "enum": ["aws", "azure"] }
+            },
+            "required": ["org_id", "backend"],
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_creds_get),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_creds_get_args(args: &Value) -> LoomResult<Vec<String>> {
+    let org = require_string(args, "org_id")?;
+    let backend = require_backend(args)?;
+    Ok(vec![
+        "cloud".to_string(),
+        "creds".to_string(),
+        "get".to_string(),
+        "--org".to_string(),
+        org,
+        "--backend".to_string(),
+        backend,
+        "--format".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn handle_creds_get(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_creds_get_args(&args)?)
+}
+
+// ── creds_remove ──────────────────────────────────────────────────
+
+fn register_creds_remove() -> McpToolRegistration {
+    McpToolRegistration {
+        name: "loom.signalman.creds_remove".to_string(),
+        description: "Remove the stored credential for an org/backend pair. \
+             Idempotent — succeeds even if no credential is configured. \
+             Use to 'rotate AWS creds for org acme' (call this then \
+             creds_set) or 'revoke Azure credentials'."
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "org_id": { "type": "string" },
+                "backend": { "type": "string", "enum": ["aws", "azure"] }
+            },
+            "required": ["org_id", "backend"],
+            "additionalProperties": false
+        }),
+        output_schema: permissive_object_schema(),
+        stability: STABILITY,
+        tier: TIER,
+        handler: Arc::new(handle_creds_remove),
+        meta: meta(),
+    }
+}
+
+pub(crate) fn build_creds_remove_args(args: &Value) -> LoomResult<Vec<String>> {
+    let org = require_string(args, "org_id")?;
+    let backend = require_backend(args)?;
+    Ok(vec![
+        "cloud".to_string(),
+        "creds".to_string(),
+        "remove".to_string(),
+        "--org".to_string(),
+        org,
+        "--backend".to_string(),
+        backend,
+        "--format".to_string(),
+        "json".to_string(),
+    ])
+}
+
+fn handle_creds_remove(_cx: &PluginContext, args: Value) -> LoomResult<Value> {
+    run_signalman(&build_creds_remove_args(&args)?)
 }
 
 // ── helpers ───────────────────────────────────────────────────────
@@ -1083,10 +2197,7 @@ mod tests {
         assert_eq!(returned, response, "response must pass through unchanged");
 
         let state = store.load("abc-123").unwrap().unwrap();
-        assert_eq!(
-            state.scenario_id.as_deref(),
-            Some("mygroup/v2/scenario-a")
-        );
+        assert_eq!(state.scenario_id.as_deref(), Some("mygroup/v2/scenario-a"));
         assert_eq!(state.status, RunStatus::Started);
     }
 
@@ -1523,9 +2634,7 @@ mod tests {
             "recording_path": "C:\\src\\proj\\.signalman\\recordings\\foo\\rec_..."
         }))
         .expect("ok");
-        assert!(args
-            .iter()
-            .any(|a| a.contains(".signalman")));
+        assert!(args.iter().any(|a| a.contains(".signalman")));
     }
 
     #[test]
@@ -1535,7 +2644,10 @@ mod tests {
             "scenario_id": "smoke/my-flow"
         }))
         .expect("ok");
-        let i = args.iter().position(|a| a == "--scenario-id").expect("flag");
+        let i = args
+            .iter()
+            .position(|a| a == "--scenario-id")
+            .expect("flag");
         assert_eq!(args[i + 1], "smoke/my-flow");
     }
 
@@ -1603,7 +2715,10 @@ mod tests {
         let promoted = promote_hermetic_identity(response);
         let id = promoted.get("hermetic_identity").expect("present");
         assert_eq!(id["scenario_hash"].as_str(), Some("a".repeat(64).as_str()));
-        assert_eq!(id["vm_lineage_hash"].as_str(), Some("b".repeat(64).as_str()));
+        assert_eq!(
+            id["vm_lineage_hash"].as_str(),
+            Some("b".repeat(64).as_str())
+        );
         assert_eq!(id["agent_version"].as_str(), Some("0.2.1"));
         assert_eq!(id["network_class"].as_str(), Some("default-switch"));
         // Original envelope unchanged.
@@ -1657,5 +2772,475 @@ mod tests {
         assert!(id["vm_lineage_hash"].is_null());
         assert!(id["agent_version"].is_null());
         assert!(id["network_class"].is_null());
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // v0.3.0-5 sub-task 6 — cloud + stack + reaper + budget + creds
+    // ─────────────────────────────────────────────────────────────
+
+    fn assert_pair(args: &[String], flag: &str, expected: &str) {
+        let i = args
+            .iter()
+            .position(|a| a == flag)
+            .unwrap_or_else(|| panic!("missing flag '{}' in args {:?}", flag, args));
+        assert_eq!(
+            args[i + 1],
+            expected,
+            "value for '{}' was {:?}, expected {:?}",
+            flag,
+            args[i + 1],
+            expected,
+        );
+    }
+
+    // ── cloud_provision ─────────────────────────────────────────
+
+    #[test]
+    fn cloud_provision_args_carry_every_required_flag() {
+        let a = build_cloud_provision_args(&json!({
+            "provider": "aws",
+            "region": "us-east-1",
+            "instance_type": "t3.small",
+            "image_ref": "ami-abc",
+            "name": "ci-runner"
+        }))
+        .unwrap();
+        assert_eq!(a[0], "cloud");
+        assert_eq!(a[1], "provision");
+        assert_pair(&a, "--provider", "aws");
+        assert_pair(&a, "--region", "us-east-1");
+        assert_pair(&a, "--instance-type", "t3.small");
+        assert_pair(&a, "--image-ref", "ami-abc");
+        assert_pair(&a, "--name", "ci-runner");
+        assert_pair(&a, "--format", "json");
+    }
+
+    #[test]
+    fn cloud_provision_args_propagate_ttl_org_and_network_mode() {
+        let a = build_cloud_provision_args(&json!({
+            "provider": "azure",
+            "region": "eastus",
+            "instance_type": "Standard_B2s",
+            "image_ref": "Canonical:UbuntuServer:22_04-lts:latest",
+            "name": "test-vm",
+            "ttl_minutes": 30,
+            "org_id": "acme",
+            "network_mode": "azure_bastion"
+        }))
+        .unwrap();
+        assert_pair(&a, "--ttl-minutes", "30");
+        assert_pair(&a, "--org-id", "acme");
+        assert_pair(&a, "--network-mode", "azure_bastion");
+    }
+
+    #[test]
+    fn cloud_provision_rejects_unknown_provider() {
+        let r = build_cloud_provision_args(&json!({
+            "provider": "gcp",
+            "region": "r",
+            "instance_type": "t",
+            "image_ref": "i",
+            "name": "n"
+        }));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn cloud_provision_rejects_zero_ttl() {
+        let r = build_cloud_provision_args(&json!({
+            "provider": "aws",
+            "region": "r",
+            "instance_type": "t",
+            "image_ref": "i",
+            "name": "n",
+            "ttl_minutes": 0
+        }));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn cloud_provision_rejects_invalid_network_mode() {
+        let r = build_cloud_provision_args(&json!({
+            "provider": "aws",
+            "region": "r",
+            "instance_type": "t",
+            "image_ref": "i",
+            "name": "n",
+            "network_mode": "ipv6_only"
+        }));
+        assert!(r.is_err());
+    }
+
+    // ── cloud_terminate ─────────────────────────────────────────
+
+    #[test]
+    fn cloud_terminate_args_have_all_four_required_flags() {
+        let a = build_cloud_terminate_args(&json!({
+            "provider": "aws",
+            "id": "i-0abc",
+            "name": "ci-runner",
+            "region": "us-east-1"
+        }))
+        .unwrap();
+        assert_pair(&a, "--provider", "aws");
+        assert_pair(&a, "--id", "i-0abc");
+        assert_pair(&a, "--name", "ci-runner");
+        assert_pair(&a, "--region", "us-east-1");
+        assert_pair(&a, "--format", "json");
+    }
+
+    // ── cloud_status ────────────────────────────────────────────
+
+    #[test]
+    fn cloud_status_args_have_all_four_required_flags() {
+        let a = build_cloud_status_args(&json!({
+            "provider": "azure",
+            "id": "vm-1",
+            "name": "test",
+            "region": "eastus"
+        }))
+        .unwrap();
+        assert_eq!(a[0], "cloud");
+        assert_eq!(a[1], "status");
+        assert_pair(&a, "--provider", "azure");
+        assert_pair(&a, "--id", "vm-1");
+    }
+
+    // ── cloud_list ──────────────────────────────────────────────
+
+    #[test]
+    fn cloud_list_args_emit_tags_as_repeated_param_flags() {
+        let a = build_cloud_list_args(&json!({
+            "provider": "aws",
+            "tags": { "env": "ci", "team": "platform" }
+        }))
+        .unwrap();
+        let joined = a.join(" ");
+        assert!(joined.contains("--provider aws"));
+        // Order is HashMap-iteration dependent; check both pairs present.
+        assert!(joined.contains("--param env=ci"));
+        assert!(joined.contains("--param team=platform"));
+    }
+
+    #[test]
+    fn cloud_list_args_without_tags_still_request_json() {
+        let a = build_cloud_list_args(&json!({ "provider": "aws" })).unwrap();
+        assert_pair(&a, "--format", "json");
+    }
+
+    // ── cloud_backends ──────────────────────────────────────────
+
+    #[test]
+    fn cloud_backends_args_take_no_inputs() {
+        let a = build_cloud_backends_args(&json!({})).unwrap();
+        assert_eq!(a, vec!["cloud", "backends", "--format", "json"]);
+    }
+
+    // ── cloud_connection_descriptor ─────────────────────────────
+
+    #[test]
+    fn cloud_connection_descriptor_args_carry_required_quadruple() {
+        let a = build_cloud_connection_descriptor_args(&json!({
+            "provider": "aws",
+            "id": "i-1",
+            "name": "n",
+            "region": "us-east-1"
+        }))
+        .unwrap();
+        assert_eq!(a[0], "cloud");
+        assert_eq!(a[1], "connection-descriptor");
+        assert_pair(&a, "--provider", "aws");
+        assert_pair(&a, "--id", "i-1");
+    }
+
+    #[test]
+    fn cloud_connection_descriptor_propagates_azure_specific_flags() {
+        let a = build_cloud_connection_descriptor_args(&json!({
+            "provider": "azure",
+            "id": "vm-1",
+            "name": "n",
+            "region": "eastus",
+            "network_mode": "azure_bastion",
+            "subscription_id": "sub-1",
+            "resource_group": "rg-1",
+            "bastion_name": "bast-1"
+        }))
+        .unwrap();
+        assert_pair(&a, "--network-mode", "azure_bastion");
+        assert_pair(&a, "--subscription-id", "sub-1");
+        assert_pair(&a, "--resource-group", "rg-1");
+        assert_pair(&a, "--bastion-name", "bast-1");
+    }
+
+    #[test]
+    fn cloud_connection_descriptor_propagates_aws_profile() {
+        let a = build_cloud_connection_descriptor_args(&json!({
+            "provider": "aws",
+            "id": "i-1",
+            "name": "n",
+            "region": "us-east-1",
+            "aws_profile": "default"
+        }))
+        .unwrap();
+        assert_pair(&a, "--aws-profile", "default");
+    }
+
+    // ── reaper_run_once / status ────────────────────────────────
+
+    #[test]
+    fn reaper_run_once_args_invoke_cloud_reaper_run() {
+        let a = build_reaper_run_once_args(&json!({})).unwrap();
+        assert_eq!(a, vec!["cloud", "reaper", "run", "--format", "json"]);
+    }
+
+    #[test]
+    fn reaper_status_args_invoke_cloud_reaper_status() {
+        let a = build_reaper_status_args(&json!({})).unwrap();
+        assert_eq!(a, vec!["cloud", "reaper", "status", "--format", "json"]);
+    }
+
+    // ── budget_get / set / usage ────────────────────────────────
+
+    #[test]
+    fn budget_get_args_forward_org_to_dash_org_flag() {
+        let a = build_budget_get_args(&json!({ "org_id": "acme" })).unwrap();
+        assert_eq!(a[0], "cloud");
+        assert_eq!(a[1], "budget");
+        assert_eq!(a[2], "get");
+        assert_pair(&a, "--org", "acme");
+    }
+
+    #[test]
+    fn budget_set_args_translate_monthly_cap_cents_to_dash_monthly_cents() {
+        let a = build_budget_set_args(&json!({
+            "org_id": "acme",
+            "monthly_cap_cents": 5000
+        }))
+        .unwrap();
+        assert_pair(&a, "--org", "acme");
+        assert_pair(&a, "--monthly-cents", "5000");
+    }
+
+    #[test]
+    fn budget_set_rejects_zero_cap_cents() {
+        // Cost-guardrail check: a zero cap is a configuration mistake,
+        // not a legitimate "no spend allowed" signal. The CLI itself
+        // also rejects it; we surface a structured SchemaValidation
+        // error rather than spend a subprocess on a typo.
+        let r = build_budget_set_args(&json!({
+            "org_id": "acme",
+            "monthly_cap_cents": 0
+        }));
+        assert!(r.is_err(), "zero cents cap must be rejected");
+        let msg = r.unwrap_err().to_string();
+        assert!(msg.contains("monthly_cap_cents"));
+    }
+
+    #[test]
+    fn budget_set_rejects_missing_cap_cents() {
+        let r = build_budget_set_args(&json!({ "org_id": "acme" }));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn budget_usage_args_forward_org_to_dash_org_flag() {
+        let a = build_budget_usage_args(&json!({ "org_id": "acme" })).unwrap();
+        assert_pair(&a, "--org", "acme");
+    }
+
+    // ── stack_apply / destroy / plan_cost ───────────────────────
+
+    #[test]
+    fn stack_apply_args_emit_vars_as_param_flags() {
+        let a = build_stack_apply_args(&json!({
+            "stack_name": "dev-cluster",
+            "module_path": "./modules/k8s",
+            "vars": { "region": "us-east-1", "node_count": 3 }
+        }))
+        .unwrap();
+        let joined = a.join(" ");
+        assert!(joined.contains("--stack-name dev-cluster"));
+        assert!(joined.contains("--module-path ./modules/k8s"));
+        assert!(joined.contains("--param region=us-east-1"));
+        assert!(joined.contains("--param node_count=3"));
+    }
+
+    #[test]
+    fn stack_apply_requires_stack_name_and_module_path() {
+        // Stack lifecycle is destructive; missing the workspace key
+        // could wipe the wrong stack. Reject early.
+        assert!(build_stack_apply_args(&json!({ "stack_name": "x" })).is_err());
+        assert!(build_stack_apply_args(&json!({ "module_path": "./p" })).is_err());
+    }
+
+    #[test]
+    fn stack_apply_rejects_nested_var_objects() {
+        let r = build_stack_apply_args(&json!({
+            "stack_name": "s",
+            "module_path": "./p",
+            "vars": { "tags": { "team": "ops" } }
+        }));
+        assert!(r.is_err(), "nested var object must be rejected");
+    }
+
+    #[test]
+    fn stack_destroy_args_drop_module_path_from_argv() {
+        // The destroy CLI verb keys the workspace on --stack-name and
+        // does NOT consume --module-path; we accept the field for API
+        // symmetry with apply/plan-cost and silently drop it from argv.
+        let a = build_stack_destroy_args(&json!({
+            "stack_name": "dev-cluster",
+            "module_path": "./modules/k8s"
+        }))
+        .unwrap();
+        assert_pair(&a, "--stack-name", "dev-cluster");
+        assert!(
+            !a.iter().any(|s| s == "--module-path"),
+            "destroy must not forward --module-path (CLI doesn't read it)"
+        );
+    }
+
+    #[test]
+    fn stack_plan_cost_args_carry_vars() {
+        let a = build_stack_plan_cost_args(&json!({
+            "stack_name": "dev-cluster",
+            "module_path": "./modules/k8s",
+            "vars": { "instance_type": "t3.small" }
+        }))
+        .unwrap();
+        assert_eq!(a[0], "stack");
+        assert_eq!(a[1], "plan-cost");
+        let joined = a.join(" ");
+        assert!(joined.contains("--param instance_type=t3.small"));
+    }
+
+    // ── creds_set / get / remove ────────────────────────────────
+
+    #[test]
+    fn creds_set_args_explode_aws_plaintext_to_per_flag_argv() {
+        // The CLI does NOT accept a `--plaintext-json` blob; the
+        // plugin keeps a uniform JSON shape and splits to per-flag
+        // argv here so secrets never round-trip through a JSON-on-
+        // argv encoding.
+        let a = build_creds_set_args(&json!({
+            "org_id": "acme",
+            "backend": "aws",
+            "plaintext_json": {
+                "access_key_id": "AKIA...",
+                "secret_access_key": "wJal...",
+                "session_token": "FQoG..."
+            }
+        }))
+        .unwrap();
+        assert_eq!(a[0], "cloud");
+        assert_eq!(a[1], "creds");
+        assert_eq!(a[2], "set");
+        assert_pair(&a, "--org", "acme");
+        assert_pair(&a, "--backend", "aws");
+        assert_pair(&a, "--access-key-id", "AKIA...");
+        assert_pair(&a, "--secret-access-key", "wJal...");
+        assert_pair(&a, "--session-token", "FQoG...");
+    }
+
+    #[test]
+    fn creds_set_args_explode_azure_plaintext_to_per_flag_argv() {
+        let a = build_creds_set_args(&json!({
+            "org_id": "acme",
+            "backend": "azure",
+            "plaintext_json": {
+                "tenant_id": "t-1",
+                "client_id": "c-1",
+                "client_secret": "s-1"
+            }
+        }))
+        .unwrap();
+        assert_pair(&a, "--backend", "azure");
+        assert_pair(&a, "--tenant-id", "t-1");
+        assert_pair(&a, "--client-id", "c-1");
+        assert_pair(&a, "--client-secret", "s-1");
+    }
+
+    #[test]
+    fn creds_set_omits_aws_session_token_when_absent() {
+        // session_token is the only optional field in the AWS bundle.
+        // Verify the flag is dropped entirely (not pushed empty).
+        let a = build_creds_set_args(&json!({
+            "org_id": "acme",
+            "backend": "aws",
+            "plaintext_json": {
+                "access_key_id": "AKIA...",
+                "secret_access_key": "wJal..."
+            }
+        }))
+        .unwrap();
+        assert!(!a.iter().any(|s| s == "--session-token"));
+    }
+
+    #[test]
+    fn creds_set_rejects_unknown_backend() {
+        let r = build_creds_set_args(&json!({
+            "org_id": "acme",
+            "backend": "gcp",
+            "plaintext_json": {}
+        }));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn creds_set_rejects_aws_bundle_missing_secret_access_key() {
+        let r = build_creds_set_args(&json!({
+            "org_id": "acme",
+            "backend": "aws",
+            "plaintext_json": { "access_key_id": "AKIA..." }
+        }));
+        assert!(r.is_err(), "AWS bundle without secret_access_key must fail");
+        let msg = r.unwrap_err().to_string();
+        // Error message must name the missing field so the operator
+        // knows exactly what to supply.
+        assert!(
+            msg.contains("secret_access_key"),
+            "error must name the missing field; got {:?}",
+            msg
+        );
+    }
+
+    #[test]
+    fn creds_set_rejects_azure_bundle_missing_client_secret() {
+        let r = build_creds_set_args(&json!({
+            "org_id": "acme",
+            "backend": "azure",
+            "plaintext_json": {
+                "tenant_id": "t",
+                "client_id": "c"
+            }
+        }));
+        assert!(r.is_err());
+        let msg = r.unwrap_err().to_string();
+        assert!(msg.contains("client_secret"));
+    }
+
+    #[test]
+    fn creds_get_args_carry_org_and_backend() {
+        let a = build_creds_get_args(&json!({
+            "org_id": "acme",
+            "backend": "aws"
+        }))
+        .unwrap();
+        assert_eq!(a[0], "cloud");
+        assert_eq!(a[1], "creds");
+        assert_eq!(a[2], "get");
+        assert_pair(&a, "--org", "acme");
+        assert_pair(&a, "--backend", "aws");
+    }
+
+    #[test]
+    fn creds_remove_args_carry_org_and_backend() {
+        let a = build_creds_remove_args(&json!({
+            "org_id": "acme",
+            "backend": "azure"
+        }))
+        .unwrap();
+        assert_eq!(a[2], "remove");
+        assert_pair(&a, "--backend", "azure");
     }
 }

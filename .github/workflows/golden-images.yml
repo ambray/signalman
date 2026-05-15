@@ -1,0 +1,308 @@
+# Generated for WS6 wave-3 carve-out #4 — Packer golden-image
+# pipeline. See docs/audit/capability-matrix-2026-05-wave3.md §"4. WS1
+# sub-task 7 — Packer golden images" for the design context.
+#
+# Triggers:
+#   - workflow_dispatch (manual). Lets an operator pick regions /
+#     image_tag / which backends to build.
+#   - schedule (monthly). Refreshes the AMI + managed image against
+#     the latest Canonical Ubuntu 22.04 LTS base so the baked images
+#     don't drift further than ~30 days behind upstream security
+#     patches.
+#
+# Auth gating:
+#   Each job is gated on a single representative secret being set
+#   (AWS_ACCESS_KEY_ID for AWS, AZURE_TENANT_ID for Azure). The job
+#   short-circuits with a friendly message when the secret is absent
+#   so the workflow doesn't fail loudly on a fresh fork — it just
+#   declines to build.
+#
+# Hyper-V is intentionally NOT a job here: GitHub-hosted runners do
+# not provide nested-virtualisation Windows hosts, so the hyperv-iso
+# Packer builder cannot run. Operators build the VHDX locally per
+# `infra/packer/README.md` and upload it themselves.
+
+name: Golden images
+
+on:
+  workflow_dispatch:
+    inputs:
+      regions:
+        description: "AWS regions to build the AMI in (comma-separated; ignored for Azure)."
+        type: string
+        default: "us-east-1"
+      image_tag:
+        description: "Image tag stamped on the AMI / managed-image / manifest. Default is the workflow run sha."
+        type: string
+        default: ""
+      targets:
+        description: "Which backends to build. 'all' = aws + azure."
+        type: choice
+        default: all
+        options:
+          - all
+          - aws
+          - azure
+  schedule:
+    # 03:17 UTC on the 1st of each month — off-peak, off-hour-boundary
+    # so we don't pile onto GitHub's cron herd.
+    - cron: "17 3 1 * *"
+
+# Only one golden-image run at a time. Cancelling in-progress runs is
+# safe because Packer cleans up its temporary instances on SIGINT.
+concurrency:
+  group: golden-images
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── AWS AMI build ─────────────────────────────────────────────
+  build-aws:
+    name: Build AWS AMI
+    runs-on: ubuntu-latest
+    # Gate the job on AWS creds being configured. Forks without
+    # `secrets.AWS_ACCESS_KEY_ID` get a clean skip rather than a
+    # red workflow run. The `targets` input narrows the run when
+    # the operator wants only Azure.
+    if: >-
+      (github.event_name != 'workflow_dispatch' || inputs.targets == 'all' || inputs.targets == 'aws')
+    steps:
+      - name: Check AWS credentials
+        id: check
+        env:
+          HAVE_AWS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID != '' }}
+        run: |
+          if [ "$HAVE_AWS_KEY" != "true" ]; then
+            echo "AWS_ACCESS_KEY_ID is not set; skipping AWS golden-image build."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        if: steps.check.outputs.skip != 'true'
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: steps.check.outputs.skip != 'true'
+
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        if: steps.check.outputs.skip != 'true'
+        with:
+          workspaces: guest -> target
+
+      - name: Install protoc
+        if: steps.check.outputs.skip != 'true'
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "25.x"
+
+      - name: Build Linux guest agent
+        if: steps.check.outputs.skip != 'true'
+        working-directory: guest
+        run: cargo build --release --bin signalman-guest
+
+      - name: Set up Packer
+        if: steps.check.outputs.skip != 'true'
+        uses: hashicorp/setup-packer@main
+        with:
+          version: "1.10.3"
+
+      - name: Resolve image_tag
+        if: steps.check.outputs.skip != 'true'
+        id: tag
+        run: |
+          tag="${{ inputs.image_tag }}"
+          if [ -z "$tag" ]; then
+            tag="$(echo "${{ github.sha }}" | cut -c1-7)"
+          fi
+          echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve regions
+        if: steps.check.outputs.skip != 'true'
+        id: regions
+        run: |
+          # Convert `us-east-1,us-west-2` to HCL list `["us-east-1","us-west-2"]`.
+          raw="${{ inputs.regions }}"
+          if [ -z "$raw" ]; then raw="us-east-1"; fi
+          hcl_list=$(echo "$raw" | awk -F, '{for(i=1;i<=NF;i++){gsub(/ /,"",$i); printf("\"%s\"%s", $i, (i==NF)?"":",")}}')
+          echo "regions=[$hcl_list]" >> "$GITHUB_OUTPUT"
+
+      - name: Write placeholder mTLS root CA
+        if: steps.check.outputs.skip != 'true'
+        # The scaffolding bakes a placeholder so the build succeeds
+        # in CI; production runs must override `mtls_root_ca` via the
+        # operator's real CA bundle. The MTLS_ROOT_CA secret (when
+        # set) replaces the placeholder content.
+        env:
+          MTLS_ROOT_CA: ${{ secrets.MTLS_ROOT_CA }}
+        run: |
+          if [ -n "$MTLS_ROOT_CA" ]; then
+            printf '%s' "$MTLS_ROOT_CA" > infra/packer/aws/placeholder-ca.pem
+          else
+            echo "# placeholder CA — replace via secrets.MTLS_ROOT_CA before any production use" > infra/packer/aws/placeholder-ca.pem
+          fi
+
+      - name: packer init
+        if: steps.check.outputs.skip != 'true'
+        working-directory: infra/packer/aws
+        run: packer init .
+
+      - name: packer validate
+        if: steps.check.outputs.skip != 'true'
+        working-directory: infra/packer/aws
+        run: |
+          packer validate \
+            -var-file=../common/build.pkrvars.hcl \
+            -var 'image_tag=${{ steps.tag.outputs.image_tag }}' \
+            -var 'regions=${{ steps.regions.outputs.regions }}' \
+            -var 'mtls_root_ca=./placeholder-ca.pem' \
+            ami.pkr.hcl
+
+      - name: packer build
+        if: steps.check.outputs.skip != 'true'
+        working-directory: infra/packer/aws
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+        run: |
+          packer build \
+            -var-file=../common/build.pkrvars.hcl \
+            -var 'image_tag=${{ steps.tag.outputs.image_tag }}' \
+            -var 'regions=${{ steps.regions.outputs.regions }}' \
+            -var 'mtls_root_ca=./placeholder-ca.pem' \
+            ami.pkr.hcl
+
+      - name: Upload AMI manifest
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: aws-ami-manifest-${{ steps.tag.outputs.image_tag }}
+          path: infra/packer/aws/manifest.json
+          if-no-files-found: error
+
+  # ── Azure managed image build ─────────────────────────────────
+  build-azure:
+    name: Build Azure managed image
+    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name != 'workflow_dispatch' || inputs.targets == 'all' || inputs.targets == 'azure')
+    steps:
+      - name: Check Azure credentials
+        id: check
+        env:
+          HAVE_AZURE_TENANT: ${{ secrets.AZURE_TENANT_ID != '' }}
+        run: |
+          if [ "$HAVE_AZURE_TENANT" != "true" ]; then
+            echo "AZURE_TENANT_ID is not set; skipping Azure golden-image build."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        if: steps.check.outputs.skip != 'true'
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: steps.check.outputs.skip != 'true'
+
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        if: steps.check.outputs.skip != 'true'
+        with:
+          workspaces: guest -> target
+
+      - name: Install protoc
+        if: steps.check.outputs.skip != 'true'
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          version: "25.x"
+
+      - name: Build Linux guest agent
+        if: steps.check.outputs.skip != 'true'
+        working-directory: guest
+        run: cargo build --release --bin signalman-guest
+
+      - name: Set up Packer
+        if: steps.check.outputs.skip != 'true'
+        uses: hashicorp/setup-packer@main
+        with:
+          version: "1.10.3"
+
+      - name: Resolve image_tag
+        if: steps.check.outputs.skip != 'true'
+        id: tag
+        run: |
+          tag="${{ inputs.image_tag }}"
+          if [ -z "$tag" ]; then
+            tag="$(echo "${{ github.sha }}" | cut -c1-7)"
+          fi
+          echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Write placeholder mTLS root CA
+        if: steps.check.outputs.skip != 'true'
+        env:
+          MTLS_ROOT_CA: ${{ secrets.MTLS_ROOT_CA }}
+        run: |
+          if [ -n "$MTLS_ROOT_CA" ]; then
+            printf '%s' "$MTLS_ROOT_CA" > infra/packer/azure/placeholder-ca.pem
+          else
+            echo "# placeholder CA — replace via secrets.MTLS_ROOT_CA before any production use" > infra/packer/azure/placeholder-ca.pem
+          fi
+
+      - name: packer init
+        if: steps.check.outputs.skip != 'true'
+        working-directory: infra/packer/azure
+        run: packer init .
+
+      - name: packer validate
+        if: steps.check.outputs.skip != 'true'
+        working-directory: infra/packer/azure
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+        run: |
+          packer validate \
+            -var-file=../common/build.pkrvars.hcl \
+            -var 'image_tag=${{ steps.tag.outputs.image_tag }}' \
+            -var "subscription_id=${AZURE_SUBSCRIPTION_ID}" \
+            -var "managed_image_resource_group=${AZURE_RESOURCE_GROUP}" \
+            -var 'mtls_root_ca=./placeholder-ca.pem' \
+            managed-image.pkr.hcl
+
+      - name: packer build
+        if: steps.check.outputs.skip != 'true'
+        working-directory: infra/packer/azure
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+        run: |
+          packer build \
+            -var-file=../common/build.pkrvars.hcl \
+            -var 'image_tag=${{ steps.tag.outputs.image_tag }}' \
+            -var "subscription_id=${AZURE_SUBSCRIPTION_ID}" \
+            -var "tenant_id=${AZURE_TENANT_ID}" \
+            -var "client_id=${AZURE_CLIENT_ID}" \
+            -var "client_secret=${AZURE_CLIENT_SECRET}" \
+            -var "managed_image_resource_group=${AZURE_RESOURCE_GROUP}" \
+            -var 'mtls_root_ca=./placeholder-ca.pem' \
+            managed-image.pkr.hcl
+
+      - name: Upload Azure manifest
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: azure-managed-image-manifest-${{ steps.tag.outputs.image_tag }}
+          path: infra/packer/azure/manifest.json
+          if-no-files-found: error
+
+  # ── Hyper-V — documentation-only ──────────────────────────────
+  # GitHub-hosted runners cannot run Hyper-V (no nested virt on the
+  # Windows images). Operators run `packer build` on a Windows host
+  # with Hyper-V enabled per `infra/packer/README.md`, then upload the
+  # resulting VHDX to whatever blob/share the local backend reads from.
+  # No CI job here on purpose; the README is the source of truth.

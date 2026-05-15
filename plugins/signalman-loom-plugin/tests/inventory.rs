@@ -23,14 +23,17 @@ fn signalman_plugin_initialize_returns_all_mcp_tools() {
     // P5.1 shipped six verbs; P5.4 added `loom.signalman.form_descriptor`
     // for descriptor-backed TUI forms; v0.3.0-1 added
     // `loom.signalman.record_finalize` so the record-then-promote
-    // workflow runs end-to-end through Loom — total eight.
+    // workflow runs end-to-end through Loom — eight scenario-surface
+    // verbs total. v0.3.0-5 sub-task 6 added the 17-handler cloud +
+    // stack + reaper + budget + creds surface, bringing the inventory
+    // to 25.
     //
     // We can't construct a real PluginContext here (it requires concrete
     // services), so we only verify the registration count surface via the
     // public re-export.
     use signalman_loom_plugin::handlers;
     let regs = handlers::all_tool_registrations();
-    assert_eq!(regs.len(), 8);
+    assert_eq!(regs.len(), 25);
     for reg in &regs {
         assert!(
             reg.name.starts_with("loom.signalman."),

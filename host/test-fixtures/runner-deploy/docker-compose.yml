@@ -1,0 +1,46 @@
+# WS6 wave-3 carve-out #3 — runner-deploy integration fixtures.
+#
+# Spins up the minimal external infrastructure the integration tests
+# in `host/src/__tests__/runner-deploy.integration.test.ts` need:
+#
+#   sshd: OpenSSH server on 127.0.0.1:2222 for the SshTransport leg.
+#         Operator (or the CI workflow) generates a throwaway
+#         ed25519 keypair and mounts the public key into
+#         /config/.ssh/authorized_keys; the test harness uses the
+#         matching private key as SSH identity.
+#
+# Run locally:
+#   cd host/test-fixtures/runner-deploy
+#   docker compose up -d
+#   # ... run tests ...
+#   docker compose down
+#
+# The CI workflow at .github/workflows/runner-deploy-integration.yml
+# automates this. The test suite is gated on
+# `SIGNALMAN_INTEGRATION_TESTS=1` AND
+# `SIGNALMAN_INTEGRATION_SSH_IDENTITY=<path>` — set both to activate
+# the SSH leg.
+#
+# Pinned to a specific linuxserver image SHA via tag for
+# reproducibility; bump in lockstep with the workflow.
+
+services:
+  sshd:
+    image: lscr.io/linuxserver/openssh-server:latest
+    container_name: signalman-int-sshd
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - SUDO_ACCESS=true
+      - PASSWORD_ACCESS=false
+      - USER_NAME=root
+      - PUBLIC_KEY_FILE=/config/.ssh/authorized_keys
+    volumes:
+      # Operator (or CI workflow) writes the public key here before
+      # `compose up`. Run scripts/gen-test-key.sh in this dir to
+      # produce a throwaway pair.
+      - ./fixtures/authorized_keys:/config/.ssh/authorized_keys:ro
+    ports:
+      - "127.0.0.1:2222:2222"
+    restart: "no"

@@ -165,14 +165,17 @@ mod tests {
     #[test]
     fn returns_full_identity_when_all_fields_present() {
         let env = envelope_with(&[
-            ("scenario_hash", json!("aa" .repeat(32))),
+            ("scenario_hash", json!("aa".repeat(32))),
             ("vm_lineage_hash", json!("bb".repeat(32))),
             ("agent_version", json!("0.2.1")),
             ("network_class", json!("default-switch")),
         ]);
         let id = extract_hermetic_identity(&env).expect("Some");
         assert_eq!(id["scenario_hash"].as_str(), Some("a".repeat(64).as_str()));
-        assert_eq!(id["vm_lineage_hash"].as_str(), Some("b".repeat(64).as_str()));
+        assert_eq!(
+            id["vm_lineage_hash"].as_str(),
+            Some("b".repeat(64).as_str())
+        );
         assert_eq!(id["agent_version"].as_str(), Some("0.2.1"));
         assert_eq!(id["network_class"].as_str(), Some("default-switch"));
     }
@@ -192,12 +195,13 @@ mod tests {
 
     #[test]
     fn returns_partial_when_lineage_present_but_others_absent() {
-        let env = envelope_with(&[
-            ("vm_lineage_hash", json!("c".repeat(64))),
-        ]);
+        let env = envelope_with(&[("vm_lineage_hash", json!("c".repeat(64)))]);
         let id = extract_hermetic_identity(&env).expect("Some");
         assert!(id["scenario_hash"].is_null());
-        assert_eq!(id["vm_lineage_hash"].as_str(), Some("c".repeat(64).as_str()));
+        assert_eq!(
+            id["vm_lineage_hash"].as_str(),
+            Some("c".repeat(64).as_str())
+        );
         assert!(id["agent_version"].is_null());
         assert!(id["network_class"].is_null());
     }

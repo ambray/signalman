@@ -42,7 +42,7 @@
 //! compact list rows.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::state::RunStatus;
 
@@ -250,9 +250,7 @@ pub fn descriptor_for_scenario(
     let description = scenario_meta
         .description
         .map(str::to_string)
-        .unwrap_or_else(|| {
-            format!("Run Signalman scenario `{}`.", scenario_id)
-        });
+        .unwrap_or_else(|| format!("Run Signalman scenario `{}`.", scenario_id));
 
     let mut fields = Vec::with_capacity(3 + scenario_meta.parameters.len());
 
@@ -277,7 +275,8 @@ pub fn descriptor_for_scenario(
         label: "Requested network class".to_string(),
         help: Some(
             "Operator intent for network isolation. Reserved for P4 \
-             — declared, not enforced today.".to_string(),
+             — declared, not enforced today."
+                .to_string(),
         ),
         kind: FieldKind::Select {
             options: vec![
@@ -331,7 +330,10 @@ pub fn descriptor_for_scenario(
 /// Convert one scenario parameter into a [`FormField`]. Pure helper for
 /// unit testing of kind-hint parsing.
 pub(crate) fn field_for_parameter(p: &ScenarioParameter<'_>) -> FormField {
-    let label = p.label.map(str::to_string).unwrap_or_else(|| p.name.to_string());
+    let label = p
+        .label
+        .map(str::to_string)
+        .unwrap_or_else(|| p.name.to_string());
     let kind = parse_kind_hint(p.kind_hint);
 
     // Secret fields default to `${secret:NAME}` so the saved form value
@@ -360,7 +362,10 @@ fn parse_kind_hint(hint: Option<&str>) -> FieldKind {
     match h {
         "text" | "string" => FieldKind::Text,
         "bool" | "boolean" => FieldKind::Boolean,
-        "number" | "integer" | "int" | "float" => FieldKind::Number { min: None, max: None },
+        "number" | "integer" | "int" | "float" => FieldKind::Number {
+            min: None,
+            max: None,
+        },
         "secret" => FieldKind::Secret,
         other if other.starts_with("select:") => {
             let raw = &other["select:".len()..];
@@ -466,7 +471,13 @@ mod tests {
 
     #[test]
     fn descriptor_id_field_is_required_and_prefilled() {
-        let d = descriptor_for_scenario("scn", &ScenarioMeta { id: "scn", ..Default::default() });
+        let d = descriptor_for_scenario(
+            "scn",
+            &ScenarioMeta {
+                id: "scn",
+                ..Default::default()
+            },
+        );
         let id_field = d.fields.iter().find(|f| f.name == "id").unwrap();
         assert!(id_field.required, "id field must be required");
         assert_eq!(id_field.default.as_ref().unwrap().as_str(), Some("scn"));
@@ -474,7 +485,13 @@ mod tests {
 
     #[test]
     fn descriptor_requested_network_class_select_lists_signalman_enum_values() {
-        let d = descriptor_for_scenario("scn", &ScenarioMeta { id: "scn", ..Default::default() });
+        let d = descriptor_for_scenario(
+            "scn",
+            &ScenarioMeta {
+                id: "scn",
+                ..Default::default()
+            },
+        );
         let nc = d
             .fields
             .iter()
@@ -482,25 +499,28 @@ mod tests {
             .unwrap();
         match &nc.kind {
             FieldKind::Select { options } => {
-                let vals: Vec<&str> = options
-                    .iter()
-                    .filter_map(|o| o.value.as_str())
-                    .collect();
+                let vals: Vec<&str> = options.iter().filter_map(|o| o.value.as_str()).collect();
                 assert_eq!(vals, vec!["isolated", "nat", "internet"]);
             }
-            other => panic!(
-                "requested_network_class must be a Select, got {:?}",
-                other
-            ),
+            other => panic!("requested_network_class must be a Select, got {:?}", other),
         }
     }
 
     #[test]
     fn descriptor_trace_id_is_optional_with_traceid_validator() {
-        let d = descriptor_for_scenario("scn", &ScenarioMeta { id: "scn", ..Default::default() });
+        let d = descriptor_for_scenario(
+            "scn",
+            &ScenarioMeta {
+                id: "scn",
+                ..Default::default()
+            },
+        );
         let t = d.fields.iter().find(|f| f.name == "trace_id").unwrap();
         assert!(!t.required);
-        assert!(t.validators.iter().any(|v| matches!(v, FieldValidator::TraceId)));
+        assert!(t
+            .validators
+            .iter()
+            .any(|v| matches!(v, FieldValidator::TraceId)));
     }
 
     #[test]
@@ -584,14 +604,26 @@ mod tests {
         assert_eq!(vm.label, "Target VM");
         assert_eq!(vm.help.as_deref(), Some("VM template name"));
 
-        let verbose = d.fields.iter().find(|f| f.name == "parameters.verbose").unwrap();
+        let verbose = d
+            .fields
+            .iter()
+            .find(|f| f.name == "parameters.verbose")
+            .unwrap();
         assert!(matches!(verbose.kind, FieldKind::Boolean));
         assert_eq!(verbose.label, "verbose"); // falls back to name when label is None
 
-        let count = d.fields.iter().find(|f| f.name == "parameters.count").unwrap();
+        let count = d
+            .fields
+            .iter()
+            .find(|f| f.name == "parameters.count")
+            .unwrap();
         assert!(matches!(count.kind, FieldKind::Number { .. }));
 
-        let tier = d.fields.iter().find(|f| f.name == "parameters.tier").unwrap();
+        let tier = d
+            .fields
+            .iter()
+            .find(|f| f.name == "parameters.tier")
+            .unwrap();
         match &tier.kind {
             FieldKind::Select { options } => {
                 let labels: Vec<&str> = options.iter().map(|o| o.label.as_str()).collect();
@@ -600,7 +632,11 @@ mod tests {
             other => panic!("tier must be Select, got {:?}", other),
         }
 
-        let api_key = d.fields.iter().find(|f| f.name == "parameters.api_key").unwrap();
+        let api_key = d
+            .fields
+            .iter()
+            .find(|f| f.name == "parameters.api_key")
+            .unwrap();
         assert!(matches!(api_key.kind, FieldKind::Secret));
         // No default supplied => synthesise the ${secret:NAME} placeholder.
         assert_eq!(
@@ -613,7 +649,13 @@ mod tests {
     fn descriptor_required_only_form_omits_optional_field_metadata() {
         // Required-fields-only baseline: just the id; no parameters; no
         // human metadata. The TUI should still render a usable form.
-        let d = descriptor_for_scenario("scn", &ScenarioMeta { id: "scn", ..Default::default() });
+        let d = descriptor_for_scenario(
+            "scn",
+            &ScenarioMeta {
+                id: "scn",
+                ..Default::default()
+            },
+        );
         assert_eq!(d.label, "scn"); // falls back to id
         assert!(d.description.contains("scn"));
         // Three baseline fields, in stable order.
@@ -658,10 +700,7 @@ mod tests {
         match parse_kind_hint(Some("select:a|b|c")) {
             FieldKind::Select { options } => {
                 assert_eq!(options.len(), 3);
-                let vals: Vec<&str> = options
-                    .iter()
-                    .filter_map(|o| o.value.as_str())
-                    .collect();
+                let vals: Vec<&str> = options.iter().filter_map(|o| o.value.as_str()).collect();
                 assert_eq!(vals, vec!["a", "b", "c"]);
             }
             other => panic!("expected Select, got {:?}", other),
@@ -672,7 +711,13 @@ mod tests {
     fn descriptor_serialises_with_stable_kind_tags() {
         // The wire format must use the discriminator `kind` so a future
         // Loom FormField type can deserialise it without a custom parser.
-        let d = descriptor_for_scenario("scn", &ScenarioMeta { id: "scn", ..Default::default() });
+        let d = descriptor_for_scenario(
+            "scn",
+            &ScenarioMeta {
+                id: "scn",
+                ..Default::default()
+            },
+        );
         let v = serde_json::to_value(&d).unwrap();
         let fields = v.get("fields").and_then(Value::as_array).unwrap();
         // requested_network_class is a Select; expect kind: "select" and options[].
@@ -754,7 +799,11 @@ mod tests {
             failed_finished_badge().glyph,
         ];
         for g in glyphs {
-            assert!(g.is_ascii_graphic(), "glyph '{}' must be printable ASCII", g);
+            assert!(
+                g.is_ascii_graphic(),
+                "glyph '{}' must be printable ASCII",
+                g
+            );
         }
         let mut seen = std::collections::HashSet::new();
         for g in glyphs {

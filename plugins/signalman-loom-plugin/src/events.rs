@@ -45,8 +45,8 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -346,10 +346,7 @@ impl MockEventSink {
 
 impl EventSink for MockEventSink {
     fn publish(&self, event: EmittedEvent) {
-        self.events
-            .lock()
-            .expect("mock sink poisoned")
-            .push(event);
+        self.events.lock().expect("mock sink poisoned").push(event);
     }
 }
 
@@ -534,20 +531,10 @@ mod tests {
                 { "seq": 6, "type": "run.finished", "result": "fail" },
             ]
         });
-        let n = emit_envelope_events(
-            &emitter,
-            "run-1",
-            &envelope,
-            Some("trace-xyz"),
-            Some("scn"),
-        );
+        let n = emit_envelope_events(&emitter, "run-1", &envelope, Some("trace-xyz"), Some("scn"));
         assert_eq!(n, 5, "5 of 7 envelope events must be promoted");
 
-        let kinds: Vec<String> = mock
-            .published()
-            .iter()
-            .map(|e| e.kind.clone())
-            .collect();
+        let kinds: Vec<String> = mock.published().iter().map(|e| e.kind.clone()).collect();
         assert_eq!(
             kinds,
             vec![
@@ -575,7 +562,13 @@ mod tests {
         );
         // Events field is the wrong type → 0 emissions, no panic.
         assert_eq!(
-            emit_envelope_events(&emitter, "r", &json!({ "events": "not-an-array" }), None, None),
+            emit_envelope_events(
+                &emitter,
+                "r",
+                &json!({ "events": "not-an-array" }),
+                None,
+                None
+            ),
             0
         );
         // Event without `type` is silently skipped.
@@ -595,14 +588,7 @@ mod tests {
         // Defensive: NoopEventSink must compile and accept publishes
         // without doing anything.
         let emitter = EventEmitter::noop();
-        emit_run_event(
-            &emitter,
-            "r",
-            RunEventKind::Lost,
-            json!({}),
-            None,
-            None,
-        );
+        emit_run_event(&emitter, "r", RunEventKind::Lost, json!({}), None, None);
         // No assertion possible (sink discards); the test asserts the
         // call doesn't panic.
     }

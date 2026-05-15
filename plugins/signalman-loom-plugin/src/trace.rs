@@ -54,7 +54,9 @@ mod tests {
     fn new_trace_id_is_32_lowercase_hex() {
         let t = new_trace_id();
         assert_eq!(t.len(), TRACE_ID_LENGTH);
-        assert!(t.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(t
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     #[test]

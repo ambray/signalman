@@ -14,7 +14,7 @@
 //!     that future Signalman versions may add (per ROADMAP §"Hermetic
 //!     envelope (staged)").
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 // ── list ──────────────────────────────────────────────────────────
 
@@ -631,7 +631,11 @@ mod tests {
         let req = |s: Value| -> Vec<String> {
             s.get("required")
                 .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         assert_eq!(req(list_input()), Vec::<String>::new());

@@ -191,9 +191,12 @@ mod tests {
         // v0.3.0-1 added `loom.signalman.record_finalize` so the full
         // record-then-promote workflow runs through Loom without
         // dropping to direct CLI for the finalize step.
+        // v0.3.0-5 sub-task 6 added the 17-handler cloud + stack +
+        // reaper + budget + creds surface.
         let regs = handlers::all_tool_registrations();
         let names: Vec<&str> = regs.iter().map(|r| r.name.as_str()).collect();
         for expected in &[
+            // v0.1.0 + v0.3.0-1 scenario surface (8)
             "loom.signalman.list",
             "loom.signalman.describe",
             "loom.signalman.plan",
@@ -202,6 +205,28 @@ mod tests {
             "loom.signalman.record",
             "loom.signalman.record_finalize",
             "loom.signalman.form_descriptor",
+            // v0.3.0-5 cloud VM surface (6)
+            "loom.signalman.cloud_provision",
+            "loom.signalman.cloud_terminate",
+            "loom.signalman.cloud_status",
+            "loom.signalman.cloud_list",
+            "loom.signalman.cloud_backends",
+            "loom.signalman.cloud_connection_descriptor",
+            // v0.3.0-5 reaper (2)
+            "loom.signalman.reaper_run_once",
+            "loom.signalman.reaper_status",
+            // v0.3.0-5 cost guardrails (3)
+            "loom.signalman.budget_get",
+            "loom.signalman.budget_set",
+            "loom.signalman.budget_usage",
+            // v0.3.0-5 stack lifecycle (3)
+            "loom.signalman.stack_apply",
+            "loom.signalman.stack_destroy",
+            "loom.signalman.stack_plan_cost",
+            // v0.3.0-5 credentials (3)
+            "loom.signalman.creds_set",
+            "loom.signalman.creds_get",
+            "loom.signalman.creds_remove",
         ] {
             assert!(
                 names.contains(expected),
@@ -211,8 +236,8 @@ mod tests {
         }
         assert_eq!(
             regs.len(),
-            8,
-            "exactly eight verbs registered (six core + form_descriptor + record_finalize)"
+            25,
+            "exactly 25 verbs registered (8 scenario + 17 cloud surface)"
         );
     }
 }

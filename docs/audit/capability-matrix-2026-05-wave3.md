@@ -1,31 +1,37 @@
 # Capability matrix — 2026-05 Wave 3 (post-WS6-closeout)
 
-**Scope**: every capability shipped to `main`. **Updated to HEAD `678a44b`** after the wave-3 carve-out batch (#1 + #2 + #5) closed three of the nine items in the recommended-sequence list.
+**Scope**: every capability shipped to `main`. **Updated through batch 2** of the wave-3 carve-out closure work. Six of nine items now closed; the remaining three are blocked on external environments.
 
-Prior HEAD reference: `82506a1` (post-M9). The wave-3 carve-out batch ships:
-- **`678a44b`** — cloud_vm install-bundle + cloud rollback + SSM/Bastion dialers (closes #1, #2, #5)
+HEAD progression:
+- `82506a1` — post-M9 (WS6 complete; wave-3 doc baseline)
+- `678a44b` — wave-3 carve-out batch 1: cloud_vm install-bundle + cloud rollback + SSM/Bastion dialers (#1, #2, #5)
+- Batch 2 (this round): M9 integration scaffolding + Packer golden-image scaffolding + Loom plugin cloud handlers (#3, #4, #6) — about to land in a single batch commit.
 
 **Relationship to prior audits**:
 - **Wave 1** (`docs/audit/capability-matrix-2026-05.md`, anchored at `558e0ed`) — the original WS6 milestone-0 audit. Preserved as historical record.
 - **Wave 2** (`docs/audit/capability-matrix-2026-05-wave2.md`, anchored at `9f418b8`) — written between Wave A/B merges and the M5-M9 work. Preserved as historical record. The "What's left for the next round" section there is superseded by this doc's deferral list.
 - **Wave 3 (this doc)** is the canonical post-WS6 state and the single source of truth for "what's left."
 
-## Top-line counts (Wave 2 → Wave 3 → carve-out batch)
+## Top-line counts (Wave 2 → Wave 3 → carve-out batch 1 → carve-out batch 2)
 
-| | Wave 2 (`9f418b8`) | Wave 3 (`82506a1`) | + carve-out (`678a44b`) |
-|---|---|---|---|
-| MCP tools registered | 69 | 72 | **72** |
-| CLI top-level verbs | 23+ | 24+ | **24+** |
-| Skill files | 39 | 42 | **42** |
-| TargetKind enum values | 6 | 8 | **8** |
-| Migrations | 12 | 14 | **14** |
-| `host/src/__tests__/*.test.ts` files | 134 | 139 | **140** (+ `cloud-dialers`) |
-| Host tests passing | 2587 + 3 skipped | 2716 + 3 skipped | **2751 + 3 skipped** |
-| Lines coverage | 84.29% | 84.55% | **~84.7%** |
-| Branches coverage | 82.28% | 82.62% | **~82.7%** |
-| Functions coverage | 88.19% | 88.32% | **~88.4%** |
-| Registry tests passing | (separate config) | 107 / 107 | **107 / 107** |
-| Cloud dialer module | — | — | **5 files / 23 tests** |
+| | Wave 2 (`9f418b8`) | Wave 3 (`82506a1`) | Batch 1 (`678a44b`) | Batch 2 (this round) |
+|---|---|---|---|---|
+| MCP tools registered (host) | 69 | 72 | 72 | **72** |
+| Loom plugin handlers | 5 | 5 | 5 | **25** (+17 cloud) |
+| CLI top-level verbs | 23+ | 24+ | 24+ | **24+** |
+| Skill files | 39 | 42 | 42 | **42** |
+| TargetKind enum values | 6 | 8 | 8 | **8** |
+| Migrations | 12 | 14 | 14 | **14** |
+| `host/src/__tests__/*.test.ts` files | 134 | 139 | 140 | **142** (+ integration + packer-templates) |
+| Host tests passing | 2587 + 3 skipped | 2716 + 3 skipped | 2751 + 3 skipped | **2761 + 8 skipped** |
+| Plugin (Rust) tests passing | n/a | n/a | n/a | **201** (was 168 — +33 cloud handler unit tests) |
+| Lines coverage | 84.29% | 84.55% | ~84.7% | **~84.7%** |
+| Branches coverage | 82.28% | 82.62% | ~82.7% | **~82.7%** |
+| Functions coverage | 88.19% | 88.32% | ~88.4% | **~88.4%** |
+| Registry tests passing | (separate config) | 107 / 107 | 107 / 107 | **107 / 107** |
+| Cloud dialer module | — | — | 5 files / 23 tests | **5 files / 23 tests** |
+| Packer templates | — | — | — | **4 HCL files + 1 workflow + 1 sanity test (9 tests)** |
+| M9 integration scaffolding | — | — | — | **1 test file + compose + 1 workflow** |
 
 All four host gates above 80 / 70 / 80 / 80 threshold.
 
@@ -60,7 +66,10 @@ All four host gates above 80 / 70 / 80 / 80 threshold.
 
 This is the operator's working list. Items are ordered by **recommended sequence**: what unblocks the most downstream work first, then tooling-readiness, then size.
 
-**Closure tracker (`678a44b`)**: ✅ #1 (M8 cloud_vm install-bundle), ✅ #2 (M8 cloud rollback), ✅ #5 (SSM/Bastion tunneling dialers) all shipped in the wave-3 carve-out batch. Remaining: #3, #4, #6, #7, #8, #9.
+**Closure tracker**:
+- Batch 1 (`678a44b`): ✅ #1 (M8 cloud_vm install-bundle), ✅ #2 (M8 cloud rollback), ✅ #5 (SSM/Bastion tunneling dialers).
+- Batch 2 (parallel-agent batch): ✅ #3 (M9 integration test scaffolding), ✅ #4 (Packer golden-image scaffolding), ✅ #6 (Loom plugin Rust handlers).
+- **Remaining: #7, #8, #9 only.** All three are genuinely blocked on external environments (real Mac dev host / live scenario run on vmrun.ts / WS5 scope re-open).
 
 > Symbol legend:
 > ✅ **Done** — shipped to main.
@@ -89,43 +98,34 @@ Edge cases tested: no active deployment refuses; one-deploy-only refuses; explic
 
 **Operator surface**: `signalman release rollback --target <cloud-target>` now works without falling back to the manual "redeploy the prior release" pattern. The old pattern still works for explicit version pinning (via `--release`).
 
-### 3. M9 transports — live integration tests 🚧 🔄
+### 3. ✅ M9 transports — live integration test scaffolding — **CLOSED (scaffolding shipped)**
 
-**What's there now**: M9's five transports (script / ssh / winrm / docker / cloud) ship with 45 unit tests that pin every command shape, but no live integration tests against real SSH/WinRM/Docker/cloud targets.
+Shipped scaffolding (an operator with a CI lane + cloud creds runs the tests; they're skipped by default):
 
-**What's missing**: An integration-test lane that runs:
-- The script transport's emitted bash against a Linux container.
-- The ssh transport against a sshd container.
-- The winrm transport against a WSL-hosted or container'd Windows target.
-- The docker transport against a local daemon.
-- The cloud transport against AWS / Azure (gated on credentials).
+- `host/src/__tests__/runner-deploy.integration.test.ts` — 6 tests gated on `SIGNALMAN_INTEGRATION_TESTS=1`. Default `npx vitest run` skips them; activating the env var runs the script/ssh/docker/cloud legs. WinRM is documentation-only (operator-driven against a real Windows host).
+- `host/test-fixtures/runner-deploy/docker-compose.yml` — sshd fixture (linuxserver/openssh-server on 127.0.0.1:2222). Throwaway keys live under `fixtures/` (gitignored).
+- `host/test-fixtures/runner-deploy/README.md` — operator-side env-var checklist for each transport leg.
+- `.github/workflows/runner-deploy-integration.yaml` — runs on workflow_dispatch + weekly schedule + PRs touching the runner-deploy surface. Cloud leg gated on `vars.SIGNALMAN_HAS_CLOUD_CREDS == 'true'` + secrets being present.
 
-**Entry points**: `host/src/__tests__/runner-deploy.test.ts` (unit tests live here; a new `host/src/__tests__/runner-deploy.integration.test.ts` would mirror the pattern). The CI lane would need a `.github/workflows/runner-deploy-integration.yml` or similar.
+**Live testing remains operator-driven**: this commit ships the harness; the operator activates it by adding GitHub secrets + setting the env vars. The cloud-transport leg is double-gated (creds + `SIGNALMAN_INTEGRATION_CLOUD_OPT_IN=1`) because it provisions real VMs that cost real money.
 
-**Size**: setup-heavy, code-light. The transports are operator-driven today, so this is a CI/operational confidence pass, not a code change.
+🚧 **Remaining precondition for actual execution**: AWS / Azure secrets + a runner with Docker for the sshd container. Until then the workflow exists, validates syntactically, but the cloud leg self-skips.
 
-**Why third**: locks in M9's contract before any downstream consumer (auto-provisioning operator workflows) takes a hard dependency on the surface.
+### 4. ✅ WS1 sub-task 7 — Packer golden-image scaffolding — **CLOSED (scaffolding shipped)**
 
-🚧 **Precondition**: a CI lane with credentials for AWS + Azure for the cloud-transport tests. Each non-cloud transport tests against a container so its precondition is just Docker-in-CI.
+Shipped scaffolding (an operator with cloud creds runs the workflow; HCL is hand-validated against Packer 1.10+ syntax):
 
-### 4. WS1 sub-task 7 — Packer golden images 🚧 🆕
+- `infra/packer/aws/ami.pkr.hcl` — `amazon-ebs` builder; per-region AMI build (Ubuntu 22.04); guest-agent baked in as a systemd unit; manifest post-processor emits AMI ids.
+- `infra/packer/azure/managed-image.pkr.hcl` — `azure-arm` builder; per-region managed image; same provisioner shape.
+- `infra/packer/hyperv/vhdx.pkr.hcl` — Windows Server 2022 base; operator-driven (no nested-virt on GitHub-hosted runners; documented).
+- `infra/packer/common/build.pkrvars.hcl` — shared variables (`agent_version`, `image_tag`, etc.) with sensible defaults.
+- `infra/packer/README.md` — operator setup: required toolchain, secret list, manifest-id consumption flow back into `signalman cloud provision --image-ref`.
+- `.github/workflows/golden-images.yml` — runs on workflow_dispatch + monthly schedule; AWS + Azure lanes gated on creds being present; Hyper-V is doc-only.
+- `host/src/__tests__/packer-templates.test.ts` — 9 sanity tests asserting the HCL files reference the expected sources, that the workflow references the expected secrets, and that the Hyper-V build is correctly excluded from CI.
 
-**What's there now**: WS1 shipped sub-tasks 5/6/8 (cost-guardrails, networking, credentials, CLI parity). Sub-task 7 (Packer-built golden images — VHDX + AMI + Azure managed image in lockstep) is the remaining WS1 deliverable.
+**Live builds remain operator-driven**: this commit ships the templates + workflow. The operator activates by adding `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (or the Azure equivalents) + optionally `MTLS_ROOT_CA` to repo secrets, then triggers `workflow_dispatch`.
 
-**What's missing**: A Packer-based image build pipeline that produces:
-- A Hyper-V VHDX image for the local backend.
-- An AWS AMI per region for the AwsBackend.
-- An Azure managed image per region for the AzureBackend.
-
-All three in lockstep so the same scenario can pin a single Signalman image-ref and have it resolve correctly on any backend.
-
-**Entry points**:
-- Existing: `.workstream-status.md` §"Sub-task 7" + `docs/workstreams/PLAN.md` (the original sub-task plan).
-- Greenfield: `infra/packer/` or similar (no existing tree).
-
-**Size**: multi-day. Includes Packer templates, post-build artifact upload to AWS + Azure, image-id tagging for cross-backend lookup, and a CI lane that runs the build periodically (or on demand).
-
-**Why fourth**: 🚧 **Precondition**: Packer binary + AWS + Azure credentials in a CI lane. Until those are available, this can't start.
+🚧 **Remaining precondition for actual execution**: Packer-capable runner + cloud secrets + a per-region build matrix decision (currently sequential list-var, not cross-region copy). All flagged in the README's "Known limitations".
 
 ### 5. ✅ WS1 SSM / Bastion tunneling dialers — **CLOSED in `678a44b`**
 
@@ -149,26 +149,30 @@ Tests: 23 in `cloud-dialers.test.ts` + 2 new dialed-tunnel integration tests in 
 
 **Operator surface**: set `network_mode: "aws_ssm"` (or `azure_bastion` + tunnel_options) on a `cloud_vm` target's connection JSON, then `signalman release deploy` just works.
 
-### 6. WS1 Loom plugin handlers (Rust) 🚧 🆕
+### 6. ✅ WS1 Loom plugin handlers (Rust) — **CLOSED**
 
-**What's there now**: The Loom plugin skeleton crate exists at `plugins/signalman-loom-plugin/` with handlers.rs / events.rs / forms.rs / etc. — but no `cloud_*` / `reaper_*` / `budget_*` / `stack_*` handlers wired through.
+Shipped: 17 new Loom-namespaced MCP handlers in `plugins/signalman-loom-plugin/src/handlers.rs`. Each follows the existing `register_X` / `build_X_args` / `handle_X` pattern and shells out via `run_signalman` (already on the subprocess allowlist; no new Cargo deps).
 
-**What's missing**: Loom plugin handlers for the v0.3.0-5 sub-task 4/5/6/8 surface:
-- `loom.signalman.cloud_provision` / `_terminate` / `_status` / `_list`
-- `loom.signalman.reaper_run_once` / `_status`
-- `loom.signalman.budget_get` / `_set` / `_usage`
-- `loom.signalman.stack_apply` / `_destroy` / `_plan_cost`
-- `loom.signalman.creds_set` / `_get` / `_remove`
+Surface:
+- `loom.signalman.cloud_provision` / `_terminate` / `_status` / `_list` / `_backends` / `_connection_descriptor` (6)
+- `loom.signalman.reaper_run_once` / `_status` (2)
+- `loom.signalman.budget_get` / `_set` / `_usage` (3)
+- `loom.signalman.stack_apply` / `_destroy` / `_plan_cost` (3)
+- `loom.signalman.creds_set` / `_get` / `_remove` (3)
 
-Each handler shells out to (or reimplements) the host's equivalent MCP tool over the Signalman host's HTTP control plane.
+Total handler count: 5 existing (list/describe/plan/run/status) + 8 mid-WS6 additions + **17 new** = **25 handlers** registered. `tests/inventory.rs` + the registration test in `lib.rs` both updated.
 
-**Entry points**:
-- `plugins/signalman-loom-plugin/src/handlers.rs` — extend.
-- `plugins/signalman-loom-plugin/Cargo.toml` — likely needs AWS/Azure SDK Rust deps (or reqwest if delegating to the host's HTTP layer).
+Tests: 33 new unit tests in `mod tests` of `handlers.rs` (target was ~20; agent shipped overcoverage including 4 reject-malformed-input cases for the trickier creds / budget / stack verbs). All 201 plugin tests pass (`cargo test`); `cargo check` + `cargo clippy --all-targets --no-deps` clean.
 
-**Size**: large. Rust + multi-vendor + plugin SDK + tests.
+Plus an incidental `cargo fmt --all` cleanup pass over the plugin tree — the plugin had pre-existing fmt drift (events.rs, forms.rs, etc.) that wasn't enforced by CI. Bundled with this commit; +254 lines of pure formatting are NOT new logic.
 
-**Why sixth**: 🚧 **Precondition**: a Rust-focused session (current environment is TypeScript-primary). Surfaces a separate operator path (Loom workflows) but doesn't unblock TypeScript-side work.
+**Operator surface**: Loom workflows now drive every operator-facing cloud verb through the plugin's namespaced MCP tool. The architecture diagram showing Signalman exposing cloud capability through Loom is now true end-to-end.
+
+**Deliberate JSON ↔ argv translations** (documented in commit + handler doc comments):
+- `org_id` (JSON) → `--org` (CLI) for budget + creds
+- `monthly_cap_cents` (JSON) → `--monthly-cents` (CLI) — validated `> 0` at the plugin layer
+- `plaintext_json` object (JSON) → split per-backend argv flags (`--access-key-id` etc.) — plaintext NEVER appears on argv in stable form
+- `stack_destroy --module-path`: required in JSON for symmetry, silently dropped from argv (CLI keys destroy on stack-name only)
 
 ### 7. WS4 macOS UI automation parity 🚧 🆕
 
