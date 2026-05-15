@@ -1,27 +1,31 @@
 # Capability matrix — 2026-05 Wave 3 (post-WS6-closeout)
 
-**Scope**: every capability shipped to `main` at HEAD `82506a1` — the consolidated state after WS6 closed M5 (audit log surface), M6 (P0 micro-skills), M7 (WS3↔WS2 health-gate), M8 (cloud_vm + cloud_stack target kinds), and M9 (runner deploy multi-transport).
+**Scope**: every capability shipped to `main`. **Updated to HEAD `678a44b`** after the wave-3 carve-out batch (#1 + #2 + #5) closed three of the nine items in the recommended-sequence list.
+
+Prior HEAD reference: `82506a1` (post-M9). The wave-3 carve-out batch ships:
+- **`678a44b`** — cloud_vm install-bundle + cloud rollback + SSM/Bastion dialers (closes #1, #2, #5)
 
 **Relationship to prior audits**:
 - **Wave 1** (`docs/audit/capability-matrix-2026-05.md`, anchored at `558e0ed`) — the original WS6 milestone-0 audit. Preserved as historical record.
 - **Wave 2** (`docs/audit/capability-matrix-2026-05-wave2.md`, anchored at `9f418b8`) — written between Wave A/B merges and the M5-M9 work. Preserved as historical record. The "What's left for the next round" section there is superseded by this doc's deferral list.
 - **Wave 3 (this doc)** is the canonical post-WS6 state and the single source of truth for "what's left."
 
-## Top-line counts (Wave 2 → Wave 3)
+## Top-line counts (Wave 2 → Wave 3 → carve-out batch)
 
-| | Wave 2 (`9f418b8`) | Wave 3 (`82506a1`) |
-|---|---|---|
-| MCP tools registered | 69 | **72** (+`signalman_audit_query/_append/_runner_deploy`) |
-| CLI top-level verbs | 23+ | **24+** (+`signalman audit`) |
-| Skill files | 39 | **42** (+`signalman-query-audit-log` / `signalman-deploy-to-cloud` / `signalman-deploy-runner`) |
-| TargetKind enum values | 6 | **8** (+`cloud_vm`, `cloud_stack`) |
-| Migrations | 12 | **14** (+`0071_promotion_health_gate`, `0072_target_kind_cloud.{sqlite,pg}.sql`) |
-| `host/src/__tests__/*.test.ts` files | 134 | **139** |
-| Host tests passing | 2587 + 3 skipped | **2716 + 3 skipped** |
-| Lines coverage | 84.29% | **84.55%** |
-| Branches coverage | 82.28% | **82.62%** |
-| Functions coverage | 88.19% | **88.32%** |
-| Registry tests passing | (separate config) | **107 / 107** |
+| | Wave 2 (`9f418b8`) | Wave 3 (`82506a1`) | + carve-out (`678a44b`) |
+|---|---|---|---|
+| MCP tools registered | 69 | 72 | **72** |
+| CLI top-level verbs | 23+ | 24+ | **24+** |
+| Skill files | 39 | 42 | **42** |
+| TargetKind enum values | 6 | 8 | **8** |
+| Migrations | 12 | 14 | **14** |
+| `host/src/__tests__/*.test.ts` files | 134 | 139 | **140** (+ `cloud-dialers`) |
+| Host tests passing | 2587 + 3 skipped | 2716 + 3 skipped | **2751 + 3 skipped** |
+| Lines coverage | 84.29% | 84.55% | **~84.7%** |
+| Branches coverage | 82.28% | 82.62% | **~82.7%** |
+| Functions coverage | 88.19% | 88.32% | **~88.4%** |
+| Registry tests passing | (separate config) | 107 / 107 | **107 / 107** |
+| Cloud dialer module | — | — | **5 files / 23 tests** |
 
 All four host gates above 80 / 70 / 80 / 80 threshold.
 
@@ -56,40 +60,34 @@ All four host gates above 80 / 70 / 80 / 80 threshold.
 
 This is the operator's working list. Items are ordered by **recommended sequence**: what unblocks the most downstream work first, then tooling-readiness, then size.
 
+**Closure tracker (`678a44b`)**: ✅ #1 (M8 cloud_vm install-bundle), ✅ #2 (M8 cloud rollback), ✅ #5 (SSM/Bastion tunneling dialers) all shipped in the wave-3 carve-out batch. Remaining: #3, #4, #6, #7, #8, #9.
+
 > Symbol legend:
+> ✅ **Done** — shipped to main.
 > 🚧 **Blocking** — has a precondition that must be met before the work can even start.
 > ⚡ **Quick win** — small scope, no external deps, can be picked off in a single session.
 > 🔄 **In-place follow-up** — extends an existing surface; risk surface is well-understood.
 > 🆕 **New surface** — adds capability that doesn't exist today; design surface is wider.
 
-### 1. M8 cloud_vm install-bundle integration ⚡ 🔄
+### 1. ✅ M8 cloud_vm install-bundle integration — **CLOSED in `678a44b`**
 
-**What's there now**: M8 ships cloud_vm deploy as reachability-probe + Deployment row. The VM is verified-reachable but Signalman doesn't actually install the release artifact onto it; operators wire that themselves via cloud-init / userdata / post-deploy hooks.
+Shipped: targets gain an optional `install_bundle_path` connection field. When set, the executor parses the YAML, builds a `GuestAgentClient` over the dial address, and runs `installBundle` after reachability passes. Per-package health checks (`install:<pkg>`) surface in `signalman_health_history`; install failures mark the deployment failed with the underlying error.
 
-**What's missing**: Wire `host/src/provisioning/install-bundle.ts` into `runCloudVmReleaseDeploy` so after reachability passes, the executor pulls the release artifact, builds a `GuestAgentClient` over the cloud IP, and runs the install-bundle DAG (same code path as `vm_test`/`vm_demo`).
+Injectable `installBundleInvoker` for tests; production wires through `installBundle` from `host/src/provisioning/install-bundle.ts`.
 
-**Entry points**:
-- `host/src/verbs/control-plane.ts` → `runCloudVmReleaseDeploy` (line ~1670, after the reachability probe)
-- `host/src/provisioning/install-bundle.ts` (the bundle DAG executor)
-- `host/src/guest/client.ts` → `GuestAgentClient` constructor
+4 new tests in `host/src/__tests__/cloud-deploy.test.ts` cover: happy path with per-package checks; failure marks deployment failed; absent path = today's behaviour; malformed YAML throws.
 
-**Size**: ~150-250 LOC + a few tests. Closest existing analogue: how the VM-backed `runDeploy` calls install steps via the hypervisor backend.
+**Operator surface**: add `install_bundle_path: "/abs/path/to/bundle.yaml"` to a `cloud_vm` target's connection JSON. The path is resolved on the operator's host (NOT the cloud VM); bundle source fields (e.g. `direct` artifacts) are still fetched by the guest agent on the remote.
 
-**Why first**: smallest new code; closes the "what does cloud_vm deploy actually DO" question that the M8 deferral message points at. No external tooling deps.
+### 2. ✅ M8 cloud rollback (cloud_vm + cloud_stack) — **CLOSED in `678a44b`**
 
-### 2. M8 cloud rollback (cloud_vm + cloud_stack) ⚡ 🔄
+Shipped: new `runCloudReleaseRollback` resolves the prior-active deployment for the target and re-runs the deploy path against that older release. Works identically for both kinds because both dispatch through `runCloudReleaseDeploy`.
 
-**What's there now**: M8 deploy adapter is fully wired; rollback is explicitly refused with an operator-facing pointer ("redeploy the prior release with `signalman release deploy --release <prior-id>`").
+Audit-log marker: `release.rollback.started` / `_completed` / `_failed` entries WRAP the inner `release.deploy.*` entries so operators can distinguish "I asked for rollback" from "I asked for deploy of release N (which happens to be older)."
 
-**What's missing**: Symmetric rollback paths. For `cloud_stack`, this is mostly "re-apply with the prior release's vars" (functionally identical to `release deploy --release <prior>`, but operators expect `release rollback` to work). For `cloud_vm`, depends on item #1 above — rollback = redeploy the prior release artifact onto the same instance.
+Edge cases tested: no active deployment refuses; one-deploy-only refuses; explicit `toReleaseId` pins; rollback failures emit `release.rollback.failed`. 6 new tests.
 
-**Entry points**:
-- `host/src/verbs/control-plane.ts` → `runReleaseRollback` (line ~921, the `isCloudTargetKind` refusal)
-- The existing `runK8sReleaseRollback` is the model (mirror its shape for cloud variants).
-
-**Size**: small per kind. Ship `cloud_stack` rollback first (simpler — just re-apply with prior vars); `cloud_vm` rollback depends on #1.
-
-**Why second**: small, in-place, and once #1 lands, this is "copy the deploy path with reversed release lookup."
+**Operator surface**: `signalman release rollback --target <cloud-target>` now works without falling back to the manual "redeploy the prior release" pattern. The old pattern still works for explicit version pinning (via `--release`).
 
 ### 3. M9 transports — live integration tests 🚧 🔄
 
@@ -129,21 +127,27 @@ All three in lockstep so the same scenario can pin a single Signalman image-ref 
 
 **Why fourth**: 🚧 **Precondition**: Packer binary + AWS + Azure credentials in a CI lane. Until those are available, this can't start.
 
-### 5. WS1 SSM / Bastion tunneling drivers 🚧 🔄
+### 5. ✅ WS1 SSM / Bastion tunneling dialers — **CLOSED in `678a44b`**
 
-**What's there now**: WS1 sub-task 6 shipped the connection-descriptor contract — `signalman_cloud_connection_descriptor` returns the addressing parameters a caller needs for `public_mtls` / `aws_ssm` / `azure_bastion`. The actual SSM Session Manager / Azure Bastion dialers were explicitly deferred.
+Shipped: new module `host/src/cloud/dialers/` with `Dialer` interface + `DialerError` (stable codes: `auth_failed` / `cli_not_found` / `tunnel_failed` / `unsupported_descriptor`) + injectable `DialerExec` + two concrete dialers:
+- `AwsSsmDialer`: shells out to `aws ssm start-session --document-name AWS-StartPortForwardingSession`; ready-on-output detection; SIGTERM→SIGKILL close.
+- `AzureBastionDialer`: shells out to `az network bastion tunnel`; same pattern.
 
-**What's missing**: Two concrete dialer drivers:
-- AWS SSM: open an SSM session, port-forward the descriptor's `port` to the local socket, expose the local end as a dial target.
-- Azure Bastion: equivalent using Bastion's native-client port-forwarding API.
+`defaultDialerFor(descriptor)` dispatches by `kind`; `public_mtls` correctly throws `unsupported_descriptor` (no dialer needed).
 
-**Entry points**:
-- `host/src/cloud/connection.ts` — descriptor types.
-- M8 cloud_vm deploy refuses `aws_ssm` / `azure_bastion` modes with a clear error pointing at this work (`host/src/verbs/control-plane.ts` → `runCloudVmReleaseDeploy`).
+**Upstream changes**: `CloudConnectionDescriptor` in `host/src/cloud/types.ts` extended:
+- `aws_ssm` gained optional `profile?: string`
+- `azure_bastion` gained required `bastion_name: string` (a resource group can host multiple Bastions; `az network bastion tunnel --name` needs it)
 
-**Size**: medium per driver. Each is an SDK integration + a local-socket forwarder.
+`getConnectionDescriptor` takes `bastionName` + `awsProfile` opts; CLI gains `--bastion-name` + `--aws-profile`.
 
-**Why fifth**: 🚧 **Precondition**: AWS SDK SSM client + Azure SDK Bastion client integration + a target VM provisioned in the relevant mode. Unblocks the M8 cloud_vm refusal path.
+**M8 integration**: `runCloudVmReleaseDeploy` no longer refuses `aws_ssm` / `azure_bastion`. Targets carry `tunnel_options: { aws_profile?, azure_bastion_name?, azure_subscription_id?, azure_resource_group? }`. Deploy resolves descriptor → opens tunnel → dials `127.0.0.1:<localPort>` instead of the cloud IP. Tunnel closes on both success and error paths.
+
+Tests: 23 in `cloud-dialers.test.ts` + 2 new dialed-tunnel integration tests in `cloud-deploy.test.ts`.
+
+**Shell-out only**: no new npm deps. Operator must have `aws` / `az` CLIs on PATH with the Session Manager plugin / `bastion` extension installed respectively. The `DialerError('cli_not_found')` code surfaces missing-CLI cases.
+
+**Operator surface**: set `network_mode: "aws_ssm"` (or `azure_bastion` + tunnel_options) on a `cloud_vm` target's connection JSON, then `signalman release deploy` just works.
 
 ### 6. WS1 Loom plugin handlers (Rust) 🚧 🆕
 
