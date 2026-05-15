@@ -1,8 +1,14 @@
 # Signalman Bootstrap
 
-End-to-end walkthrough: fresh Windows host with Hyper-V enabled to a
-green `signalman run` against a provisioned VM. v0.1.1 surface — every
-command below maps to code already on `main` (commit `e1be740`).
+End-to-end walkthrough: fresh host with a supported hypervisor enabled
+to a green `signalman run` against a provisioned VM. Every command
+below maps to code already on `main`.
+
+The Hyper-V path is the most-trodden and is documented first. Linux
+(libvirt), macOS (Tart), and cloud-VM (AWS / Azure) walkthroughs land
+in sections 5–7 with the deltas from the Hyper-V flow rather than
+repeating the whole sequence — the verb surface is uniform across
+backends.
 
 If you only want a 30-second taste, skip to the [README Quick
 Start](../README.md#quick-start). This document is the fully-traced
@@ -10,7 +16,7 @@ path with expected output for every step, written so an LLM agent can
 follow it and detect divergence without reading source.
 
 > **Voice convention**: declarative, second-person. When something is
-> not yet wired, the prose says "until P9.x lands". Cross-references
+> not yet wired, the prose says "until <epic> lands". Cross-references
 > to `host/src/...` are the source of truth — when the doc and the
 > code disagree, the code wins.
 
@@ -449,19 +455,23 @@ Allowlisted extensions for `direct`: `.msi`, `.exe`, `.msix`,
 
 ## 8. What's NOT covered
 
-Bootstrap deliberately scopes itself to the v0.1.1 happy path. The
-items below are documented elsewhere or deferred to v0.2.0:
+The Hyper-V flow above is the most-trodden path. Other backends share
+the verb surface — sections 5–7 document the deltas — but a few items
+remain out of scope here:
 
-- **Linux / macOS provisioning.** Today only Tart has a bootstrap
-  script (`scripts/macos/install-guest-agent.sh`); a first-class
-  `signalman vm provision` on macOS is v0.2.0. See
-  [docs/mac-virtualization.md](mac-virtualization.md).
-- **Per-VM identity certs.** v0.1.1 ships one-CA-many-VMs (locked
-  Q2(c), `provision.ts:354-365`). Per-VM certs land in v0.2.0
-  alongside the B2 pin registry.
-- **ISO-to-VHDX conversion.** Operators provide pre-built VHDX in
-  v0.1.1 (`template-fetch.ts:23-24`). v0.2.0 may add an ISO build
-  step.
+- **Per-VM identity certs.** Today ships one-CA-many-VMs (locked
+  Q2(c), `provision.ts:354-365`). Per-VM certs land alongside the B2
+  pin registry; see the per-user identity epic in the strategic
+  roadmap.
+- **ISO-to-VHDX conversion.** Operators provide pre-built VHDX
+  (`template-fetch.ts:23-24`); Packer-built golden images are
+  scaffolded as of WS6 wave-3 (see §"Packer scaffolding" in
+  `docs/audit/capability-matrix-2026-05-wave3.md`).
+- **macOS UI automation parity.** Tart provisioning works; the
+  AppleScript + Accessibility API driver for UI / browser RPCs is
+  not yet shipped. UI RPCs return `Status::unimplemented` on macOS
+  with a canonical message. See `docs/mac-virtualization.md` for
+  the trait-flip plan.
 - **Multi-VM scenarios with separate networks.** Works today via
   the `vms:` block in `setup.yaml`, but bootstrap walks the
   one-VM path. See the smoke example in [README — Setup
@@ -471,6 +481,239 @@ items below are documented elsewhere or deferred to v0.2.0:
   images or create VMs. Operators still run `vm fetch-template` and
   `vm provision` explicitly with the chosen template, storage, and MSI
   inputs.
+
+---
+
+# Cross-platform + cloud bootstrap
+
+The sections above walk the Hyper-V (Windows) path because that's
+the most mature backend and the original target. The same `signalman`
+CLI works against three other backends with deltas on prerequisites,
+provisioning, and connection setup but the same scenario surface
+(`signalman run <scenario>` is uniform across backends).
+
+## 5. Linux + libvirt walkthrough
+
+`host/src/hypervisors/libvirt.ts` wraps `virsh` (Linux's standard
+libvirt CLI). Use this on a Linux developer host or a Linux CI runner.
+
+### Prerequisites (Linux deltas)
+
+| Item | Required | Verify |
+|---|---|---|
+| Linux distribution with kernel ≥ 5.10 and KVM available | yes | `kvm-ok` (Ubuntu) or `egrep -c '(vmx\|svm)' /proc/cpuinfo` (any) > 0 |
+| `libvirt-daemon` + `qemu-kvm` installed and the daemon running | yes | `systemctl status libvirtd` |
+| `virsh` on `PATH` | yes | `virsh --version` |
+| Your user in the `libvirt` group (or root) | yes | `groups \| grep libvirt` |
+| A libvirt network for guest connectivity — `default` (NAT) is fine for dev | yes | `virsh net-list --all` shows `default` as `active` |
+| A pre-built guest qcow2/raw image with the Signalman guest agent installed | yes | the path in `base_image_path:` |
+
+### Setup deltas
+
+```bash
+# Same install paths as Hyper-V — npm or build-from-source.
+npm install -g @signalman/host
+
+# Pick the libvirt backend explicitly. Selector default falls through
+# to libvirt on Linux when virsh is on PATH and no override is set.
+signalman init --name myproject
+
+# Edit .signalman/config.yaml:
+#   hypervisor:
+#     backend: libvirt
+#     libvirt:
+#       uri: qemu:///system        # or qemu:///session for user-mode
+#       storage_pool: default
+#       network: default
+
+# Cert generation is identical (scripts/certs/generate.sh on Linux).
+bash scripts/certs/generate.sh
+```
+
+### Provisioning deltas
+
+`signalman vm fetch-template` and `signalman vm provision` work
+against libvirt with the same flags as Hyper-V; the difference is the
+underlying VM creation path uses `virsh define` / `virsh start` rather
+than `New-VM` / `Start-VM`.
+
+```bash
+signalman vm fetch-template \
+  --name ubuntu24-base \
+  --source-url file:///path/to/ubuntu24.qcow2
+
+signalman vm provision \
+  --name ci-runner-1 \
+  --template ubuntu24-base \
+  --memory-gb 4 --cpu-count 2
+```
+
+### Linux-specific notes
+
+- **SYSTEM-elevation equivalent** — the guest agent's `run_as=system`
+  path uses passwordless `sudo -n` on Linux. Configure
+  `/etc/sudoers.d/signalman` on the guest image to allow the agent's
+  service user to escalate; the agent refuses to run as root by
+  default and operators audit the sudoers entry. See
+  `guest/src/platform/linux.rs` header.
+- **Package install** routes through whichever package manager is
+  available — `apt` (Debian/Ubuntu), `dnf` (Fedora/RHEL),
+  `yum` (legacy RHEL). Auto-detected on first install call.
+- **No UI / browser RPCs** — `Status::unimplemented` returned with a
+  canonical message. There is no portable AX equivalent on Linux;
+  scenarios that need UI assertions should be authored against the
+  Windows backend, or use the command-output / network-probe
+  primitives the agent already implements.
+
+## 6. macOS + Tart walkthrough
+
+Apple Silicon (M1+) only. Tart is the only first-class macOS hypervisor.
+
+### Prerequisites (macOS deltas)
+
+| Item | Required | Verify |
+|---|---|---|
+| macOS 13 (Ventura) or later on Apple Silicon | yes | `sw_vers` |
+| Tart 2.x | yes | `tart --version` |
+| Homebrew (`brew`) — used by the agent's package-install path | yes | `brew --version` |
+| A Tart-imported VM image with the guest agent installed | yes | `tart list` shows the image |
+
+### Setup deltas
+
+```bash
+# Install host CLI.
+npm install -g @signalman/host
+
+# Init project — Tart auto-detected as the macOS backend.
+signalman init --name myproject
+
+# Install the guest agent as a LaunchDaemon on the Tart-imported VM
+# (the script runs inside the VM after import).
+bash scripts/macos/install-guest-agent.sh
+
+# Cert generation is identical.
+bash scripts/certs/generate.sh
+```
+
+### Provisioning deltas
+
+Tart's VM lifecycle is `tart clone <source> <name>` + `tart run`.
+`signalman vm provision` wraps both.
+
+```bash
+signalman vm provision \
+  --name macos-runner-1 \
+  --template macos-sonoma-base \
+  --memory-gb 8 --cpu-count 4
+```
+
+### macOS-specific notes
+
+- **UI / browser RPCs return `unimplemented`** on macOS today.
+  AppleScript + Accessibility API driver is queued as an epic;
+  `MacosPlatform::supports_ui_automation()` becomes the capability
+  flip once the driver lands.
+- **Package install routes through `brew`** — operators should ensure
+  the agent's service user owns its `brew` prefix (avoid bootstrap-
+  time permission surprises).
+- **No SYSTEM-elevation equivalent** — macOS doesn't have a direct
+  analog; agent commands run under the LaunchDaemon's effective user
+  (typically `root` if installed via the provided script). Pin the
+  service user explicitly if your scenarios assume a non-root
+  identity.
+- **Networking** — `Default Switch` doesn't apply; Tart uses NAT by
+  default. Multi-VM scenarios with isolated networks need explicit
+  `tart create network ...` setup.
+
+See [docs/mac-virtualization.md](mac-virtualization.md) for the
+full Mac strategy and outstanding work.
+
+## 7. Cloud-VM walkthrough (AWS + Azure)
+
+Provision an ephemeral cloud VM as a deploy target. Useful for CI
+pipelines that don't have local hypervisor access, and for
+short-lived smoke environments.
+
+### Prerequisites
+
+| Item | Required | Verify |
+|---|---|---|
+| AWS account with EC2:RunInstances/TerminateInstances permissions, OR Azure subscription with VM contributor role | yes | `aws sts get-caller-identity` / `az account show` |
+| `SIGNALMAN_CRED_KEY` env var (base64-encoded 32-byte key) | yes | `echo $SIGNALMAN_CRED_KEY \| wc -c` ≥ 44 |
+| A pre-built AMI (AWS) or gallery image (Azure) with the Signalman guest agent + your application baked in | yes | `aws ec2 describe-images --image-ids ami-...` / Azure portal |
+
+### Walkthrough
+
+```bash
+# 1. Generate + persist the credential-encryption key. NEVER lose this;
+#    it decrypts all cloud creds at rest.
+export SIGNALMAN_CRED_KEY=$(openssl rand -base64 32)
+echo "$SIGNALMAN_CRED_KEY" > ~/.signalman/cred.key   # operator-managed safe storage
+chmod 600 ~/.signalman/cred.key
+
+# 2. Store cloud credentials per org. Plaintext never appears on argv;
+#    the verb reads from --plaintext-json which the CLI immediately
+#    encrypts before any other code sees it.
+signalman cloud creds set --provider aws \
+  --plaintext-json '{"access_key_id":"AKIA...","secret_access_key":"..."}'
+
+signalman cloud creds set --provider azure \
+  --plaintext-json '{"subscription_id":"...","tenant_id":"...","client_id":"...","client_secret":"..."}'
+
+# 3. Set a budget guardrail (optional but recommended).
+signalman cloud budget set --monthly-cents-limit 5000 --soft-warn-pct 80
+
+# 4. Provision an ephemeral cloud VM. Sentinel tags flow on every
+#    instance (signalman-managed=true, signalman-org=<id>,
+#    signalman-ttl-minutes=<n>); the reaper auto-terminates after TTL.
+signalman cloud provision --provider aws \
+  --region us-east-1 --instance-type t3.micro \
+  --image-ref ami-0c55b159cbfafe1f0 \
+  --name ci-runner-1 --ttl-minutes 60
+
+# 5. Generate a connection descriptor (defines how the host dials the
+#    cloud VM). Three modes: public_mtls (direct), aws_ssm, azure_bastion.
+signalman cloud connection-descriptor \
+  --provider aws --network-mode aws_ssm \
+  --instance-id i-0123abc456def > target.json
+
+# 6. Register the cloud VM as a deploy target.
+signalman target add --name prod-host --kind cloud_vm_test \
+  --connection "$(cat target.json)"
+
+# 7. Run scenarios + deploy to the cloud VM exactly as you would for
+#    a local VM. The deploy executor handles SSM / Bastion tunneling
+#    transparently — your scenarios don't know about it.
+signalman run service-backend-smoke
+signalman release deploy --target prod-host --release <id>
+
+# 8. Inspect cost + usage + reaper state.
+signalman cloud usage --org-id <id>
+signalman cloud reaper status
+
+# 9. Tear down on demand (the reaper handles TTL automatically).
+signalman cloud terminate --provider aws \
+  --id i-0123abc456def --name ci-runner-1 --region us-east-1
+```
+
+### Cloud-specific notes
+
+- **Network connectivity** — `public_mtls` is fastest but requires
+  the cloud VM to accept inbound traffic on the guest agent port.
+  `aws_ssm` and `azure_bastion` tunnel through cloud-provider native
+  services; no inbound firewall holes needed but startup latency is
+  higher (~5–10s for the tunnel to establish).
+- **The reaper** is the safety net. Set TTLs aggressively
+  (`--ttl-minutes 60` for ephemeral CI work) and trust the reaper
+  to clean up if a scenario crashes mid-run. The reaper runs as a
+  separate daemon — `signalman cloud reaper start` for the long-
+  running form, `signalman cloud reaper run-once` for a single tick.
+- **Cost guardrails** — projected spend per org is checked at
+  every `provision` call; soft-warn emits an event, hard-cap
+  refuses provisioning until usage falls.
+- **Stack-based deploys** — for multi-resource cloud infrastructure
+  (VPC + subnets + security groups + the VM itself), use
+  `signalman stack apply` against an OpenTofu HCL module.
 
 ## 9. Cross-references
 
