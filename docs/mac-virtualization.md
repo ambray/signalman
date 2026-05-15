@@ -7,6 +7,29 @@ Virtualization.framework requires the calling process to have the
 on Apple Silicon. That makes a plain Rust or Node daemon awkward unless we also
 build, sign, and entitle a native macOS helper.
 
+## Status (2026-05)
+
+WS4 (cross-platform parity) shipped the Tart backend as the v0.2.x Mac
+runner in v0.2.0. The current macOS surface is:
+
+- **Tart backend** — `host/src/hypervisors/tart.ts`. `HypervisorBackend`
+  parity with `HyperVBackend` / `LibvirtBackend` / `VmwareBackend` for
+  `createVM` / `startVM` / `stopVM` / `executeCommand` /
+  `vmCheckpoint(save|restore|delete)`. Selected via
+  `SIGNALMAN_BACKEND=tart` or `hypervisor: tart` in `signalman.yaml`.
+- **Guest agent on macOS** — the `Platform` trait in
+  [`guest/src/platform/`](../guest/src/platform/) has a `Macos` impl
+  alongside `Windows`, `Linux`, and `Other`. `WriteFile` jails into
+  `SIGNALMAN_WORKSPACE`, `ExecuteCommand` uses `/bin/sh` for shell-mode
+  execution, and the [LaunchDaemon installer](../scripts/macos/install-guest-agent.sh)
+  installs it as `com.signalman.guest`.
+- **Bootstrap doc** — see [`bootstrap.md` §6](bootstrap.md#6-macos-host-bootstrap-tart)
+  for the end-to-end install walkthrough on a fresh Apple Silicon host.
+- **UI automation** — **not yet shipped.** AppleScript + AX driver
+  parity with the Windows `UiAutomation` driver remains the open WS4
+  follow-up; see the [Recommendation](#recommendation) section for the
+  current plan.
+
 ## Requirements
 
 - Host: Apple Silicon Mac for macOS guests. Linux guests can also run through
@@ -147,9 +170,35 @@ Tradeoffs:
 
 ## Recommendation
 
-Use Tart as the v0.1.x Mac runner backend and treat a first-party Swift helper
-as the v0.2+ hardening path if we need service-level identity, signed packaging,
-or deeper VM-state control.
+**v0.2.0 (shipped).** Tart is the primary Mac runner backend. The
+Tart `HypervisorBackend` implementation in
+`host/src/hypervisors/tart.ts` is feature-complete for VM lifecycle,
+command execution, and checkpoint emulation via clones. CI exercises
+the backend through hermetic mocks of the `tart` CLI; smoke testing
+against a real Apple Silicon host is documented in
+[`bootstrap.md` §6](bootstrap.md#6-macos-host-bootstrap-tart).
+
+**v0.3.x – v0.4.x (current).** The Tart backend is stable; no
+first-party Swift helper has been needed for VM lifecycle. The open
+WS4 follow-up is **UI automation parity** on macOS:
+
+- Spec out an `AppleScriptDriver` + `AXUIElementDriver` pair that
+  mirrors the Windows `UiAutomation` driver shape.
+- The driver should run as a LaunchAgent in the logged-in user
+  session (the LaunchDaemon stays for privileged file/command
+  operations).
+- Accessibility + Screen Recording TCC grants are operator
+  prerequisites — we will document the manual grant on first run
+  and the MDM PPPC profile shape for fleet deployments.
+
+**v0.5+ horizon.** A first-party Swift helper (Option B) remains the
+hardening path if Tart's license, command surface, or roadmap
+diverges from Signalman's needs, **or** if persistent unattended
+screen capture
+(`com.apple.developer.persistent-content-capture`) is required for
+a hosted demo / screenshot product. The Apple entitlement
+application is the long-pole item, so we defer it until a concrete
+customer use case appears.
 
 Sources:
 
