@@ -1931,7 +1931,7 @@ async function cmdRunner(args: ParsedArgs): Promise<number> {
   const sub = args.positional.shift();
   if (!sub)
     usageError(
-      "runner requires a subcommand (register, start, deploy-k8s, list, deregister)",
+      "runner requires a subcommand (register, start, deploy, deploy-k8s, list, deregister)",
     );
   switch (sub) {
     case "register":
@@ -1945,8 +1945,171 @@ async function cmdRunner(args: ParsedArgs): Promise<number> {
       return await cmdRunnerList(args);
     case "deregister":
       return await cmdRunnerDeregister(args);
+    // WS6 M9:
+    case "deploy":
+      return await cmdRunnerDeploy(args);
     default:
       usageError(`unknown runner subcommand: ${sub}`);
+  }
+}
+
+// WS6 M9 — runner deploy multi-transport.
+async function cmdRunnerDeploy(args: ParsedArgs): Promise<number> {
+  const transport = args.options.get("transport");
+  if (!transport)
+    usageError(
+      "runner deploy requires --transport <script|ssh|winrm|docker|cloud>",
+    );
+  const binaryUrl = args.options.get("binary-url");
+  if (!binaryUrl) usageError("runner deploy requires --binary-url <URL>");
+  const controlPlaneUrl = args.options.get("control-plane");
+  if (!controlPlaneUrl) usageError("runner deploy requires --control-plane <URL>");
+  const token = args.options.get("token");
+  if (!token) usageError("runner deploy requires --token <TOKEN>");
+  const workerName = args.options.get("worker-name");
+  if (!workerName) usageError("runner deploy requires --worker-name <NAME>");
+  const binarySha = args.options.get("binary-sha256");
+  const waitRaw = args.options.get("wait-timeout-ms");
+  const waitTimeoutMs = waitRaw === undefined ? undefined : parseInt(waitRaw, 10);
+  if (waitTimeoutMs !== undefined && (Number.isNaN(waitTimeoutMs) || waitTimeoutMs < 0)) {
+    usageError("runner deploy: --wait-timeout-ms must be a non-negative integer");
+  }
+  const format = args.options.get("format");
+
+  let transportOpts: import("./runner/deploy/index.js").TransportOptions;
+  if (transport === "script") {
+    const os = args.options.get("os");
+    if (os !== "linux" && os !== "macos" && os !== "windows") {
+      usageError(`runner deploy --transport script requires --os linux|macos|windows`);
+    }
+    transportOpts = {
+      kind: "script",
+      os: os as "linux" | "macos" | "windows",
+      outputPath: args.options.get("output-path"),
+    };
+  } else if (transport === "ssh") {
+    const host = args.options.get("host");
+    const identityPath = args.options.get("identity-path");
+    if (!host) usageError("runner deploy --transport ssh requires --host <USER@HOST>");
+    if (!identityPath) usageError("runner deploy --transport ssh requires --identity-path <PATH>");
+    const portRaw = args.options.get("port");
+    const sm = args.options.get("service-manager");
+    if (sm !== undefined && sm !== "systemd" && sm !== "launchd" && sm !== "none") {
+      usageError(`--service-manager must be systemd|launchd|none (got ${sm})`);
+    }
+    transportOpts = {
+      kind: "ssh",
+      host,
+      identityPath,
+      port: portRaw ? parseInt(portRaw, 10) : undefined,
+      serviceManager: sm as "systemd" | "launchd" | "none" | undefined,
+      proxyJump: args.options.get("proxy-jump"),
+    };
+  } else if (transport === "winrm") {
+    const host = args.options.get("host");
+    const username = args.options.get("username");
+    const password = args.options.get("password");
+    if (!host) usageError("runner deploy --transport winrm requires --host <HOST>");
+    if (!username) usageError("runner deploy --transport winrm requires --username <USER>");
+    if (!password) usageError("runner deploy --transport winrm requires --password <PASS>");
+    const portRaw = args.options.get("port");
+    transportOpts = {
+      kind: "winrm",
+      host,
+      username,
+      password,
+      port: portRaw ? parseInt(portRaw, 10) : undefined,
+      useSsl: args.flags.has("no-ssl") ? false : undefined,
+    };
+  } else if (transport === "docker") {
+    const image = args.options.get("image");
+    if (!image) usageError("runner deploy --transport docker requires --image <REPO:TAG>");
+    transportOpts = {
+      kind: "docker",
+      image,
+      context: args.options.get("context"),
+      containerName: args.options.get("container-name"),
+    };
+  } else if (transport === "cloud") {
+    const provider = args.options.get("provider");
+    if (provider !== "aws" && provider !== "azure") {
+      usageError(`runner deploy --transport cloud requires --provider aws|azure (got ${provider})`);
+    }
+    const region = args.options.get("region");
+    const instanceType = args.options.get("instance-type");
+    const imageRef = args.options.get("image-ref");
+    const name = args.options.get("name");
+    const osFamily = args.options.get("os-family");
+    if (!region || !instanceType || !imageRef || !name || !osFamily) {
+      usageError(
+        "runner deploy --transport cloud requires --region, --instance-type, --image-ref, --name, --os-family",
+      );
+    }
+    if (osFamily !== "linux" && osFamily !== "windows") {
+      usageError(`--os-family must be linux|windows (got ${osFamily})`);
+    }
+    transportOpts = {
+      kind: "cloud",
+      provider: provider as "aws" | "azure",
+      region: region!,
+      instanceType: instanceType!,
+      imageRef: imageRef!,
+      name: name!,
+      osFamily: osFamily as "linux" | "windows",
+      innerSsh: args.options.get("inner-ssh-identity-path")
+        ? { identityPath: args.options.get("inner-ssh-identity-path")! }
+        : undefined,
+      innerWinRm:
+        args.options.get("inner-winrm-username") && args.options.get("inner-winrm-password")
+          ? {
+              username: args.options.get("inner-winrm-username")!,
+              password: args.options.get("inner-winrm-password")!,
+            }
+          : undefined,
+      orgId: args.options.get("org-id"),
+      ttlMinutes: args.options.get("ttl-minutes")
+        ? parseInt(args.options.get("ttl-minutes")!, 10)
+        : undefined,
+    };
+  } else {
+    usageError(`unknown --transport: ${transport}`);
+  }
+
+  try {
+    const { runRunnerDeploy } = await import("./runner/deploy/index.js");
+    const result = await withControlPlane((cpInst) =>
+      runRunnerDeploy(cpInst, {
+        binary: { url: binaryUrl, sha256: binarySha },
+        controlPlaneUrl: controlPlaneUrl,
+        token,
+        workerName,
+        transport: transportOpts!,
+        waitTimeoutMs,
+      }),
+    );
+    if (format === "json") {
+      emitJson(result);
+      return 0;
+    }
+    if (result.bootstrap.script) {
+      // script transport: emit the script body to stdout so the
+      // operator can pipe it / redirect it. Bootstrap detail to stderr.
+      process.stderr.write(`# Generated signalman runner deploy script for ${result.bootstrap.workerName}\n`);
+      process.stdout.write(result.bootstrap.script);
+      return 0;
+    }
+    process.stdout.write(
+      `Runner '${result.bootstrap.workerName}' deployed via ${result.bootstrap.transport}\n` +
+        (result.verification
+          ? result.verification.heartbeated
+            ? `  Verified: heartbeat received in ${result.verification.elapsedMs}ms\n`
+            : `  WARNING: ${result.verification.reason}\n`
+          : `  (verification skipped)\n`),
+    );
+    return result.verification && !result.verification.heartbeated ? 1 : 0;
+  } catch (err) {
+    console.error(`signalman runner deploy: ${(err as Error).message}`);
+    return 4;
   }
 }
 
@@ -4543,7 +4706,7 @@ function printHelp(): void {
       "  serve [--port P] [--host H] [--disable-loopback-bypass]",
       "                              (start the control-plane HTTP server)",
       "  api-key <subcommand>   (create, list, revoke)",
-      "  runner <subcommand>    (register, start, deploy-k8s, list, deregister)",
+      "  runner <subcommand>    (register, start, deploy, deploy-k8s, list, deregister)",
       "  k8s <subcommand>       (deploy, rollback, status — direct K8s ops)",
       "  key <subcommand>       (generate, fingerprint — Ed25519 release signing)",
       "  cloud <subcommand>     (provision, terminate, status, list, backends, reaper, budget, creds, connection-descriptor)",

@@ -1168,6 +1168,196 @@ server.tool(
     }),
 );
 
+// WS6 M9 — runner deploy multi-transport (script / ssh / winrm / docker / cloud).
+server.tool(
+  "signalman_runner_deploy",
+  "Deploy a Signalman runner to a remote target via one of five transports (script / ssh / winrm / docker / cloud). The `binary_url` points at the runner binary (typically a `@signalman/registry` blob URL); the transport downloads it on the remote, writes the registration config, and starts the service. By default waits up to 60s for the runner to heartbeat before declaring success. Set `wait_timeout_ms: 0` to fire-and-forget. The `script` transport returns an executable script string instead of dispatching remotely — operator runs it themselves.",
+  {
+    binary_url: z
+      .string()
+      .url()
+      .describe("HTTP(S) URL to the runner binary. Registry blob URLs (`/v1/blobs/sha256:<hash>`) work; any URL the remote can curl is acceptable."),
+    binary_sha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional()
+      .describe("Optional sha256 (64 hex chars). When set, transport verifies after download and refuses to install on mismatch."),
+    binary_version: z
+      .string()
+      .optional()
+      .describe("Operator-named version string for audit clarity."),
+    control_plane_url: z
+      .string()
+      .url()
+      .describe("Control-plane URL the runner reports to."),
+    token: z
+      .string()
+      .describe("API key the runner authenticates with (mint via signalman_api_key_create)."),
+    worker_name: z
+      .string()
+      .describe("Friendly worker name; surfaces in the runners table."),
+    transport: z
+      .union([
+        z.object({
+          kind: z.literal("script"),
+          os: z.enum(["linux", "macos", "windows"]),
+          output_path: z.string().optional(),
+        }),
+        z.object({
+          kind: z.literal("ssh"),
+          host: z.string(),
+          identity_path: z.string(),
+          port: z.number().int().optional(),
+          service_manager: z.enum(["systemd", "launchd", "none"]).optional(),
+          proxy_jump: z.string().optional(),
+        }),
+        z.object({
+          kind: z.literal("winrm"),
+          host: z.string(),
+          username: z.string(),
+          password: z.string(),
+          port: z.number().int().optional(),
+          use_ssl: z.boolean().optional(),
+        }),
+        z.object({
+          kind: z.literal("docker"),
+          image: z.string(),
+          context: z.string().optional(),
+          container_name: z.string().optional(),
+          extra_volumes: z.array(z.string()).optional(),
+          extra_env: z.record(z.string()).optional(),
+        }),
+        z.object({
+          kind: z.literal("cloud"),
+          provider: z.enum(["aws", "azure"]),
+          region: z.string(),
+          instance_type: z.string(),
+          image_ref: z.string(),
+          name: z.string(),
+          os_family: z.enum(["linux", "windows"]),
+          inner_ssh_identity_path: z.string().optional(),
+          inner_winrm_username: z.string().optional(),
+          inner_winrm_password: z.string().optional(),
+          org_id: z.string().optional(),
+          ttl_minutes: z.number().int().optional(),
+        }),
+      ])
+      .describe("Transport-specific options. Discriminated by `kind`."),
+    wait_timeout_ms: z
+      .number()
+      .int()
+      .min(0)
+      .max(600_000)
+      .optional()
+      .describe("Heartbeat-verification budget. 0 disables. Default 60000."),
+  },
+  async (params) =>
+    withRecording("signalman_runner_deploy", params, async () => {
+      const p = params as {
+        binary_url: string;
+        binary_sha256?: string;
+        binary_version?: string;
+        control_plane_url: string;
+        token: string;
+        worker_name: string;
+        transport: Record<string, unknown> & { kind: string };
+        wait_timeout_ms?: number;
+      };
+      // Translate snake_case wire schema into the verb's
+      // camelCase TransportOptions union.
+      const t = p.transport;
+      let transportOpts:
+        | import("./runner/deploy/index.js").TransportOptions;
+      switch (t.kind) {
+        case "script":
+          transportOpts = {
+            kind: "script",
+            os: t.os as "linux" | "macos" | "windows",
+            outputPath: t.output_path as string | undefined,
+          };
+          break;
+        case "ssh":
+          transportOpts = {
+            kind: "ssh",
+            host: t.host as string,
+            identityPath: t.identity_path as string,
+            port: t.port as number | undefined,
+            serviceManager: t.service_manager as
+              | "systemd"
+              | "launchd"
+              | "none"
+              | undefined,
+            proxyJump: t.proxy_jump as string | undefined,
+          };
+          break;
+        case "winrm":
+          transportOpts = {
+            kind: "winrm",
+            host: t.host as string,
+            username: t.username as string,
+            password: t.password as string,
+            port: t.port as number | undefined,
+            useSsl: t.use_ssl as boolean | undefined,
+          };
+          break;
+        case "docker":
+          transportOpts = {
+            kind: "docker",
+            image: t.image as string,
+            context: t.context as string | undefined,
+            containerName: t.container_name as string | undefined,
+            extraVolumes: t.extra_volumes as string[] | undefined,
+            extraEnv: t.extra_env as Record<string, string> | undefined,
+          };
+          break;
+        case "cloud":
+          transportOpts = {
+            kind: "cloud",
+            provider: t.provider as "aws" | "azure",
+            region: t.region as string,
+            instanceType: t.instance_type as string,
+            imageRef: t.image_ref as string,
+            name: t.name as string,
+            osFamily: t.os_family as "linux" | "windows",
+            innerSsh: t.inner_ssh_identity_path
+              ? { identityPath: t.inner_ssh_identity_path as string }
+              : undefined,
+            innerWinRm:
+              t.inner_winrm_username && t.inner_winrm_password
+                ? {
+                    username: t.inner_winrm_username as string,
+                    password: t.inner_winrm_password as string,
+                  }
+                : undefined,
+            orgId: t.org_id as string | undefined,
+            ttlMinutes: t.ttl_minutes as number | undefined,
+          };
+          break;
+        default:
+          throw new Error(`unknown transport kind: ${t.kind}`);
+      }
+      const { runRunnerDeploy } = await import("./runner/deploy/index.js");
+      const result = await withControlPlane((cp) =>
+        runRunnerDeploy(cp, {
+          binary: {
+            url: p.binary_url,
+            sha256: p.binary_sha256,
+            version: p.binary_version,
+          },
+          controlPlaneUrl: p.control_plane_url,
+          token: p.token,
+          workerName: p.worker_name,
+          transport: transportOpts,
+          waitTimeoutMs: p.wait_timeout_ms,
+        }),
+      );
+      return asMcpResult({
+        bootstrap: result.bootstrap,
+        verification: result.verification ?? null,
+      });
+    }),
+);
+
 server.tool(
   "signalman_release_build_remote",
   "Submit a release.build job to the runner queue and poll until terminal. Equivalent to `signalman release build --remote`. Requires a registered runner config (~/.signalman/runner.yaml). Long-running: a successful response means the job finished (succeeded or failed); intermediate progress is recorded via the call's withRecording wrapper.",
