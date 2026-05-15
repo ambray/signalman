@@ -57,6 +57,18 @@ export interface MountCargoReadOptions {
    * callers set this to e.g. `https://registry.signalman.io`.
    */
   publicBaseUrl?: string;
+  /**
+   * WS6 wave-3 (M10.4): optional virtual-registry proxy. When set,
+   * sparse-index handlers fall through to the proxy on local-miss
+   * (returns NDJSON or null). Download handlers fall through with
+   * `proxyDownload` (returns tarball bytes or null).
+   */
+  proxySparseIndex?: (org: string, name: string) => Promise<string | null>;
+  proxyDownload?: (
+    org: string,
+    name: string,
+    version: string,
+  ) => Promise<{ sha256: string; bytes: Buffer } | null>;
 }
 
 /**
@@ -109,13 +121,6 @@ export function mountCargoReadRoutes(
       }
       const manifestName = cargoManifestName(ctx.params.org, name);
       const versions = await storage.listManifestVersions(manifestName);
-      if (versions.length === 0) {
-        return write404(
-          ctx.res,
-          "not_found",
-          `cargo crate not found: ${ctx.params.org}/${name}`,
-        );
-      }
       const lines: string[] = [];
       for (const v of versions) {
         const m = await storage.getManifest(v.name, v.version);
@@ -123,11 +128,21 @@ export function mountCargoReadRoutes(
         if (m.kind !== "cargo" || !m.cargoMetadata) continue;
         lines.push(JSON.stringify(serializeIndexEntry(m.cargoMetadata)));
       }
+      if (lines.length === 0 && opts.proxySparseIndex) {
+        // WS6 wave-3 (M10.4): fall through to virtual upstream
+        const proxied = await opts.proxySparseIndex(ctx.params.org, name);
+        if (proxied !== null) {
+          ctx.res.statusCode = 200;
+          ctx.res.setHeader("content-type", "application/json; charset=utf-8");
+          ctx.res.end(proxied);
+          return;
+        }
+      }
       if (lines.length === 0) {
         return write404(
           ctx.res,
           "not_found",
-          `cargo crate has no cargo-kind versions: ${name}`,
+          `cargo crate not found: ${ctx.params.org}/${name}`,
         );
       }
       ctx.res.statusCode = 200;
@@ -161,6 +176,27 @@ export function mountCargoReadRoutes(
       const manifestName = cargoManifestName(ctx.params.org, ctx.params.name);
       const manifest = await storage.getManifest(manifestName, ctx.params.version);
       if (!manifest) {
+        // WS6 wave-3 (M10.4): fall through to virtual upstream
+        // download. The proxy populates the blob; we re-fetch the
+        // manifest after to serve.
+        if (opts.proxyDownload) {
+          const proxied = await opts.proxyDownload(
+            ctx.params.org,
+            ctx.params.name,
+            ctx.params.version,
+          );
+          if (proxied) {
+            ctx.res.statusCode = 200;
+            ctx.res.setHeader("content-type", "application/x-tar");
+            ctx.res.setHeader(
+              "content-disposition",
+              `attachment; filename="${ctx.params.name}-${ctx.params.version}.crate"`,
+            );
+            ctx.res.setHeader("content-length", String(proxied.bytes.length));
+            ctx.res.end(proxied.bytes);
+            return;
+          }
+        }
         return write404(
           ctx.res,
           "not_found",
@@ -190,6 +226,26 @@ export function mountCargoReadRoutes(
           err instanceof RegistryError &&
           err.code === REGISTRY_ERROR_CODES.BLOB_NOT_FOUND
         ) {
+          // The manifest was proxy-cached but the tarball hasn't
+          // been pulled yet. Proxy-fetch it now.
+          if (opts.proxyDownload) {
+            const proxied = await opts.proxyDownload(
+              ctx.params.org,
+              ctx.params.name,
+              ctx.params.version,
+            );
+            if (proxied && proxied.sha256 === blobRef.sha256) {
+              ctx.res.statusCode = 200;
+              ctx.res.setHeader("content-type", "application/x-tar");
+              ctx.res.setHeader(
+                "content-disposition",
+                `attachment; filename="${ctx.params.name}-${ctx.params.version}.crate"`,
+              );
+              ctx.res.setHeader("content-length", String(proxied.bytes.length));
+              ctx.res.end(proxied.bytes);
+              return;
+            }
+          }
           return write404(
             ctx.res,
             "blob_not_found",

@@ -41,6 +41,11 @@ import {
 import type { LocalFsRegistryStorage } from "../storage/registry-storage.js";
 import { mountCargoReadRoutes } from "../cargo/index.js";
 import { mountCargoPublishRoutes } from "../cargo/publish.js";
+import {
+  proxyCargoDownload,
+  proxyCargoSparseIndex,
+  type UpstreamFetch,
+} from "../cargo/virtual.js";
 
 const VERSION = "0.0.1";
 const DEFAULT_BLOB_MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5 GiB
@@ -58,6 +63,19 @@ export interface AppOptions {
    * their externally-resolvable URL.
    */
   publicBaseUrl?: string;
+  /**
+   * WS6 wave-3 (M10.4): operator's Ed25519 private key (PEM) used
+   * for re-signing cached manifests on virtual-registry pull-through.
+   * Optional — when absent, virtual upstreams configured with
+   * `resign_on_cache: true` cache unsigned + audit-log the skip.
+   */
+  virtualResignPrivateKeyPem?: string;
+  /**
+   * WS6 wave-3 (M10.4): injectable upstream fetcher for tests. When
+   * undefined, virtual upstreams use the global `fetch`. Tests pass
+   * a stub that returns pre-canned responses.
+   */
+  virtualUpstreamFetch?: UpstreamFetch;
 }
 
 export function buildApp(opts: AppOptions): Router {
@@ -216,19 +234,43 @@ export function buildApp(opts: AppOptions): Router {
     return { status: 204, body: null };
   });
 
-  // ── Cargo facade (WS6 wave-3 M10.2 + M10.3) ────────────────────
+  // ── Cargo facade (WS6 wave-3 M10.2 + M10.3 + M10.4) ────────────
   //
-  // Per-org sparse-index + download + publish + yank routes.
-  // Virtual-registry pull-through lands in M10.4.
+  // Per-org sparse-index + download + publish + yank + virtual-
+  // registry pull-through.
+  const idxStorage = storage as Partial<LocalFsRegistryStorage>;
+
+  // Virtual-registry proxy hooks. Only active when the storage
+  // backing carries an `index` (i.e. is `LocalFsRegistryStorage`);
+  // future S3 / Postgres drivers wire their own equivalents.
+  const proxyOpts =
+    idxStorage.index !== undefined
+      ? {
+          storage,
+          index: idxStorage.index,
+          ...(opts.virtualUpstreamFetch ? { fetch: opts.virtualUpstreamFetch } : {}),
+          ...(opts.virtualResignPrivateKeyPem
+            ? { signingPrivateKeyPem: opts.virtualResignPrivateKeyPem }
+            : {}),
+        }
+      : null;
+
   mountCargoReadRoutes(router, {
     storage,
     publicBaseUrl: opts.publicBaseUrl,
+    ...(proxyOpts
+      ? {
+          proxySparseIndex: (org, name) =>
+            proxyCargoSparseIndex(proxyOpts, org, name),
+          proxyDownload: (org, name, version) =>
+            proxyCargoDownload(proxyOpts, org, name, version),
+        }
+      : {}),
   });
   // Publish + yank need direct access to the SqliteManifestIndex
   // for setCargoYanked + appendAuditEntry. Storage backings that
   // aren't sqlite-backed get a degraded experience (publish works;
   // yank routes 503).
-  const idxStorage = storage as Partial<LocalFsRegistryStorage>;
   mountCargoPublishRoutes(router, {
     storage,
     index: idxStorage.index,

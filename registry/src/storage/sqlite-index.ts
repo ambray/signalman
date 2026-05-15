@@ -262,6 +262,116 @@ export class SqliteManifestIndex {
       .run(name, version);
   }
 
+  // ── Virtual upstream config (WS6 wave-3 M10.4) ────────────────
+
+  /**
+   * Register a virtual-upstream row. The unique index on
+   * (org, kind, upstream_url) makes this idempotent: re-adding
+   * the same triple returns the existing row.
+   */
+  addVirtualUpstream(input: {
+    org: string;
+    kind: VirtualUpstreamKind;
+    upstreamUrl: string;
+    config?: VirtualUpstreamConfig;
+    enabled?: boolean;
+  }): VirtualUpstream {
+    if (!/^https?:\/\//i.test(input.upstreamUrl)) {
+      throw new RegistryError(
+        REGISTRY_ERROR_CODES.BAD_NAME,
+        `virtual upstream URL must be http(s); got '${input.upstreamUrl}'`,
+      );
+    }
+    // Idempotent: try fetching first.
+    const existing = this.db
+      .prepare(
+        `SELECT id FROM virtual_upstream
+         WHERE org = ? AND kind = ? AND upstream_url = ?`,
+      )
+      .get(input.org, input.kind, input.upstreamUrl) as
+      | { id: string }
+      | undefined;
+    if (existing) {
+      const row = this.getVirtualUpstream(existing.id);
+      if (row) return row;
+    }
+    const id = newAuditId();
+    const now = this.now().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO virtual_upstream
+           (id, org, kind, upstream_url, config_json, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.org,
+        input.kind,
+        input.upstreamUrl,
+        JSON.stringify(input.config ?? {}),
+        (input.enabled ?? true) ? 1 : 0,
+        now,
+        now,
+      );
+    return {
+      id,
+      org: input.org,
+      kind: input.kind,
+      upstreamUrl: input.upstreamUrl,
+      config: input.config ?? {},
+      enabled: input.enabled ?? true,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  /** Fetch a virtual-upstream row by id. */
+  getVirtualUpstream(id: string): VirtualUpstream | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, org, kind, upstream_url, config_json, enabled, created_at, updated_at
+         FROM virtual_upstream WHERE id = ?`,
+      )
+      .get(id) as VirtualUpstreamRow | undefined;
+    return row ? rowToVirtualUpstream(row) : null;
+  }
+
+  /**
+   * List virtual upstreams for an org. Filter by kind when set;
+   * filter to enabled-only by default.
+   */
+  listVirtualUpstreams(opts: {
+    org: string;
+    kind?: VirtualUpstreamKind;
+    includeDisabled?: boolean;
+  }): VirtualUpstream[] {
+    const where: string[] = ["org = ?"];
+    const args: Array<string> = [opts.org];
+    if (opts.kind) {
+      where.push("kind = ?");
+      args.push(opts.kind);
+    }
+    if (!opts.includeDisabled) {
+      where.push("enabled = 1");
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT id, org, kind, upstream_url, config_json, enabled, created_at, updated_at
+         FROM virtual_upstream
+         WHERE ${where.join(" AND ")}
+         ORDER BY created_at ASC`,
+      )
+      .all(...args) as unknown as VirtualUpstreamRow[];
+    return rows.map(rowToVirtualUpstream);
+  }
+
+  /** Remove a virtual-upstream row. Idempotent. */
+  removeVirtualUpstream(id: string): void {
+    this.db
+      .prepare(`DELETE FROM virtual_upstream WHERE id = ?`)
+      .run(id);
+  }
+
   // ── Cargo yank state (WS6 wave-3 M10.3) ───────────────────────
 
   /**
@@ -485,6 +595,79 @@ function rowToManifest(row: ManifestRow): Manifest {
     ...(signature ? { signature } : {}),
     ...(cargoMetadata ? { cargoMetadata } : {}),
     createdAt: row.created_at,
+  };
+}
+
+// ── Virtual upstream types (WS6 wave-3 M10.4) ───────────────────────
+
+export type VirtualUpstreamKind = "cargo" | "npm" | "oci" | "maven" | "pip" | "helm";
+
+/**
+ * Per-upstream config. Free-form so future facades can carry their
+ * own knobs (npm scopes, OCI media-type allowlist, etc.) without
+ * schema changes.
+ */
+export interface VirtualUpstreamConfig {
+  /** Glob patterns of names to allow from this upstream. */
+  allow_patterns?: string[];
+  /** Glob patterns of names to refuse from this upstream. */
+  deny_patterns?: string[];
+  /**
+   * When true, the registry re-signs the cached manifest with the
+   * operator's Ed25519 key on first cache. The upstream's original
+   * signature (if any) is preserved on the row's provenance.
+   */
+  resign_on_cache?: boolean;
+  /**
+   * Optional Authorization header template for upstream requests.
+   * Use `{token}` for the token placeholder when needed; tokens
+   * come from env vars the operator sets out-of-band.
+   */
+  auth_header_template?: string;
+  /**
+   * Cache TTL for sparse-index entries (NOT for the immutable
+   * tarball blobs — those are content-addressed and never expire).
+   * After this many seconds, the next sparse-index request triggers
+   * an upstream re-fetch even if the cached row exists. Default 0
+   * (immutable cache; operator manually busts via DELETE manifest).
+   */
+  cache_ttl_seconds?: number;
+}
+
+export interface VirtualUpstream {
+  id: string;
+  org: string;
+  kind: VirtualUpstreamKind;
+  upstreamUrl: string;
+  config: VirtualUpstreamConfig;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface VirtualUpstreamRow {
+  id: string;
+  org: string;
+  kind: VirtualUpstreamKind;
+  upstream_url: string;
+  config_json: string;
+  enabled: number;
+  created_at: string;
+  updated_at: string;
+}
+
+function rowToVirtualUpstream(row: VirtualUpstreamRow): VirtualUpstream {
+  return {
+    id: row.id,
+    org: row.org,
+    kind: row.kind,
+    upstreamUrl: row.upstream_url,
+    config: row.config_json
+      ? (JSON.parse(row.config_json) as VirtualUpstreamConfig)
+      : {},
+    enabled: row.enabled === 1,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 

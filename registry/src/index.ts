@@ -51,6 +51,9 @@ export type {
   AuditEntityType,
   RegistryAuditEntry,
   SqliteManifestIndexOptions,
+  VirtualUpstream,
+  VirtualUpstreamConfig,
+  VirtualUpstreamKind,
 } from "./storage/sqlite-index.js";
 export { LocalFsRegistryStorage } from "./storage/registry-storage.js";
 export type { LocalFsRegistryStorageOptions } from "./storage/registry-storage.js";

@@ -45,3 +45,12 @@ export {
   type CargoPublishMetadata,
   type MountCargoPublishOptions,
 } from "./publish.js";
+
+export {
+  proxyCargoSparseIndex,
+  proxyCargoDownload,
+  nameMatchesPatterns,
+  type UpstreamFetch,
+  type UpstreamFetchResult,
+  type VirtualCargoOptions,
+} from "./virtual.js";
