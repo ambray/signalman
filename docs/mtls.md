@@ -11,6 +11,13 @@ that has been in place since v0.0.x.
   default; mTLS layers on top.
 - v0.2.0+: ECDSA P-256 standardized; cert-renewal CLI; secret primitive
   for distributing client identities.
+- v0.3.0+: host control-plane service certs (TCP mTLS listener for
+  remote MCP / HTTP control-plane traffic) with in-place rotation via
+  `signalman-service rotate-certs`. Per-org cloud credentials encrypted
+  at rest with AES-256-GCM (see [Per-org credential storage](#per-org-credential-storage)).
+- v0.4.0+: webhook outbound HMAC-SHA256 signing for `generic` subscribers
+  (orthogonal to TLS — covers payload integrity even when the receiver
+  terminates TLS at a load balancer).
 
 ## Trust model
 
@@ -161,3 +168,115 @@ afterward so the TCP mTLS listener reloads the new files.
 - `RST_STREAM with code UNAVAILABLE` from the host — the agent rejected
   the TLS handshake (typically due to a missing client cert). Check the
   agent logs; rejected handshakes are logged at INFO.
+
+## Host control-plane service certs
+
+The host control plane terminates TCP MCP / HTTP traffic on its own
+TLS listener — separate from the guest-agent surface above. The default
+bundle path is `%ProgramData%\Signalman\certs` on Windows and
+`/etc/signalman/certs` on Linux/macOS, holding:
+
+```
+ca.pem   ca.key       Self-signed CA pinned by the host's bearer-token cert-pin registry
+server.pem server.key Service identity presented to remote MCP / HTTP clients
+client.pem client.key Client identity the host uses to dial guest agents (re-used from §1 above)
+```
+
+The bundle layout is intentionally identical to the dev-cert script's
+output so operators can promote a vetted dev bundle to production by
+copying the files into place.
+
+### Rotation
+
+```powershell
+# Rotate in-place (writes new files alongside; backs up prior bundle).
+signalman-service rotate-certs
+
+# Rotate at an explicit cert directory.
+signalman-service rotate-certs --cert-dir 'C:\Signalman\certs'
+```
+
+The command preserves the prior complete bundle under
+`.rotation-backups/<unix-ms>/`. Restart the service afterward so the
+TCP listener reloads the new files; the existing process keeps serving
+the old bundle until restart, so rotation is zero-downtime when paired
+with a graceful service restart.
+
+A rotation audit row (`service.cert_rotated`) is appended to the
+control-plane audit log on success so operators can prove rotation
+happened — see [supply-chain.md](supply-chain.md#immutable-audit-log).
+
+## Per-org credential storage
+
+Cloud target kinds (`cloud_vm_*`, `cloud_stack_*`) need credentials —
+AWS access keys, Azure service principals, GCP service-account JSON,
+etc. — that the host has to be able to decrypt on demand to provision
+infrastructure. Storing them plaintext on disk would defeat the
+audit-log story.
+
+Signalman encrypts credentials at rest with AES-256-GCM:
+
+- **Key source.** The data-encryption key comes from the
+  `SIGNALMAN_CRED_KEY` env var on the host. It must be 32 bytes
+  base64-encoded. The host refuses to set or read credentials when
+  the var is missing or malformed.
+- **Per-row nonce.** Each row uses a fresh 12-byte random IV; the
+  16-byte GCM auth tag is appended to the ciphertext. Stored layout
+  in `cloud_org_credential.ciphertext_b64`:
+  `base64(<iv 12B> || <ciphertext> || <auth_tag 16B>)`.
+- **Plaintext shape.** A JSON document specific to the backend kind,
+  e.g. `{"access_key_id": "...", "secret_access_key": "..."}` for AWS.
+  The shape is documented in `0041_cloud_credentials.sql`.
+- **Redacted hint.** Every row also stores a non-secret
+  `redacted_hint` like `"AKIA****EXAMPLE"` that surfaces via CLI / MCP
+  `cloud-creds get` so operators can confirm they have the right key
+  without ever seeing the secret again.
+- **Decryption locality.** Decryption only happens at the call site
+  via `loadCredentialForOrg(orgId, backend)` — typically inside a
+  cloud-provider client wrapper that immediately uses the credential
+  to sign a request. Plaintext is never logged, never written to
+  disk, and never crosses an MCP boundary.
+
+### Setting credentials
+
+```bash
+# AWS — env-var key, then upsert via CLI.
+export SIGNALMAN_CRED_KEY="$(openssl rand -base64 32)"
+
+signalman cloud-creds set \
+  --org-id 01HEXAMPLE... \
+  --backend aws \
+  --json '{"access_key_id":"AKIA...","secret_access_key":"..."}'
+
+# Verify the redacted hint.
+signalman cloud-creds get --org-id 01HEXAMPLE... --backend aws
+# → backend: aws
+# → redacted_hint: AKIA****EXAMPLE
+# → encryption_method: aes-gcm-env
+```
+
+Both the set + remove operations append rows to the audit log
+(`cloud_creds.set`, `cloud_creds.removed`) so the trail of "who
+configured what credential when" is preserved even after the row
+is overwritten by rotation.
+
+### Key rotation roadmap
+
+v0.3.0 ships env-var-key encryption only (`encryption_method =
+'aes-gcm-env'`). KMS-derived keys (`aws-kms`, `azure-key-vault`,
+`age-encrypted-file`) land in v0.3.x with the same table layout —
+only `encryption_method` gains new values and `loadCredentialForOrg`
+dispatches on it. See `docs/design/meta-build-system.md §13.7` for
+the design.
+
+## Registry TLS
+
+`@signalman/registry` (the standalone OSS sibling) terminates its
+HTTP surface in plaintext by default for local-development ease.
+For production it should be fronted by a reverse proxy (nginx,
+Caddy, Envoy) that terminates TLS, with the registry bound to
+localhost or a private network only. The bearer-token + HMAC
+signature on uploads remains the integrity layer regardless of
+where TLS terminates. Native TLS termination inside the registry
+process is on the roadmap once the cargo + npm protocol facades
+stabilize.
