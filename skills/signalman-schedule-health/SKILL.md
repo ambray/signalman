@@ -1,7 +1,7 @@
 ---
 name: signalman-schedule-health
-description: Set up a periodic health-check schedule against a deployed target. Lists existing schedules, registers a new one with an interval and (optional) probe-name filter, and surfaces disable/remove paths. Trigger when the user says "schedule health checks for <target>", "ping <target> every N minutes", "set up periodic probes on <target>", or asks to list/disable an existing schedule.
-allowed-tools: Bash
+description: 'Set up periodic health-check schedules against deployed targets and manually trigger one-shot tick runs. Lists existing schedules, registers a new one with an interval and (optional) probe-name filter, surfaces disable/enable/remove, and fires `signalman_schedule_run_once` for verify-before-daemon flows or CI cron paths. Trigger when the user says "schedule health checks for <target>", "ping <target> every N minutes", "set up periodic probes on <target>", "run the scheduler once", "fire all schedules now", "verify the schedule fires", or asks to list/disable an existing schedule. CLI parity: `signalman schedule {list,add,disable,enable,remove,run-once,start}`.'
+allowed-tools: mcp__signalman__signalman_schedule_list, mcp__signalman__signalman_schedule_add, mcp__signalman__signalman_schedule_disable, mcp__signalman__signalman_schedule_enable, mcp__signalman__signalman_schedule_remove, mcp__signalman__signalman_schedule_run_once, Bash
 ---
 
 # Schedule periodic health checks
@@ -34,11 +34,39 @@ signalman schedule enable <ID>
 signalman schedule remove <ID>
 ```
 
-Run one tick manually (useful for CI cron paths and for verifying a schedule before letting it run unattended):
+### Run one tick manually (`signalman_schedule_run_once`)
+
+Drive `signalman_schedule_run_once` when the operator says "fire the
+scheduler now", "verify the schedule before I leave it running",
+or pairs Signalman with an external cron / Kubernetes CronJob (the
+cron entry calls `signalman schedule run-once` every N seconds in
+place of the long-lived daemon):
+
+```jsonc
+// MCP
+{}
+```
 
 ```bash
 signalman schedule run-once
 ```
+
+Behaviour:
+
+- Wakes once, enumerates all **enabled** schedules whose
+  `next_run_at` has elapsed, runs each, records results.
+- Disabled schedules are skipped even if they're past-due.
+- Returns the count of schedules fired + any per-schedule
+  pass/fail/error breakdown for the agent to surface.
+- Idempotent across rapid-fire calls: a schedule that just ran
+  won't run again until its interval has elapsed.
+
+Two-mode operator pattern:
+
+| Pattern | Fire path |
+|---|---|
+| Long-running host process | `signalman schedule start --tick-ms 60000` (daemon owns the tick loop). |
+| External scheduler (cron / k8s CronJob / Jenkins / GHA cron) | `signalman_schedule_run_once` per tick. Lets the operator centralise scheduling on infra they already operate. |
 
 Run the scheduler as a long-lived daemon (Ctrl-C to stop):
 

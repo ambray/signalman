@@ -1,7 +1,7 @@
 ---
 name: signalman-promote-release
-description: Drive Signalman's auto-promotion + approval pipeline. Configures promotion policies (auto / manual / time-delay), surfaces pending approvals, and fires approve/reject decisions. Trigger when the user says "set up auto-promotion", "promote releases from test to demo", "approve the pending promotion", "show pending approvals", or asks about gate behaviour for a product.
-allowed-tools: Bash
+description: 'Drive Signalman''s auto-promotion + approval pipeline end-to-end. Configures promotion policies (auto / manual / time-delay); lists active policies; surfaces pending approvals; fires approve/reject decisions; and ticks the time-delay queue. Trigger when the user says "set up auto-promotion", "promote releases from test to demo", "approve the pending promotion", "what is pending approval", "show pending approvals", "list promotion policies", "tick the auto-approve queue", or asks about gate behaviour for a product. CLI parity: `signalman promotion {add,list,remove,approve,reject,approvals,tick}`.'
+allowed-tools: mcp__signalman__signalman_promotion_add, mcp__signalman__signalman_promotion_list, mcp__signalman__signalman_promotion_remove, mcp__signalman__signalman_promotion_approve, mcp__signalman__signalman_promotion_reject, mcp__signalman__signalman_promotion_approvals, mcp__signalman__signalman_promotion_tick, Bash
 ---
 
 # Auto-promote a release
@@ -44,6 +44,32 @@ List policies / pending approvals:
 signalman promotion list [--format json]
 signalman promotion approvals [--status pending] [--format json]
 ```
+
+### Querying pending approvals (`signalman_promotion_approvals`)
+
+When the operator asks "what's waiting for me?", "show pending approvals",
+or "is anything queued for review", drive `signalman_promotion_approvals`
+directly:
+
+```jsonc
+// MCP
+{ "status": "pending" }
+```
+
+The `status` filter is one of `pending` / `approved` / `rejected` /
+`auto_approved`. Omit the filter to get every approval row. The
+response is an array of approval objects with `id`, `release_id`,
+`dest_target`, `gate_kind`, `auto_approve_at` (for time-delay rows),
+`status`, `decided_by`, `decided_at`, `reason`, `deploy_outcome`.
+
+Typical patterns:
+
+- **"What's pending right now?"** → `{ "status": "pending" }`.
+- **"What did the time-delay queue auto-approve last hour?"** →
+  `{ "status": "auto_approved" }` then filter by `decided_at` in the
+  caller.
+- **"Did my approve fire the deploy?"** → look up the row by `id`;
+  `deploy_outcome` says `succeeded` / `failed` / `pending`.
 
 Decide on a pending approval:
 
