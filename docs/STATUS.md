@@ -1,38 +1,64 @@
 # Signalman — Status & Resume Context
 
-> Last updated: 2026-05-12. Living document — update on every commit
+> Last updated: 2026-05-15. Living document — update on every commit
 > that changes scope, ships a feature, closes an audit finding, or
 > introduces a new TODO bucket. See [Document maintenance](#document-maintenance)
 > for the trigger rules.
 
-## v0.2.0 release cut — 2026-05-12
+## Current state — 2026-05-15
 
-`main` is at the v0.2.0 bump commit and in sync with `origin/main`.
-History was rewritten via `git filter-repo` to scrub prior
-product-specific references, so commit SHAs prior to the bump differ
-from earlier snapshots of this file. See `CHANGELOG.md` for the
-detailed change log of what's in v0.2.0.
+`main` is at `61978e4` (commit subject: `Cleanup for public release`).
+v0.2.1 is the most recent tagged release on `main`; v0.3.x and v0.4.x
+work has shipped to `main` but has not yet been tagged. The standalone
+artifact registry (`@signalman/registry`) is independently versioned
+and is currently at v0.1.1 (cargo + npm protocol facades + virtual
+upstreams + forensic API).
 
-v0.2.0 bundles what was originally scoped as v0.2.0 (local
-in-process meta build system) + v0.3.0 (networked control plane:
-HTTP serve, runners, signing, Postgres, S3) into one tag. The two
-were developed in lockstep on the same branch and neither shipped
-independently. Also packages the public-release security pass, the
-Apache-2.0 license migration, and the standard OSS community-health
-files.
+Recent waves of work shipped to `main` since v0.2.1:
 
-CODE_OF_CONDUCT.md is intentionally deferred (operator decision);
-GitHub's community-profile checklist will show one missing item.
+- **v0.3.0-5** (WS1) — cloud-provider support (AWS + Azure), ephemeral
+  cloud instances + cost guardrails (TTL reaper, per-org budgets),
+  per-org credentials at rest, OpenTofu stack driver, network
+  connection descriptor (`public_mtls` / `aws_ssm` / `azure_bastion`).
+- **v0.3.0-6** (WS2) — Kubernetes deploy target + runner substrate
+  (KubectlDriver, HelmDriver, `signalman k8s` verbs, `signalman runner
+  deploy-k8s`).
+- **v0.4.0-1/-2/-3** (WS3) — release-ops trio: auto-promotion +
+  approval gates, webhooks + Slack/email/generic drivers, scheduled
+  health checks.
+- **v0.4.0-4** (WS4) — cross-platform completion: `Platform` trait
+  in the guest agent, Linux/macOS support, libvirt backend, vmrun
+  parallel-track backend.
+- **`@signalman/registry` v0.1.0/v0.1.1** (WS5/WS6) — standalone OSS
+  registry with cargo + npm protocol facades, virtual-upstream
+  pull-through with Ed25519 re-signing, forensic + provenance HTTP
+  API, immutable audit log, multi-transport runner deploy
+  (script/ssh/winrm/docker/cloud).
+- **WS6 wave-3 (M5–M10.6)** — production-readiness pass: cloud_vm +
+  cloud_stack target kinds, install-bundle integration, SSM/Bastion
+  tunneling dialers, Packer golden-image scaffolding, multi-transport
+  deploy integration tests, operator CLI + skill for registry +
+  forensic surface.
+
+A git-history genericization pass also landed on 2026-05-15 (commit
+`61978e4`): commit messages across all refs were neutralized to make
+the repo suitable for public consumption. Pre-rewrite mirror clone +
+reflog tarball are preserved under
+`C:/Users/ucale/source/repos-backups/signalman-2026-05-15-pre-history-rewrite/`
+for recovery cherry-picks if ever needed.
 
 ## Public-release status
 
 Closed:
 
-1. ✅ **Git history genericization pass.** Done 2026-05-12. Pre-pass
-   mirror clone of the repo is preserved for recovery cherry-picks
-   if ever needed.
-2. ✅ **Version-pin bump strategy.** v0.2.0 carries v0.2 + v0.3
-   scopes in one tag (decided 2026-05-12).
+1. ✅ **Git history genericization pass.** Done 2026-05-15 via
+   `git filter-repo` (27 exact rewrites + regex sweep + 9 historical
+   path strips + 1 tag annotation rewrite). Pre-rewrite mirror clone
+   preserved.
+2. ✅ **Version-pin bump strategy.** v0.2.0 carries v0.2 + v0.3 scopes
+   in one tag (decided 2026-05-12); v0.2.1 is the most recent tag.
+3. ✅ **CHANGELOG + STATUS docs.** Current-tree residuals cleaned up
+   in `61978e4`.
 
 Open:
 
@@ -43,66 +69,71 @@ Open:
    `CARGO_REGISTRY_TOKEN`. Without them the workflow builds
    artifacts but skips publishing — fine for an unsigned dry-run
    tag; not fine for an actual public release.
-
-The v0.2.0 tag was created and pushed to origin on 2026-05-12 (see
-the latest entry in `CHANGELOG.md`).
+3. **`signalman --version` verb** — referenced in `SECURITY.md` /
+   `CONTRIBUTING.md` / bug-report template but currently returns
+   "unknown verb". Slated for the OSS-hygiene trio (epic #10).
+4. **`CODE_OF_CONDUCT.md`** — intentionally deferred at v0.2.0;
+   GitHub's community-profile checklist will continue to show it as
+   missing until the operator picks a variant.
+5. **v0.3.0 / v0.4.0 tags** — `main` carries the work but no tag has
+   been cut. A consolidated v0.3.0 (or higher) release-engineering
+   pass is queued as a follow-up.
 
 ## TL;DR (one-paragraph)
 
-`main` is ready to tag as **v0.2.0** — the first formally versioned
-release. v0.2.0 bundles the secure scenario runner (six MCP verbs,
-Loom-fronted plugin, mTLS guest agent, signed-MSI release pipeline,
-P9 provisioning + bootstrap, UI sidecar with UIA + CDP) **plus** the
-tag-driven meta build system that landed since the v0.1.x line:
-local in-process control plane (storage / schema / build executor /
-deploy + rollback / health probes), HTTP control plane with
-Bearer-token auth, runner protocol + remote `release.build`,
-Postgres `StorageDriver`, Ed25519 manifest signing + `release
-verify`, and S3 `BlobDriver`. The repo was prepared for public
-release: F1–F5 security fixes landed, manifests aligned to
-Apache-2.0, and all prior product-specific references scrubbed
-from working tree
-**and** git history. All four manifest version pins + the in-code
-`VERSION` constant now read `0.2.0`; the release workflow validates
-the manifest matches the pushed tag before building, so the
-remaining operator step is `git tag -a v0.2.0 && git push origin
-v0.2.0`. Four GitHub repo secrets
-(`WINDOWS_CERT_BASE64`, `WINDOWS_CERT_PASSWORD`, `NPM_TOKEN`,
-`CARGO_REGISTRY_TOKEN`) gate publishing; without them the workflow
-builds artifacts but does not publish.
+`main` carries v0.2.1 + everything shipped since: v0.3.0-5 (cloud
+providers + cost guardrails + per-org credentials), v0.3.0-6
+(Kubernetes deploy + runner substrate), v0.4.0-1/-2/-3 (auto-promotion
++ webhooks + scheduled health), v0.4.0-4 (cross-platform guest agent
+with `Platform` trait + libvirt + vmrun backends), and the standalone
+`@signalman/registry` v0.1.1 (cargo + npm protocol facades + virtual
+upstreams + Ed25519 re-signing + forensic + provenance API + immutable
+audit log). The git-history genericization pass landed today
+(2026-05-15, commit `61978e4`), so the repo is structurally
+public-ready. The remaining open items are operator gestures
+(visibility flip, repo secrets) and a small OSS-hygiene trio
+(`signalman --version` verb + `CODE_OF_CONDUCT.md` + a consolidated
+v0.3.0/v0.4.0 release-engineering tag).
 
 ## Versions
 
 | Component | Path | Current version |
 |---|---|---|
-| Host (npm) | `host/package.json` | `0.2.0` |
-| Guest (cargo) | `guest/Cargo.toml` | `0.2.0` |
-| Workspace (cargo) | `Cargo.toml` (`workspace.package.version`) | `0.2.0` |
-| Service (cargo) | `service/Cargo.toml` (`version.workspace = true`) | `0.2.0` (inherits workspace) |
-| Loom plugin | `plugins/signalman-loom-plugin/Cargo.toml` | `0.2.0` |
-| HTTP `/v1/healthz` `version` field | `host/src/http/app.ts` `VERSION` const | `0.2.0` |
-| Proto contract — guest | `proto/guest.proto` | `signalman.guest` package, **v1 frozen** (P8 / commit `c9e8e30`) with `oneof platform_details` |
+| Host (npm) | `host/package.json` | `0.2.1` (latest tag) — `main` carries v0.3.x + v0.4.x work, not yet bumped |
+| Guest (cargo) | `guest/Cargo.toml` | `0.2.1` (same) |
+| Workspace (cargo) | `Cargo.toml` (`workspace.package.version`) | `0.2.1` |
+| Service (cargo) | `service/Cargo.toml` (`version.workspace = true`) | `0.2.1` (inherits workspace) |
+| Loom plugin | `plugins/signalman-loom-plugin/Cargo.toml` | `0.2.1` |
+| Registry (npm) | `registry/package.json` | `0.1.1` (independently versioned; latest tag is the registry-v0.1.1 commit on `main`) |
+| HTTP `/v1/healthz` `version` field | `host/src/http/app.ts` `VERSION` const | `0.2.1` |
+| Proto contract — guest | `proto/guest.proto` | `signalman.guest` package, **v1 frozen** with `oneof platform_details` |
 | Proto contract — service | `service/proto/signalman_service.proto` | `signalman.service.v1.ControlPlane` |
 
 > The release workflow at `.github/workflows/release.yaml` validates
 > that every manifest matches the pushed tag before building.
-> Bumping for the next release: change all five entries above in
-> lockstep (the proto-contract rows are not version-pinned in the
-> same way), commit, then `git tag -a vX.Y.Z` and push the tag.
+> Bumping for the next release: change the host / guest / workspace /
+> service / loom plugin / VERSION-const entries in lockstep (the
+> proto-contract rows are not version-pinned the same way; the
+> registry is independently versioned), commit, then `git tag -a
+> vX.Y.Z` and push the tag.
+>
+> A consolidated v0.3.0 (or higher) release-engineering tag is queued
+> — `main` currently carries v0.3.x + v0.4.x work that the version
+> pins haven't caught up to yet.
 
 ## Latest commits (top 10)
 
 ```
-a350af8 Add UI observation roles and labels
-f1b5cea Use UIA events for native waits
-790790d Expand native UI key tokens
-ff5df3e Expose UI action targets
-6f733f7 Support array includes assertions
-b9c63db Add UI descriptor action hints
-1c2f56d Consolidate native UIA lookup helpers
-faf7d6c Prefer native UI invoke clicks
-f5261f4 Honor UI action timeouts
-5ddcda5 Expand native UI key modifiers
+834ad44 docs(readme): refresh for v0.3.x + v0.4.x feature surface
+61978e4 Cleanup for public release
+c539444 feat(registry v0.1.1): npm protocol facade — publish + install + virtual mirror
+68a2c28 feat(ws6 wave-3 m10.6): operator CLI + skill + ROADMAP refresh + wave-3 closure
+dba57d0 feat(ws6 wave-3 m10.5): forensic + provenance HTTP API
+05ca80d feat(ws6 wave-3 m10.4): cargo virtual-registry pull-through + re-signing
+5fb4d00 feat(ws6 wave-3 m10.3): cargo publish + yank + audit-log on writes
+2409b71 feat(ws6 wave-3 m10.2): cargo sparse-index read path + per-org namespacing
+3d2cecd feat(ws6 wave-3 m10.1): registry schema for cargo + provenance + audit log
+eb8ce17 feat(ws6 wave-3): close carve-outs #3 + #4 + #6 (integration scaffolding + Packer + Loom)
 ```
 
 ## Audit closure (security findings)
@@ -403,6 +434,144 @@ Tracked in ROADMAP § "v0.2.0 Roadmap":
 v0.3.0+ speculative: cross-platform daemon (libvirt, vmrun wrapper),
 Linux/macOS guest agent (E3), mobile UI proto shape (E4), per-user
 identity certs and per-method capability tokens.
+
+### v0.3.0-5 — Cloud provider support (AWS + Azure) — SHIPPED (WS1, 2026-05-14)
+
+Closes the v0.3.0 cloud milestone scoped in
+`docs/design/v0.3.0-5-cloud-providers.md`.
+
+- **Cloud SDK backends** — AWS via `@aws-sdk/client-ec2`; Azure via
+  `@azure/arm-compute` + `@azure/identity`. Backend registry under
+  `host/src/cloud/registry.ts`; `getCloudBackend("aws"|"azure")`
+  resolves at call time.
+- **Ephemeral cloud VMs** — `signalman cloud provision/terminate/
+  status/list/backends` MCP tools + matching CLI verbs. Sentinel
+  tags (`signalman-managed=true`, `signalman-org=<id>`,
+  `signalman-ttl-minutes=<n>`) flow on every instance.
+- **OpenTofu stack driver** — `signalman stack apply/destroy/
+  plan-cost`. Per-stack workspace under
+  `<projectRoot>/.signalman/tofu-workspaces/<stack_name>/`.
+  `tofu` binary on PATH or via `SIGNALMAN_TOFU_BIN`.
+- **Per-org credentials at rest** — AES-256-GCM, key from
+  `SIGNALMAN_CRED_KEY` (base64). Plaintext never appears on argv in
+  the stable surface. `signalman cloud creds set/get/remove`.
+- **Cost guardrails** — `cloud_org_budget` + `cloud_org_usage`
+  tables; reaper enforces TTL + projected-spend caps. `signalman
+  cloud budget/usage/reaper {status,run-once}`.
+- **Connection-descriptor** — `signalman cloud connection-descriptor`
+  emits JSON that `signalman target add` consumes. Modes: `public_mtls`,
+  `aws_ssm`, `azure_bastion`.
+- **`cloud_vm_test` + `cloud_stack_test` target kinds** — registered
+  in the targets table and resolved by the deploy executor (with
+  SSM/Bastion dialing on tunneled modes).
+
+### v0.3.0-6 — Kubernetes (deploy target + runner substrate) — SHIPPED (WS2, 2026-05-14)
+
+- **`KubectlDriver` + `HelmDriver`** at `host/src/k8s/{kubectl,helm}.ts`.
+- **MCP tools**: `signalman_k8s_deploy`, `signalman_k8s_rollback`,
+  `signalman_k8s_status`.
+- **CLI verbs**: `signalman k8s deploy/rollback/status`.
+- **`signalman runner deploy-k8s`** — deploys runner pods as a remote
+  worker substrate; gates on pod readiness with configurable
+  `--wait-timeout-ms`.
+- **`k8s_test` target kind**: deliberately bypasses the control-plane
+  Deployment row (k8s manifests don't fit the per-target deployment
+  model the VM-deploy path uses). Both VM-deploy and k8s-deploy emit
+  `release-deployed` webhook events on success.
+
+### v0.4.0-1/-2/-3 — Release-ops trio — SHIPPED (WS3, 2026-05-14)
+
+- **v0.4.0-1: Auto-promotion + approval gates**
+  - `promotion_policy` + `approval` tables.
+  - `signalman promotion {add,list,remove,approve,reject,tick,approvals}` CLI.
+  - 7 MCP tools (`signalman_promotion_*`).
+  - Three gate kinds: `auto` (fire deploy immediately), `manual` (queue
+    pending approval), `time_delay` (queue with `auto_approve_at`).
+  - Honour-system approver allow-list via `gate_config.approvers`.
+    Authenticated RBAC is delegated to fronting auth layer (e.g.
+    `signalman-cloud`); contract spec at
+    `signalman-cloud/docs/contracts/promotion-approvers.md`.
+  - Tier-to-tier promotion (`source_target_id` non-null) fires from
+    `runReleaseDeploy` when the deploy lands as `status=active`;
+    rollbacks deliberately do NOT promote.
+- **v0.4.0-2: Webhooks + notifications**
+  - `webhook_subscription` table + `EventDispatcher` + HMAC-SHA256
+    signer + Slack Block-Kit formatter + nodemailer-backed email
+    (gated on `SIGNALMAN_SMTP_URL`; absent = silent skip).
+  - `signalman webhook {add,list,remove,test}` CLI; 4 MCP tools.
+  - Event kinds: `release-built`, `release-deployed`,
+    `deployment-rolled-back`, `health-failed`, `promotion-approved`,
+    `promotion-rejected`.
+  - `X-Signalman-Signature: sha256=<hex>` header on generic webhook
+    deliveries.
+- **v0.4.0-3: Scheduled health checks**
+  - `health_schedule` table + scheduler module (`dueSchedules` pure
+    decision + `runSchedulerTick` + `startScheduler` loop).
+  - `signalman schedule {add,list,disable,enable,remove,run-once,start}`
+    CLI; 6 MCP tools.
+  - Interval floor: 60 seconds. Scheduled runs land in the existing
+    `health_check` table alongside operator-triggered runs.
+
+### v0.4.0-4 — Cross-platform completion — SHIPPED (WS4, 2026-05-14)
+
+- **`Platform` trait** in `guest/src/platform/{windows,linux,macos,other}.rs`.
+- **Linux** — proc / cmd / file / net implemented; SYSTEM-elevation via
+  passwordless `sudo -n`; package install routes through
+  `apt`/`dnf`/`yum`.
+- **macOS** — proc / cmd / file / net implemented; package install
+  routes through `brew`. UI / browser RPCs return `unimplemented`
+  pending the AppleScript + AX driver (carve-out, blocked on Mac
+  developer host).
+- **`libvirt` host backend** at `host/src/hypervisors/libvirt.ts` —
+  `virsh`-wrapping for Linux qemu/KVM.
+- **`vmrun.ts`** — parallel-track VMware Workstation/Fusion driver
+  with injectable exec + stable error codes. Converges with the
+  legacy `vmware.ts` in a follow-up release.
+
+### Registry (`@signalman/registry`) v0.1.0 / v0.1.1 — SHIPPED (WS5/WS6, 2026-05-15)
+
+Independent versioning track. Standalone OSS product.
+
+- **v0.1.0** — package skeleton, generic blob format, Ed25519 signing
+  port, minimal HTTP API, `signalman-registry` CLI, host-side
+  `signalman-registry` BlobDriver.
+- **v0.1.1 (current)** — cargo + npm protocol facades, virtual
+  upstream pull-through with Ed25519 re-signing on cache write,
+  forensic + provenance HTTP API (`/v1/forensic/manifest/<name>/<version>`,
+  `/v1/audit/query`), immutable audit log with canonical action codes
+  (`upload`, `proxy_cache`, `manifest_create`, `security_scan_*`).
+- **Operator surface**: `signalman-registry serve/audit/forensic/
+  virtual/keygen/verify`. The `signalman-registry` BlobDriver in
+  `@signalman/host` routes blob writes through the registry's
+  storage layer; provenance + signing for free.
+
+Queued (`registry/ROADMAP.md`): v0.1.2 OCI distribution spec
+(`docker pull` from a Signalman registry); v0.1.3 security
+integration (OSV + commercial firewall passthroughs); v0.1.4 mutable
+tags + retention/GC; v0.2.0 operational hardening; v0.2.1 RBAC +
+Cloud federation.
+
+### WS6 wave-3 (M5–M10.6) — SHIPPED (2026-05-15)
+
+Production-readiness pass spanning M5 through M10.6:
+
+- **M6–M7** — multi-transport runner deploy (`script` / `ssh` / `winrm`
+  / `docker` / `cloud`), WS3 promotion auto-approver health-gate
+  for WS2 readiness.
+- **M8** — `cloud_vm` + `cloud_stack` target kinds with deploy
+  adapters, install-bundle integration for cloud VMs, cloud
+  rollback paths.
+- **M9** — runner-deploy multi-transport with integration test
+  scaffolding (gated on `SIGNALMAN_INTEGRATION_TESTS=1`), SSM /
+  Bastion tunneling dialers in the deploy executor.
+- **M10** — registry feature pass (M10.1 schema, M10.2 cargo
+  sparse-index, M10.3 publish/yank, M10.4 virtual + re-sign,
+  M10.5 forensic HTTP API, M10.6 operator CLI + skill).
+
+Wave-3 capability matrix (the operator's working doc) lives at
+`docs/audit/capability-matrix-2026-05-wave3.md` and tracks the full
+M5–M10 close-out + remaining carve-outs (macOS UI automation,
+vmrun↔vmware convergence).
 
 ## Outstanding TODOs in code
 
