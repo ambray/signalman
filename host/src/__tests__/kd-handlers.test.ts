@@ -635,23 +635,33 @@ describe("ScenarioOrchestrator — driver_* dispatch", () => {
     return { orchestrator, vmMap };
   }
 
-  it("dispatches driver_load and JSON-stringifies the result", async () => {
-    const client = new FakeGuestClient();
-    client.queueSuccess(); // sc start
-    client.queueSuccess({
-      stdout: "        STATE              : 4  RUNNING",
-    }); // sc query
+  // Bumped timeout: under coverage instrumentation + Windows CPU
+  // contention, the dynamic import of `../scenarios/orchestrator.js`
+  // (which transitively pulls the hypervisor/guest stack) exceeds the
+  // default 5s testTimeout. In non-coverage mode the same test
+  // completes in ~2.9s. Per-test timeout keeps the rest of the file
+  // on the default 5s so logic regressions surface quickly.
+  it(
+    "dispatches driver_load and JSON-stringifies the result",
+    async () => {
+      const client = new FakeGuestClient();
+      client.queueSuccess(); // sc start
+      client.queueSuccess({
+        stdout: "        STATE              : 4  RUNNING",
+      }); // sc query
 
-    const { orchestrator, vmMap } = await makeOrchestrator(client);
-    const out = await orchestrator.executeToolBlock(
-      "driver_load",
-      { vm: "endpoint-1", service: "example-product" },
-      vmMap as never,
-    );
-    const parsed = JSON.parse(out);
-    expect(parsed.service_state).toBe("Running");
-    expect(parsed.status).toBe(0);
-  });
+      const { orchestrator, vmMap } = await makeOrchestrator(client);
+      const out = await orchestrator.executeToolBlock(
+        "driver_load",
+        { vm: "endpoint-1", service: "example-product" },
+        vmMap as never,
+      );
+      const parsed = JSON.parse(out);
+      expect(parsed.service_state).toBe("Running");
+      expect(parsed.status).toBe(0);
+    },
+    30000,
+  );
 
   it("dispatches driver_unload and JSON-stringifies the result", async () => {
     const client = new FakeGuestClient();

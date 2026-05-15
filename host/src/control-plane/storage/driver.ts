@@ -40,6 +40,7 @@ import type {
   Release,
   ReleaseStatus,
   Run,
+  Runner,
   RunTriggeredBy,
   Scenario,
   Target,
@@ -164,6 +165,22 @@ export interface TargetRepo {
   get(id: string): Promise<Target | null>;
   getByName(orgId: string, name: string): Promise<Target | null>;
   listForOrg(orgId: string): Promise<Target[]>;
+  /**
+   * Edit a target row. `kind` and `id` are NOT editable — kind would
+   * invalidate past deployments' backend assumptions; id is the
+   * primary key. Past deployment rows reference targets by id and
+   * are intentionally NOT updated by this method — operations
+   * against a deployment use the target row's *current* connection,
+   * which is the right semantic for rollback / health-check.
+   *
+   * @throws StorageNotFoundError when `id` is unknown or soft-deleted.
+   * @throws StorageConflictError when renaming to a name held by
+   *   another active target in the same org.
+   */
+  update(
+    id: string,
+    patch: Partial<Pick<Target, "name" | "connection">>,
+  ): Promise<Target>;
   softDelete(id: string): Promise<void>;
 }
 
@@ -550,6 +567,47 @@ export interface StorageDriver {
   // v0.4.0-1 (Epic 1, WS3) — promotion policies + approvals:
   readonly promotionPolicies: PromotionPolicyRepo;
   readonly approvals: ApprovalRepo;
+  // WS6 M3 — registered runners + heartbeat:
+  readonly runners: RunnerRepo;
+}
+
+// ── RunnerRepo (WS6 M3) ─────────────────────────────────────────────
+
+export interface RunnerRepo {
+  /**
+   * Heartbeat from a worker. Upserts by (orgId, name):
+   *   - First call for that (org, name) creates a new row with
+   *     `registered_at` = now.
+   *   - Subsequent calls update `last_seen_at` and `meta`; the
+   *     `registered_at` stays at the first-call value.
+   *   - If a row exists but is soft-deleted (deregistered), this
+   *     call resurrects it: clears `deleted_at`, sets a fresh
+   *     `registered_at` (because the runner went away and came
+   *     back as a new lifecycle).
+   *
+   * Returns the upserted row.
+   */
+  heartbeat(input: {
+    orgId: string;
+    name: string;
+    meta?: Record<string, unknown> | null;
+  }): Promise<Runner>;
+
+  /** Get by id (active only). */
+  get(id: string): Promise<Runner | null>;
+
+  /** Get by name within an org (active only). */
+  getByName(orgId: string, name: string): Promise<Runner | null>;
+
+  /**
+   * List active runners for an org, newest-`last_seen_at` first.
+   * The "stale" determination is left to the caller — repos return
+   * raw rows; the verb layer applies the staleness threshold.
+   */
+  listForOrg(orgId: string): Promise<Runner[]>;
+
+  /** Soft-delete (deregister) by id. */
+  softDelete(id: string): Promise<void>;
 }
 
 /** Thrown by repos that are declared in this PR but not yet implemented. */

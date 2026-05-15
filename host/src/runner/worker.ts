@@ -40,6 +40,19 @@ export interface WorkerOptions {
    * `noop` + `release.build` handlers.
    */
   handlers?: Record<string, JobHandler>;
+  /**
+   * WS6 M3 — heartbeat cadence in ms. Default 30000 (30s). Set to 0
+   * to disable heartbeats (legacy tests, single-shot CLI flows). The
+   * control plane's `runner list` flags rows as stale at
+   * `last_seen_at + 90s` by default; cadences above ~60s will flap
+   * the staleness indicator under operator observation.
+   */
+  heartbeatIntervalMs?: number;
+  /**
+   * WS6 M3 — optional diagnostic metadata posted with each heartbeat
+   * (hostname, version, etc). Surfaces in `signalman runner list`.
+   */
+  heartbeatMeta?: Record<string, unknown>;
 }
 
 export interface JobHandler {
@@ -56,6 +69,7 @@ export class JobFailedError extends Error {
 export async function runWorker(opts: WorkerOptions): Promise<void> {
   const out = opts.out ?? process.stderr;
   const pollInterval = opts.pollIntervalMs ?? 1_000;
+  const heartbeatInterval = opts.heartbeatIntervalMs ?? 30_000;
   const handlers =
     opts.handlers ??
     defaultHandlers({
@@ -64,6 +78,23 @@ export async function runWorker(opts: WorkerOptions): Promise<void> {
       runnerId: opts.workerName,
     });
   out.write(`[runner] starting worker '${opts.workerName}' against ${opts.client["baseUrl" as keyof HttpClient] ?? "<base>"}\n`);
+
+  // WS6 M3 — heartbeat loop. Runs in parallel with the job-claim
+  // loop so a long-running job (release.build clones + builds; can
+  // exceed the staleness threshold) doesn't make the worker appear
+  // dead to `signalman runner list`. Both loops respect the same
+  // AbortSignal.
+  const heartbeatPromise =
+    heartbeatInterval > 0
+      ? runHeartbeatLoop({
+          client: opts.client,
+          workerName: opts.workerName,
+          intervalMs: heartbeatInterval,
+          meta: opts.heartbeatMeta,
+          signal: opts.signal,
+          out,
+        })
+      : Promise.resolve();
 
   while (!opts.signal.aborted) {
     let job: Job | null = null;
@@ -110,7 +141,43 @@ export async function runWorker(opts: WorkerOptions): Promise<void> {
     }
   }
 
+  // Wait for the heartbeat loop to finish unwinding before declaring
+  // the worker stopped. Aborting the signal triggers both loops to
+  // exit; the await here just makes sure we don't leak a pending
+  // timer past the function's return.
+  await heartbeatPromise;
+
   out.write(`[runner] worker '${opts.workerName}' stopped\n`);
+}
+
+interface HeartbeatLoopOptions {
+  client: HttpClient;
+  workerName: string;
+  intervalMs: number;
+  meta?: Record<string, unknown>;
+  signal: AbortSignal;
+  out: NodeJS.WritableStream;
+}
+
+async function runHeartbeatLoop(opts: HeartbeatLoopOptions): Promise<void> {
+  // Fire one heartbeat immediately on startup so the worker appears
+  // in `runner list` without waiting `intervalMs` for the first
+  // tick. Subsequent ticks fire on the configured interval until
+  // the signal aborts.
+  while (!opts.signal.aborted) {
+    try {
+      await opts.client.postRunnerHeartbeat(opts.workerName, opts.meta);
+    } catch (err) {
+      // Heartbeat failures are surfaced but don't kill the loop —
+      // they're typically transient (network glitch, control-plane
+      // restart). The next tick retries.
+      opts.out.write(
+        `[runner] heartbeat failed: ${(err as Error).message}\n`,
+      );
+    }
+    if (opts.signal.aborted) break;
+    await sleep(opts.intervalMs, opts.signal);
+  }
 }
 
 async function safeFail(

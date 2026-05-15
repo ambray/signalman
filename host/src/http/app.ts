@@ -473,6 +473,37 @@ export function buildApp(opts: AppOptions): Router {
     return { status: 204, body: null };
   });
 
+  // ── Runners (WS6 M3 — explicit registration + heartbeat) ──────────
+
+  router.post("/v1/runners/heartbeat", async (ctx) => {
+    const body = asObject(ctx.body, "request body");
+    const name = readString(body, "name");
+    const meta =
+      body.meta !== undefined && body.meta !== null
+        ? asObject(body.meta, "meta")
+        : undefined;
+    const runner = await cp.runners.heartbeat({
+      orgId: ctx.auth.orgId,
+      name,
+      meta,
+    });
+    return { status: 200, body: { runner } };
+  });
+
+  router.get("/v1/runners", async (ctx) => {
+    const runners = await cp.runners.listForOrg(ctx.auth.orgId);
+    return { runners };
+  });
+
+  router.delete("/v1/runners/:id", async (ctx) => {
+    const runner = await cp.runners.get(ctx.params.id);
+    if (!runner || runner.orgId !== ctx.auth.orgId) {
+      throw notFound(`runner not found: ${ctx.params.id}`);
+    }
+    await cp.runners.softDelete(runner.id);
+    return { status: 204, body: null };
+  });
+
   // ── Jobs (PR 8 — submit-mode runner queue) ────────────────────────
 
   router.post("/v1/jobs", async (ctx) => {

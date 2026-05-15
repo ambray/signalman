@@ -243,6 +243,38 @@ describe("targets / deployments / health_check", () => {
     expect(t?.connection).toEqual({ backend: "service", vmName: "Win11_demo" });
   });
 
+  // WS6 M3 — target edit via the PgTargetRepo.update path.
+  it("targets: update edits name and connection; preserves id + kind", async () => {
+    const updated = await driver.targets.update(target.id, {
+      name: "win11-demo-renamed",
+      connection: { backend: "hyperv", vmName: "Win11_demo_v2" },
+    });
+    expect(updated.id).toBe(target.id);
+    expect(updated.kind).toBe("vm_demo");
+    expect(updated.name).toBe("win11-demo-renamed");
+    expect(updated.connection).toEqual({
+      backend: "hyperv",
+      vmName: "Win11_demo_v2",
+    });
+    const byNewName = await driver.targets.getByName(org.id, "win11-demo-renamed");
+    expect(byNewName?.id).toBe(target.id);
+    const byOldName = await driver.targets.getByName(org.id, "win11-demo");
+    expect(byOldName).toBeNull();
+  });
+
+  it("targets: update with empty patch is a no-op (id unchanged)", async () => {
+    const updated = await driver.targets.update(target.id, {});
+    expect(updated.id).toBe(target.id);
+    expect(updated.name).toBe(target.name);
+    expect(updated.connection).toEqual(target.connection);
+  });
+
+  it("targets: update against unknown id throws StorageNotFoundError", async () => {
+    await expect(
+      driver.targets.update("01HNONEXISTENT0000000000000", { name: "x" }),
+    ).rejects.toBeInstanceOf(StorageNotFoundError);
+  });
+
   it("deployments: one active per target invariant", async () => {
     const d1 = await driver.deployments.create({
       orgId: org.id,
@@ -457,5 +489,81 @@ describe("api_key", () => {
     expect(found?.id).toBe(k.id);
     await driver.apiKeys.softDelete(k.id);
     expect(await driver.apiKeys.getByPrefix("sk_AAAA1111")).toBeNull();
+  });
+});
+
+// ── runner (WS6 M3) ────────────────────────────────────────────────
+
+describe("runner", () => {
+  it("heartbeat creates a new row on first call", async () => {
+    const r = await driver.runners.heartbeat({
+      orgId: org.id,
+      name: "builder-1",
+      meta: { hostname: "pg-mac-01" },
+    });
+    expect(r.name).toBe("builder-1");
+    expect(r.meta).toEqual({ hostname: "pg-mac-01" });
+    expect(r.registeredAt).toBe(r.lastSeenAt);
+    expect(r.deletedAt).toBeNull();
+  });
+
+  it("heartbeat upserts: preserves id + registered_at, advances last_seen_at", async () => {
+    const first = await driver.runners.heartbeat({
+      orgId: org.id,
+      name: "builder-up",
+      meta: { v: 1 },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    const second = await driver.runners.heartbeat({
+      orgId: org.id,
+      name: "builder-up",
+      meta: { v: 2 },
+    });
+    expect(second.id).toBe(first.id);
+    expect(second.registeredAt).toBe(first.registeredAt);
+    expect(second.lastSeenAt >= first.lastSeenAt).toBe(true);
+    expect(second.meta).toEqual({ v: 2 });
+  });
+
+  it("heartbeat resurrects a deregistered runner with fresh registered_at", async () => {
+    const original = await driver.runners.heartbeat({
+      orgId: org.id,
+      name: "builder-back",
+    });
+    await driver.runners.softDelete(original.id);
+    expect(await driver.runners.get(original.id)).toBeNull();
+
+    await new Promise((r) => setTimeout(r, 10));
+    const resurrected = await driver.runners.heartbeat({
+      orgId: org.id,
+      name: "builder-back",
+    });
+    expect(resurrected.id).toBe(original.id);
+    expect(resurrected.registeredAt > original.registeredAt).toBe(true);
+    expect(resurrected.deletedAt).toBeNull();
+  });
+
+  it("listForOrg returns active rows newest-last_seen-first", async () => {
+    await driver.runners.heartbeat({ orgId: org.id, name: "alpha" });
+    await new Promise((r) => setTimeout(r, 5));
+    await driver.runners.heartbeat({ orgId: org.id, name: "beta" });
+    const list = await driver.runners.listForOrg(org.id);
+    expect(list.map((r) => r.name)).toEqual(["beta", "alpha"]);
+  });
+
+  it("softDelete by id removes from the active view", async () => {
+    const r = await driver.runners.heartbeat({
+      orgId: org.id,
+      name: "to-remove",
+    });
+    await driver.runners.softDelete(r.id);
+    expect(await driver.runners.get(r.id)).toBeNull();
+    expect(await driver.runners.getByName(org.id, "to-remove")).toBeNull();
+  });
+
+  it("softDelete against unknown id throws StorageNotFoundError", async () => {
+    await expect(
+      driver.runners.softDelete("01HNONEXISTENT0000000000000"),
+    ).rejects.toBeInstanceOf(StorageNotFoundError);
   });
 });

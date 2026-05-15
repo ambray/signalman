@@ -156,4 +156,8 @@ export class ControlPlane {
   get approvals() {
     return this.storage.approvals;
   }
+  // WS6 M3 — registered runners:
+  get runners() {
+    return this.storage.runners;
+  }
 }

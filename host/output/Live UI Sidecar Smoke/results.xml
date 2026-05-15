@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="Live UI Sidecar Smoke" tests="10" failures="9" time="0.517" timestamp="2026-05-07T16:43:01.477Z">
+    <testcase name="step-0.ui_screenshot" classname="Live UI Sidecar Smoke" time="0">
+      <failure message="No guest client for VM &apos;Win11_test&apos;" type="tool_block">
+      </failure>
+    </testcase>
+    <testcase name="step-1.ui_find" classname="Live UI Sidecar Smoke" time="0">
+      <failure message="No guest client for VM &apos;Win11_test&apos;" type="tool_block">
+      </failure>
+    </testcase>
+    <testcase name="step-2.ui_click" classname="Live UI Sidecar Smoke" time="0">
+      <failure message="No guest client for VM &apos;Win11_test&apos;" type="tool_block">
+      </failure>
+    </testcase>
+    <testcase name="step-3.wait" classname="Live UI Sidecar Smoke" time="0">
+    </testcase>
+    <testcase name="step-4.ui_type" classname="Live UI Sidecar Smoke" time="0">
+      <failure message="No guest client for VM &apos;Win11_test&apos;" type="tool_block">
+      </failure>
+    </testcase>
+    <testcase name="screenshot-captured" classname="Live UI Sidecar Smoke" time="0">
+      <failure message="Expected assertion &apos;screenshot-captured&apos; to pass" type="medium">
+        Actual: ERROR: No guest client for VM &apos;Win11_test&apos;
+      </failure>
+    </testcase>
+    <testcase name="screenshot-format" classname="Live UI Sidecar Smoke" time="0">
+      <failure message="Expected assertion &apos;screenshot-format&apos; to pass" type="medium">
+        Actual: ERROR: No guest client for VM &apos;Win11_test&apos;
+      </failure>
+    </testcase>
+    <testcase name="start-button-found" classname="Live UI Sidecar Smoke" time="0">
+      <failure message="Expected assertion &apos;start-button-found&apos; to pass" type="medium">
+        Actual: ERROR: No guest client for VM &apos;Win11_test&apos;
+      </failure>
+    </testcase>
+    <testcase name="start-button-clicked" classname="Live UI Sidecar Smoke" time="0">
+      <failure message="Expected assertion &apos;start-button-clicked&apos; to pass" type="medium">
+        Actual: ERROR: No guest client for VM &apos;Win11_test&apos;
+      </failure>
+    </testcase>
+    <testcase name="text-typed" classname="Live UI Sidecar Smoke" time="0">
+      <failure message="Expected assertion &apos;text-typed&apos; to pass" type="medium">
+        Actual: ERROR: No guest client for VM &apos;Win11_test&apos;
+      </failure>
+    </testcase>
+  </testsuite>
+</testsuites>

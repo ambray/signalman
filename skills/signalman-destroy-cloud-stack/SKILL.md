@@ -1,6 +1,6 @@
 ---
 name: signalman-destroy-cloud-stack
-description: Destroy a previously-applied OpenTofu stack. Runs tofu destroy in the workspace under .signalman/tofu-workspaces/<stack_name>/, then returns. Idempotent — destroying a never-applied stack returns alreadyEmpty: true. Trigger on "tear down the network stack", "destroy <stack_name>", "clean up the scenario fixture". CLI parity: `signalman stack destroy`.
+description: 'Destroy a previously-applied OpenTofu stack. Runs tofu destroy in the workspace under .signalman/tofu-workspaces/<stack_name>/, then returns. Idempotent — destroying a never-applied stack returns alreadyEmpty: true. Trigger on "tear down the network stack", "destroy <stack_name>", "clean up the scenario fixture". CLI parity: `signalman stack destroy`.'
 allowed-tools: mcp__signalman__signalman_stack_destroy, Bash
 ---
 

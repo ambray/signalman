@@ -60,6 +60,7 @@ import type {
   Release,
   ReleaseStatus,
   Run,
+  Runner,
   RunTriggeredBy,
   Scenario,
   ScenarioSource,
@@ -86,6 +87,7 @@ import {
   type PromotionPolicyRepo,
   type ReleaseRepo,
   type RunRepo,
+  type RunnerRepo,
   type ScenarioRepo,
   StorageConflictError,
   type StorageDriver,
@@ -139,6 +141,8 @@ export class PostgresStorageDriver implements StorageDriver {
   readonly webhookSubscriptions: WebhookSubscriptionRepo;
   readonly promotionPolicies: PromotionPolicyRepo;
   readonly approvals: ApprovalRepo;
+  // WS6 M3 — registered runners:
+  readonly runners: RunnerRepo;
 
   constructor(opts: PostgresDriverOptions) {
     if (opts.pool) {
@@ -173,6 +177,8 @@ export class PostgresStorageDriver implements StorageDriver {
     this.webhookSubscriptions = new PgWebhookSubscriptionRepo(this.pool);
     this.promotionPolicies = new PgPromotionPolicyRepo(this.pool);
     this.approvals = new PgApprovalRepo(this.pool);
+    // WS6 M3:
+    this.runners = new PgRunnerRepo(this.pool);
   }
 
   async migrate(): Promise<void> {
@@ -1053,6 +1059,34 @@ class PgTargetRepo implements TargetRepo {
       [orgId],
     );
     return r.rows.map(mapTarget);
+  }
+
+  // WS6 M3 — operator-authorised P3 closure (edit name/connection;
+  // kind + id stay immutable). Past Deployment rows not cascaded.
+  async update(
+    id: string,
+    patch: Partial<Pick<Target, "name" | "connection">>,
+  ): Promise<Target> {
+    const existing = await this.get(id);
+    if (!existing) throw new StorageNotFoundError("target", id);
+    const bind = {
+      id: existing.id,
+      name: patch.name ?? existing.name,
+      connection: JSON.stringify(patch.connection ?? existing.connection),
+      updated_at: nowIso(),
+    };
+    await pgQuery(
+      this.pool,
+      "UPDATE target SET name = @name, connection = @connection, updated_at = @updated_at WHERE id = @id",
+      bind,
+    );
+    return mapTarget({
+      ...bind,
+      org_id: existing.orgId,
+      kind: existing.kind,
+      created_at: existing.createdAt,
+      deleted_at: existing.deletedAt,
+    });
   }
 
   async softDelete(id: string): Promise<void> {
@@ -2393,5 +2427,129 @@ class PgApprovalRepo implements ApprovalRepo {
       [now, now, id],
     );
     if (r.rowCount === 0) throw new StorageNotFoundError("approval", id);
+  }
+}
+
+// ── Runner repo (WS6 M3) ────────────────────────────────────────────
+
+function mapRunner(row: SqlRow): Runner {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    name: row.name as string,
+    lastSeenAt: row.last_seen_at as string,
+    registeredAt: row.registered_at as string,
+    meta: row.meta
+      ? (typeof row.meta === "string"
+          ? (JSON.parse(row.meta) as Record<string, unknown>)
+          : (row.meta as Record<string, unknown>))
+      : null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+class PgRunnerRepo implements RunnerRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async heartbeat(input: {
+    orgId: string;
+    name: string;
+    meta?: Record<string, unknown> | null;
+  }): Promise<Runner> {
+    const now = nowIso();
+    const lookup = await pgPositional(
+      this.pool,
+      "SELECT * FROM runner WHERE org_id = $1 AND name = $2 ORDER BY (deleted_at IS NULL) DESC, last_seen_at DESC LIMIT 1",
+      [input.orgId, input.name],
+    );
+    const existing = lookup.rows[0] as SqlRow | undefined;
+    const metaJson = input.meta === undefined ? null : JSON.stringify(input.meta ?? {});
+
+    if (existing && existing.deleted_at === null) {
+      const bind = {
+        id: existing.id as string,
+        last_seen_at: now,
+        meta: metaJson ?? (existing.meta as string | null),
+        updated_at: now,
+      };
+      await pgQuery(
+        this.pool,
+        "UPDATE runner SET last_seen_at = @last_seen_at, meta = @meta, updated_at = @updated_at WHERE id = @id",
+        bind,
+      );
+      return mapRunner({ ...existing, ...bind });
+    }
+
+    if (existing && existing.deleted_at !== null) {
+      const bind = {
+        id: existing.id as string,
+        last_seen_at: now,
+        registered_at: now,
+        meta: metaJson,
+        updated_at: now,
+      };
+      await pgQuery(
+        this.pool,
+        "UPDATE runner SET last_seen_at = @last_seen_at, registered_at = @registered_at, meta = @meta, updated_at = @updated_at, deleted_at = NULL WHERE id = @id",
+        bind,
+      );
+      return mapRunner({ ...existing, ...bind, deleted_at: null });
+    }
+
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      name: input.name,
+      last_seen_at: now,
+      registered_at: now,
+      meta: metaJson,
+      created_at: now,
+      updated_at: now,
+    };
+    await pgQuery(
+      this.pool,
+      "INSERT INTO runner (id, org_id, name, last_seen_at, registered_at, meta, created_at, updated_at) VALUES (@id, @org_id, @name, @last_seen_at, @registered_at, @meta, @created_at, @updated_at)",
+      bind,
+    );
+    return mapRunner({ ...bind, deleted_at: null });
+  }
+
+  async get(id: string): Promise<Runner | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM runner WHERE id = $1 AND deleted_at IS NULL",
+      [id],
+    );
+    return r.rows[0] ? mapRunner(r.rows[0]) : null;
+  }
+
+  async getByName(orgId: string, name: string): Promise<Runner | null> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM runner WHERE org_id = $1 AND name = $2 AND deleted_at IS NULL",
+      [orgId, name],
+    );
+    return r.rows[0] ? mapRunner(r.rows[0]) : null;
+  }
+
+  async listForOrg(orgId: string): Promise<Runner[]> {
+    const r = await pgPositional(
+      this.pool,
+      "SELECT * FROM runner WHERE org_id = $1 AND deleted_at IS NULL ORDER BY last_seen_at DESC",
+      [orgId],
+    );
+    return r.rows.map(mapRunner);
+  }
+
+  async softDelete(id: string): Promise<void> {
+    const now = nowIso();
+    const r = await pgPositional(
+      this.pool,
+      "UPDATE runner SET deleted_at = $1, updated_at = $2 WHERE id = $3 AND deleted_at IS NULL",
+      [now, now, id],
+    );
+    if (!r.rowCount) throw new StorageNotFoundError("runner", id);
   }
 }

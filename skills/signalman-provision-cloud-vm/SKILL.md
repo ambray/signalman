@@ -1,6 +1,6 @@
 ---
 name: signalman-provision-cloud-vm
-description: Provision an ephemeral cloud VM (AWS EC2 or Azure VM) tagged with signalman-managed=true so the cost-reaper owns its TTL. Trigger when the user says "spin up an EC2 box", "give me an Azure VM for scenario X", "provision a cloud target", or any variant of "create a test VM on AWS / Azure". Returns a handle the operator can pass to status / terminate. v0.3.0-5: budget-gated (over-budget orgs refuse with `budget_exceeded`); `network.mode` supports public_mtls / aws_ssm / azure_bastion; per-org credentials inject when org_id is set and a cred row exists. CLI parity: `signalman cloud provision`.
+description: 'Provision an ephemeral cloud VM (AWS EC2 or Azure VM) tagged with signalman-managed=true so the cost-reaper owns its TTL. Trigger when the user says "spin up an EC2 box", "give me an Azure VM for scenario X", "provision a cloud target", or any variant of "create a test VM on AWS / Azure". Returns a handle the operator can pass to status / terminate. v0.3.0-5: budget-gated (over-budget orgs refuse with `budget_exceeded`); `network.mode` supports public_mtls / aws_ssm / azure_bastion; per-org credentials inject when org_id is set and a cred row exists. CLI parity: `signalman cloud provision`.'
 allowed-tools: mcp__signalman__signalman_cloud_provision, mcp__signalman__signalman_cloud_backends, mcp__signalman__signalman_cloud_status, Bash
 ---
 

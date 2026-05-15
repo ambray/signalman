@@ -58,6 +58,7 @@ import {
   runReleaseList,
   runReleaseShow,
   runTargetAdd,
+  runTargetEdit,
   runTargetList,
   runTargetRemove,
   runReleaseDeploy,
@@ -85,6 +86,9 @@ import {
   runPromotionApprove,
   runPromotionReject,
   runPromotionTickVerb,
+  // WS6 M3:
+  runRunnerList,
+  runRunnerDeregister,
 } from "./verbs/control-plane.js";
 import { runSchedulerTick, startScheduler } from "./control-plane/scheduler/index.js";
 // PR 6 — `signalman serve` HTTP control plane.
@@ -1449,12 +1453,14 @@ async function cmdRelease(args: ParsedArgs): Promise<number> {
 
 async function cmdTarget(args: ParsedArgs): Promise<number> {
   const sub = args.positional.shift();
-  if (!sub) usageError("target requires a subcommand (add, list, remove)");
+  if (!sub) usageError("target requires a subcommand (add, list, edit, remove)");
   switch (sub) {
     case "add":
       return await cmdTargetAdd(args);
     case "list":
       return await cmdTargetList(args);
+    case "edit":
+      return await cmdTargetEdit(args);
     case "remove":
       return await cmdTargetRemove(args);
     default:
@@ -1548,6 +1554,52 @@ async function cmdTargetList(args: ParsedArgs): Promise<number> {
     return 0;
   } catch (err) {
     console.error(`signalman target list: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdTargetEdit(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0] ?? args.options.get("name");
+  if (!name) usageError("target edit requires <name>");
+  const newName = args.options.get("new-name");
+  const connectionJson = args.options.get("connection");
+  let newConnection: Record<string, unknown> | undefined;
+  if (connectionJson !== undefined) {
+    try {
+      newConnection = JSON.parse(connectionJson) as Record<string, unknown>;
+    } catch {
+      usageError(`target edit: --connection must be valid JSON`);
+    }
+    if (
+      newConnection === null ||
+      typeof newConnection !== "object" ||
+      Array.isArray(newConnection)
+    ) {
+      usageError(`target edit: --connection must be a JSON object`);
+    }
+  }
+  if (newName === undefined && newConnection === undefined) {
+    usageError(
+      "target edit: provide at least one of --new-name <NAME> or --connection '<json>'",
+    );
+  }
+  const format = args.options.get("format");
+  try {
+    const updated = await withControlPlane((cp) =>
+      runTargetEdit(cp, { name, newName, newConnection }),
+    );
+    if (format === "json") {
+      emitJson(updated);
+    } else {
+      process.stdout.write(
+        `Edited target '${updated.name}' (${updated.id})\n` +
+          `  kind:       ${updated.kind}\n` +
+          `  connection: ${JSON.stringify(updated.connection)}\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman target edit: ${(err as Error).message}`);
     return 4;
   }
 }
@@ -1874,7 +1926,10 @@ async function cmdK8sStatus(args: ParsedArgs): Promise<number> {
 
 async function cmdRunner(args: ParsedArgs): Promise<number> {
   const sub = args.positional.shift();
-  if (!sub) usageError("runner requires a subcommand (register, start, deploy-k8s)");
+  if (!sub)
+    usageError(
+      "runner requires a subcommand (register, start, deploy-k8s, list, deregister)",
+    );
   switch (sub) {
     case "register":
       return await cmdRunnerRegister(args);
@@ -1882,6 +1937,11 @@ async function cmdRunner(args: ParsedArgs): Promise<number> {
       return await cmdRunnerStart(args);
     case "deploy-k8s":
       return await cmdRunnerDeployK8s(args);
+    // WS6 M3:
+    case "list":
+      return await cmdRunnerList(args);
+    case "deregister":
+      return await cmdRunnerDeregister(args);
     default:
       usageError(`unknown runner subcommand: ${sub}`);
   }
@@ -1935,6 +1995,79 @@ async function cmdRunnerDeployK8s(args: ParsedArgs): Promise<number> {
       `signalman runner deploy-k8s: ${e.message ?? String(err)}` +
         (e.code ? ` (code=${e.code})` : ""),
     );
+    return 4;
+  }
+}
+
+// WS6 M3 — list registered runners.
+async function cmdRunnerList(args: ParsedArgs): Promise<number> {
+  const thresholdRaw = args.options.get("stale-threshold-seconds");
+  const staleThresholdSeconds = thresholdRaw
+    ? parseInt(thresholdRaw, 10)
+    : undefined;
+  if (
+    thresholdRaw !== undefined &&
+    (Number.isNaN(staleThresholdSeconds!) || staleThresholdSeconds! < 1)
+  ) {
+    usageError(
+      `--stale-threshold-seconds must be a positive integer (got '${thresholdRaw}')`,
+    );
+  }
+  const format = args.options.get("format");
+  try {
+    const entries = await withControlPlane((cp) =>
+      runRunnerList(cp, { staleThresholdSeconds }),
+    );
+    if (format === "json") {
+      emitJson(
+        entries.map((e) => ({
+          id: e.runner.id,
+          name: e.runner.name,
+          last_seen_at: e.runner.lastSeenAt,
+          registered_at: e.runner.registeredAt,
+          meta: e.runner.meta,
+          is_stale: e.isStale,
+        })),
+      );
+      return 0;
+    }
+    if (entries.length === 0) {
+      process.stdout.write("(no runners registered)\n");
+      return 0;
+    }
+    emitTable(
+      entries.map((e) => ({
+        name: e.runner.name,
+        last_seen_at: e.runner.lastSeenAt,
+        registered_at: e.runner.registeredAt,
+        is_stale: e.isStale ? "STALE" : "ok",
+        id: e.runner.id,
+      })),
+    );
+    return 0;
+  } catch (err) {
+    console.error(`signalman runner list: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// WS6 M3 — deregister a runner.
+async function cmdRunnerDeregister(args: ParsedArgs): Promise<number> {
+  const name = args.options.get("name") ?? args.positional[0];
+  const id = args.options.get("id");
+  if (!name && !id) {
+    usageError("runner deregister requires --name <NAME> or --id <ID>");
+  }
+  try {
+    const result = await withControlPlane((cp) =>
+      runRunnerDeregister(cp, { name, id }),
+    );
+    process.stdout.write(
+      `Deregistered runner '${result.name}' (${result.id}).\n`,
+    );
+    return 0;
+  } catch (err) {
+    console.error(`signalman runner deregister: ${(err as Error).message}`);
     return 4;
   }
 }
@@ -4256,7 +4389,7 @@ function printHelp(): void {
       "                     fetch-template — see ROADMAP P9 / signalman vm --help)",
       "  product <subcommand>   (add, list, remove)",
       "  release <subcommand>   (build, list, show, deploy, rollback)",
-      "  target <subcommand>    (add, list, remove)",
+      "  target <subcommand>    (add, list, edit, remove)",
       "  health <subcommand>    (check, history)",
       "  schedule <subcommand>  (list, add, disable, enable, remove, run-once, start)",
       "  webhook <subcommand>   (list, add, remove, test)",
@@ -4264,7 +4397,7 @@ function printHelp(): void {
       "  serve [--port P] [--host H] [--disable-loopback-bypass]",
       "                              (start the control-plane HTTP server)",
       "  api-key <subcommand>   (create, list, revoke)",
-      "  runner <subcommand>    (register, start, deploy-k8s)",
+      "  runner <subcommand>    (register, start, deploy-k8s, list, deregister)",
       "  k8s <subcommand>       (deploy, rollback, status — direct K8s ops)",
       "  key <subcommand>       (generate, fingerprint — Ed25519 release signing)",
       "  cloud <subcommand>     (provision, terminate, status, list, backends, reaper, budget, creds, connection-descriptor)",

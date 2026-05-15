@@ -1,0 +1,47 @@
+# Loom review policy
+#
+# Commands that match no rule are queued by default so agents can keep working
+# through safe chores while escalation-worthy steps wait for operator review.
+
+[defaults]
+unmatched = "queue"
+
+[[auto_approve]]
+pattern = "cargo fmt"
+reason = "Formatting is deterministic and local."
+
+[[auto_approve]]
+pattern = "cargo test"
+reason = "Running tests is safe and expected during development."
+
+[[auto_approve]]
+pattern = "git status"
+reason = "Read-only git inspection is safe."
+
+[[auto_approve]]
+pattern = "git diff"
+reason = "Read-only git inspection is safe."
+
+[[require_approval]]
+pattern = "git push"
+reason = "Publishing changes is an operator decision."
+
+[[require_approval]]
+pattern = "git commit"
+reason = "Creating a durable commit should be operator-approved."
+
+[[never_auto]]
+pattern = "rm -rf"
+reason = "Destructive deletes must never be auto-approved."
+
+[[never_auto]]
+pattern = "git reset --hard"
+reason = "Hard resets must never be auto-approved."
+
+[[never_auto]]
+pattern = "curl http*"
+reason = "Network fetches require explicit operator review."
+
+[[never_auto]]
+pattern = "Invoke-WebRequest http*"
+reason = "Network fetches require explicit operator review."

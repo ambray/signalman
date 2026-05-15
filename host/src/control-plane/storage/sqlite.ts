@@ -47,6 +47,7 @@ import type {
   Release,
   ReleaseStatus,
   Run,
+  Runner,
   RunTriggeredBy,
   Scenario,
   ScenarioSource,
@@ -73,6 +74,7 @@ import {
   type PromotionPolicyRepo,
   type ReleaseRepo,
   type RunRepo,
+  type RunnerRepo,
   type ScenarioRepo,
   StorageConflictError,
   type StorageDriver,
@@ -121,6 +123,8 @@ export class SqliteStorageDriver implements StorageDriver {
   readonly webhookSubscriptions: WebhookSubscriptionRepo;
   readonly promotionPolicies: PromotionPolicyRepo;
   readonly approvals: ApprovalRepo;
+  // WS6 M3 — registered runners:
+  readonly runners: RunnerRepo;
 
   constructor(opts: SqliteDriverOptions) {
     if (opts.path !== ":memory:") {
@@ -154,6 +158,8 @@ export class SqliteStorageDriver implements StorageDriver {
     this.webhookSubscriptions = new SqliteWebhookSubscriptionRepo(this.db);
     this.promotionPolicies = new SqlitePromotionPolicyRepo(this.db);
     this.approvals = new SqliteApprovalRepo(this.db);
+    // WS6 M3:
+    this.runners = new SqliteRunnerRepo(this.db);
   }
 
   async migrate(): Promise<void> {
@@ -993,6 +999,40 @@ class SqliteTargetRepo implements TargetRepo {
         )
         .all(orgId) as SqlRow[]
     ).map(mapTarget);
+  }
+
+  // WS6 M3 — operator-authorised P3 closure: edit name/connection
+  // in place; kind + id stay immutable (kind change would invalidate
+  // past deployments' backend assumptions). Past Deployment rows are
+  // NOT cascaded; they reference target by id and use the current
+  // (post-edit) connection for rollback / health-check.
+  async update(
+    id: string,
+    patch: Partial<Pick<Target, "name" | "connection">>,
+  ): Promise<Target> {
+    const existing = await this.get(id);
+    if (!existing) throw new StorageNotFoundError("target", id);
+    const bind = {
+      id: existing.id,
+      name: patch.name ?? existing.name,
+      connection: JSON.stringify(patch.connection ?? existing.connection),
+      updated_at: nowIso(),
+    };
+    try {
+      prep(
+        this.db,
+        "UPDATE target SET name = @name, connection = @connection, updated_at = @updated_at WHERE id = @id",
+      ).run(bind);
+    } catch (err) {
+      mapSqliteError(err);
+    }
+    return mapTarget({
+      ...bind,
+      org_id: existing.orgId,
+      kind: existing.kind,
+      created_at: existing.createdAt,
+      deleted_at: existing.deletedAt,
+    });
   }
 
   async softDelete(id: string): Promise<void> {
@@ -2482,5 +2522,141 @@ class SqliteApprovalRepo implements ApprovalRepo {
       )
       .run(now, now, id);
     if (result.changes === 0) throw new StorageNotFoundError("approval", id);
+  }
+}
+
+// ── Runner repo (WS6 M3) ────────────────────────────────────────────
+
+function mapRunner(row: SqlRow): Runner {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    name: row.name as string,
+    lastSeenAt: row.last_seen_at as string,
+    registeredAt: row.registered_at as string,
+    meta: row.meta
+      ? (JSON.parse(row.meta as string) as Record<string, unknown>)
+      : null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+    deletedAt: (row.deleted_at as string | null) ?? null,
+  };
+}
+
+class SqliteRunnerRepo implements RunnerRepo {
+  constructor(private readonly db: DatabaseSync) {}
+
+  async heartbeat(input: {
+    orgId: string;
+    name: string;
+    meta?: Record<string, unknown> | null;
+  }): Promise<Runner> {
+    const now = nowIso();
+    // Strategy: lookup by (org_id, name) including soft-deleted rows
+    // so we can resurrect a deregistered runner that comes back.
+    const existing = this.db
+      .prepare(
+        "SELECT * FROM runner WHERE org_id = ? AND name = ? ORDER BY deleted_at IS NULL DESC, last_seen_at DESC LIMIT 1",
+      )
+      .get(input.orgId, input.name) as SqlRow | undefined;
+    const metaJson = input.meta === undefined ? null : JSON.stringify(input.meta ?? {});
+
+    if (existing && existing.deleted_at === null) {
+      // Active row → update last_seen_at + meta.
+      const bind = {
+        id: existing.id as string,
+        last_seen_at: now,
+        meta: metaJson ?? (existing.meta as string | null),
+        updated_at: now,
+      };
+      this.db
+        .prepare(
+          "UPDATE runner SET last_seen_at = @last_seen_at, meta = @meta, updated_at = @updated_at WHERE id = @id",
+        )
+        .run(bind);
+      return mapRunner({
+        ...existing,
+        ...bind,
+      });
+    }
+
+    if (existing && existing.deleted_at !== null) {
+      // Deregistered row → resurrect with fresh registered_at.
+      const bind = {
+        id: existing.id as string,
+        last_seen_at: now,
+        registered_at: now,
+        meta: metaJson,
+        updated_at: now,
+      };
+      this.db
+        .prepare(
+          "UPDATE runner SET last_seen_at = @last_seen_at, registered_at = @registered_at, meta = @meta, updated_at = @updated_at, deleted_at = NULL WHERE id = @id",
+        )
+        .run(bind);
+      return mapRunner({
+        ...existing,
+        ...bind,
+        deleted_at: null,
+      });
+    }
+
+    // First sighting → insert.
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      name: input.name,
+      last_seen_at: now,
+      registered_at: now,
+      meta: metaJson,
+      created_at: now,
+      updated_at: now,
+    };
+    try {
+      this.db
+        .prepare(
+          "INSERT INTO runner (id, org_id, name, last_seen_at, registered_at, meta, created_at, updated_at) VALUES (@id, @org_id, @name, @last_seen_at, @registered_at, @meta, @created_at, @updated_at)",
+        )
+        .run(bind);
+    } catch (err) {
+      mapSqliteError(err);
+    }
+    return mapRunner({ ...bind, deleted_at: null });
+  }
+
+  async get(id: string): Promise<Runner | null> {
+    const row = this.db
+      .prepare("SELECT * FROM runner WHERE id = ? AND deleted_at IS NULL")
+      .get(id) as SqlRow | undefined;
+    return row ? mapRunner(row) : null;
+  }
+
+  async getByName(orgId: string, name: string): Promise<Runner | null> {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM runner WHERE org_id = ? AND name = ? AND deleted_at IS NULL",
+      )
+      .get(orgId, name) as SqlRow | undefined;
+    return row ? mapRunner(row) : null;
+  }
+
+  async listForOrg(orgId: string): Promise<Runner[]> {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM runner WHERE org_id = ? AND deleted_at IS NULL ORDER BY last_seen_at DESC",
+        )
+        .all(orgId) as SqlRow[]
+    ).map(mapRunner);
+  }
+
+  async softDelete(id: string): Promise<void> {
+    const now = nowIso();
+    const result = this.db
+      .prepare(
+        "UPDATE runner SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+      )
+      .run(now, now, id);
+    if (result.changes === 0) throw new StorageNotFoundError("runner", id);
   }
 }

@@ -105,7 +105,16 @@ async function waitFor<T>(
 }
 
 describe("remote release.build — end-to-end", () => {
-  it("submits a job, worker clones + builds + uploads, release lands as 'ready'", async () => {
+  // Bumped timeout: this test spins up an in-process HTTP control
+  // plane + a real worker that git-clones a synthetic file:// repo,
+  // runs the build executor, uploads to the BlobDriver, then
+  // round-trips through HTTP. Under coverage + Windows CPU contention
+  // the chain exceeds the default 5s. Non-coverage runs complete in
+  // ~3.7s. Scoping the bump to this test keeps the three sibling
+  // HttpControlPlane repo round-trip tests on the default budget.
+  it(
+    "submits a job, worker clones + builds + uploads, release lands as 'ready'",
+    async () => {
     // 1. Register the synthetic repo as a product on the remote
     //    control plane. Use file:// for the repo URL so git can clone
     //    it without network.
@@ -176,7 +185,9 @@ describe("remote release.build — end-to-end", () => {
       "utf-8",
     );
     expect(downloaded).toBe("agent-v1.0.0");
-  });
+  },
+    30000,
+  );
 });
 
 describe("HttpControlPlane — repo round-trips", () => {

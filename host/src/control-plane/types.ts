@@ -357,6 +357,36 @@ export interface Job {
   deletedAt: string | null;
 }
 
+// ── Runners (WS6 M3 — explicit registration + heartbeat) ────────────
+
+/**
+ * Registered build runner. Workers POST `/v1/runners/heartbeat` on
+ * startup and every `--heartbeat-interval-ms` (default 30000ms); the
+ * row's `last_seen_at` is updated each time. Operators see "is this
+ * worker alive" via `signalman runner list`, which computes a
+ * derived `isStale` flag at read time from `last_seen_at` + a
+ * threshold (default 90s).
+ *
+ * Deregistration is a soft-delete (`deleted_at IS NOT NULL`). A
+ * deregistered runner's row is preserved for audit; re-registering
+ * under the same name spawns a fresh row.
+ */
+export interface Runner {
+  id: string;
+  orgId: string;
+  /** Worker name (e.g. `builder-mac-01`). Unique per active row. */
+  name: string;
+  /** ISO-8601 of the most recent heartbeat. */
+  lastSeenAt: string;
+  /** ISO-8601 of the first heartbeat that created this row. */
+  registeredAt: string;
+  /** Free-form JSON: hostname, version, etc. Diagnostic only. */
+  meta: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+}
+
 // ── Audit log ───────────────────────────────────────────────────────
 
 export interface AuditLogEntry {

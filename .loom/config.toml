@@ -1,0 +1,11 @@
+[repo]
+name = "loom"
+
+[languages]
+enabled = [
+    "rust",
+    "typescript",
+    "markdown",
+]
+
+[plugins]

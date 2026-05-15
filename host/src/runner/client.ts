@@ -11,7 +11,13 @@
  */
 
 import type { Readable } from "node:stream";
-import type { Job, JobStatus, Product, Release } from "../control-plane/types.js";
+import type {
+  Job,
+  JobStatus,
+  Product,
+  Release,
+  Runner,
+} from "../control-plane/types.js";
 
 export class HttpClientError extends Error {
   constructor(
@@ -149,6 +155,23 @@ export class HttpClient {
       started_at: new Date().toISOString(),
     });
     return job;
+  }
+
+  /**
+   * WS6 M3 — post a heartbeat for this worker. Idempotent: the
+   * server upserts by (org_id, name). Optional `meta` carries
+   * diagnostic data (hostname, version) that surfaces in
+   * `signalman runner list`.
+   */
+  async postRunnerHeartbeat(
+    name: string,
+    meta?: Record<string, unknown>,
+  ): Promise<Runner> {
+    const { runner } = await this.post<{ runner: Runner }>(
+      "/v1/runners/heartbeat",
+      meta === undefined ? { name } : { name, meta },
+    );
+    return runner;
   }
 
   /**

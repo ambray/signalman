@@ -48,12 +48,16 @@ import {
   runReleaseList,
   runReleaseRollback,
   runReleaseShow,
+  runReleaseVerify,
+  runRunnerDeregister,
+  runRunnerList,
   runScheduleAdd,
   runScheduleDisable,
   runScheduleEnable,
   runScheduleList,
   runScheduleRemove,
   runTargetAdd,
+  runTargetEdit,
   runTargetList,
   runTargetRemove,
   runWebhookAdd,
@@ -70,6 +74,25 @@ import {
   withControlPlane,
 } from "./verbs/control-plane.js";
 import { runSchedulerTick } from "./control-plane/scheduler/index.js";
+// WS6 M2: P1 MCP wrapper deps
+import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+  generateKeypair,
+  fingerprintPublicKey,
+} from "./control-plane/build/signing.js";
+import { generateApiKey } from "./http/auth.js";
+import { ControlPlane } from "./control-plane/index.js";
+import { loadConfig as loadHostConfig } from "./config.js";
+import {
+  writeRunnerConfig,
+  defaultRunnerConfigPath,
+  type RunnerConfig,
+} from "./runner/config.js";
+import { HttpClient, HttpClientError } from "./runner/client.js";
+import { resolvePemInput } from "./server-helpers.js";
 
 // ── Backend Discovery ─────────────────────────────────────────────
 
@@ -599,6 +622,40 @@ server.tool(
 );
 
 server.tool(
+  "signalman_target_edit",
+  "Edit an existing target's name and/or connection. `kind` and `id` are intentionally NOT editable — for a kind change, use remove + re-add. Past deployments are not retroactively updated; rollback and health-check use the post-edit connection. Logs a `target.edited` audit entry with before/after detail.",
+  {
+    name: z.string().describe("Current target name (lookup key)."),
+    new_name: z
+      .string()
+      .optional()
+      .describe("Rename the target. Must be unique among active targets in the same org."),
+    connection: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe(
+        "Replacement connection JSON. Replaces the whole object; do not pass a partial patch.",
+      ),
+  },
+  async (params) =>
+    withRecording("signalman_target_edit", params, async () => {
+      const p = params as {
+        name: string;
+        new_name?: string;
+        connection?: Record<string, unknown>;
+      };
+      const updated = await withControlPlane((cp) =>
+        runTargetEdit(cp, {
+          name: p.name,
+          newName: p.new_name,
+          newConnection: p.connection,
+        }),
+      );
+      return asMcpResult(updated);
+    }),
+);
+
+server.tool(
   "signalman_release_deploy",
   "Deploy a release to a target. Pre-deploy checkpoint, stage artifacts, health probe, promote on pass.",
   {
@@ -718,6 +775,458 @@ server.tool(
         }),
       );
       return asMcpResult(entries);
+    }),
+);
+
+// ── WS6 milestone 2 — P1 MCP wrappers for CLI-only verbs ──────────
+//
+// The capability matrix flagged several CLI-only verbs as P1. Agents
+// previously had to shell out via Bash; these tools give them a
+// structured MCP surface. Each tool's CLI counterpart still exists
+// and behaves the same — these are additive.
+//
+// Tool families:
+//   - signalman_release_verify — Ed25519 manifest signature check
+//   - signalman_key_generate / signalman_key_fingerprint — key ops
+//   - signalman_api_key_create / _list / _revoke — bearer token CRUD
+//   - signalman_runner_build_config / _persist_config — runner setup
+//     (split per operator's "Both as separate tools" preference)
+//   - signalman_release_build_remote — submit + poll release.build job
+
+server.tool(
+  "signalman_release_verify",
+  "Verify a release's Ed25519 manifest signature against a public key. Returns verified=true on fingerprint + signature match; verified=false with a reason string otherwise. CLI parity with `signalman release verify`.",
+  {
+    release_id: z.string().describe("Release ULID (from signalman_release_list)."),
+    public_key_path: z
+      .string()
+      .optional()
+      .describe(
+        "Filesystem path to the Ed25519 public key PEM on the host. Mutually exclusive with public_key_pem.",
+      ),
+    public_key_pem: z
+      .string()
+      .optional()
+      .describe(
+        "Literal PEM-encoded Ed25519 public key. Mutually exclusive with public_key_path; use this when running on a different host than the keys.",
+      ),
+  },
+  async (params) =>
+    withRecording("signalman_release_verify", params, async () => {
+      const p = params as {
+        release_id: string;
+        public_key_path?: string;
+        public_key_pem?: string;
+      };
+      const pem = await resolvePemInput(
+        p.public_key_path,
+        p.public_key_pem,
+        "signalman_release_verify",
+      );
+      const result = await withControlPlane((cp) =>
+        runReleaseVerify(cp, { releaseId: p.release_id, publicKeyPem: pem }),
+      );
+      return asMcpResult({
+        verified: result.verified,
+        release: {
+          id: result.release.id,
+          tag: result.release.tag,
+          product: result.product.name,
+          manifest_sha256: result.release.manifestSha256,
+          signed_by: result.release.signedBy,
+        },
+        ...(result.verified ? {} : { reason: result.reason }),
+      });
+    }),
+);
+
+server.tool(
+  "signalman_key_generate",
+  "Generate a fresh Ed25519 signing keypair. Default: write to ~/.signalman/keys/signing.{pub,key} (private mode 0600). When write_to_disk=false, returns the PEM text inline and writes nothing — useful for hosted mode where the agent shouldn't write to the server's filesystem.",
+  {
+    name: z
+      .string()
+      .optional()
+      .describe("Filename stem (default: 'signing'). Output is <out>/<name>.pub + <name>.key."),
+    out_dir: z
+      .string()
+      .optional()
+      .describe("Output directory (default: ~/.signalman/keys). Ignored when write_to_disk=false."),
+    force: z
+      .boolean()
+      .optional()
+      .describe("Overwrite existing keys at the target paths. Default false; refuses to clobber."),
+    write_to_disk: z
+      .boolean()
+      .optional()
+      .describe("Write PEMs to disk. Default true. When false, response carries the PEMs inline."),
+  },
+  async (params) =>
+    withRecording("signalman_key_generate", params, async () => {
+      const p = params as {
+        name?: string;
+        out_dir?: string;
+        force?: boolean;
+        write_to_disk?: boolean;
+      };
+      const kp = generateKeypair();
+      const fp = fingerprintPublicKey(kp.publicKeyPem);
+      const writeToDisk = p.write_to_disk !== false; // default true
+
+      if (!writeToDisk) {
+        return asMcpResult({
+          fingerprint: fp,
+          public_key_pem: kp.publicKeyPem,
+          private_key_pem: kp.privateKeyPem,
+          written: false,
+        });
+      }
+
+      const outDir = p.out_dir
+        ? path.resolve(p.out_dir)
+        : path.join(os.homedir(), ".signalman", "keys");
+      const stem = p.name ?? "signing";
+      const pubPath = path.join(outDir, `${stem}.pub`);
+      const privPath = path.join(outDir, `${stem}.key`);
+
+      if (!p.force) {
+        for (const target of [pubPath, privPath]) {
+          if (fs.existsSync(target)) {
+            throw new Error(
+              `signalman_key_generate: ${target} already exists. Pass force=true to overwrite (loses the existing key).`,
+            );
+          }
+        }
+      }
+      await fsp.mkdir(outDir, { recursive: true });
+      await fsp.writeFile(pubPath, kp.publicKeyPem, "utf-8");
+      await fsp.writeFile(privPath, kp.privateKeyPem, {
+        encoding: "utf-8",
+        mode: 0o600,
+      });
+      return asMcpResult({
+        fingerprint: fp,
+        public_key_path: pubPath,
+        private_key_path: privPath,
+        written: true,
+      });
+    }),
+);
+
+server.tool(
+  "signalman_key_fingerprint",
+  "Compute the 16-hex-char fingerprint (first 16 chars of sha256(DER pubkey)) of an Ed25519 public key. Accepts either a path on the host or inline PEM. The fingerprint matches the `signed_by` field on releases this key signed.",
+  {
+    public_key_path: z
+      .string()
+      .optional()
+      .describe("Filesystem path to the public key PEM. Mutually exclusive with public_key_pem."),
+    public_key_pem: z
+      .string()
+      .optional()
+      .describe("Literal PEM-encoded Ed25519 public key. Mutually exclusive with public_key_path."),
+  },
+  async (params) =>
+    withRecording("signalman_key_fingerprint", params, async () => {
+      const p = params as { public_key_path?: string; public_key_pem?: string };
+      const pem = await resolvePemInput(
+        p.public_key_path,
+        p.public_key_pem,
+        "signalman_key_fingerprint",
+      );
+      const fp = fingerprintPublicKey(pem);
+      return asMcpResult({ fingerprint: fp });
+    }),
+);
+
+server.tool(
+  "signalman_api_key_create",
+  "Mint a new bearer-token API key for the active org. The secret token is returned ONCE in the response — there is no way to recover it later. Agents must surface it to the operator and not retain it across calls.",
+  {
+    name: z.string().describe("Friendly name for the key (e.g. 'builder-1', 'ci-pipeline')."),
+    expires_at: z
+      .string()
+      .optional()
+      .describe("Optional ISO-8601 expiry. Omit for non-expiring keys."),
+  },
+  async (params) =>
+    withRecording("signalman_api_key_create", params, async () => {
+      const p = params as { name: string; expires_at?: string };
+      const config = loadHostConfig();
+      const cp = ControlPlane.fromConfig(config.controlPlane);
+      try {
+        const { defaultOrg } = await cp.init();
+        const generated = generateApiKey();
+        const row = await cp.apiKeys.create({
+          orgId: defaultOrg.id,
+          name: p.name,
+          prefix: generated.prefix,
+          hash: generated.hash,
+          expiresAt: p.expires_at,
+        });
+        return asMcpResult({
+          api_key: {
+            id: row.id,
+            name: row.name,
+            prefix: row.prefix,
+            expires_at: row.expiresAt ?? null,
+            created_at: row.createdAt,
+          },
+          token: generated.token,
+          warning: "Token shown ONCE — save it now; it cannot be recovered later.",
+        });
+      } finally {
+        await cp.close();
+      }
+    }),
+);
+
+server.tool(
+  "signalman_api_key_list",
+  "List active (non-revoked) API keys for the active org. Returns id, name, prefix, and expiry — never the secret or its hash.",
+  {},
+  async (params) =>
+    withRecording("signalman_api_key_list", params, async () => {
+      const config = loadHostConfig();
+      const cp = ControlPlane.fromConfig(config.controlPlane);
+      try {
+        const { defaultOrg } = await cp.init();
+        const keys = await cp.apiKeys.listForOrg(defaultOrg.id);
+        return asMcpResult({
+          api_keys: keys.map((k) => ({
+            id: k.id,
+            name: k.name,
+            prefix: k.prefix,
+            expires_at: k.expiresAt ?? null,
+            created_at: k.createdAt,
+          })),
+        });
+      } finally {
+        await cp.close();
+      }
+    }),
+);
+
+server.tool(
+  "signalman_api_key_revoke",
+  "Soft-delete an API key by id. The key immediately stops authenticating; past audit-log entries referencing it remain.",
+  {
+    id: z.string().describe("API key ULID (from signalman_api_key_list)."),
+  },
+  async (params) =>
+    withRecording("signalman_api_key_revoke", params, async () => {
+      const p = params as { id: string };
+      const config = loadHostConfig();
+      const cp = ControlPlane.fromConfig(config.controlPlane);
+      try {
+        await cp.init();
+        const key = await cp.apiKeys.get(p.id);
+        if (!key) throw new Error(`api key not found: ${p.id}`);
+        await cp.apiKeys.softDelete(key.id);
+        return asMcpResult({
+          revoked: { id: key.id, name: key.name, prefix: key.prefix },
+        });
+      } finally {
+        await cp.close();
+      }
+    }),
+);
+
+server.tool(
+  "signalman_runner_build_config",
+  "Construct and validate a runner registration config (control_plane_url + token + optional worker_name). Returns the config envelope WITHOUT writing it. Pair with signalman_runner_persist_config to actually register the runner; the split lets callers inspect or transform the envelope before commit.",
+  {
+    control_plane_url: z
+      .string()
+      .describe("Base URL of the control plane (e.g. http://control.example.com:8765)."),
+    token: z
+      .string()
+      .describe("Bearer token for this runner. Mint via signalman_api_key_create on the control-plane host."),
+    worker_name: z
+      .string()
+      .optional()
+      .describe("Optional friendly worker name. When omitted, the runner derives one at start time."),
+  },
+  async (params) =>
+    withRecording("signalman_runner_build_config", params, async () => {
+      const p = params as {
+        control_plane_url: string;
+        token: string;
+        worker_name?: string;
+      };
+      if (p.control_plane_url.length === 0) {
+        throw new Error("signalman_runner_build_config: control_plane_url must be non-empty");
+      }
+      if (p.token.length === 0) {
+        throw new Error("signalman_runner_build_config: token must be non-empty");
+      }
+      const envelope: RunnerConfig = {
+        controlPlaneUrl: p.control_plane_url,
+        token: p.token,
+        ...(p.worker_name ? { workerName: p.worker_name } : {}),
+      };
+      return asMcpResult({
+        config: {
+          control_plane_url: envelope.controlPlaneUrl,
+          token_prefix: envelope.token.slice(0, 12) + "…",
+          worker_name: envelope.workerName ?? null,
+        },
+        envelope,
+        target_path: defaultRunnerConfigPath(),
+      });
+    }),
+);
+
+server.tool(
+  "signalman_runner_persist_config",
+  "Write a runner config envelope to disk. Default target: $SIGNALMAN_DATA_DIR/runner.yaml (or ~/.signalman/runner.yaml when unset). Mode 0600 on POSIX. Idempotent: overwrites whatever is there.",
+  {
+    control_plane_url: z.string(),
+    token: z.string(),
+    worker_name: z.string().optional(),
+    target_path: z
+      .string()
+      .optional()
+      .describe("Override the default target path. Useful for tests and non-default install layouts."),
+  },
+  async (params) =>
+    withRecording("signalman_runner_persist_config", params, async () => {
+      const p = params as {
+        control_plane_url: string;
+        token: string;
+        worker_name?: string;
+        target_path?: string;
+      };
+      const target = p.target_path ?? defaultRunnerConfigPath();
+      await writeRunnerConfig(
+        {
+          controlPlaneUrl: p.control_plane_url,
+          token: p.token,
+          workerName: p.worker_name,
+        },
+        target,
+      );
+      return asMcpResult({ written: true, path: target });
+    }),
+);
+
+server.tool(
+  "signalman_runner_list",
+  "List registered build runners for the active org, newest-last_seen first. Each entry carries the raw runner row plus an `isStale` flag computed from `last_seen_at` + a threshold (default 90s; configurable). Stale rows are preserved for audit; use `signalman_runner_deregister` to actually remove a dead runner.",
+  {
+    stale_threshold_seconds: z
+      .number()
+      .int()
+      .min(1)
+      .max(86400)
+      .optional()
+      .describe(
+        "Seconds since `last_seen_at` to flag a runner as stale. Default 90 (matches the worker heartbeat cadence of 30s + 2 missed beats).",
+      ),
+  },
+  async (params) =>
+    withRecording("signalman_runner_list", params, async () => {
+      const p = params as { stale_threshold_seconds?: number };
+      const entries = await withControlPlane((cp) =>
+        runRunnerList(cp, { staleThresholdSeconds: p.stale_threshold_seconds }),
+      );
+      return asMcpResult({
+        runners: entries.map((e) => ({
+          id: e.runner.id,
+          name: e.runner.name,
+          last_seen_at: e.runner.lastSeenAt,
+          registered_at: e.runner.registeredAt,
+          meta: e.runner.meta,
+          is_stale: e.isStale,
+        })),
+      });
+    }),
+);
+
+server.tool(
+  "signalman_runner_deregister",
+  "Soft-delete a registered runner by name or id. The row is preserved for audit. A worker that heartbeats again under the same name will resurrect the row with a fresh registered_at; deregister is for the case where the operator wants to mark a worker permanently retired.",
+  {
+    name: z
+      .string()
+      .optional()
+      .describe("Runner name (preferred for operator use)."),
+    id: z
+      .string()
+      .optional()
+      .describe("Runner ULID (preferred for automation)."),
+  },
+  async (params) =>
+    withRecording("signalman_runner_deregister", params, async () => {
+      const p = params as { name?: string; id?: string };
+      const result = await withControlPlane((cp) =>
+        runRunnerDeregister(cp, { name: p.name, id: p.id }),
+      );
+      return asMcpResult({ deregistered: result });
+    }),
+);
+
+server.tool(
+  "signalman_release_build_remote",
+  "Submit a release.build job to the runner queue and poll until terminal. Equivalent to `signalman release build --remote`. Requires a registered runner config (~/.signalman/runner.yaml). Long-running: a successful response means the job finished (succeeded or failed); intermediate progress is recorded via the call's withRecording wrapper.",
+  {
+    product: z.string().describe("Product name."),
+    tag: z.string().describe("Git tag to build."),
+    poll_interval_ms: z
+      .number()
+      .int()
+      .min(100)
+      .max(10000)
+      .optional()
+      .describe("How often to poll the job for terminal state. Default 750ms (matches CLI)."),
+  },
+  async (params) =>
+    withRecording("signalman_release_build_remote", params, async () => {
+      const p = params as {
+        product: string;
+        tag: string;
+        poll_interval_ms?: number;
+      };
+      // Read runner config from disk; same as the CLI path.
+      const { loadRunnerConfig } = await import("./runner/config.js");
+      const config = await loadRunnerConfig();
+      const client = new HttpClient({
+        baseUrl: config.controlPlaneUrl,
+        token: config.token,
+      });
+      let product;
+      try {
+        product = await client.productByName(p.product);
+      } catch (err) {
+        if (err instanceof HttpClientError) {
+          throw new Error(
+            `signalman_release_build_remote: HTTP ${err.status} (${err.code}) resolving product '${p.product}': ${err.message}`,
+          );
+        }
+        throw err;
+      }
+      const job = await client.submitJob("release.build", {
+        product_id: product.id,
+        product_name: product.name,
+        tag: p.tag,
+      });
+      const pollMs = p.poll_interval_ms ?? 750;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const cur = await client.getJob(job.id);
+        if (cur.status === "succeeded" || cur.status === "failed") {
+          return asMcpResult({
+            job: {
+              id: cur.id,
+              status: cur.status,
+              kind: cur.kind,
+              error: cur.error ?? null,
+              result: cur.result ?? null,
+            },
+          });
+        }
+        await new Promise((r) => setTimeout(r, pollMs));
+      }
     }),
 );
 

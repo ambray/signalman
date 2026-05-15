@@ -351,3 +351,49 @@ describe("api keys", () => {
     expect((list.body as { api_keys: unknown[] }).api_keys).toHaveLength(0);
   });
 });
+
+describe("runners — WS6 M3", () => {
+  it("POST /v1/runners/heartbeat upserts and returns the row", async () => {
+    const r1 = await api("POST", "/v1/runners/heartbeat", {
+      name: "builder-1",
+      meta: { hostname: "mac-01", version: "0.3.0" },
+    });
+    expect(r1.status).toBe(200);
+    const first = (r1.body as { runner: { id: string; name: string; lastSeenAt: string } })
+      .runner;
+    expect(first.name).toBe("builder-1");
+
+    // Second heartbeat should return the same id with a newer lastSeenAt.
+    await new Promise((r) => setTimeout(r, 10));
+    const r2 = await api("POST", "/v1/runners/heartbeat", { name: "builder-1" });
+    expect(r2.status).toBe(200);
+    const second = (r2.body as { runner: { id: string; lastSeenAt: string } }).runner;
+    expect(second.id).toBe(first.id);
+    expect(second.lastSeenAt >= first.lastSeenAt).toBe(true);
+  });
+
+  it("GET /v1/runners lists active runners only", async () => {
+    await api("POST", "/v1/runners/heartbeat", { name: "alpha" });
+    await api("POST", "/v1/runners/heartbeat", { name: "beta" });
+    const list = await api("GET", "/v1/runners");
+    expect(list.status).toBe(200);
+    const runners = (list.body as { runners: Array<{ name: string }> }).runners;
+    expect(runners.map((r) => r.name).sort()).toEqual(["alpha", "beta"]);
+  });
+
+  it("DELETE /v1/runners/:id soft-deletes the row", async () => {
+    const created = await api("POST", "/v1/runners/heartbeat", {
+      name: "to-deregister",
+    });
+    const id = (created.body as { runner: { id: string } }).runner.id;
+    const del = await api("DELETE", `/v1/runners/${id}`);
+    expect(del.status).toBe(204);
+    const list = await api("GET", "/v1/runners");
+    expect((list.body as { runners: unknown[] }).runners).toHaveLength(0);
+  });
+
+  it("DELETE /v1/runners/:id returns 404 for unknown id", async () => {
+    const del = await api("DELETE", "/v1/runners/01HNONEXISTENT0000000000000");
+    expect(del.status).toBe(404);
+  });
+});

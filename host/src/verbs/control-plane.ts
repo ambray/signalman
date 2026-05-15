@@ -492,6 +492,142 @@ export async function runTargetRemove(
   });
 }
 
+/**
+ * Edit an existing target's name and/or connection. WS6 M3
+ * operator-authorised closure of the P3 "no target edit verb"
+ * gap.
+ *
+ * Editable fields: `name`, `connection`. The `kind` field is
+ * deliberately NOT editable — past deployments reference the
+ * target by id and route through the deploy backend that matches
+ * `kind`; mid-life kind changes would invalidate that assumption.
+ * For a kind change, operators still use `remove` + re-`add`.
+ *
+ * Past deployments are NOT updated by this method. Rollback and
+ * health-check operations against this target will use the *new*
+ * connection — which is the right semantic ("the target lives
+ * here now"), distinct from "rewrite history."
+ *
+ * @throws if `input.name` doesn't match an active target
+ * @throws if neither `newName` nor `newConnection` is supplied
+ *   (a no-op edit is treated as an operator mistake)
+ */
+// ── WS6 M3 — runner list + deregister ───────────────────────────────
+
+/**
+ * One row from `runner list` — the raw Runner plus a computed
+ * `isStale` flag based on the request's threshold.
+ */
+export interface RunnerListEntry {
+  runner: import("../control-plane/types.js").Runner;
+  isStale: boolean;
+}
+
+/**
+ * WS6 M3 — list registered build runners, newest-`last_seen_at`
+ * first. Workers POST heartbeats every `--heartbeat-interval-ms`
+ * (default 30s); rows whose `last_seen_at` is older than the
+ * `staleThresholdSeconds` (default 90s) are flagged `isStale: true`.
+ *
+ * Caveat: the threshold is purely advisory — the row stays in the
+ * list with `isStale: true` so operators can see "this worker was
+ * here recently and stopped." Use `runRunnerDeregister` to actually
+ * remove a dead runner.
+ */
+export async function runRunnerList(
+  controlPlane: ControlPlane,
+  opts?: { staleThresholdSeconds?: number },
+): Promise<RunnerListEntry[]> {
+  const orgId = await getActiveOrgId(controlPlane);
+  const threshold = opts?.staleThresholdSeconds ?? 90;
+  const cutoffMs = Date.now() - threshold * 1000;
+  const rows = await controlPlane.runners.listForOrg(orgId);
+  return rows.map((runner) => ({
+    runner,
+    isStale: new Date(runner.lastSeenAt).getTime() < cutoffMs,
+  }));
+}
+
+/**
+ * WS6 M3 — soft-delete a registered runner. Identified by either
+ * name (preferred for operator use) or id (preferred for
+ * automation). The row is preserved for audit; a worker that
+ * heartbeats again under the same name will resurrect the row.
+ *
+ * @throws if neither `name` nor `id` is supplied
+ * @throws if the runner doesn't exist (active) under the supplied
+ *   key
+ */
+export async function runRunnerDeregister(
+  controlPlane: ControlPlane,
+  input: { name?: string; id?: string },
+): Promise<{ id: string; name: string }> {
+  if (input.name === undefined && input.id === undefined) {
+    throw new Error(
+      "runner deregister requires --name or --id (got neither)",
+    );
+  }
+  const orgId = await getActiveOrgId(controlPlane);
+  const target =
+    input.id !== undefined
+      ? await controlPlane.runners.get(input.id)
+      : await controlPlane.runners.getByName(orgId, input.name!);
+  if (!target) {
+    const key = input.id !== undefined ? `id=${input.id}` : `name=${input.name}`;
+    throw new Error(`runner not found: ${key}`);
+  }
+  if (target.orgId !== orgId) {
+    throw new Error(`runner ${target.id} belongs to a different org`);
+  }
+  await controlPlane.runners.softDelete(target.id);
+  await controlPlane.auditLog.append({
+    orgId,
+    actor: "cli",
+    action: "runner.deregistered",
+    entityType: "runner",
+    entityId: target.id,
+    detail: { name: target.name },
+  });
+  return { id: target.id, name: target.name };
+}
+
+export async function runTargetEdit(
+  controlPlane: ControlPlane,
+  input: {
+    name: string;
+    newName?: string;
+    newConnection?: Record<string, unknown>;
+  },
+): Promise<Target> {
+  if (
+    input.newName === undefined &&
+    input.newConnection === undefined
+  ) {
+    throw new Error(
+      "target edit requires at least one of --new-name or --connection",
+    );
+  }
+  const orgId = await getActiveOrgId(controlPlane);
+  const existing = await controlPlane.targets.getByName(orgId, input.name);
+  if (!existing) throw new Error(`target not found: ${input.name}`);
+  const patch: Partial<Pick<Target, "name" | "connection">> = {};
+  if (input.newName !== undefined) patch.name = input.newName;
+  if (input.newConnection !== undefined) patch.connection = input.newConnection;
+  const updated = await controlPlane.targets.update(existing.id, patch);
+  await controlPlane.auditLog.append({
+    orgId,
+    actor: "cli",
+    action: "target.edited",
+    entityType: "target",
+    entityId: existing.id,
+    detail: {
+      before: { name: existing.name, connection: existing.connection },
+      after: { name: updated.name, connection: updated.connection },
+    },
+  });
+  return updated;
+}
+
 // ── Release deploy / rollback verbs (PR 3) ──────────────────────────
 
 export interface ReleaseDeployInput {

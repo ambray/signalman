@@ -1,127 +1,198 @@
-/**
- * v0.3.0-5 sub-task 8 commit 3 — skills frontmatter validator.
- *
- * Walks the top-level `skills/` directory and parses each
- * `SKILL.md`'s YAML frontmatter. Asserts the required fields
- * are present + well-formed so a malformed skill can't ship
- * undetected. The agent runtime ignores skills with broken
- * frontmatter (silent failure mode) — this test makes the
- * silence audible.
- *
- * Required frontmatter fields:
- *   - `name`         non-empty string; matches the directory name
- *   - `description`  non-empty string (operator-facing trigger
- *                    phrases)
- *   - `allowed-tools` non-empty comma-separated list
- *
- * Optional but flagged:
- *   - `model`        ignored if present (legacy)
- */
+// WS6 deliverable — skills frontmatter validator.
+//
+// Walks every `skills/<name>/SKILL.md` in the repo, parses the YAML
+// frontmatter, and asserts each carries a well-formed `name` /
+// `description` / `allowed-tools`. For each entry in `allowed-tools`,
+// validates it either:
+//   - is a documented Claude Code built-in tool (Bash, Read, …), or
+//   - matches `mcp__signalman__<TOOLNAME>` where `<TOOLNAME>` is a
+//     real MCP tool the host registers (`server.tool(...)`).
+//
+// Why static parsing: dynamically importing server.ts to enumerate
+// registered tools would boot backend discovery + grpc bindings + the
+// MCP transport — too heavy for a frontmatter sanity test. Parsing
+// server.ts and tools/*.ts as text gives the same set without side
+// effects.
+//
+// If this test fails:
+//   - The describe.each skill name in the failure tells you which
+//     SKILL.md regressed.
+//   - "MCP tool X is not registered" → either the skill names a tool
+//     that doesn't exist, or the tool was renamed in server.ts/tools.
+//     The fix is in the skill, not the test.
 
 import { describe, it, expect } from "vitest";
-import * as fs from "node:fs";
-import * as path from "node:path";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import YAML from "yaml";
 
-const SKILLS_DIR = path.resolve(
-  path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")),
-  "..",
-  "..",
-  "..",
-  "skills",
-);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const repoRoot = path.resolve(__dirname, "..", "..", "..");
+const skillsDir = path.join(repoRoot, "skills");
+const serverTs = path.join(repoRoot, "host", "src", "server.ts");
+const toolsDir = path.join(repoRoot, "host", "src", "tools");
 
-interface ParsedFrontmatter {
+// Claude Code built-in tools. Skills can grant any of these without
+// further checks; the agent harness, not signalman, owns their schema.
+const BUILTIN_TOOLS = new Set([
+  "Bash",
+  "Read",
+  "Write",
+  "Edit",
+  "Glob",
+  "Grep",
+  "Task",
+  "WebFetch",
+  "WebSearch",
+  "NotebookEdit",
+  "TodoWrite",
+]);
+
+interface DiscoveredSkill {
+  dir: string;
+  file: string;
+  label: string;
+}
+
+function findSkillFiles(): DiscoveredSkill[] {
+  if (!fs.existsSync(skillsDir)) return [];
+  const out: DiscoveredSkill[] = [];
+  for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const dir = path.join(skillsDir, entry.name);
+    const file = path.join(dir, "SKILL.md");
+    if (fs.existsSync(file)) {
+      out.push({ dir, file, label: entry.name });
+    }
+  }
+  return out.sort((a, b) => a.label.localeCompare(b.label));
+}
+
+interface Frontmatter {
   name: string;
   description: string;
   "allowed-tools": string;
-  [key: string]: string;
+  [k: string]: unknown;
 }
 
-function parseFrontmatter(filePath: string): ParsedFrontmatter | null {
-  // Normalise CRLF (Windows commits via git autocrlf land with \r\n)
-  // so the frontmatter regex matches on either platform.
-  const content = fs.readFileSync(filePath, "utf-8").replace(/\r\n/g, "\n");
-  const match = /^---\n([\s\S]*?)\n---/.exec(content);
-  if (!match) return null;
-  const lines = match[1].split("\n");
-  const out: Record<string, string> = {};
-  let currentKey: string | null = null;
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    const keyMatch = /^([a-z][a-z0-9_-]*)\s*:\s*(.*)$/i.exec(line);
-    if (keyMatch) {
-      currentKey = keyMatch[1];
-      out[currentKey] = keyMatch[2];
-    } else if (currentKey) {
-      // Continuation of previous value (YAML multi-line; rare for our
-      // skills which use single-line descriptions).
-      out[currentKey] += " " + line.trim();
+function readFrontmatter(file: string): Frontmatter {
+  const content = fs.readFileSync(file, "utf8");
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!match) {
+    throw new Error(`No YAML frontmatter delimited by --- ... --- in ${file}`);
+  }
+  const data = YAML.parse(match[1]) as Record<string, unknown>;
+  return data as Frontmatter;
+}
+
+function collectRegisteredMcpTools(): Set<string> {
+  const tools = new Set<string>();
+
+  // (1) Direct `server.tool("name", ...)` registrations in server.ts.
+  const serverSrc = fs.readFileSync(serverTs, "utf8");
+  for (const m of serverSrc.matchAll(/server\.tool\(\s*"([a-z_][a-z0-9_]*)"/g)) {
+    tools.add(m[1]);
+  }
+
+  // (2) The for-loop over `allTools` in server.ts registers each
+  //     tool from tools/* under TWO names:
+  //       - canonical: `signalman_advanced_<tool.name>`
+  //       - legacy alias: `<tool.name>` (deprecated, removed v0.2.0).
+  //     Parse tools/*.ts statically for the `name:` field on each
+  //     ToolDefinition.
+  for (const entry of fs.readdirSync(toolsDir)) {
+    if (!entry.endsWith(".ts")) continue;
+    if (entry === "index.ts" || entry === "types.ts") continue;
+    const src = fs.readFileSync(path.join(toolsDir, entry), "utf8");
+    for (const m of src.matchAll(/^\s*name:\s*"([a-z_][a-z0-9_]*)"/gm)) {
+      tools.add(m[1]);
+      tools.add(`signalman_advanced_${m[1]}`);
     }
   }
-  return out as ParsedFrontmatter;
+
+  return tools;
 }
 
-function listSkillDirs(): string[] {
-  if (!fs.existsSync(SKILLS_DIR)) return [];
-  return fs
-    .readdirSync(SKILLS_DIR, { withFileTypes: true })
-    .filter((d) => d.isDirectory())
-    .map((d) => d.name);
-}
+const skills = findSkillFiles();
+const mcpTools = collectRegisteredMcpTools();
 
-describe("skills/ — frontmatter validation", () => {
-  const dirs = listSkillDirs();
-
-  it("at least one skill is present", () => {
-    expect(dirs.length).toBeGreaterThan(0);
+describe("skills frontmatter validator", () => {
+  it("discovers at least one SKILL.md under skills/", () => {
+    expect(skills.length, "no SKILL.md files found under skills/").toBeGreaterThan(0);
   });
 
-  for (const dir of dirs) {
-    const skillPath = path.join(SKILLS_DIR, dir, "SKILL.md");
-    describe(`skills/${dir}`, () => {
-      it("has a SKILL.md file", () => {
-        expect(fs.existsSync(skillPath)).toBe(true);
-      });
+  it("MCP tool registry parsed at least one signalman_* tool", () => {
+    // Sanity check: if static parsing of server.ts misses everything,
+    // the per-skill `allowed-tools` checks below would silently pass.
+    const signalmanScoped = [...mcpTools].filter((t) => t.startsWith("signalman_"));
+    expect(
+      signalmanScoped.length,
+      "static parse of server.ts/tools/* found no signalman_* MCP tools",
+    ).toBeGreaterThan(0);
+  });
 
-      it("has parseable YAML frontmatter", () => {
-        const fm = parseFrontmatter(skillPath);
-        expect(fm).not.toBeNull();
-      });
+  describe.each(skills.map((s) => [s.label, s]))("%s", (_label, skill) => {
+    const fm = readFrontmatter(skill.file);
 
-      it("name field matches the directory name", () => {
-        const fm = parseFrontmatter(skillPath);
-        expect(fm).not.toBeNull();
-        expect(fm!.name).toBe(dir);
-      });
-
-      it("description is non-empty", () => {
-        const fm = parseFrontmatter(skillPath);
-        expect(fm).not.toBeNull();
-        expect(fm!.description.length).toBeGreaterThan(0);
-      });
-
-      it("allowed-tools is non-empty", () => {
-        const fm = parseFrontmatter(skillPath);
-        expect(fm).not.toBeNull();
-        expect(fm!["allowed-tools"]?.length).toBeGreaterThan(0);
-      });
-
-      it("description has at least one operator-trigger phrase indicator", () => {
-        // Heuristic: the description should mention "Trigger" or an
-        // imperative verb / quoted operator phrase so the agent
-        // runtime knows when to use the skill. Catches descriptions
-        // that are too abstract.
-        const fm = parseFrontmatter(skillPath);
-        expect(fm).not.toBeNull();
-        const desc = fm!.description.toLowerCase();
-        // We accept any of: "trigger", a quoted phrase ('"..."'), or
-        // the imperative verb pattern at the start.
-        const hasTriggerCue =
-          desc.includes("trigger") ||
-          /"[^"]+"/i.test(fm!.description) ||
-          /^[a-z]+s?\s+/.test(desc); // starts with a verb
-        expect(hasTriggerCue).toBe(true);
-      });
+    it("frontmatter has a non-empty string `name`", () => {
+      expect(typeof fm.name).toBe("string");
+      expect(fm.name.trim().length).toBeGreaterThan(0);
     });
-  }
+
+    it("`name` matches the skill directory name", () => {
+      expect(fm.name).toBe(skill.label);
+    });
+
+    it("frontmatter has a non-empty string `description`", () => {
+      expect(typeof fm.description).toBe("string");
+      expect(fm.description.trim().length).toBeGreaterThan(0);
+    });
+
+    it("description includes at least one trigger-phrase signal (`Trigger when`, `trigger`, `says`, `wants`)", () => {
+      // Soft constraint: skill descriptions need natural-language
+      // trigger phrasing so an agent matches on them. We accept any
+      // of the common patterns the existing skills already use.
+      const d = fm.description;
+      const ok =
+        /trigger/i.test(d) ||
+        /\bsays\b/i.test(d) ||
+        /\bwants\b/i.test(d);
+      expect(ok, `description for ${skill.label} has no trigger-phrase signal`).toBe(true);
+    });
+
+    it("frontmatter has a non-empty `allowed-tools`", () => {
+      const at = fm["allowed-tools"];
+      expect(typeof at).toBe("string");
+      expect((at as string).trim().length).toBeGreaterThan(0);
+    });
+
+    it("every `allowed-tools` entry resolves to a built-in tool or a registered MCP tool", () => {
+      const raw = (fm["allowed-tools"] as string)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      expect(raw.length, "allowed-tools is empty after split").toBeGreaterThan(0);
+
+      const problems: string[] = [];
+      for (const entry of raw) {
+        if (BUILTIN_TOOLS.has(entry)) continue;
+        const m = entry.match(/^mcp__signalman__([a-z_][a-z0-9_]*)$/);
+        if (!m) {
+          problems.push(
+            `"${entry}" is neither a known built-in (${[...BUILTIN_TOOLS].join("/")}) nor an mcp__signalman__<tool> reference`,
+          );
+          continue;
+        }
+        const toolName = m[1];
+        if (!mcpTools.has(toolName)) {
+          problems.push(
+            `mcp tool "${toolName}" (from "${entry}") is not registered in host/src/server.ts or host/src/tools/`,
+          );
+        }
+      }
+      expect(problems, problems.join("\n")).toEqual([]);
+    });
+  });
 });
