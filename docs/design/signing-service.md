@@ -250,7 +250,13 @@ export interface SigningProvider {
 
   sign(req: SignRequest): Promise<SignEnvelope>;
 
-  /** Verify a signature against payload bytes + a known public key.
+  /** Verify a signature envelope against payload bytes + the public
+   *  keys that produced it. `keys` is an array because hybrid envelopes
+   *  (Milestone 1b+) carry one SigEntry per algorithm and each entry
+   *  needs its own public key. Classical-only callers pass a
+   *  single-element array. The provider matches entries to keys by
+   *  (algorithm, fingerprint).
+   *
    *  Verify can run on ANY provider for ANY envelope when the algorithm
    *  matches — verification does not require the producing provider.
    *  This keeps verifiers (CI, third parties) free of the cloud-KMS
@@ -258,7 +264,8 @@ export interface SigningProvider {
   verify(
     env: SignEnvelope,
     payload: Uint8Array,
-    key: PublicKeyRef,
+    keys: readonly PublicKeyRef[],
+    mode?: VerifyMode,
   ): Promise<VerifyResult>;
 
   /** Compute the fingerprint of a key managed by this provider. The
