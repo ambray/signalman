@@ -1220,34 +1220,131 @@ a one-click-install Claude Code plugin, with a clean open-core boundary
 - v1.0.0 scope: split into `signalman` (OSS) + `signalman-cloud`
   (proprietary) plugins
 
-### Other next-10 epics (running in parallel with WS7)
+### Per-user identity certs (WS8) — v0.5
 
-The full next-10 list lives in operator notes; the items most likely
-to land in v0.5–v0.6 are:
+Extend the one-CA-many-VMs model from v0.1.x into named-identity
+mTLS with per-identity revocation, replacing the v0.1.x cert-pin
+stopgap (`guest/src/cert_pin.rs`). Three identity kinds
+(user / machine / service); SPIFFE-compatible URI SAN convention;
+signed serial-denylist for revocation; opt-in → default-on → sole
+migration over v0.2.0 → v0.2.1 → v0.3.0.
 
-- **Signing service provider + infrastructure** — Loom is drafting
-  requirements; will gate at the spec stage before workstream kickoff.
-- **macOS UI automation parity** — AppleScript + AX driver matching
-  the Windows `UiAutomation` shape. See
-  [`docs/mac-virtualization.md`](docs/mac-virtualization.md) §Recommendation.
-- **vmrun ↔ VMware backend convergence** — close the gap between the
-  vmrun-driven path and the broader VMware-backend interface so the
-  same scenario runs on both without per-backend hand-tuning.
-- **Per-user identity certs (WS8)** — extend the one-CA-many-VMs
-  model from v0.1.x into named-identity mTLS with per-identity
-  revocation, replacing the v0.1.x cert-pin stopgap
-  (`guest/src/cert_pin.rs`). Three identity kinds
-  (user / machine / service); SPIFFE-compatible URI SAN convention;
-  signed serial-denylist for revocation; opt-in → default-on →
-  sole migration over v0.2.0 → v0.2.1 → v0.3.0. Design doc:
-  [`docs/design/per-user-identity-certs.md`](docs/design/per-user-identity-certs.md).
-  Workstream prompt:
-  [`docs/workstreams/prompts/ws8-per-user-identity-certs.md`](docs/workstreams/prompts/ws8-per-user-identity-certs.md).
-- **OSS-hygiene trio** — CI coverage gates, Contributor Covenant,
-  CONTRIBUTING.md polish. Closes the GitHub community-profile checklist.
+- Design doc: [`docs/design/per-user-identity-certs.md`](docs/design/per-user-identity-certs.md)
+- Workstream prompt: [`docs/workstreams/prompts/ws8-per-user-identity-certs.md`](docs/workstreams/prompts/ws8-per-user-identity-certs.md)
+- Status: awaiting session launch (2026-05-16)
 
-These are placeholders; each gets its own workstream prompt under
-`docs/workstreams/prompts/` when it's pulled active.
+### Next cohort (WS9–WS12) — 4-parallel wave, kicked off 2026-05-16
+
+The 4-parallel pattern proven by the WS1–WS6 wave (2026-05-14)
+applies again here: four workstreams off `main`, each on its own
+feature branch, each owned by one Claude Code session. Coordination
+rules are reduced because WS9–WS12 have minimal file overlap, but
+the same Definition of Done + 4-lens audit + "no push to origin"
+rules apply.
+
+| # | Stream | Branch | First milestone | Status |
+|---|---|---|---|---|
+| 9 | Signing service provider + infrastructure | `feat/v0.5-signing-service` | Design doc (gated) → `LocalDiskProvider` interface + lift | Awaiting session launch (2026-05-16) |
+| 10 | Registry OCI distribution spec v1.1 | `feat/v0.5-registry-oci` | Design doc (gated) → manifest schema + types | Awaiting session launch (2026-05-16) |
+| 11 | vmrun ↔ VMware backend convergence | `feat/v0.5-vmware-convergence` | Design doc (gated) → parity test suite (before merge) | Awaiting session launch (2026-05-16) |
+| 12 | OSS release-readiness | `feat/v0.5-oss-release-readiness` | `signalman --version` verb | Awaiting session launch (2026-05-16) |
+
+Prompts: [`ws9-signing-service.md`](docs/workstreams/prompts/ws9-signing-service.md),
+[`ws10-registry-oci.md`](docs/workstreams/prompts/ws10-registry-oci.md),
+[`ws11-vmrun-vmware-convergence.md`](docs/workstreams/prompts/ws11-vmrun-vmware-convergence.md),
+[`ws12-oss-release-readiness.md`](docs/workstreams/prompts/ws12-oss-release-readiness.md).
+
+#### Cohort scope summary
+
+- **WS9 (Signing service)** — introduce a `SigningProvider` abstraction
+  so release-manifest signing, registry re-signing, and (after WS8
+  merges) the service-side CA-key signing all route through one
+  versioned interface. `LocalDiskProvider` keeps the existing on-disk
+  PEM flow as the v0.5 default; subsequent providers add HSM / Cloud
+  KMS / detached-operator support without touching call sites.
+  Design-gated. Closes WS8's deferred TPM/HSM scope.
+- **WS10 (Registry OCI distribution spec v1.1)** — close
+  [`registry/ROADMAP.md`](registry/ROADMAP.md) §v0.1.2: add `/v2/*`
+  route surface alongside `/v1/*`, OCI manifest + image-index media
+  types, shared blob store (digests are `sha256:<hex>` so the
+  existing `BlobRef` shape maps 1:1), virtual upstream pull-through
+  against Docker Hub with Ed25519 re-signing, cosign-style signing
+  using the existing keypair, and the upstream
+  `opencontainers/distribution-spec/conformance` harness wired into
+  CI. GHCR + ECR upstreams scoped to v0.6. Design-gated. **Note:**
+  the original WS10 (macOS UI automation parity) was reassigned on
+  2026-05-16 because the operator does not currently have an Apple
+  Silicon dev-host; the scoped prompt is preserved at
+  [`docs/workstreams/prompts/ws-future-macos-ui-parity.md`](docs/workstreams/prompts/ws-future-macos-ui-parity.md)
+  for pickup when Mac hardware becomes available.
+- **WS11 (vmrun ↔ VMware convergence)** — merge the parallel-track
+  `vmrun.ts` + legacy `vmware.ts` backends into a single converged
+  module per the operator commitment baked into the `vmrun.ts`
+  §"Locked design" header comment. Behavior parity is enforced
+  by a new parity test suite landed *before* the merge.
+  Design-gated. No new features; refactor-with-guarantee.
+- **WS12 (OSS release-readiness)** — close the five "Open" items in
+  [`docs/STATUS.md`](docs/STATUS.md) §Public-release status plus
+  one quiet CI gap: `signalman --version` verb, `CODE_OF_CONDUCT.md`
+  (Contributor Covenant), coordinated v0.4.0 tag prep, public-release
+  operator runbook (secrets + visibility flip), CI coverage gate
+  enforcement, and GitHub community-profile checklist closure.
+  Small items by design; bundled to amortize the operator-review
+  cost.
+
+#### Cross-stream coordination (WS9–WS12)
+
+Minimal overlap by design; the coordination matrix is short.
+
+| Resource | WS9 | WS10 | WS11 | WS12 |
+|---|---|---|---|---|
+| Host migration numbers | 0090–0099 | (none) | (none) | (none) |
+| Registry migration numbers | (none) | `0004` (oci_metadata) | (none) | (none) |
+| New error-code namespaces | `signing.*` audit codes; `SigningProviderError` | OCI spec `errors[]` shape (canonical codes `BLOB_UNKNOWN`, `MANIFEST_UNKNOWN`, etc.) | converged `VmwareBackendError` (supersedes `VmrunBackendError`) | (none) |
+| New CLI verbs | `signalman signing *` | `signalman-registry oci sign|verify` (if Q3 lands "include cosign") | (none — selector alias only) | `signalman --version` flag |
+| New MCP tools | `signalman_signing_keys_list`, `signalman_signing_verify` | (none — OCI tooling is standard CLI) | (none) | (none) |
+| New HTTP route namespace | (none) | `/v2/*` on the registry app | (none) | (none) |
+| `host/src/cli.ts` edits | yes (new `signing` verb) | none | none | yes (new `--version` flag) |
+| `host/src/mcp/server.ts` edits | new tool block | none | none | none |
+| `host/src/hypervisors/` edits | none | none | yes (full convergence) | none |
+| `registry/src/` edits | minor (`signing.ts` refactor through provider) | major (new `oci/` module, `http/app.ts` mount, schema delta) | none | none |
+| `guest/src/` edits | none | none | none | none |
+| `service/src/tls.rs` edits | yes (Milestone 4 only; coordinate with WS8 merge) | none | none | none |
+| Design doc | `docs/design/signing-service.md` (new) | `docs/design/registry-oci.md` (new) | `docs/design/vmware-backend-convergence.md` (new) | (none; runbook only) |
+
+**WS9 ↔ WS8 coupling.** WS9 Milestone 4 routes the WS8 CA-key signing
+through the new provider interface. If WS8 hasn't merged when WS9
+reaches that milestone, the WS9 session stops and surfaces to the
+operator. All other WS9 milestones are independent.
+
+**WS9 ↔ WS10 coupling.** WS10 Milestone 6 (cosign signing on OCI
+manifests) uses the existing `registry/src/signing.ts` Ed25519
+surface directly. If WS9 has merged when WS10 reaches that
+milestone, the cosign path routes through the new `SigningProvider`
+interface instead of the legacy surface; the WS10 session
+coordinates with the operator before that milestone. Otherwise
+WS10 ships against the v0.4.x signing surface and a follow-up PR
+migrates it after WS9 lands.
+
+**WS11 scope discipline.** WS11 is a refactor with a parity
+guarantee — not a venue for new VMware features. Adjacent ideas
+(VM creation via vmrun, expanded snapshot semantics, vSphere
+extras) get filed as v0.6+ ROADMAP entries.
+
+**WS10 ↔ WS12 coupling.** The registry's `package.json` is at
+`0.0.1` despite `registry/ROADMAP.md` claiming v0.1.1 shipped. WS12
+Milestone 3 will discover this drift during the version-bump pass;
+WS10 Milestone 7 surfaces it explicitly. Resolve in whichever
+session reaches the bump first; do not double-write.
+
+**Design-gated workstreams (WS9, WS10, WS11).** Milestone 0 is the
+design doc; the operator approves it before any production code
+lands. WS12 has no design gate — its scope is concrete enough that
+the operator-question round at session start is sufficient.
+
+**No push to origin from any session.** Same as the WS1–WS6 wave:
+operator consolidates by fast-forward into `main` after reviewing
+each session's `.workstream-status.md`.
 
 ---
 
