@@ -242,7 +242,25 @@ The audit log uses canonical action codes namespaced by entity:
 | `cloud_creds.*` | cloud credentials | `cloud_creds.set`, `cloud_creds.removed` |
 | `cloud_budget.*` | cloud budgets | `cloud_budget.set`, `cloud_budget.exceeded` |
 | `cloud_usage.*` | cloud usage | `cloud_usage.recorded`, `cloud_usage.terminated` |
+| `signing.*` | signing-service operations (WS9 v0.5.0) | `signing.requested`, `signing.completed`, `signing.failed`, `signing.key_added`, `signing.key_revoked`, `signing.key_rotated` |
 | Registry `upload` / `proxy_cache` / `manifest_create` / `security_scan_*` | registry artifacts | (see registry section above) |
+
+The `signing.*` family is written by the host's signing-service
+provider (see `docs/design/signing-service.md`). Every sign() call
+through a provider with audit + nonce-dedup wired records
+`signing.requested` on entry and either `signing.completed` (success)
+or `signing.failed` (replay rejection, clock skew, key not found, etc).
+Detail-blob shapes:
+
+- `signing.requested` — `{ provider, keyId, nonce, requestedAt, purpose, payloadSha256 }`
+- `signing.completed` — `{ provider, keyId, nonce, payloadSha256, algorithms[]: [{ algorithm, signedBy, signedAt }] }`. Hybrid envelopes record both sub-key fingerprints in `algorithms[]`.
+- `signing.failed` — `{ provider, keyId, nonce, errorCode, errorMessage }` with `errorCode` taken from the canonical SigningErrorCode union (e.g. `nonce-replay`, `clock-skew`, `key-not-found`).
+- `signing.key_added` — `{ provider, keyId, algorithm, fingerprint, pairId?, hybridAlias?, label? }`
+- `signing.key_revoked` — `{ provider, fingerprint, reason }`
+- `signing.key_rotated` — `{ provider, oldFingerprint, newFingerprint }`
+
+`entity_type` is `signing_key`; `entity_id` is the key fingerprint
+(or `nonce:<value>` for failures that occur before a key resolves).
 
 Every audit row carries `actor` (CLI label, service identity, or
 bearer-token prefix), `entity_type`, `entity_id`, and an optional

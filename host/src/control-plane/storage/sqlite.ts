@@ -76,6 +76,10 @@ import {
   type RunRepo,
   type RunnerRepo,
   type ScenarioRepo,
+  type SigningNonce,
+  type SigningNonceRepo,
+  type SigningProviderKey,
+  type SigningProviderKeyRepo,
   StorageConflictError,
   type StorageDriver,
   StorageNotFoundError,
@@ -125,6 +129,9 @@ export class SqliteStorageDriver implements StorageDriver {
   readonly approvals: ApprovalRepo;
   // WS6 M3 — registered runners:
   readonly runners: RunnerRepo;
+  // WS9 M2 — signing catalog + replay-dedup ledger:
+  readonly signingProviderKeys: SigningProviderKeyRepo;
+  readonly signingNonces: SigningNonceRepo;
 
   constructor(opts: SqliteDriverOptions) {
     if (opts.path !== ":memory:") {
@@ -160,6 +167,9 @@ export class SqliteStorageDriver implements StorageDriver {
     this.approvals = new SqliteApprovalRepo(this.db);
     // WS6 M3:
     this.runners = new SqliteRunnerRepo(this.db);
+    // WS9 M2:
+    this.signingProviderKeys = new SqliteSigningProviderKeyRepo(this.db);
+    this.signingNonces = new SqliteSigningNonceRepo(this.db);
   }
 
   async migrate(): Promise<void> {
@@ -2672,5 +2682,216 @@ class SqliteRunnerRepo implements RunnerRepo {
       )
       .run(now, now, id);
     if (result.changes === 0) throw new StorageNotFoundError("runner", id);
+  }
+}
+
+// ── WS9 M2 ─────────────────────────────────────────────────────────
+
+function mapSigningProviderKey(row: SqlRow): SigningProviderKey {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    provider: row.provider as string,
+    keyId: row.key_id as string,
+    algorithm: row.algorithm as SigningProviderKey["algorithm"],
+    fingerprint: row.fingerprint as string,
+    publicKeyB64: row.public_key_b64 as string,
+    pairId: (row.pair_id as string | null) ?? null,
+    pairRole: (row.pair_role as SigningProviderKey["pairRole"]) ?? null,
+    hybridAlias: (row.hybrid_alias as string | null) ?? null,
+    label: (row.label as string | null) ?? null,
+    addedBy: row.added_by as string,
+    addedAt: row.added_at as string,
+    revokedAt: (row.revoked_at as string | null) ?? null,
+    revokedBy: (row.revoked_by as string | null) ?? null,
+    revokeReason: (row.revoke_reason as string | null) ?? null,
+    rotatedTo: (row.rotated_to as string | null) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+class SqliteSigningProviderKeyRepo implements SigningProviderKeyRepo {
+  constructor(private readonly db: DatabaseSync) {}
+
+  async insert(input: {
+    orgId: string;
+    provider: string;
+    keyId: string;
+    algorithm: SigningProviderKey["algorithm"];
+    fingerprint: string;
+    publicKeyB64: string;
+    pairId?: string | null;
+    pairRole?: SigningProviderKey["pairRole"];
+    hybridAlias?: string | null;
+    label?: string | null;
+    addedBy: string;
+  }): Promise<SigningProviderKey> {
+    const now = nowIso();
+    const bind = {
+      id: newId(),
+      org_id: input.orgId,
+      provider: input.provider,
+      key_id: input.keyId,
+      algorithm: input.algorithm,
+      fingerprint: input.fingerprint,
+      public_key_b64: input.publicKeyB64,
+      pair_id: input.pairId ?? null,
+      pair_role: input.pairRole ?? null,
+      hybrid_alias: input.hybridAlias ?? null,
+      label: input.label ?? null,
+      added_by: input.addedBy,
+      added_at: now,
+      created_at: now,
+      updated_at: now,
+    };
+    try {
+      this.db
+        .prepare(
+          "INSERT INTO signing_provider_key (id, org_id, provider, key_id, algorithm, fingerprint, public_key_b64, pair_id, pair_role, hybrid_alias, label, added_by, added_at, created_at, updated_at) " +
+            "VALUES (@id, @org_id, @provider, @key_id, @algorithm, @fingerprint, @public_key_b64, @pair_id, @pair_role, @hybrid_alias, @label, @added_by, @added_at, @created_at, @updated_at)",
+        )
+        .run(bind);
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (msg.includes("UNIQUE") || msg.includes("unique")) {
+        throw new StorageConflictError(
+          `signing key fingerprint ${input.fingerprint} already registered for org ${input.orgId}`,
+        );
+      }
+      throw err;
+    }
+    return mapSigningProviderKey({
+      ...bind,
+      revoked_at: null,
+      revoked_by: null,
+      revoke_reason: null,
+      rotated_to: null,
+    });
+  }
+
+  async getByFingerprint(
+    orgId: string,
+    fingerprint: string,
+  ): Promise<SigningProviderKey | null> {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM signing_provider_key WHERE org_id = ? AND fingerprint = ? AND deleted_at IS NULL",
+      )
+      .get(orgId, fingerprint) as SqlRow | undefined;
+    return row ? mapSigningProviderKey(row) : null;
+  }
+
+  async getByAlias(
+    orgId: string,
+    keyId: string,
+  ): Promise<readonly SigningProviderKey[]> {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM signing_provider_key WHERE org_id = ? AND key_id = ? AND deleted_at IS NULL ORDER BY pair_role, added_at",
+      )
+      .all(orgId, keyId) as SqlRow[];
+    return rows.map(mapSigningProviderKey);
+  }
+
+  async list(
+    orgId: string,
+    opts: { provider?: string; includeRevoked?: boolean } = {},
+  ): Promise<readonly SigningProviderKey[]> {
+    const parts: string[] = ["org_id = ?", "deleted_at IS NULL"];
+    const params: unknown[] = [orgId];
+    if (opts.provider) {
+      parts.push("provider = ?");
+      params.push(opts.provider);
+    }
+    if (!opts.includeRevoked) {
+      parts.push("revoked_at IS NULL");
+    }
+    const sql = `SELECT * FROM signing_provider_key WHERE ${parts.join(" AND ")} ORDER BY added_at DESC`;
+    const rows = this.db.prepare(sql).all(...(params as never[])) as SqlRow[];
+    return rows.map(mapSigningProviderKey);
+  }
+
+  async revoke(input: {
+    orgId: string;
+    fingerprint: string;
+    revokedBy: string;
+    reason: string;
+  }): Promise<void> {
+    const now = nowIso();
+    this.db
+      .prepare(
+        "UPDATE signing_provider_key SET revoked_at = ?, revoked_by = ?, revoke_reason = ?, updated_at = ? " +
+          "WHERE org_id = ? AND fingerprint = ? AND deleted_at IS NULL AND revoked_at IS NULL",
+      )
+      .run(now, input.revokedBy, input.reason, now, input.orgId, input.fingerprint);
+  }
+
+  async recordRotation(input: {
+    orgId: string;
+    oldFingerprint: string;
+    newFingerprint: string;
+  }): Promise<void> {
+    const now = nowIso();
+    const newRow = this.db
+      .prepare(
+        "SELECT id FROM signing_provider_key WHERE org_id = ? AND fingerprint = ? AND deleted_at IS NULL",
+      )
+      .get(input.orgId, input.newFingerprint) as SqlRow | undefined;
+    if (!newRow) {
+      throw new StorageNotFoundError(
+        "signing_provider_key",
+        `new fingerprint ${input.newFingerprint} not in catalog`,
+      );
+    }
+    this.db
+      .prepare(
+        "UPDATE signing_provider_key SET rotated_to = ?, updated_at = ? WHERE org_id = ? AND fingerprint = ? AND deleted_at IS NULL",
+      )
+      .run(newRow.id as string, now, input.orgId, input.oldFingerprint);
+  }
+}
+
+class SqliteSigningNonceRepo implements SigningNonceRepo {
+  constructor(private readonly db: DatabaseSync) {}
+
+  async insert(input: SigningNonce): Promise<void> {
+    try {
+      this.db
+        .prepare(
+          "INSERT INTO signing_nonce (org_id, actor_cn, nonce, requested_at, fingerprint) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(
+          input.orgId,
+          input.actorCn,
+          input.nonce,
+          input.requestedAt,
+          input.fingerprint,
+        );
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (msg.includes("UNIQUE") || msg.includes("unique") || msg.includes("PRIMARY")) {
+        throw new StorageConflictError(
+          `signing nonce already used: org=${input.orgId} actor=${input.actorCn} nonce=${input.nonce}`,
+        );
+      }
+      throw err;
+    }
+  }
+
+  async exists(orgId: string, actorCn: string, nonce: string): Promise<boolean> {
+    const row = this.db
+      .prepare(
+        "SELECT 1 FROM signing_nonce WHERE org_id = ? AND actor_cn = ? AND nonce = ? LIMIT 1",
+      )
+      .get(orgId, actorCn, nonce) as SqlRow | undefined;
+    return row !== undefined;
+  }
+
+  async sweepOlderThan(cutoffIso: string): Promise<number> {
+    const result = this.db
+      .prepare("DELETE FROM signing_nonce WHERE requested_at < ?")
+      .run(cutoffIso);
+    return Number(result.changes ?? 0);
   }
 }

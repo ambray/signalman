@@ -52,6 +52,15 @@ import * as path from "node:path";
 
 import { ml_dsa65 } from "@noble/post-quantum/ml-dsa.js";
 
+import type {
+  AuditLogRepo,
+  SigningNonceRepo,
+} from "../../storage/driver.js";
+import {
+  writeCompletedRow,
+  writeFailedRow,
+  writeRequestedRow,
+} from "../audit.js";
 import {
   AlgorithmNotImplementedError,
   DEFAULT_SIGNING_POLICY,
@@ -94,6 +103,21 @@ export interface LocalDiskProviderOptions {
   readonly keysDir?: string;
   /** Policy floor; defaults to DEFAULT_SIGNING_POLICY. */
   readonly policy?: SigningPolicyDefaults;
+  /** WS9 Milestone 2: optional audit-log + replay-dedup wiring.
+   *  When set, the async `sign()` path writes signing.requested /
+   *  signing.completed / signing.failed rows AND rejects replayed
+   *  nonces (org, actor, nonce uniqueness within the freshness
+   *  window). When unset, sign() behaves identically to v0.4.x —
+   *  no audit, no dedup — preserving compatibility with legacy
+   *  in-process call sites that don't yet have a storage driver
+   *  (e.g. the build/signing.ts shim during the migration window). */
+  readonly auditLog?: AuditLogRepo;
+  readonly nonceRepo?: SigningNonceRepo;
+  /** The org-id audit rows are written under when auditLog is set.
+   *  Falls back to the SignRequest's actor.orgId when omitted.
+   *  Explicit override lets a control-plane wrapper pin org-id
+   *  even when actors come from less-trusted sources. */
+  readonly auditOrgId?: string;
 }
 
 /**
@@ -413,6 +437,9 @@ export class LocalDiskProvider implements SigningProvider, SyncSigningProvider {
    *  the static factory assigns it after constructor runs; external
    *  code can't reach this field (private). */
   private inlineKey: ResolvedKey | null;
+  private readonly auditLog: AuditLogRepo | null;
+  private readonly nonceRepo: SigningNonceRepo | null;
+  private readonly auditOrgIdOverride: string | null;
 
   constructor(opts: LocalDiskProviderOptions = {}) {
     this.keysDir = opts.keysDir
@@ -420,6 +447,9 @@ export class LocalDiskProvider implements SigningProvider, SyncSigningProvider {
       : path.join(os.homedir(), ".signalman", "keys");
     this.policy = opts.policy ?? DEFAULT_SIGNING_POLICY;
     this.inlineKey = null;
+    this.auditLog = opts.auditLog ?? null;
+    this.nonceRepo = opts.nonceRepo ?? null;
+    this.auditOrgIdOverride = opts.auditOrgId ?? null;
   }
 
   /**
@@ -668,7 +698,141 @@ export class LocalDiskProvider implements SigningProvider, SyncSigningProvider {
   // ──────────────────────────────────────────────────────────────
 
   async sign(req: SignRequest): Promise<SignEnvelope> {
-    return this.signSync(req);
+    // Fast path: no audit / replay-dedup wired. signSync() is still
+    // the byte-parity invariant locus; this path stays identical to
+    // pre-M2 behavior.
+    if (!this.auditLog && !this.nonceRepo) {
+      return this.signSync(req);
+    }
+    return this.signWithAudit(req);
+  }
+
+  /**
+   * Audit-wired sign path. Order of operations matters:
+   *   1. Resolve the key (gives us a fingerprint to put in the audit
+   *      row's entityId; failure surfaces SigningError pre-audit).
+   *   2. Compute payload hash for the requested-row detail.
+   *   3. Write `signing.requested` (audit before nonce-check so the
+   *      replay attempt is itself recorded).
+   *   4. Insert the nonce (replay-dedup); UNIQUE-violation maps to
+   *      `nonce-replay`. The insert serves as both the dedup probe
+   *      AND the recording of "we used this nonce".
+   *   5. Run the cryptographic sign (signSync handles the actual
+   *      crypto + per-entry shape).
+   *   6. Write `signing.completed`.
+   * On any throw between (3) and (6), write `signing.failed` with the
+   * error code.
+   */
+  private async signWithAudit(req: SignRequest): Promise<SignEnvelope> {
+    const orgId = this.auditOrgIdOverride ?? req.actor.orgId;
+    const provider = this.id;
+    // Resolve the key BEFORE the audit-log row so a missing-key
+    // failure doesn't pollute the audit trail with an undefined
+    // entityId. We don't validate the request here — signSync will,
+    // and request-validation failures DO get an audit row.
+    let primaryFingerprint: string | undefined;
+    try {
+      const resolved = this.resolveForSign(req.keyId);
+      primaryFingerprint =
+        resolved.subKeys.find((sk) => sk.algorithm !== "ml-dsa-65")?.fingerprint ??
+        resolved.subKeys[0]?.fingerprint;
+    } catch (err) {
+      if (this.auditLog) {
+        await writeFailedRow(this.auditLog, {
+          actor: req.actor,
+          orgId,
+          request: req,
+          provider,
+          errorCode: err instanceof SigningError ? err.code : "internal-error",
+          errorMessage: (err as Error).message,
+        });
+      }
+      throw err;
+    }
+    const fingerprint = primaryFingerprint ?? "unknown";
+
+    const payloadSha256 = crypto
+      .createHash("sha256")
+      .update(req.payload)
+      .digest("hex");
+
+    if (this.auditLog) {
+      await writeRequestedRow(this.auditLog, {
+        actor: req.actor,
+        orgId,
+        request: req,
+        provider,
+        fingerprint,
+        payloadSha256,
+      });
+    }
+
+    // Replay-dedup. UNIQUE-violation on the nonce-ledger insert is
+    // the replay signal; the storage layer maps it to a
+    // StorageConflictError which we translate to a SigningError of
+    // code "nonce-replay".
+    if (this.nonceRepo) {
+      try {
+        await this.nonceRepo.insert({
+          orgId,
+          actorCn: req.actor.cn,
+          nonce: req.nonce,
+          requestedAt: req.requestedAt,
+          fingerprint,
+        });
+      } catch (err) {
+        const replayErr = new SigningError(
+          "nonce-replay",
+          `signing nonce ${req.nonce} has already been used by actor ${req.actor.cn}`,
+        );
+        if (this.auditLog) {
+          await writeFailedRow(this.auditLog, {
+            actor: req.actor,
+            orgId,
+            request: req,
+            provider,
+            fingerprint,
+            errorCode: "nonce-replay",
+            errorMessage: replayErr.message,
+          });
+        }
+        // Re-raise as SigningError regardless of original err shape
+        // (StorageConflictError or pg/sqlite-specific) so callers
+        // can dispatch on `code`.
+        void err;
+        throw replayErr;
+      }
+    }
+
+    let envelope: SignEnvelope;
+    try {
+      envelope = this.signSync(req);
+    } catch (err) {
+      if (this.auditLog) {
+        await writeFailedRow(this.auditLog, {
+          actor: req.actor,
+          orgId,
+          request: req,
+          provider,
+          fingerprint,
+          errorCode: err instanceof SigningError ? err.code : "internal-error",
+          errorMessage: (err as Error).message,
+        });
+      }
+      throw err;
+    }
+
+    if (this.auditLog) {
+      await writeCompletedRow(this.auditLog, {
+        actor: req.actor,
+        orgId,
+        request: req,
+        envelope,
+        provider,
+      });
+    }
+
+    return envelope;
   }
 
   async verify(

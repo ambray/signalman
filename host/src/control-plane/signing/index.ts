@@ -48,3 +48,12 @@ export type {
   GenerateHybridKeyResult,
   LocalDiskProviderOptions,
 } from "./providers/local-disk.js";
+
+export {
+  SIGNING_ACTION_CODES,
+  actorString,
+  writeCompletedRow,
+  writeFailedRow,
+  writeRequestedRow,
+} from "./audit.js";
+export type { SigningActionCode } from "./audit.js";

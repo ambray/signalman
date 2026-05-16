@@ -535,6 +535,128 @@ export interface CloudCredentialsRepo {
   listForOrg(orgId: string): Promise<CloudOrgCredential[]>;
 }
 
+// ── WS9 Milestone 2 — signing key catalog + replay-dedup ────────────
+
+/**
+ * One row in the signing-key catalog (migration 0090). Hybrid keys
+ * are TWO rows linked by `pair_id` + `hybrid_alias`; single-algorithm
+ * keys leave both pair fields null.
+ *
+ * The local catalog does NOT store private keys. For LocalDiskProvider
+ * the key material lives at `~/.signalman/keys/...`; for cloud-KMS
+ * providers it lives in the cloud backend keyed by `key_id` (the ARN
+ * or vault path).
+ */
+export interface SigningProviderKey {
+  id: string;
+  orgId: string;
+  provider: string;
+  keyId: string;
+  algorithm: "ed25519" | "ecdsa-p256-sha256" | "ml-dsa-65";
+  fingerprint: string;
+  publicKeyB64: string;
+  pairId: string | null;
+  pairRole: "classical" | "post-quantum" | null;
+  hybridAlias: string | null;
+  label: string | null;
+  addedBy: string;
+  addedAt: string;
+  revokedAt: string | null;
+  revokedBy: string | null;
+  revokeReason: string | null;
+  rotatedTo: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SigningProviderKeyRepo {
+  /** Insert a new catalog row. Throws on duplicate fingerprint within
+   *  the same org (unique-index constraint). */
+  insert(input: {
+    orgId: string;
+    provider: string;
+    keyId: string;
+    algorithm: SigningProviderKey["algorithm"];
+    fingerprint: string;
+    publicKeyB64: string;
+    pairId?: string | null;
+    pairRole?: SigningProviderKey["pairRole"];
+    hybridAlias?: string | null;
+    label?: string | null;
+    addedBy: string;
+  }): Promise<SigningProviderKey>;
+
+  /** Look up a key by its 16-hex fingerprint within an org. */
+  getByFingerprint(
+    orgId: string,
+    fingerprint: string,
+  ): Promise<SigningProviderKey | null>;
+
+  /** Return both halves of a hybrid pair (or just the one row for a
+   *  single-algorithm key) by operator-facing alias. */
+  getByAlias(
+    orgId: string,
+    keyId: string,
+  ): Promise<readonly SigningProviderKey[]>;
+
+  /** List all (non-deleted) keys for an org, optionally filtered by
+   *  provider. By default revoked keys are excluded. */
+  list(
+    orgId: string,
+    opts?: { provider?: string; includeRevoked?: boolean },
+  ): Promise<readonly SigningProviderKey[]>;
+
+  /** Mark a key revoked. Idempotent: re-revoking is a no-op. The
+   *  catalog row is preserved so verifying past signatures still
+   *  works — operators audit who revoked + why. */
+  revoke(input: {
+    orgId: string;
+    fingerprint: string;
+    revokedBy: string;
+    reason: string;
+  }): Promise<void>;
+
+  /** Mark `oldFingerprint` as rotated to `newFingerprint`. The old
+   *  row is left in place (past signatures still verify); the new row
+   *  takes over for future sign operations. */
+  recordRotation(input: {
+    orgId: string;
+    oldFingerprint: string;
+    newFingerprint: string;
+  }): Promise<void>;
+}
+
+/**
+ * Replay-protection ledger (migration 0091). The provider's sign()
+ * path checks this table for an existing (orgId, actorCn, nonce)
+ * tuple BEFORE signing; if found, the request is rejected with
+ * signing-error code "nonce-replay" and audit-logged as
+ * `signing.failed: nonce-replay`.
+ *
+ * Rows TTL out: a janitor sweeps anything older than 24h (1440x the
+ * 60s skew tolerance). Operators can adjust via the policy floor.
+ */
+export interface SigningNonce {
+  orgId: string;
+  actorCn: string;
+  nonce: string;
+  requestedAt: string;
+  fingerprint: string | null;
+}
+
+export interface SigningNonceRepo {
+  /** Record a fresh nonce. Throws on collision (PK violation) — that
+   *  IS the replay signal; callers map it to a SigningError. */
+  insert(input: SigningNonce): Promise<void>;
+
+  /** True iff the nonce already exists for this (org, actor) tuple. */
+  exists(orgId: string, actorCn: string, nonce: string): Promise<boolean>;
+
+  /** Delete rows older than `cutoffIso`. Returns deleted-row count.
+   *  Operator-driven (or scheduler-driven) janitor. */
+  sweepOlderThan(cutoffIso: string): Promise<number>;
+}
+
 // ── Driver façade ───────────────────────────────────────────────────
 
 export interface StorageDriver {
@@ -577,6 +699,9 @@ export interface StorageDriver {
   readonly approvals: ApprovalRepo;
   // WS6 M3 — registered runners + heartbeat:
   readonly runners: RunnerRepo;
+  // WS9 M2 — signing-key catalog + replay-dedup ledger:
+  readonly signingProviderKeys: SigningProviderKeyRepo;
+  readonly signingNonces: SigningNonceRepo;
 }
 
 // ── RunnerRepo (WS6 M3) ─────────────────────────────────────────────

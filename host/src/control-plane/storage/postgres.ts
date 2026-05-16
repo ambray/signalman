@@ -89,6 +89,10 @@ import {
   type RunRepo,
   type RunnerRepo,
   type ScenarioRepo,
+  type SigningNonce,
+  type SigningNonceRepo,
+  type SigningProviderKey,
+  type SigningProviderKeyRepo,
   StorageConflictError,
   type StorageDriver,
   StorageNotFoundError,
@@ -143,6 +147,9 @@ export class PostgresStorageDriver implements StorageDriver {
   readonly approvals: ApprovalRepo;
   // WS6 M3 — registered runners:
   readonly runners: RunnerRepo;
+  // WS9 M2 — signing catalog + replay-dedup ledger:
+  readonly signingProviderKeys: SigningProviderKeyRepo;
+  readonly signingNonces: SigningNonceRepo;
 
   constructor(opts: PostgresDriverOptions) {
     if (opts.pool) {
@@ -179,6 +186,9 @@ export class PostgresStorageDriver implements StorageDriver {
     this.approvals = new PgApprovalRepo(this.pool);
     // WS6 M3:
     this.runners = new PgRunnerRepo(this.pool);
+    // WS9 M2:
+    this.signingProviderKeys = new PgSigningProviderKeyRepo(this.pool);
+    this.signingNonces = new PgSigningNonceRepo(this.pool);
   }
 
   async migrate(): Promise<void> {
@@ -2564,5 +2574,203 @@ class PgRunnerRepo implements RunnerRepo {
       [now, now, id],
     );
     if (!r.rowCount) throw new StorageNotFoundError("runner", id);
+  }
+}
+
+// ── WS9 M2 ─────────────────────────────────────────────────────────
+
+function mapPgSigningProviderKey(row: SqlRow): SigningProviderKey {
+  return {
+    id: row.id as string,
+    orgId: row.org_id as string,
+    provider: row.provider as string,
+    keyId: row.key_id as string,
+    algorithm: row.algorithm as SigningProviderKey["algorithm"],
+    fingerprint: row.fingerprint as string,
+    publicKeyB64: row.public_key_b64 as string,
+    pairId: (row.pair_id as string | null) ?? null,
+    pairRole: (row.pair_role as SigningProviderKey["pairRole"]) ?? null,
+    hybridAlias: (row.hybrid_alias as string | null) ?? null,
+    label: (row.label as string | null) ?? null,
+    addedBy: row.added_by as string,
+    addedAt: row.added_at as string,
+    revokedAt: (row.revoked_at as string | null) ?? null,
+    revokedBy: (row.revoked_by as string | null) ?? null,
+    revokeReason: (row.revoke_reason as string | null) ?? null,
+    rotatedTo: (row.rotated_to as string | null) ?? null,
+    createdAt: row.created_at as string,
+    updatedAt: row.updated_at as string,
+  };
+}
+
+class PgSigningProviderKeyRepo implements SigningProviderKeyRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async insert(input: {
+    orgId: string;
+    provider: string;
+    keyId: string;
+    algorithm: SigningProviderKey["algorithm"];
+    fingerprint: string;
+    publicKeyB64: string;
+    pairId?: string | null;
+    pairRole?: SigningProviderKey["pairRole"];
+    hybridAlias?: string | null;
+    label?: string | null;
+    addedBy: string;
+  }): Promise<SigningProviderKey> {
+    const now = nowIso();
+    const id = newId();
+    try {
+      const out = await this.pool.query(
+        `INSERT INTO signing_provider_key
+          (id, org_id, provider, key_id, algorithm, fingerprint, public_key_b64,
+           pair_id, pair_role, hybrid_alias, label, added_by, added_at,
+           created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $13)
+         RETURNING *`,
+        [
+          id,
+          input.orgId,
+          input.provider,
+          input.keyId,
+          input.algorithm,
+          input.fingerprint,
+          input.publicKeyB64,
+          input.pairId ?? null,
+          input.pairRole ?? null,
+          input.hybridAlias ?? null,
+          input.label ?? null,
+          input.addedBy,
+          now,
+        ],
+      );
+      return mapPgSigningProviderKey(out.rows[0] as SqlRow);
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === "23505") {
+        // unique_violation
+        throw new StorageConflictError(
+          `signing key fingerprint ${input.fingerprint} already registered for org ${input.orgId}`,
+        );
+      }
+      throw err;
+    }
+  }
+
+  async getByFingerprint(
+    orgId: string,
+    fingerprint: string,
+  ): Promise<SigningProviderKey | null> {
+    const out = await this.pool.query(
+      "SELECT * FROM signing_provider_key WHERE org_id = $1 AND fingerprint = $2 AND deleted_at IS NULL",
+      [orgId, fingerprint],
+    );
+    return out.rows[0]
+      ? mapPgSigningProviderKey(out.rows[0] as SqlRow)
+      : null;
+  }
+
+  async getByAlias(
+    orgId: string,
+    keyId: string,
+  ): Promise<readonly SigningProviderKey[]> {
+    const out = await this.pool.query(
+      "SELECT * FROM signing_provider_key WHERE org_id = $1 AND key_id = $2 AND deleted_at IS NULL ORDER BY pair_role, added_at",
+      [orgId, keyId],
+    );
+    return (out.rows as SqlRow[]).map(mapPgSigningProviderKey);
+  }
+
+  async list(
+    orgId: string,
+    opts: { provider?: string; includeRevoked?: boolean } = {},
+  ): Promise<readonly SigningProviderKey[]> {
+    const parts: string[] = ["org_id = $1", "deleted_at IS NULL"];
+    const params: unknown[] = [orgId];
+    if (opts.provider) {
+      params.push(opts.provider);
+      parts.push(`provider = $${params.length}`);
+    }
+    if (!opts.includeRevoked) {
+      parts.push("revoked_at IS NULL");
+    }
+    const sql = `SELECT * FROM signing_provider_key WHERE ${parts.join(" AND ")} ORDER BY added_at DESC`;
+    const out = await this.pool.query(sql, params);
+    return (out.rows as SqlRow[]).map(mapPgSigningProviderKey);
+  }
+
+  async revoke(input: {
+    orgId: string;
+    fingerprint: string;
+    revokedBy: string;
+    reason: string;
+  }): Promise<void> {
+    const now = nowIso();
+    await this.pool.query(
+      `UPDATE signing_provider_key SET revoked_at = $1, revoked_by = $2, revoke_reason = $3, updated_at = $4
+       WHERE org_id = $5 AND fingerprint = $6 AND deleted_at IS NULL AND revoked_at IS NULL`,
+      [now, input.revokedBy, input.reason, now, input.orgId, input.fingerprint],
+    );
+  }
+
+  async recordRotation(input: {
+    orgId: string;
+    oldFingerprint: string;
+    newFingerprint: string;
+  }): Promise<void> {
+    const now = nowIso();
+    const lookup = await this.pool.query(
+      "SELECT id FROM signing_provider_key WHERE org_id = $1 AND fingerprint = $2 AND deleted_at IS NULL",
+      [input.orgId, input.newFingerprint],
+    );
+    if (!lookup.rows[0]) {
+      throw new StorageNotFoundError(
+        "signing_provider_key",
+        `new fingerprint ${input.newFingerprint} not in catalog`,
+      );
+    }
+    const newId = (lookup.rows[0] as SqlRow).id as string;
+    await this.pool.query(
+      "UPDATE signing_provider_key SET rotated_to = $1, updated_at = $2 WHERE org_id = $3 AND fingerprint = $4 AND deleted_at IS NULL",
+      [newId, now, input.orgId, input.oldFingerprint],
+    );
+  }
+}
+
+class PgSigningNonceRepo implements SigningNonceRepo {
+  constructor(private readonly pool: Pool) {}
+
+  async insert(input: SigningNonce): Promise<void> {
+    try {
+      await this.pool.query(
+        "INSERT INTO signing_nonce (org_id, actor_cn, nonce, requested_at, fingerprint) VALUES ($1, $2, $3, $4, $5)",
+        [input.orgId, input.actorCn, input.nonce, input.requestedAt, input.fingerprint],
+      );
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === "23505") {
+        throw new StorageConflictError(
+          `signing nonce already used: org=${input.orgId} actor=${input.actorCn} nonce=${input.nonce}`,
+        );
+      }
+      throw err;
+    }
+  }
+
+  async exists(orgId: string, actorCn: string, nonce: string): Promise<boolean> {
+    const out = await this.pool.query(
+      "SELECT 1 FROM signing_nonce WHERE org_id = $1 AND actor_cn = $2 AND nonce = $3 LIMIT 1",
+      [orgId, actorCn, nonce],
+    );
+    return out.rows.length > 0;
+  }
+
+  async sweepOlderThan(cutoffIso: string): Promise<number> {
+    const out = await this.pool.query(
+      "DELETE FROM signing_nonce WHERE requested_at < $1",
+      [cutoffIso],
+    );
+    return out.rowCount ?? 0;
   }
 }
