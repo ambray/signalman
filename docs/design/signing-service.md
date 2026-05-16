@@ -1,8 +1,66 @@
 # Signing Service
 
-**Status:** design proposal (2026-05-16). No code shipped yet.
+**Status:** design proposal (2026-05-16) — **§Open product questions resolved 2026-05-16**; §Locked design below is operator-approved and not re-litigated in implementation PRs.
 **Owner:** WS9 (`docs/workstreams/prompts/ws9-signing-service.md`)
 **Predecessor:** v0.4.x direct on-disk signing — `host/src/control-plane/build/signing.ts`, `registry/src/signing.ts`, `service/src/tls.rs` (CA-key + denylist signing path). This doc is the v0.5.0+ progression that introduces a provider abstraction over key-material custody.
+
+## Resolved decisions (operator-confirmed 2026-05-16)
+
+Eight product questions originally surfaced in §Open product questions below; the operator approved the following resolutions. The full trade-off analysis remains in §Open product questions as historical context — that section is not re-litigated in implementation PRs.
+
+1. **Q1 — Provider set for v0.5.0: `LocalDiskProvider` + `AwsKmsProvider`.** AWS KMS first exercises the abstraction against a credibly different key-custody model. Other cloud-KMS providers ship v0.6+.
+2. **Q2 — Algorithm scope: Ed25519 + ECDSA P-256 + ML-DSA-65, with hybrid (Ed25519 + ML-DSA-65) as the default for new keys.** See §Quantum safety below for the rationale and mechanism. Legacy v0.4.x Ed25519-only keys stay valid for verification and signing; new keys default to hybrid; operator can opt classical-only or PQ-only per key.
+3. **Q3 — Detached-operator signing: deferred to v0.6+.** The three v0.5.0 providers already cover regulated + multi-operator personas. Roadmap entry to land separately; the v0.5.0 envelope shape (`SigEntry[]`, mandatory nonce + timestamp) is forward-compatible with detached transports.
+4. **Q4 — Per-signature audit trail: existing audit-log table with new `signing.*` action codes, plus dedicated `signing_nonce` index (migration 0091) for the replay-detection hot path.**
+5. **Q5 — Replay protection: mandatory nonce + RFC 3339 timestamp on every `SignRequest`.** Providers reject skew > 60s; audit log dedups on `(provider, keyId, nonce)`.
+6. **Q6 — Authorization: mTLS caller identity (WS8 identity cert) + per-key actor allow-list.** Bearer-token-prefix fallback if WS8 has not merged at Milestone 2.
+7. **Q7 — Quorum / multi-sig: deferred to v0.6+; envelope already shaped as `SigEntry[]` so v0.6 addition is non-breaking.** Hybrid signing (Q2) is the first real use of the multi-entry shape — it validates the forward-compatibility before the quorum work begins.
+8. **Q8 — Key rotation: provider concern (`provider.rotate(keyId)`), operator-initiated via `signalman signing keys rotate <fp>`.** Auto-rotation scheduler is a v0.6+ extension.
+
+## Quantum safety
+
+**Ed25519 and ECDSA P-256 are NOT quantum-safe.** Both are elliptic-curve discrete-log primitives and fall to Shor's algorithm on a sufficiently capable quantum computer. RSA is in the same family. As of 2026-05-16, the NIST post-quantum digital-signature standards are:
+
+- **FIPS 204 — ML-DSA** (Module-Lattice-based Digital Signature Algorithm; formerly CRYSTALS-Dilithium). Lattice-based. Three parameter sets (ML-DSA-44 / -65 / -87). Signatures are 2.4–4.6 KB.
+- **FIPS 205 — SLH-DSA** (Stateless Hash-Based Digital Signature Algorithm; formerly SPHINCS+). Hash-based. Conservative security assumptions but signatures are 8–50 KB.
+- **FN-DSA** (formerly FALCON). Lattice-based with floating-point arithmetic. Not yet a NIST FIPS at the time of writing.
+
+NIST guidance is migration by 2035 for general-purpose use; sooner for high-value or long-lived signatures (release manifests, supply-chain attestations).
+
+**v0.5.0 stance: hybrid by default (Ed25519 + ML-DSA-65).** Every new key created in v0.5.0 defaults to a *hybrid* logical key: under the hood, two cryptographic keypairs (one Ed25519, one ML-DSA-65) that share a logical `keyId`. Every `provider.sign()` call against a hybrid key emits **two `SigEntry` rows** in the `SignEnvelope.signatures` array — one Ed25519, one ML-DSA-65.
+
+**Why ML-DSA-65 and not -44 / -87 / SLH-DSA:**
+- **ML-DSA-65** targets NIST security category 3 (~AES-192). It's the conservative middle ground — comfortable margin without ballooning signature size. Signature is ~3.3 KB; release rows absorbing one of these are not a storage concern.
+- **ML-DSA-44** is security category 2 (~AES-128); we prefer the headroom of category 3 for long-lived signatures.
+- **ML-DSA-87** is security category 5 (~AES-256); the extra margin doesn't justify the 4.6 KB signature size for the use cases v0.5.0 targets.
+- **SLH-DSA** sigs are an order of magnitude larger (8–50 KB), which is operationally meaningful when release rows + provenance entries multiply across a fleet. Reserved as a v0.6+ extension if an operator needs hash-based-only assumptions.
+
+**Why hybrid, not PQ-only:**
+- Preserves v0.4.x byte-parity for the Ed25519 half — legacy keys, legacy releases, legacy tooling all keep working.
+- ML-DSA is young in production; if a parameter-set break is announced, the Ed25519 half still authenticates the signature (in "transition" verifier mode).
+- Inverse case: if a future Ed25519 weakness emerges, the ML-DSA half authenticates the signature.
+- The cost is two signatures per release (~3.4 KB total instead of 64 bytes) — meaningful only at fleet scale, and operators who don't need PQ can opt out per key.
+
+**Verifier modes** (operator-configurable per release / per registry virtual-upstream / per WS8 denylist):
+
+| Mode | Hybrid envelope accept criteria |
+|---|---|
+| **transition** (default) | At least ONE of `signatures[]` verifies. Tolerates a parameter-set break in either algorithm without immediate fleet-wide breakage. |
+| **strict** | EVERY entry in `signatures[]` must verify against its declared algorithm + key. The default once the PQ half has hardened (probably v0.6+). |
+| **classical-only** | Only the Ed25519 entry is checked. Provided for verifiers that haven't yet linked an ML-DSA library; explicitly NOT quantum-safe. Emits a warning on the CLI surface. |
+
+**Library choice (Milestone 1 risk to surface now):** Node's stable `crypto` module does not ship ML-DSA as of January 2026. The implementation will need either `liboqs-node` (libsodium-style binding to liboqs) or `@noble/post-quantum` (pure-JS, audited but slower). Decision deferred to Milestone 1; design doc only commits to the *interface* exposure of ML-DSA, not the implementation library. The byte-shape of an ML-DSA-65 signature is defined by FIPS 204 and is library-independent.
+
+**Provider impact:**
+- **`LocalDiskProvider`** — a hybrid key stores TWO PEM keypairs under the same logical alias: `~/.signalman/keys/<alias>-ed25519.{pub,key}` + `~/.signalman/keys/<alias>-mldsa65.{pub,key}`. The legacy `~/.signalman/keys/signing.{pub,key}` files are treated as a classical-only key with alias `"default"` to preserve v0.4.x muscle memory.
+- **`AwsKmsProvider`** — hybrid is operator-tagged. The classical half is an AWS KMS ECDSA P-256 key (universally available); the PQ half is either an AWS KMS ML-DSA key (if GA in the operator's region) OR a local-fallback ML-DSA-65 keypair stored alongside the cred config (clearly marked in the catalog row as "kms+local-hybrid"). The operator confirms in the credentials setup which path applies in their region. If neither region availability nor local-fallback is acceptable, the operator may opt the AWS-KMS key to classical-only — explicit, audited, not silently downgraded.
+- **WS8 denylist signing** (Milestone 4) — emits hybrid by default. The denylist sidecar grows from a single Ed25519 signature to a hybrid envelope; the on-disk format is described in WS8's design doc and gets a §Hybrid envelope subsection in Milestone 4. Guest agents in transition mode accept either signature; strict mode requires both.
+
+**Operator opt-out paths:**
+- `signalman signing keys add --algorithm ed25519` — classical-only Ed25519 (v0.4.x parity; not quantum-safe).
+- `signalman signing keys add --algorithm ecdsa-p256-sha256` — classical-only ECDSA (cloud-KMS interoperability; not quantum-safe).
+- `signalman signing keys add --algorithm ml-dsa-65` — PQ-only (no classical fallback; rejects classical-only verifiers).
+- `signalman signing keys add` (no flag) — hybrid Ed25519 + ML-DSA-65 (the default).
 
 ## Problem statement
 
@@ -52,15 +110,25 @@ The interface is intentionally **small**. Four required methods, one optional (`
 // host/src/control-plane/signing/types.ts
 
 /**
- * Signature algorithm. v0.5.0 ships ed25519 (matches v0.4.x) and
- * ecdsa-p256-sha256 (so cloud-KMS providers that don't expose
- * Ed25519 still work).
+ * Signature algorithm. v0.5.0 ships:
+ *   - ed25519           — matches v0.4.x; not quantum-safe.
+ *   - ecdsa-p256-sha256 — cloud-KMS interoperability; not quantum-safe.
+ *   - ml-dsa-65         — NIST FIPS 204 post-quantum (lattice-based).
+ *                         Default for the post-quantum half of every
+ *                         new hybrid key. See §Quantum safety above.
+ *
+ * Hybrid keys are represented by TWO key rows in
+ * `signing_provider_key` linked by a shared `pair_id`, each carrying
+ * its own algorithm value (one `ed25519`, one `ml-dsa-65`).
+ * `provider.sign()` against a hybrid logical key emits one SigEntry
+ * per linked row.
  *
  * RSA variants are deliberately omitted — bigger signatures, slower
- * verification, no operator request driving them. Adding `rsa-2048`
- * is a future, additive change.
+ * verification, no operator request driving them. SLH-DSA (FIPS 205)
+ * is similarly omitted — sigs are 8–50 KB and operationally heavy.
+ * Both are additive changes if needed later.
  */
-export type SigAlgorithm = "ed25519" | "ecdsa-p256-sha256";
+export type SigAlgorithm = "ed25519" | "ecdsa-p256-sha256" | "ml-dsa-65";
 
 /**
  * Opaque key identifier. The provider decides the format:
@@ -254,46 +322,52 @@ This keeps the Rust surface tight and avoids reimplementing AWS KMS / Azure KV /
 
 ### Algorithm matrix per provider (v0.5.0)
 
-| Provider | `ed25519` | `ecdsa-p256-sha256` |
-|---|---|---|
-| `LocalDiskProvider` | required (legacy parity) | optional (only when minted that way) |
-| `AwsKmsProvider`     | iff KMS exposes Ed25519 in the operator's region; else require `ecdsa-p256-sha256` | required |
-| `AzureKvProvider`    | NOT available on Azure Key Vault Standard; require `ecdsa-p256-sha256` | required |
-| `GcpKmsProvider`     | NOT available on GCP Cloud KMS; require `ecdsa-p256-sha256` | required |
+| Provider | `ed25519` | `ecdsa-p256-sha256` | `ml-dsa-65` | Hybrid (Ed25519 + ML-DSA-65) |
+|---|---|---|---|---|
+| `LocalDiskProvider` | supported (legacy parity) | supported | supported | **default for new keys** |
+| `AwsKmsProvider`    | iff KMS exposes Ed25519 in the operator's region | supported | iff KMS exposes ML-DSA-65 in the operator's region | **default for new keys**; PQ half is KMS ML-DSA when available, otherwise local-fallback (operator-confirmed at credential setup) |
+| `AzureKvProvider` (v0.6+) | NOT available on Azure Key Vault Standard | supported | TBD (Azure roadmap) | TBD |
+| `GcpKmsProvider` (v0.6+)  | NOT available on GCP Cloud KMS | supported | TBD (GCP roadmap) | TBD |
 
-The reason §Open product questions Q1 + Q2 are coupled: if v0.5.0 ships any of the major cloud-KMS backends, we cannot stay Ed25519-only. The default recommendation below assumes ECDSA P-256 lands together with the first cloud provider.
+The cloud-KMS PQ availability columns are operator-verified at credential-setup time per §Quantum safety above — the design does not assume any specific region's KMS ML-DSA GA status. Operators in regions without KMS ML-DSA can either accept the local-fallback PQ half (clearly marked in the catalog row) or opt the AWS-KMS key to classical-only with an explicit, audited acknowledgment that the key is not quantum-safe.
 
-## Provider implementations (v0.5.0 scope, subject to operator decision Q1)
+## Provider implementations (v0.5.0 scope, per Q1 = LocalDisk + AwsKms)
 
 ### `LocalDiskProvider`
 
-Ships in Milestone 1. Required regardless of Q1 outcome.
+Ships in Milestone 1.
 
-- **Default `keyId`:** `"default"` → `~/.signalman/keys/signing.{pub,key}`. Operators on v0.4.x with this layout require no config change.
-- **Custom `keyId`:** absolute filesystem path to a PEM private key. The public-key path is inferred by stripping `.key` and appending `.pub`.
-- **Wire format on disk:** unchanged — PKCS#8 PEM for private, SPKI PEM for public. v0.4.x byte-parity invariant requires it.
-- **Algorithm detection:** read `keyObject.asymmetricKeyType` (Node `crypto` exposes it). Reject if not in `supportedAlgorithms`.
-- **`rotate()`:** generate a fresh keypair via `crypto.generateKeyPairSync()`, archive the old `signing.{pub,key}` to `~/.signalman/keys/archive/<unix-ms>/` (preserving filesystem permissions), write the new pair to `signing.{pub,key}` with mode `0600`. Emit `signing.key_rotated`.
-- **Authorization:** none beyond filesystem permissions. The local-disk path trusts whatever can read the key file. Same trust posture as v0.4.x.
+- **Legacy alias:** `keyId="default"` resolves to `~/.signalman/keys/signing.{pub,key}` (classical Ed25519, v0.4.x layout). No config change required for operators on v0.4.x; verification continues to work; new signing operations on this alias emit a CLI warning that the key is classical-only.
+- **New hybrid keys** (the v0.5.0 default — see §Quantum safety): `signalman signing keys add` (no flags) creates a hybrid key under alias `<alias>`. On disk, **two** keypairs live side-by-side:
+  - `~/.signalman/keys/<alias>-ed25519.{pub,key}` (PKCS#8 PEM, classical half)
+  - `~/.signalman/keys/<alias>-mldsa65.{pub,key}` (ML-DSA-65 key blob; FIPS 204 byte format)
+  The two share a `pair_id` in `signing_provider_key` (see §Storage).
+- **Single-algorithm keys:** `--algorithm ed25519` / `--algorithm ecdsa-p256-sha256` / `--algorithm ml-dsa-65` create one PEM (or FIPS 204 blob) under `~/.signalman/keys/<alias>.{pub,key}`. Single-row catalog entry; no `pair_id`.
+- **Custom paths:** an absolute path as `keyId` is treated as a single-algorithm key (the legacy `--key <path>` form). Hybrid keys must be created via the new alias-based form so the two halves stay co-located.
+- **Wire format on disk:** unchanged for the Ed25519 half — PKCS#8 PEM private + SPKI PEM public. v0.4.x byte-parity invariant requires it. The ML-DSA-65 half uses the raw FIPS 204 byte format (no PEM wrapper) since PEM ASN.1 for ML-DSA is not yet standardized across libraries as of 2026-05-16.
+- **Algorithm detection:** read `keyObject.asymmetricKeyType` for Ed25519/ECDSA; ML-DSA blobs carry an explicit 4-byte magic header (`MLDA`) followed by FIPS-204 wire bytes.
+- **`rotate()`:** for hybrid keys, rotate both halves atomically; for single-algorithm keys, rotate the one. In both cases, archive the previous bytes to `~/.signalman/keys/archive/<unix-ms>/` with the original filenames preserved. Emit `signing.key_rotated` with detail listing each rotated sub-key.
+- **Authorization:** none beyond filesystem permissions. The local-disk path trusts whatever can read the key files. Same trust posture as v0.4.x.
 
-### `AwsKmsProvider` (Q1=B recommendation)
+### `AwsKmsProvider`
 
-Ships in Milestone 3 if Q1 lands on AWS KMS.
+Ships in Milestone 3 (Q1=B).
 
 - **Credentials:** reuses `host/src/cloud/credentials.ts` per-org storage. AWS access key + secret + optional session token + region; encrypted at rest under `SIGNALMAN_CRED_KEY`. The provider does NOT introduce a new credential silo.
-- **Key registry:** per-org table `signing_provider_key` (see §Storage) maps `keyId` → KMS ARN + cached public key. The cache is keyed by ARN; cache miss triggers `kms:GetPublicKey`.
-- **Sign:** `kms:Sign` with `MessageType=RAW` (we sign canonical JSON bytes, not pre-hashed) and `SigningAlgorithm=ECDSA_SHA_256` for P-256.
-- **Verify:** Node `crypto.verify` with the cached public key; no KMS round-trip needed. (This is what makes verify-anywhere work — verifiers never need KMS access.)
-- **`rotate()`:** `kms:CreateKey` for a new key, update the local `signing_provider_key` row to point at the new ARN, schedule old ARN for `PendingWindowInDays=30` deletion via `kms:ScheduleKeyDeletion`. Emit `signing.key_rotated` with `old_arn` + `new_arn` in the detail blob.
-- **Algorithm:** `ecdsa-p256-sha256` (always). AWS KMS Ed25519 availability is region-dependent; we don't conditionally enable it in v0.5.0.
+- **Key registry:** per-org table `signing_provider_key` (see §Storage) maps `keyId` → KMS ARN + cached public key. The cache is keyed by ARN; cache miss triggers `kms:GetPublicKey`. Hybrid keys store two linked rows sharing `pair_id` — typically one KMS ARN (classical ECDSA P-256) plus one second row that is either a second KMS ARN (when KMS ML-DSA is GA in the operator's region) or a local-fallback ML-DSA-65 keypair on the host (operator-confirmed at credential setup, clearly marked in the catalog row).
+- **Sign (classical half):** `kms:Sign` with `MessageType=RAW` and `SigningAlgorithm=ECDSA_SHA_256` for P-256.
+- **Sign (PQ half):** when the second row is a KMS ARN, `kms:Sign` with `SigningAlgorithm=ML_DSA_65` (or the AWS-blessed name when GA); when the second row is local-fallback, `LocalDiskProvider`-style ML-DSA-65 signing against the host-resident key blob.
+- **Verify:** Node `crypto.verify` (classical) / the ML-DSA library decided in Milestone 1 (PQ) with the cached public keys; no KMS round-trip needed. Verifiers never need KMS access — same "verify anywhere" property as v0.4.x.
+- **`rotate()`:** `kms:CreateKey` for the new classical key, separate rotation for the PQ half (either `kms:CreateKey` again or LocalDisk-style rotation depending on the second row's kind). Update the linked `signing_provider_key` rows atomically. Schedule old ARNs for `PendingWindowInDays=30` deletion via `kms:ScheduleKeyDeletion`. Emit `signing.key_rotated` with `old_pair`/`new_pair` detail listing both halves.
+- **Classical-only opt-out:** operator can create a key with `--algorithm ecdsa-p256-sha256` explicitly. The catalog row records `algorithm=ecdsa-p256-sha256, hybrid=false`, and every sign operation surfaces a CLI warning that the key is not quantum-safe. Audited; explicit; not silently downgraded.
 
-### `AzureKvProvider` (Q1=C alternative)
+### `AzureKvProvider` (v0.6+)
 
-Same shape as `AwsKmsProvider`, against `azure-keyvault-keys` SDK. Algorithm: `ecdsa-p256-sha256`. Credentials reuse the existing Azure plaintext shape in `cloud/credentials.ts`.
+Same shape as `AwsKmsProvider`, against `azure-keyvault-keys` SDK. Classical algorithm: `ecdsa-p256-sha256`. Credentials reuse the existing Azure plaintext shape in `cloud/credentials.ts`. PQ availability tracked separately; v0.6+ adds when Azure Key Vault's ML-DSA support GA's.
 
-### `GcpKmsProvider` (Q1=D alternative)
+### `GcpKmsProvider` (v0.6+)
 
-Same shape, against `@google-cloud/kms` SDK. Algorithm: `ecdsa-p256-sha256`. **Requires new credential plumbing** — GCP isn't in `cloud/credentials.ts` today. Adds a `GcpCredentialPlaintext` shape.
+Same shape, against `@google-cloud/kms` SDK. Classical algorithm: `ecdsa-p256-sha256`. **Requires new credential plumbing** — GCP isn't in `cloud/credentials.ts` today. Adds a `GcpCredentialPlaintext` shape. PQ availability tracked separately.
 
 ## Audit-log integration
 
@@ -325,9 +399,23 @@ CREATE TABLE signing_provider_key (
   org_id          TEXT NOT NULL REFERENCES org (id),
   provider        TEXT NOT NULL,           -- "local-disk" | "aws-kms" | ...
   key_id          TEXT NOT NULL,           -- provider-opaque
-  algorithm       TEXT NOT NULL CHECK (algorithm IN ('ed25519', 'ecdsa-p256-sha256')),
-  fingerprint     TEXT NOT NULL,           -- sha256(DER-SPKI), 16 hex chars
-  public_key_der  TEXT NOT NULL,           -- base64-encoded; cached for verify
+  algorithm       TEXT NOT NULL CHECK (algorithm IN ('ed25519', 'ecdsa-p256-sha256', 'ml-dsa-65')),
+  fingerprint     TEXT NOT NULL,           -- sha256(public-key bytes), 16 hex chars
+  public_key_der  TEXT NOT NULL,           -- base64-encoded; cached for verify.
+                                           -- Ed25519/ECDSA: DER SubjectPublicKeyInfo.
+                                           -- ML-DSA-65: FIPS 204 raw public-key bytes.
+  pair_id         TEXT,                    -- nullable; non-null for hybrid sub-keys.
+                                           -- Two rows sharing pair_id form one
+                                           -- logical hybrid key. The pair MUST have
+                                           -- exactly one row with algorithm='ed25519'
+                                           -- (the classical half) and one with
+                                           -- algorithm='ml-dsa-65' (the PQ half).
+  pair_role       TEXT CHECK (pair_role IN ('classical', 'post-quantum') OR pair_role IS NULL),
+                                           -- nullable; non-null iff pair_id is set.
+  hybrid_alias    TEXT,                    -- nullable; the operator-facing alias for
+                                           -- the hybrid logical key (e.g. "default",
+                                           -- "release-signing-prod"). Both rows in a
+                                           -- pair share the same hybrid_alias.
   label           TEXT,                    -- operator-supplied human label
   added_by        TEXT NOT NULL,           -- actor that called `keys add`
   added_at        TEXT NOT NULL,
@@ -347,6 +435,13 @@ CREATE UNIQUE INDEX signing_provider_key_fingerprint_unique
 CREATE INDEX signing_provider_key_provider_idx
   ON signing_provider_key (org_id, provider)
   WHERE deleted_at IS NULL AND revoked_at IS NULL;
+
+-- A hybrid pair must carry exactly two rows with distinct pair_role.
+-- Enforced by application code (the migration cannot CHECK across rows
+-- on SQLite); covered by integration tests at Milestone 1.
+CREATE INDEX signing_provider_key_pair_idx
+  ON signing_provider_key (org_id, pair_id)
+  WHERE deleted_at IS NULL AND pair_id IS NOT NULL;
 
 -- migration 0091_signing_nonce.sql (v0.5.0)
 --
@@ -380,12 +475,23 @@ signalman signing providers list
 
 # List keys per provider.
 signalman signing keys list [--provider X] [--include-revoked]
-# Columns: provider, key-id, algorithm, fingerprint, label, added-at
+# Columns: provider, key-id, algorithm, fingerprint, label, added-at, hybrid
 
-# Register a new cloud-KMS key with the local catalog.
+# Add a key to the catalog. Default algorithm is hybrid (Ed25519+ML-DSA-65).
+# Operator can opt to a single-algorithm key with --algorithm.
+signalman signing keys add \
+  --provider local-disk \
+  --alias release-signing-prod \
+  [--algorithm hybrid|ed25519|ecdsa-p256-sha256|ml-dsa-65]    # default: hybrid
+# audit: signing.key_added (one row per logical key; hybrid pairs link two
+#        signing_provider_key rows under a shared pair_id)
+
+# Register an existing cloud-KMS key with the local catalog (hybrid pairing
+# is resolved from the operator's credential setup — see §AwsKmsProvider).
 signalman signing keys add \
   --provider aws-kms \
   --key-id arn:aws:kms:us-east-1:123:key/abc \
+  [--pq-half arn:aws:kms:us-east-1:123:key/mldsa-abc | --pq-half local-fallback | --classical-only] \
   [--label "release-signing-prod"]
 # audit: signing.key_added
 
@@ -438,10 +544,12 @@ MCP mirrors:
 
 - **Unit (TS):**
   - Canonicalization parity: pre-WS9 vs post-WS9 produces identical bytes for fixed-input manifests (release + registry).
-  - Signature byte-equality: `LocalDiskProvider.sign(payload, key)` produces the exact same `signature_b64` as v0.4.x `crypto.sign(null, payload, key)` for fixed input.
-  - Provider error taxonomy: each provider documents its error codes and unit tests cover each one (`fingerprint-mismatch`, `unknown-algorithm`, `replay-detected`, `clock-skew`, `key-revoked`, `key-not-found`).
+  - Signature byte-equality (Ed25519 half): `LocalDiskProvider.sign(payload, ed25519-key)` produces the exact same Ed25519 `signatureB64` as v0.4.x `crypto.sign(null, payload, key)` for fixed input. Hybrid sign() against the same Ed25519 sub-key produces the same bytes in the `signatures[ed25519]` entry.
+  - Hybrid envelope shape: `provider.sign()` against a hybrid key emits exactly two SigEntry rows — one Ed25519, one ML-DSA-65 — both verifiable against the linked public-key pair. Tampering one signature byte fails strict-mode verify but passes transition-mode (the other signature still verifies). Tampering both fails both modes.
+  - Verifier modes: transition / strict / classical-only each produce the documented accept/reject outcomes against a hybrid envelope, a tampered hybrid envelope, and a legacy Ed25519-only envelope.
+  - Provider error taxonomy: each provider documents its error codes and unit tests cover each one (`fingerprint-mismatch`, `unknown-algorithm`, `replay-detected`, `clock-skew`, `key-revoked`, `key-not-found`, `hybrid-pair-incomplete`).
   - Nonce / timestamp validation: rejects skew > 60s, rejects duplicate nonce, accepts fresh nonce.
-  - Audit-row shape: the `signing.requested` row's `detail` blob contains exactly the documented fields.
+  - Audit-row shape: the `signing.requested` row's `detail` blob contains exactly the documented fields; hybrid signing emits one `signing.completed` row with both sub-fingerprints in detail.
 - **Unit (Rust, Milestone 4 only):**
   - `service/src/tls.rs` denylist-sign call site shifts to RPC; mock the RPC and verify the bytes that go over match the canonical denylist.
 - **Integration (TS):**
@@ -463,18 +571,20 @@ Coverage gate: **≥80% lines / ≥70% branches** across new code (host signing 
 
 1. Migration 0090 + 0091 land; SQLite + pg-mem both clean.
 2. `LocalDiskProvider` ships and all v0.4.x signing call sites route through it.
-3. The cloud provider from §Open product questions Q1 ships (or §Q1 lands on "defer all" with operator approval).
-4. Audit log records `signing.*` action codes for every signing operation.
-5. **Byte-parity test passes**: `LocalDiskProvider` output is byte-identical to v0.4.x `signing.ts` for a fixed input.
-6. `cd host && npm test` — full suite green.
-7. `cd host && npx tsc --noEmit` — zero errors.
-8. `cd registry && npm test` — full suite green.
-9. `cargo test --workspace` — zero failures.
-10. Coverage holds per gate (≥80% lines / ≥70% branches).
-11. **4-lens audit**: QA / Architecture / Product / Security all PASS or explicit operator-review concern flagged. **Security lens is non-negotiable here** — cryptographic infrastructure.
-12. `docs/supply-chain.md` updated: §Key model expanded, §Audit log canonical action codes table gains the `signing.*` row, §Operator workflow gains a §"Switching providers" subsection.
-13. `docs/design/signing-service.md` (this doc) §Status flipped to "shipped in v0.5.0".
-14. Operator-led end-to-end test on Windows: build a release with `LocalDiskProvider`, verify with `LocalDiskProvider`; build a release with the new cloud provider, verify with the matching provider. Outcomes recorded in `.workstream-status.md`.
+3. `AwsKmsProvider` ships (Q1=B locked).
+4. **Hybrid (Ed25519 + ML-DSA-65) is the default** for new keys created via `signalman signing keys add` (no `--algorithm` flag). Single-algorithm opt-outs work for all three algorithms.
+5. Verifier modes (transition / strict / classical-only) all produce the documented outcomes against hybrid, tampered-hybrid, and legacy envelopes.
+6. Audit log records `signing.*` action codes for every signing operation.
+7. **Byte-parity test passes**: `LocalDiskProvider` Ed25519 output is byte-identical to v0.4.x `signing.ts` for a fixed input (locks the abstraction against silent regression on the classical path).
+8. `cd host && npm test` — full suite green.
+9. `cd host && npx tsc --noEmit` — zero errors.
+10. `cd registry && npm test` — full suite green.
+11. `cargo test --workspace` — zero failures.
+12. Coverage holds per gate (≥80% lines / ≥70% branches).
+13. **4-lens audit**: QA / Architecture / Product / Security all PASS or explicit operator-review concern flagged. **Security lens is non-negotiable here** — cryptographic infrastructure.
+14. `docs/supply-chain.md` updated: §Key model expanded (providers + hybrid stance), §Audit log canonical action codes table gains the `signing.*` row, §Operator workflow gains a §"Switching providers" subsection, new §Quantum safety subsection explains the hybrid default and verifier modes.
+15. `docs/design/signing-service.md` (this doc) §Status flipped to "shipped in v0.5.0".
+16. Operator-led end-to-end test on Windows: build a release with `LocalDiskProvider` (hybrid), verify with `LocalDiskProvider`; build a release with `AwsKmsProvider`, verify with the matching provider; tamper one signature byte and confirm transition-mode accepts (other half verifies) and strict-mode rejects. Outcomes recorded in `.workstream-status.md`.
 
 ## Open product questions
 
@@ -576,21 +686,6 @@ The answer is coupled to Q1. If Q1 = A (LocalDisk only), Ed25519-only suffices. 
 | C — Both: provider exposes rotate, control plane runs a scheduler against it | The right v0.6+ shape. | v0.5.0 scope creep. |
 
 **Recommendation: A** for v0.5.0; C as the v0.6+ extension.
-
-## Decisions required
-
-Operator answers required before §Locked design is finalized and any code lands:
-
-1. **Q1** — Provider set for v0.5.0? (rec: B — `LocalDiskProvider` + `AwsKmsProvider`)
-2. **Q2** — Algorithm scope? (rec: B — Ed25519 + ECDSA P-256; coupled to Q1)
-3. **Q3** — Detached-operator signing in scope? (rec: deferred to v0.6+)
-4. **Q4** — Per-signature audit trail location? (rec: existing audit log + `signing_nonce` index)
-5. **Q5** — Replay protection mandatory? (rec: yes, mandatory nonce + timestamp)
-6. **Q6** — Authorization model? (rec: mTLS caller identity + per-key actor allow-list, with bearer-token fallback if WS8 hasn't merged)
-7. **Q7** — Quorum / multi-sig in v0.5.0? (rec: deferred, envelope shape forward-compatible)
-8. **Q8** — Key rotation ownership? (rec: provider concern, operator-initiated in v0.5.0)
-
-Once operator answers land, §Locked design above is updated to reflect them and this §Decisions required section is replaced with a §Resolved decisions changelog.
 
 ## Extension points (out of scope for WS9 v0.5.0)
 
