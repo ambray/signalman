@@ -8,7 +8,8 @@
 
 import * as http from "node:http";
 import { AddressInfo } from "node:net";
-import { buildApp, type AppOptions } from "./app.js";
+import { buildApp, type AppHandles, type AppOptions } from "./app.js";
+import type { Router } from "./router.js";
 
 export interface CreateServerOptions extends AppOptions {
   /** Bind host. Defaults to "127.0.0.1". */
@@ -28,6 +29,11 @@ export interface ServerHandle {
   baseUrl: string;
   /** Stop the server. Resolves once `close()` has fully shut down. */
   close(): Promise<void>;
+  /**
+   * App-level handles for background tasks (WS10 reaper, etc.).
+   * Optional — only present when the underlying app spawned them.
+   */
+  handles?: AppHandles;
 }
 
 export async function createServer(
@@ -46,6 +52,7 @@ export async function createServer(
   });
   const addr = server.address() as AddressInfo;
   const boundPort = addr.port;
+  const appHandles = (router as Router & { handles?: AppHandles }).handles;
   return {
     server,
     port: boundPort,
@@ -53,10 +60,12 @@ export async function createServer(
     baseUrl: `http://${host}:${boundPort}`,
     close: () =>
       new Promise<void>((resolve, reject) => {
+        appHandles?.stopBackgroundTasks();
         server.close((err) => {
           if (err) reject(err);
           else resolve();
         });
       }),
+    ...(appHandles ? { handles: appHandles } : {}),
   };
 }

@@ -190,6 +190,7 @@ function parseAuditAction(s: string | undefined): AuditAction | undefined {
     case "manifest_create":
     case "yank":
     case "unyank":
+    case "delete":
       return s;
     default:
       throw badRequest(`unknown audit action: ${s}`);

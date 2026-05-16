@@ -758,7 +758,12 @@ export type AuditAction =
   | "proxy_cache"
   | "manifest_create"
   | "yank"
-  | "unyank";
+  | "unyank"
+  // WS10 (v0.5 OCI facade): emitted by blob DELETE (M2) and manifest
+  // DELETE (M3). The 0002 migration's `action` column carries no CHECK
+  // constraint, so no schema change is needed; the forensic-API parser
+  // (registry/src/http/forensic.ts) accepts `delete` in tandem.
+  | "delete";
 
 export type AuditEntityType =
   | "blob"

@@ -55,3 +55,45 @@ export {
   parseOciIndex,
   parseManifestOrIndex,
 } from "./guards.js";
+
+export {
+  mountOciBlobRoutes,
+  type MountOciBlobOptions,
+} from "./blobs.js";
+
+export {
+  mountOciRoutes,
+  type MountOciOptions,
+  type MountedOciHandles,
+} from "./mount.js";
+
+export {
+  UploadStore,
+  DEFAULT_UPLOAD_TTL_SECONDS,
+  type PendingUploadChunk,
+  type PendingUploadRow,
+  type UploadStoreOptions,
+} from "./upload-store.js";
+
+export {
+  UploadFsStore,
+  validateUploadId,
+  type UploadFsStoreOptions,
+} from "./upload-fs.js";
+
+export {
+  startReaper,
+  type ReaperHandle,
+  type ReaperOptions,
+} from "./reaper.js";
+
+export {
+  parseContentRange,
+  contentRangeLength,
+  writeOciError,
+  writeUploadAccepted,
+  writeBlobCreated,
+  setDockerContentDigest,
+  asOciError,
+  type ContentRange,
+} from "./http.js";
