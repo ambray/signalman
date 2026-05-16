@@ -1,6 +1,6 @@
 [package]
 name = "signalman-guest"
-version = "0.2.1"
+version = "0.4.0"
 edition = "2021"
 description = "Signalman guest agent — process control, UI automation, and network/file-access probes inside VMs"
 license = "Apache-2.0"

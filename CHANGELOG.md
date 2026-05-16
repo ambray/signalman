@@ -6,62 +6,187 @@ aims for [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Cross-platform milestone (v0.4.0-4 / WS4). Lands first-class Linux
-and macOS support across the guest agent and host hypervisor
-surfaces, plus the explicit platform-capability machinery the host
-orchestrator needs to skip-gate scenarios that require Windows-only
-behaviour on non-Windows VMs.
+(WS9-WS12 cohort + WS7/WS8 in flight — see `docs/workstreams/README.md`.)
 
-Not wire-breaking. The new `install_software` sources are additive
-string values; the `hypervisor.backend` union gains
-`"libvirt" | "vmrun"` but existing values stay valid; the guest
-proto is unchanged.
+## [0.4.0] — 2026-05-XX
 
-### Added (host hypervisor backends)
+Consolidated release covering everything that landed on `main` after
+v0.2.1: the v0.3.0 sub-tags (record/replay, ephemeral VMs, hermetic
+envelope, Loom-fronted orchestrator, cloud-provider support, Kubernetes)
+plus the v0.4.0 sub-tags (auto-promotion, webhooks, scheduled health,
+cross-platform parity). The standalone `@signalman/registry` package is
+independently versioned and reached v0.1.1 in parallel.
 
-- `host/src/hypervisors/libvirt.ts` — libvirt / KVM backend driven
-  by the `virsh` CLI (no native libvirt-node dep, so Windows CI
-  keeps building). Covers lifecycle, snapshots, file transfer
-  (via qemu-guest-agent JSON-RPC), and command execution.
-  Constructor accepts an injectable `LibvirtExec` callback for
-  tests, mirroring `cloud/tofu.ts`.
+The version pins in `host/package.json`, `guest/Cargo.toml`,
+`Cargo.toml`, `service/Cargo.toml` (inherited), and
+`plugins/signalman-loom-plugin/Cargo.toml` move from 0.2.1 → 0.4.0 in
+one coordinated bump. `host/src/http/app.ts`'s formerly hardcoded
+`VERSION` constant now reads from `host/package.json` via the shared
+`host/src/version.ts` helper, so subsequent bumps only touch
+`package.json`.
+
+Not wire-breaking. Additive across all surfaces — config unions gain
+options, MCP tools gain verbs, RPCs gain capability gates.
+
+### Added — v0.3.0-1 Record/Replay
+
+- Record/replay surface that captures MCP tool calls + CLI
+  invocations into a single unified `calls.jsonl` per session.
+- Loom plugin response shape graduates the record/replay
+  surface so the orchestrator can correlate envelopes with
+  recorded inputs.
+- `signalman record` + `signalman record finalize` verbs;
+  `parsedArgsToRecord` helper for tooling that wants to
+  programmatically capture argv.
+
+### Added — v0.3.0-2 Ephemeral VMs
+
+- Ephemeral VM provisioning module with deterministic teardown
+  on scenario exit. Backed by differencing-disk primitives so
+  the parent image is never mutated.
+- `vm_lineage_hash` canonicalization module — every ephemeral
+  VM carries a stable hash naming its base image + diff chain.
+- Streamed `vm_copy_file` progress (Closure C8) — host gets
+  byte-count progress callbacks during long transfers.
+- Orchestrator wiring + `template:` shorthand for scenario
+  fixtures (Closure C9).
+
+### Added — v0.3.0-3 Hermetic Envelope (full triple)
+
+- ScenarioResult envelope graduates with the full hermetic
+  triple: code hash, data hash, environment hash.
+- `aggregateUniqueStrings` helper extracted as the shared
+  primitive for envelope construction.
+- Envelope-hash helpers + design note for the three-axis model.
+
+### Added — v0.3.0-4 Loom-fronted Orchestrator
+
+- `hermetic_identity` field promoted to the Loom plugin
+  response so Loom workflows can be the orchestrator with
+  Signalman exposing the contract surface.
+
+### Added — v0.3.0-5 Cloud-provider support (AWS + Azure)
+
+WS1 cohort. Closes ROADMAP `v0.3.0-5`.
+
+- Cloud-backend abstraction + registry: `CloudBackend` interface
+  with `provisionInstance` / `terminateInstance` / `getStatus` /
+  `listInstances` / `getBackends`. Per-backend error codes
+  unionized as `CloudBackendErrorCode`.
+- **AWS EC2** cloud backend via `@aws-sdk/client-ec2`.
+- **Azure VM** cloud backend via `@azure/arm-compute`.
+- **OpenTofu driver** for `cloud_stack_test` target kind —
+  plan / apply / destroy + `tofu plan -json` parsing for
+  cost estimation.
+- MCP cloud + stack tools: `signalman_cloud_provision`,
+  `signalman_cloud_terminate`, `signalman_cloud_status`,
+  `signalman_cloud_list`, `signalman_cloud_backends`,
+  `signalman_stack_apply`, `signalman_stack_destroy`,
+  `signalman_stack_plan_cost`.
+- **Cost guardrails** (sub-task 5): TTL reaper (5-min poll
+  terminates past-TTL instances), per-org spend budget gate
+  with cost table + soft-warn-at-80% / hard-refuse-at-100%
+  semantics, pre-flight cost estimate from `tofu plan -json`.
+- **Network connection descriptor** (sub-task 6): three modes
+  for guest reachability — `public_mtls`, `aws_ssm`,
+  `azure_bastion`. Per-org credentials at rest in the
+  `cloud_org_credentials` table.
+- **CLI** (sub-task 8): `signalman cloud {provision,
+  terminate, status, list, backends, reaper, budget, creds,
+  connection-descriptor}` + `signalman stack {apply, destroy,
+  plan-cost}`.
+- 5 cloud skills.
+
+### Added — v0.3.0-6 Kubernetes (WS2)
+
+- **K8s deploy target**: `k8s_test` / `k8s_demo` target kinds.
+  `KubectlDriver` shells `kubectl apply -k` for kustomize;
+  `HelmDriver` shells `helm upgrade --install`. Rollback via
+  `kubectl rollout undo` / `helm rollback`. Health via
+  `kubectl wait`. New `K8sDriverError` for stable error codes.
+- **K8s runner substrate**: operator-authored manifest pattern
+  with `Job` (one-shot) and `Deployment` (warm-pool)
+  examples under `examples/k8s-runner/`.
+- New MCP tools `signalman_k8s_{deploy,rollback,status}` +
+  CLI verbs `signalman k8s {deploy,rollback,status}` and
+  `signalman runner deploy-k8s`.
+
+### Added — v0.4.0-1 Auto-promotion (WS3)
+
+- **Promotion policy schema** + listener on build-completed
+  event. Three gate kinds: `auto` (immediate),
+  `manual` (operator approves), `time_delay` (auto after
+  duration).
+- **Tier-to-tier promotion** with approver allow-list.
+- CLI: `signalman promotion {list, add, remove, approve,
+  reject, tick, approvals}`. MCP mirrors. Skill:
+  `signalman-promote-release`.
+
+### Added — v0.4.0-2 Webhooks (WS3)
+
+- **Event dispatcher** + `webhook_subscription` table.
+  Generic-webhook driver with HMAC signing; **Slack** driver;
+  **Email** driver (gated by `SIGNALMAN_SMTP_URL`).
+- Events fired on release-built / deployed / rolled-back /
+  health-failed / promotion-approved.
+- CLI: `signalman webhook {list, add, remove, test}`. MCP
+  mirrors. Skill: `signalman-webhook-setup`.
+
+### Added — v0.4.0-3 Scheduled health (WS3)
+
+- **`health_schedule` table** + scheduler (1-min tick) +
+  hook into audit log + event dispatcher.
+- CLI: `signalman schedule {list, add, disable, enable,
+  remove, run-once, start}`. MCP mirrors. Skill:
+  `signalman-schedule-health`.
+
+### Added — v0.4.0-4 Cross-platform (WS4)
+
+#### Host hypervisor backends
+
+- `host/src/hypervisors/libvirt.ts` — libvirt / KVM backend
+  driven by the `virsh` CLI (no native libvirt-node dep, so
+  Windows CI keeps building). Covers lifecycle, snapshots,
+  file transfer (via qemu-guest-agent JSON-RPC), and command
+  execution. Constructor accepts an injectable `LibvirtExec`
+  callback for tests, mirroring `cloud/tofu.ts`.
 - `host/src/hypervisors/vmrun.ts` — parallel-track VMware
-  Workstation / Fusion backend wrapping `vmrun`. Same shape as
-  libvirt: injectable `VmrunExec`, stable error codes, S-14
-  password redaction on every stderr egress. The existing
-  `vmware.ts` (with its `govc` vSphere fallback) is unchanged.
-  Operators opt in via `hypervisor.backend = "vmrun"`.
-  Convergence onto a single VMware backend is tracked as a
-  roadmap follow-up.
-- New error classes `LibvirtBackendError` and `VmrunBackendError`
-  with stable codes the orchestrator dispatches on without
-  parsing CLI phrasing.
+  Workstation / Fusion backend wrapping `vmrun`. Same shape
+  as libvirt: injectable `VmrunExec`, stable error codes,
+  S-14 password redaction on every stderr egress. The
+  existing `vmware.ts` (with its `govc` vSphere fallback) is
+  unchanged. Operators opt in via
+  `hypervisor.backend = "vmrun"`. Convergence onto a single
+  VMware backend is tracked as a roadmap follow-up (WS11).
+- New error classes `LibvirtBackendError` and
+  `VmrunBackendError` with stable codes the orchestrator
+  dispatches on without parsing CLI phrasing.
 
-### Added (guest agent platform layer)
+#### Guest agent platform layer
 
 - `guest/src/platform/{windows,linux,macos,other}.rs` — new
   `Platform` trait the service layer dispatches through.
   Capability getters (`supports_ui_automation`,
-  `supports_system_elevation`, `supported_package_sources`)
-  let RPC handlers return a clean `Status::unimplemented`
-  on platforms that don't implement a given operation,
-  rather than letting the call hang on a sidecar that will
-  never connect.
-- All four `Platform` impls compile on every target; only the
-  `Current` re-export is `cfg`-gated so trait tests can
+  `supports_system_elevation`,
+  `supported_package_sources`) let RPC handlers return a
+  clean `Status::unimplemented` on platforms that don't
+  implement a given operation, rather than letting the call
+  hang on a sidecar that will never connect.
+- All four `Platform` impls compile on every target; only
+  the `Current` re-export is `cfg`-gated so trait tests can
   exercise each impl regardless of build host.
 
-### Added (Linux SYSTEM-elevation)
+#### Linux SYSTEM-elevation
 
 - `process::start_process_as_system` on Linux now shells
   `sudo -n [-E] -- <path> <args>`. Sudoers refusal surfaces
   as `Status::permission_denied`; the agent's invoking user
   must have NOPASSWD configured for the commands the operator
   intends to run.
-- `build_sudo_argv` is factored out as a free function so the
+- `build_sudo_argv` factored out as a free function so the
   argv shape is unit-testable on every build host.
 
-### Added (install_software sources)
+#### install_software sources
 
 - Linux: `apt` (shells `apt-get install -y`), `dnf`
   (`dnf install -y`), `yum` (legacy RHEL ≤ 7 alias). Version
@@ -74,20 +199,17 @@ proto is unchanged.
   "is already installed" (dnf/yum), "already installed" /
   "up-to-date" (brew).
 
-### Changed (cross-platform RPC behaviour)
+#### Changed — cross-platform RPC behaviour
 
 - Windows-only RPCs (`ui_click` / `ui_type` / `ui_key` /
   `ui_find` / `ui_screenshot` / `browser_*` /
   `install_software` with Windows-only sources /
   `run_command(run_as="system")` on macOS) now return
   `Status::unimplemented` with a canonical
-  "<feature> is not supported on <os>" message rather than
-  failing through downstream subsystems.
-- `ui_health` is the deliberate exception: keeps its
-  OK-with-payload shape on non-Windows and reports
-  `sidecar_reachable=false` with the canonical message in
-  the `error` field, so existing host pattern-matching on
-  that shape continues to work.
+  "<feature> is not supported on <os>" message.
+- `ui_health` keeps its OK-with-payload shape on non-Windows
+  and reports `sidecar_reachable=false` with the canonical
+  message in the `error` field.
 - `install_software` distinguishes three failure modes for
   an unrecognised source: wrong-platform →
   `Status::unimplemented`; typo / unknown source →
@@ -95,7 +217,7 @@ proto is unchanged.
   → `Status::invalid_argument` with a hint of the supported
   set (Windows still defaults to winget for backwards compat).
 
-### Changed (selector + config)
+#### Changed — selector + config
 
 - `host/src/hypervisors/selector.ts` registers libvirt and
   vmrun in `buildBackendList`. Platform-aware default
@@ -104,40 +226,108 @@ proto is unchanged.
 - `SignalmanConfig.hypervisor` adds `virshPath` and
   `libvirtUri` fields; the `backend` union now accepts
   `"libvirt" | "vmrun"` in addition to the existing values.
-  Env overrides: `SIGNALMAN_VIRSH_BIN`,
-  `LIBVIRT_DEFAULT_URI`.
+  Env overrides: `SIGNALMAN_VIRSH_BIN`, `LIBVIRT_DEFAULT_URI`.
+
+### Added — WS6 wave-2: capability audit + skills
+
+- Capability matrix doc enumerating every shipped capability
+  × {functional? MCP-exposed? CLI-exposed? skill-covered?}.
+- 25 skill `SKILL.md` files for the highest-impact gaps.
+- P1 MCP wrappers + target-edit + runner table.
+- Skill-frontmatter validator test.
+
+### Added — WS6 wave-3 (M5–M10.6): production readiness
+
+- **M5**: Audit-log CLI + MCP surface (`signalman audit
+  {query, append}`).
+- **M6**: MCP tools wired into `promote-release` +
+  `schedule-health` skills.
+- **M7**: Promotion auto-approver health-gate
+  (WS2 readiness check).
+- **M8**: `cloud_vm` + `cloud_stack` target kinds + deploy
+  adapters; install-bundle integration.
+- **M9**: Multi-transport runner deploy
+  (script / ssh / winrm / docker / cloud).
+- **M10.1–M10.6**: Standalone registry productionization —
+  registry schema for cargo, sparse-index read path, publish
+  + yank, virtual-registry pull-through with re-signing,
+  forensic + provenance HTTP API, operator CLI + skill.
+  Cloud_vm install-bundle + cloud rollback + SSM/Bastion
+  dialers. Packer golden-image scaffolding. Multi-transport
+  deploy integration tests.
+
+### Added — `@signalman/registry` (independently versioned, v0.1.0 / v0.1.1)
+
+Built in parallel with the host work as a standalone OSS package
+at `registry/`. Federates with `@signalman/host` via the existing
+`BlobDriver` interface.
+
+- Package skeleton, generic blob + manifest types,
+  `LocalFsBlobStore` (content-addressed), SQLite manifest
+  catalog, Ed25519 manifest signing port.
+- Minimal HTTP API + `LocalFsRegistryStorage` facade;
+  registry CLI + MCP surface (`serve`, `verify`, `keygen`).
+- `signalman-registry` BlobDriver on the host side proves
+  federation works.
+- **v0.1.1**: npm protocol facade — publish + install +
+  virtual mirror (cargo facade landed earlier in wave-3).
 
 ### Tests
 
-- Guest: +29 tests (147 → 159 over the WS4 commits, plus
-  +12 from the follow-up sudo + package-manager work).
-  Coverage of every `LinuxPlatform` / `MacosPlatform` /
-  `WindowsPlatform` capability surface; cross-platform
-  trait dispatch tests that exercise non-host impls from a
-  Windows build host; argv-helper coverage for
+Held-core coverage holds at 86.57% statements / 81.61%
+branches / 91.15% functions / 86.57% lines on the host (well
+above the 80/70/80/80 floors enforced by `vitest.config.ts`).
+
+- Guest: ~159 tests over the WS4 commits (147 → 159), plus
+  the +12 follow-up sudo + package-manager tests.
+  Cross-platform trait dispatch tests exercise non-host
+  impls from a Windows build host; argv-helper coverage for
   `build_sudo_argv`.
-- Host: +85 tests (1795 → 1880). Libvirt argv composition,
-  parser coverage with fixture files under
-  `host/src/__tests__/fixtures/virsh-*.txt`, integration
-  tests covering every `LibvirtBackendError` and
-  `VmrunBackendError` code path, selector registration.
-  Held-core coverage holds at 86.57% statements / 81.61%
-  branches / 91.15% functions / 86.57% lines (well above
-  the 80/70/80/80 floors).
+- Host: 1880+ tests (1795 → 1880 in WS4 alone). Libvirt
+  argv composition, virsh parser coverage with fixture files
+  under `host/src/__tests__/fixtures/virsh-*.txt`,
+  integration tests covering every `LibvirtBackendError` and
+  `VmrunBackendError` code path. Cloud-provider backend
+  tests, K8s driver tests, promotion / webhook / schedule
+  end-to-end tests, audit-log integration, multi-transport
+  runner deploy integration tests.
 
-### Deferred (tracked in ROADMAP)
+### Public-release readiness (WS12 partial)
 
-- macOS UI automation parity with the Win32 UIA sidecar.
-  Trait contract + unimplemented-message tests are in
-  place; the AppleScript / Accessibility-API
-  implementation requires a real macOS dev host.
-- `vmrun.ts` + `vmware.ts` convergence. Deliberately
-  deferred until `vmrun.ts` has seen at least one
-  production scenario end-to-end so the merge target isn't
-  unproven.
+- **`signalman --version` verb** lands — `host/src/cli.ts` +
+  `host/src/version.ts` shared helper. `http/app.ts` migrates
+  to consume the helper, eliminating the hardcoded `VERSION
+  = "0.2.1"` drift.
+- **`registry/package.json`** version-pin drift resolved
+  (`0.0.1` → `0.1.1`) to match the ROADMAP claim.
+- **CI coverage gate** wired into `.github/workflows/ci.yaml`
+  (matches `vitest.config.ts` thresholds exactly).
+- **Public-release operator runbook** at
+  `docs/runbooks/public-release.md` covers `gh secret set`
+  for the four release secrets, pre-flight checklist,
+  dry-run tag, visibility flip, post-flip smoke, rollback.
+- **Bug-report issue template** makes the `signalman
+  --version` field required.
 
-See ROADMAP §"2026-05-14 (v0.4.0-4 cross-platform
-followups)" for both items' restart preconditions.
+### Deferred (tracked in ROADMAP / STATUS)
+
+- **macOS UI automation parity** with the Win32 UIA sidecar
+  (Tart-backed Mac runner shipped in v0.4.0-4; AppleScript /
+  Accessibility-API driver awaits Mac dev-host availability).
+  Scoped prompt preserved at
+  `docs/workstreams/prompts/ws-future-macos-ui-parity.md`.
+- **`vmrun.ts` + `vmware.ts` convergence** (WS11) —
+  deliberately deferred until vmrun.ts has seen at least one
+  production scenario end-to-end. Design + parity test suite
+  scoped in the WS9–WS12 cohort.
+- **`CODE_OF_CONDUCT.md`** — STATUS.md item #4. Land outside
+  this WS12 pass.
+- **Visibility flip** + **GitHub repo secrets** — operator
+  gestures, documented in `docs/runbooks/public-release.md`.
+
+See ROADMAP §"v0.5+ — Claude Code plugin + next-10 epics" for
+in-flight follow-on work (WS7 plugin, WS8 identity certs, WS9
+signing service, WS10 registry OCI, WS11 vmware convergence).
 
 ## [0.2.1] — 2026-05-13
 
