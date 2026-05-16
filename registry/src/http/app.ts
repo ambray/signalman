@@ -92,6 +92,19 @@ export interface AppOptions {
   /** WS10: max chunk body cap for a single PATCH/PUT. Default 5 GiB. */
   ociMaxChunkBytes?: number;
   /**
+   * WS10 M3: max manifest body cap for a single PUT. Default 4 MiB
+   * (spec minimum). Operators with very large multi-arch index trees
+   * raise this; clients are required by the spec to handle 413 for
+   * over-cap bodies.
+   */
+  ociMaxManifestBytes?: number;
+  /**
+   * WS10 M3 (operator-locked Q6): default-on. Flip to false to refuse
+   * manifest DELETE per spec UNSUPPORTED (405). Useful in immutable-
+   * registry deployments that pair with a separate retention surface.
+   */
+  ociAllowManifestDelete?: boolean;
+  /**
    * WS10: deterministic clock for tests. Threads through the upload
    * store + reaper so timestamp assertions are stable.
    */
@@ -364,6 +377,12 @@ export function buildApp(opts: AppOptions): Router {
         : {}),
       ...(opts.ociMaxChunkBytes !== undefined
         ? { maxChunkBytes: opts.ociMaxChunkBytes }
+        : {}),
+      ...(opts.ociMaxManifestBytes !== undefined
+        ? { maxManifestBytes: opts.ociMaxManifestBytes }
+        : {}),
+      ...(opts.ociAllowManifestDelete !== undefined
+        ? { allowManifestDelete: opts.ociAllowManifestDelete }
         : {}),
       ...(opts.ociNow ? { now: opts.ociNow } : {}),
     });

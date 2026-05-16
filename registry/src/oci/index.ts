@@ -62,6 +62,17 @@ export {
 } from "./blobs.js";
 
 export {
+  mountOciManifestRoutes,
+  type MountOciManifestOptions,
+} from "./manifests.js";
+
+export {
+  TagStore,
+  type TagRow,
+  type TagStoreOptions,
+} from "./tag-store.js";
+
+export {
   mountOciRoutes,
   type MountOciOptions,
   type MountedOciHandles,

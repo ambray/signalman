@@ -18,7 +18,9 @@ import type { SqliteManifestIndex } from "../storage/sqlite-index.js";
 import type { LocalFsBlobStore } from "../storage/local-fs.js";
 import type { RegistryStorage } from "../types.js";
 import { mountOciBlobRoutes } from "./blobs.js";
+import { mountOciManifestRoutes } from "./manifests.js";
 import { startReaper, type ReaperHandle } from "./reaper.js";
+import { TagStore } from "./tag-store.js";
 import { UploadFsStore } from "./upload-fs.js";
 import { UploadStore } from "./upload-store.js";
 
@@ -37,6 +39,10 @@ export interface MountOciOptions {
   uploadTtlSeconds?: number;
   now?: () => Date;
   maxChunkBytes?: number;
+  /** Per-manifest body cap. Default 4 MiB (spec minimum). */
+  maxManifestBytes?: number;
+  /** Operator-locked Q6: default-on; flip to disable manifest DELETE. */
+  allowManifestDelete?: boolean;
 }
 
 export interface MountedOciHandles {
@@ -47,6 +53,7 @@ export interface MountedOciHandles {
   uploadStore: UploadStore;
   uploadFs: UploadFsStore;
   reaper: ReaperHandle;
+  tagStore: TagStore;
 }
 
 export function mountOciRoutes(
@@ -61,6 +68,10 @@ export function mountOciRoutes(
       : {}),
   });
   const uploadFs = new UploadFsStore({ root: opts.blobStore.root });
+  const tagStore = new TagStore({
+    index: opts.index,
+    ...(opts.now ? { now: opts.now } : {}),
+  });
 
   mountOciBlobRoutes(router, {
     storage: opts.storage,
@@ -71,6 +82,20 @@ export function mountOciRoutes(
     ...(opts.publicBaseUrl ? { publicBaseUrl: opts.publicBaseUrl } : {}),
     ...(opts.maxChunkBytes !== undefined
       ? { maxChunkBytes: opts.maxChunkBytes }
+      : {}),
+    ...(opts.now ? { now: opts.now } : {}),
+  });
+
+  mountOciManifestRoutes(router, {
+    storage: opts.storage,
+    index: opts.index,
+    tagStore,
+    ...(opts.publicBaseUrl ? { publicBaseUrl: opts.publicBaseUrl } : {}),
+    ...(opts.maxManifestBytes !== undefined
+      ? { maxManifestBytes: opts.maxManifestBytes }
+      : {}),
+    ...(opts.allowManifestDelete !== undefined
+      ? { allowDelete: opts.allowManifestDelete }
       : {}),
     ...(opts.now ? { now: opts.now } : {}),
   });
@@ -93,5 +118,6 @@ export function mountOciRoutes(
     uploadStore,
     uploadFs,
     reaper,
+    tagStore,
   };
 }
