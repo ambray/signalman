@@ -37,6 +37,7 @@ import {
   type ManifestKind,
   type ManifestSignature,
   type NpmManifestMetadata,
+  type OciManifestMetadata,
   type Provenance,
   validateManifestName,
   validateManifestVersion,
@@ -81,6 +82,8 @@ interface ManifestRow {
   cargo_metadata_json: string | null;
   // v0.1.1 (npm facade):
   npm_metadata_json: string | null;
+  // WS10 (v0.5 OCI facade):
+  oci_metadata_json: string | null;
 }
 
 interface BlobRow {
@@ -171,8 +174,9 @@ export class SqliteManifestIndex {
         `INSERT INTO manifest (
            name, version, media_type, blobs_json, annotations_json,
            signature_b64, signed_by, canonical_bytes, created_at,
-           kind, provenance_json, cargo_metadata_json, npm_metadata_json
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           kind, provenance_json, cargo_metadata_json, npm_metadata_json,
+           oci_metadata_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.name,
@@ -188,6 +192,7 @@ export class SqliteManifestIndex {
         JSON.stringify(provenance),
         input.cargoMetadata ? JSON.stringify(input.cargoMetadata) : null,
         input.npmMetadata ? JSON.stringify(input.npmMetadata) : null,
+        input.ociMetadata ? JSON.stringify(input.ociMetadata) : null,
       );
     return {
       ...input,
@@ -624,7 +629,8 @@ export class SqliteManifestIndex {
       .prepare(
         `SELECT name, version, media_type, blobs_json, annotations_json,
                 signature_b64, signed_by, canonical_bytes, created_at,
-                kind, provenance_json, cargo_metadata_json, npm_metadata_json
+                kind, provenance_json, cargo_metadata_json, npm_metadata_json,
+                oci_metadata_json
          FROM manifest
          WHERE name = ? AND version = ?`,
       )
@@ -650,6 +656,9 @@ function rowToManifest(row: ManifestRow): Manifest {
   const npmMetadata: NpmManifestMetadata | undefined = row.npm_metadata_json
     ? (JSON.parse(row.npm_metadata_json) as NpmManifestMetadata)
     : undefined;
+  const ociMetadata: OciManifestMetadata | undefined = row.oci_metadata_json
+    ? (JSON.parse(row.oci_metadata_json) as OciManifestMetadata)
+    : undefined;
   // WS6 wave-3 (M10): only surface `kind` when the row actually
   // recorded a non-default value, so v0.4.0 manifests round-trip
   // signature-compatible.
@@ -664,6 +673,7 @@ function rowToManifest(row: ManifestRow): Manifest {
     ...(signature ? { signature } : {}),
     ...(cargoMetadata ? { cargoMetadata } : {}),
     ...(npmMetadata ? { npmMetadata } : {}),
+    ...(ociMetadata ? { ociMetadata } : {}),
     createdAt: row.created_at,
   };
 }

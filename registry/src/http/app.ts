@@ -427,6 +427,13 @@ function parseManifestBody(
     obj.npmMetadata && typeof obj.npmMetadata === "object"
       ? (obj.npmMetadata as import("../types.js").NpmManifestMetadata)
       : undefined;
+  // WS10 (v0.5 OCI facade): the generic /v1/manifests PUT also accepts
+  // ociMetadata so an operator pushing an OCI manifest through the
+  // generic surface round-trips identically to the /v2/* path.
+  const ociMetadata =
+    obj.ociMetadata && typeof obj.ociMetadata === "object"
+      ? (obj.ociMetadata as import("../types.js").OciManifestMetadata)
+      : undefined;
   return {
     name: expectedName,
     version: expectedVersion,
@@ -437,6 +444,7 @@ function parseManifestBody(
     ...(signature ? { signature } : {}),
     ...(cargoMetadata ? { cargoMetadata } : {}),
     ...(npmMetadata ? { npmMetadata } : {}),
+    ...(ociMetadata ? { ociMetadata } : {}),
     createdAt,
   };
 }
