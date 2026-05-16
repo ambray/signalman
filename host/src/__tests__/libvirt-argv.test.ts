@@ -23,6 +23,8 @@ import {
   parseSnapshotList,
   parseGuestExecPid,
   parseGuestExecStatus,
+  parseGuestFileHandle,
+  parseGuestFileRead,
 } from "../hypervisors/libvirt.js";
 
 interface ExecCall {
@@ -256,6 +258,48 @@ describe("parseGuestExecStatus", () => {
 
   it("throws when the return body is missing", () => {
     expect(() => parseGuestExecStatus("{}")).toThrow(/missing return body/);
+  });
+});
+
+describe("parseGuestFileHandle", () => {
+  it("extracts the numeric handle from a QGA open envelope", () => {
+    expect(parseGuestFileHandle('{"return":42}')).toBe(42);
+  });
+
+  it("throws when the payload is not valid JSON", () => {
+    expect(() => parseGuestFileHandle("not-json")).toThrow(/not valid JSON/);
+  });
+
+  it("throws when the handle is missing or not a number", () => {
+    expect(() => parseGuestFileHandle("{}")).toThrow(/numeric handle/);
+    expect(() => parseGuestFileHandle('{"return":"x"}')).toThrow(
+      /numeric handle/,
+    );
+  });
+});
+
+describe("parseGuestFileRead", () => {
+  it("decodes buf-b64 into a Buffer and surfaces eof", () => {
+    const b64 = Buffer.from("hello", "utf8").toString("base64");
+    const out = parseGuestFileRead(
+      JSON.stringify({ return: { count: 5, "buf-b64": b64, eof: false } }),
+    );
+    expect(out.buf.toString("utf8")).toBe("hello");
+    expect(out.eof).toBe(false);
+  });
+
+  it("returns an empty buffer when buf-b64 is absent (eof case)", () => {
+    const out = parseGuestFileRead('{"return":{"count":0,"eof":true}}');
+    expect(out.buf.length).toBe(0);
+    expect(out.eof).toBe(true);
+  });
+
+  it("throws when the payload is not valid JSON", () => {
+    expect(() => parseGuestFileRead("not-json")).toThrow(/not valid JSON/);
+  });
+
+  it("throws when the return body is missing", () => {
+    expect(() => parseGuestFileRead("{}")).toThrow(/missing return body/);
   });
 });
 

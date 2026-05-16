@@ -8,12 +8,18 @@
  * argv composition directly.
  */
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
+import * as fsp from "node:fs/promises";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-import { LibvirtBackend, LibvirtBackendError } from "../hypervisors/libvirt.js";
+import {
+  LibvirtBackend,
+  LibvirtBackendError,
+  QGA_FILE_CHUNK_BYTES,
+} from "../hypervisors/libvirt.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.resolve(__dirname, "fixtures");
@@ -313,6 +319,291 @@ describe("LibvirtBackend integration", () => {
     await expect(
       backend.executeCommand(HANDLE, "", []),
     ).rejects.toMatchObject({ code: "invalid_argument" });
+  });
+
+  // ── QGA file transfer ──────────────────────────────────────────
+
+  describe("copyFileToVM", () => {
+    const tmpFiles: string[] = [];
+    afterEach(async () => {
+      while (tmpFiles.length > 0) {
+        const f = tmpFiles.pop()!;
+        await fsp.unlink(f).catch(() => undefined);
+      }
+    });
+    async function makeHostFile(contents: Buffer | string): Promise<string> {
+      const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "libvirt-m2-"));
+      const file = path.join(dir, "src");
+      await fsp.writeFile(file, contents);
+      tmpFiles.push(file);
+      return file;
+    }
+
+    it("opens with mode=w, writes the host file in chunks, then closes", async () => {
+      const contents = Buffer.from("hello QGA world\n", "utf8");
+      const hostFile = await makeHostFile(contents);
+      const sequence: { execute: string; payload: object }[] = [];
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as {
+            execute: string;
+            arguments?: Record<string, unknown>;
+          };
+          sequence.push({ execute: payload.execute, payload: payload.arguments ?? {} });
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":17}', stderr: "", exitCode: 0 };
+          }
+          if (payload.execute === "guest-file-write") {
+            return {
+              stdout: '{"return":{"count":16,"eof":false}}',
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          // guest-file-close
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.copyFileToVM(HANDLE, hostFile, "/tmp/dst");
+      expect(sequence.map((s) => s.execute)).toEqual([
+        "guest-file-open",
+        "guest-file-write",
+        "guest-file-close",
+      ]);
+      const openArgs = sequence[0].payload as { path: string; mode: string };
+      expect(openArgs).toEqual({ path: "/tmp/dst", mode: "w" });
+      const writeArgs = sequence[1].payload as { handle: number; "buf-b64": string };
+      expect(writeArgs.handle).toBe(17);
+      expect(Buffer.from(writeArgs["buf-b64"], "base64").toString("utf8")).toBe(
+        "hello QGA world\n",
+      );
+      const closeArgs = sequence[2].payload as { handle: number };
+      expect(closeArgs.handle).toBe(17);
+    });
+
+    it("opens + closes even when the host file is empty (no write call)", async () => {
+      const hostFile = await makeHostFile("");
+      const verbs: string[] = [];
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+          verbs.push(payload.execute);
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":9}', stderr: "", exitCode: 0 };
+          }
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.copyFileToVM(HANDLE, hostFile, "/tmp/empty");
+      expect(verbs).toEqual(["guest-file-open", "guest-file-close"]);
+    });
+
+    it("chunks files larger than QGA_FILE_CHUNK_BYTES into multiple writes", async () => {
+      // 2.5 chunks worth of data — ensures the loop terminates only
+      // when fs.read reports 0 bytes, not after a fixed chunk count.
+      const bytes = Math.floor(QGA_FILE_CHUNK_BYTES * 2.5);
+      const buf = Buffer.alloc(bytes);
+      for (let i = 0; i < bytes; i += 1) buf[i] = i % 256;
+      const hostFile = await makeHostFile(buf);
+      const writeChunks: Buffer[] = [];
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as {
+            execute: string;
+            arguments?: { "buf-b64"?: string };
+          };
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":1}', stderr: "", exitCode: 0 };
+          }
+          if (payload.execute === "guest-file-write") {
+            writeChunks.push(
+              Buffer.from(payload.arguments!["buf-b64"]!, "base64"),
+            );
+            return {
+              stdout: '{"return":{"count":1,"eof":false}}',
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.copyFileToVM(HANDLE, hostFile, "/tmp/big");
+      expect(writeChunks.length).toBe(3);
+      expect(writeChunks[0].length).toBe(QGA_FILE_CHUNK_BYTES);
+      expect(writeChunks[1].length).toBe(QGA_FILE_CHUNK_BYTES);
+      expect(writeChunks[2].length).toBe(bytes - 2 * QGA_FILE_CHUNK_BYTES);
+      const combined = Buffer.concat(writeChunks);
+      expect(combined.length).toBe(bytes);
+      expect(combined.equals(buf)).toBe(true);
+    });
+
+    it("still closes the guest handle when a chunk write fails midway", async () => {
+      const hostFile = await makeHostFile(Buffer.alloc(QGA_FILE_CHUNK_BYTES * 2));
+      const verbs: string[] = [];
+      let writeCount = 0;
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+          verbs.push(payload.execute);
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":5}', stderr: "", exitCode: 0 };
+          }
+          if (payload.execute === "guest-file-write") {
+            writeCount += 1;
+            if (writeCount === 1) {
+              return {
+                stdout: '{"return":{"count":1,"eof":false}}',
+                stderr: "",
+                exitCode: 0,
+              };
+            }
+            return {
+              stdout: "",
+              stderr: "guest-file-write: disk full",
+              exitCode: 1,
+            };
+          }
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      await expect(
+        backend.copyFileToVM(HANDLE, hostFile, "/tmp/dst"),
+      ).rejects.toMatchObject({ code: "copy_failed" });
+      // Even on failure, the close is attempted — the guest must not
+      // leak file handles when the host gives up partway through.
+      expect(verbs).toContain("guest-file-close");
+    });
+
+    it("surfaces copy_failed when guest-file-open returns a non-numeric handle", async () => {
+      const hostFile = await makeHostFile("x");
+      const backend = new LibvirtBackend({
+        exec: async () => ({
+          stdout: '{"return":"not-a-number"}',
+          stderr: "",
+          exitCode: 0,
+        }),
+      });
+      await expect(
+        backend.copyFileToVM(HANDLE, hostFile, "/tmp/dst"),
+      ).rejects.toMatchObject({ code: "copy_failed" });
+    });
+  });
+
+  describe("copyFileFromVM", () => {
+    const tmpDirs: string[] = [];
+    afterEach(async () => {
+      while (tmpDirs.length > 0) {
+        const d = tmpDirs.pop()!;
+        await fsp.rm(d, { recursive: true, force: true });
+      }
+    });
+    async function makeHostTarget(): Promise<string> {
+      const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "libvirt-m2-"));
+      tmpDirs.push(dir);
+      return path.join(dir, "dst");
+    }
+
+    it("reads guest file in chunks until eof and writes to the host", async () => {
+      const target = await makeHostTarget();
+      const part1 = Buffer.from("foo");
+      const part2 = Buffer.from("bar");
+      let readCount = 0;
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":3}', stderr: "", exitCode: 0 };
+          }
+          if (payload.execute === "guest-file-read") {
+            readCount += 1;
+            const chunk = readCount === 1 ? part1 : part2;
+            const eof = readCount >= 2;
+            return {
+              stdout: JSON.stringify({
+                return: {
+                  count: chunk.length,
+                  "buf-b64": chunk.toString("base64"),
+                  eof,
+                },
+              }),
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.copyFileFromVM(HANDLE, "/guest/src", target);
+      const written = await fsp.readFile(target);
+      expect(written.equals(Buffer.concat([part1, part2]))).toBe(true);
+    });
+
+    it("handles eof on the first read (empty guest file)", async () => {
+      const target = await makeHostTarget();
+      const verbs: string[] = [];
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+          verbs.push(payload.execute);
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":42}', stderr: "", exitCode: 0 };
+          }
+          if (payload.execute === "guest-file-read") {
+            return {
+              stdout: '{"return":{"count":0,"eof":true}}',
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.copyFileFromVM(HANDLE, "/guest/empty", target);
+      expect(verbs).toEqual([
+        "guest-file-open",
+        "guest-file-read",
+        "guest-file-close",
+      ]);
+      const written = await fsp.readFile(target);
+      expect(written.length).toBe(0);
+    });
+
+    it("still closes the guest handle when a read fails midway", async () => {
+      const target = await makeHostTarget();
+      const verbs: string[] = [];
+      let reads = 0;
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+          verbs.push(payload.execute);
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":7}', stderr: "", exitCode: 0 };
+          }
+          if (payload.execute === "guest-file-read") {
+            reads += 1;
+            if (reads === 1) {
+              return {
+                stdout:
+                  '{"return":{"count":3,"buf-b64":"Zm9v","eof":false}}',
+                stderr: "",
+                exitCode: 0,
+              };
+            }
+            return {
+              stdout: "",
+              stderr: "guest-file-read: I/O error",
+              exitCode: 1,
+            };
+          }
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      await expect(
+        backend.copyFileFromVM(HANDLE, "/guest/src", target),
+      ).rejects.toMatchObject({ code: "copy_failed" });
+      expect(verbs).toContain("guest-file-close");
+    });
   });
 
   it("isAvailable returns false when virsh is not installed", async () => {

@@ -57,6 +57,7 @@
  */
 
 import { execFile as execFileCb } from "node:child_process";
+import * as fs from "node:fs/promises";
 import { promisify } from "node:util";
 import type {
   CheckpointHandle,
@@ -94,6 +95,14 @@ export const QGA_POLL_INITIAL_MS = 50;
 
 /** Upper bound on `guest-exec-status` poll interval. */
 export const QGA_POLL_MAX_MS = 1_000;
+
+/**
+ * Bytes per `guest-file-write` / `guest-file-read` chunk. QGA's
+ * default cmdline cap is 48KB after base64 encoding (~36KB raw); we
+ * stay well below it so a slightly older QGA build doesn't reject
+ * the payload.
+ */
+export const QGA_FILE_CHUNK_BYTES = 32 * 1024;
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -443,6 +452,78 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Parse the JSON envelope returned by `virsh qemu-agent-command` for
+ * a `guest-file-open` call.
+ *
+ * QGA shape: `{"return":<handle-as-integer>}`. The integer is opaque
+ * to the host — we pass it back unchanged on every subsequent
+ * `guest-file-write` / `guest-file-read` / `guest-file-close` call.
+ *
+ * Exported for unit tests.
+ */
+export function parseGuestFileHandle(raw: string): number {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `qemu-guest-agent guest-file-open response was not valid JSON: ${(err as Error).message}`,
+    );
+  }
+  const ret = (parsed as { return?: unknown }).return;
+  if (typeof ret !== "number" || !Number.isFinite(ret)) {
+    throw new Error(
+      `qemu-guest-agent guest-file-open response did not carry a numeric handle: ${raw}`,
+    );
+  }
+  return ret;
+}
+
+/** Decoded `guest-file-read` chunk. */
+export interface GuestFileReadResult {
+  /** Decoded bytes from `buf-b64`. Empty buffer when QGA reports zero count. */
+  buf: Buffer;
+  /** Mirror of QGA's terminal flag. */
+  eof: boolean;
+}
+
+/**
+ * Parse the JSON envelope returned by `virsh qemu-agent-command` for
+ * a `guest-file-read` call. QGA shape:
+ *
+ *   `{"return":{"count":N,"buf-b64":"<base64>","eof":bool}}`
+ *
+ * Returns the decoded buffer + EOF flag. When `buf-b64` is absent
+ * the buffer is empty (some QGA versions omit it at EOF).
+ *
+ * Exported for unit tests.
+ */
+export function parseGuestFileRead(raw: string): GuestFileReadResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `qemu-guest-agent guest-file-read response was not valid JSON: ${(err as Error).message}`,
+    );
+  }
+  const ret = (parsed as {
+    return?: { "buf-b64"?: unknown; eof?: unknown };
+  }).return;
+  if (!ret || typeof ret !== "object") {
+    throw new Error(
+      `qemu-guest-agent guest-file-read response missing return body: ${raw}`,
+    );
+  }
+  const eof = ret.eof === true;
+  const b64 = typeof ret["buf-b64"] === "string" ? ret["buf-b64"] : "";
+  return {
+    buf: Buffer.from(b64, "base64"),
+    eof,
+  };
+}
+
+/**
  * Single source of truth for the "is this stderr text a libvirt
  * domain-not-found message?" check. virsh phrasing varies between
  * versions; we normalise to lowercase and look for the canonical
@@ -754,20 +835,40 @@ export class LibvirtBackend implements HypervisorBackend {
     const name = sanitizeVmName(handle.name);
     const safeHost = sanitizePath(hostPath);
     const safeGuest = sanitizePath(guestPath);
-    // virsh has no first-class host→guest copy verb; we route through
-    // the qemu-guest-agent's `guest-file-write` channel via the
-    // `--mode=passthrough` cmdline. Returns a `command_failed` if the
-    // guest agent isn't running inside the VM.
-    const result = await this.run(
-      ["qemu-agent-command", name, this.buildGuestFilePayload(safeHost, safeGuest, "write")],
-      { timeoutMs: VIRSH_LIFECYCLE_TIMEOUT_MS },
-    );
-    if (result.exitCode !== 0) {
-      throw new LibvirtBackendError(
-        "copy_failed",
-        `host→guest copy failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
-      );
+
+    // QGA has no single-shot host→guest copy verb; the wire protocol
+    // is guest-file-open(mode=w) → repeat guest-file-write(handle,
+    // buf-b64) → guest-file-close(handle). Each call is its own
+    // virsh subprocess; we keep chunks ≤ QGA_FILE_CHUNK_BYTES so the
+    // base64-encoded payload stays inside QGA's per-call cap.
+    const fileHandle = await this.qgaFileOpen(name, safeGuest, "w");
+    let primaryError: unknown;
+    try {
+      const hostFile = await fs.open(safeHost, "r");
+      try {
+        const buf = Buffer.allocUnsafe(QGA_FILE_CHUNK_BYTES);
+        let bytesRead = 0;
+        do {
+          ({ bytesRead } = await hostFile.read(buf, 0, buf.length, null));
+          if (bytesRead > 0) {
+            await this.qgaFileWrite(name, fileHandle, buf.subarray(0, bytesRead));
+          }
+        } while (bytesRead > 0);
+      } finally {
+        await hostFile.close();
+      }
+    } catch (err) {
+      primaryError = err;
+    } finally {
+      try {
+        await this.qgaFileClose(name, fileHandle);
+      } catch (closeErr) {
+        // Surface the close error only if the main flow succeeded;
+        // otherwise the upstream error is more diagnostically useful.
+        if (primaryError === undefined) primaryError = closeErr;
+      }
     }
+    if (primaryError !== undefined) throw primaryError;
   }
 
   async copyFileFromVM(
@@ -779,14 +880,147 @@ export class LibvirtBackend implements HypervisorBackend {
     const name = sanitizeVmName(handle.name);
     const safeHost = sanitizePath(hostPath);
     const safeGuest = sanitizePath(guestPath);
+
+    // Mirror image of copyFileToVM: guest-file-open(mode=r) → repeat
+    // guest-file-read(handle, count=QGA_FILE_CHUNK_BYTES) until QGA
+    // signals eof=true → guest-file-close. The host file is truncated
+    // on open so partial-failure leaves it shorter than the source
+    // rather than silently mixed-content.
+    const fileHandle = await this.qgaFileOpen(name, safeGuest, "r");
+    let primaryError: unknown;
+    try {
+      const hostFile = await fs.open(safeHost, "w");
+      try {
+        for (;;) {
+          const chunk = await this.qgaFileRead(
+            name,
+            fileHandle,
+            QGA_FILE_CHUNK_BYTES,
+          );
+          if (chunk.buf.length > 0) {
+            await hostFile.write(chunk.buf);
+          }
+          if (chunk.eof) break;
+        }
+      } finally {
+        await hostFile.close();
+      }
+    } catch (err) {
+      primaryError = err;
+    } finally {
+      try {
+        await this.qgaFileClose(name, fileHandle);
+      } catch (closeErr) {
+        if (primaryError === undefined) primaryError = closeErr;
+      }
+    }
+    if (primaryError !== undefined) throw primaryError;
+  }
+
+  /**
+   * Submit a `guest-file-open` and return the QGA handle. Throws
+   * `copy_failed` on RPC failure or unparseable response.
+   */
+  private async qgaFileOpen(
+    vmName: string,
+    guestPath: string,
+    mode: "r" | "w",
+  ): Promise<number> {
+    const payload = JSON.stringify({
+      execute: "guest-file-open",
+      arguments: { path: guestPath, mode },
+    });
     const result = await this.run(
-      ["qemu-agent-command", name, this.buildGuestFilePayload(safeGuest, safeHost, "read")],
+      ["qemu-agent-command", vmName, payload],
       { timeoutMs: VIRSH_LIFECYCLE_TIMEOUT_MS },
     );
     if (result.exitCode !== 0) {
       throw new LibvirtBackendError(
         "copy_failed",
-        `guest→host copy failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+        `guest-file-open(${mode}) failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+      );
+    }
+    try {
+      return parseGuestFileHandle(result.stdout);
+    } catch (err) {
+      throw new LibvirtBackendError(
+        "copy_failed",
+        `guest-file-open(${mode}) returned an unparseable response: ${(err as Error).message}`,
+        err,
+      );
+    }
+  }
+
+  /** Submit one `guest-file-write` chunk. Throws `copy_failed` on failure. */
+  private async qgaFileWrite(
+    vmName: string,
+    fileHandle: number,
+    chunk: Buffer,
+  ): Promise<void> {
+    const payload = JSON.stringify({
+      execute: "guest-file-write",
+      arguments: {
+        handle: fileHandle,
+        "buf-b64": chunk.toString("base64"),
+      },
+    });
+    const result = await this.run(
+      ["qemu-agent-command", vmName, payload],
+      { timeoutMs: VIRSH_LIFECYCLE_TIMEOUT_MS },
+    );
+    if (result.exitCode !== 0) {
+      throw new LibvirtBackendError(
+        "copy_failed",
+        `guest-file-write failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+      );
+    }
+  }
+
+  /** Submit one `guest-file-read` chunk. Throws `copy_failed` on failure. */
+  private async qgaFileRead(
+    vmName: string,
+    fileHandle: number,
+    count: number,
+  ): Promise<GuestFileReadResult> {
+    const payload = JSON.stringify({
+      execute: "guest-file-read",
+      arguments: { handle: fileHandle, count },
+    });
+    const result = await this.run(
+      ["qemu-agent-command", vmName, payload],
+      { timeoutMs: VIRSH_LIFECYCLE_TIMEOUT_MS },
+    );
+    if (result.exitCode !== 0) {
+      throw new LibvirtBackendError(
+        "copy_failed",
+        `guest-file-read failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+      );
+    }
+    try {
+      return parseGuestFileRead(result.stdout);
+    } catch (err) {
+      throw new LibvirtBackendError(
+        "copy_failed",
+        `guest-file-read returned an unparseable response: ${(err as Error).message}`,
+        err,
+      );
+    }
+  }
+
+  /** Submit a `guest-file-close`. Throws `copy_failed` on failure. */
+  private async qgaFileClose(vmName: string, fileHandle: number): Promise<void> {
+    const payload = JSON.stringify({
+      execute: "guest-file-close",
+      arguments: { handle: fileHandle },
+    });
+    const result = await this.run(
+      ["qemu-agent-command", vmName, payload],
+      { timeoutMs: VIRSH_DEFAULT_TIMEOUT_MS },
+    );
+    if (result.exitCode !== 0) {
+      throw new LibvirtBackendError(
+        "copy_failed",
+        `guest-file-close failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
       );
     }
   }
@@ -917,30 +1151,6 @@ export class LibvirtBackend implements HypervisorBackend {
     return ip;
   }
 
-  // ── Private Helpers ───────────────────────────────────────────
-
-  /**
-   * Build a qemu-guest-agent JSON payload for `guest-file-open` +
-   * `guest-file-write` / `guest-file-read`. The agent only exposes a
-   * primitive file API; full progress reporting (the `ProgressCallback`
-   * on the interface) is unimplemented here because the JSON-RPC API
-   * doesn't expose intermediate byte counts. The orchestrator falls
-   * back to the SCP path when a progress callback is required.
-   */
-  private buildGuestFilePayload(
-    fromPath: string,
-    toPath: string,
-    direction: "read" | "write",
-  ): string {
-    return JSON.stringify({
-      execute: direction === "write" ? "guest-file-open-write" : "guest-file-open-read",
-      arguments: {
-        path: direction === "write" ? toPath : fromPath,
-        "source-path": direction === "write" ? fromPath : undefined,
-        "dest-path": direction === "write" ? toPath : fromPath,
-      },
-    });
-  }
 }
 
 // ── Public helpers (exported for argv tests) ────────────────────────
