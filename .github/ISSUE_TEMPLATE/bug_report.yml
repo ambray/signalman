@@ -1,0 +1,121 @@
+name: Bug report
+description: Something is broken; you have steps to reproduce.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > **Security issue?** Please do NOT file a public bug report.
+        > See [SECURITY.md](https://github.com/ambray/signalman/blob/main/SECURITY.md)
+        > for the private disclosure channel.
+
+  - type: input
+    id: signalman-version
+    attributes:
+      label: Signalman version
+      description: |
+        Output of `signalman --version` on the host where you saw the
+        bug. (If `signalman` is unavailable for some reason, paste
+        `git rev-parse HEAD` from your build tree instead.)
+      placeholder: "signalman 0.4.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-you-ran
+    attributes:
+      label: What you ran
+      description: The exact command, MCP tool call, or HTTP request.
+      render: shell
+      placeholder: |
+        signalman <verb> --flag value
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-expected
+    attributes:
+      label: What you expected
+      description: One or two sentences describing the intended behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What actually happened
+      description: |
+        What did you see instead? Paste the full error output and the
+        first 20-or-so lines of any stack trace.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: Reproduction steps
+      description: |
+        Numbered steps that get from a clean checkout to the broken
+        state. If a fresh `git clone && cd host && npm ci && npm run
+        build` reproduces it, say so — that's the most useful baseline.
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS + version
+      placeholder: "Windows 11 Pro 23H2, Ubuntu 24.04, macOS 14.5, etc."
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node version
+      description: Output of `node -v`.
+      placeholder: "v22.5.1"
+    validations:
+      required: true
+
+  - type: input
+    id: rust-version
+    attributes:
+      label: Rust version
+      description: Output of `rustc -V` — only if you built from source.
+      placeholder: "rustc 1.84.0 (9fc6b4312 2025-01-07)"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: hypervisor
+    attributes:
+      label: Hypervisor backend
+      description: Which backend was active when the bug surfaced?
+      options:
+        - "Not applicable / no VM involved"
+        - "Hyper-V"
+        - "Tart"
+        - "VMware (vmware backend)"
+        - "VMware (vmrun backend)"
+        - "libvirt"
+        - "cloud (AWS / Azure)"
+    validations:
+      required: false
+
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else
+      description: |
+        Logs, screenshots, suspected root cause, related issues —
+        anything that might help triage. Workarounds you've found are
+        also welcome.
+    validations:
+      required: false
