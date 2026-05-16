@@ -119,6 +119,48 @@ export interface CargoDependency {
 }
 
 /**
+ * WS10 (v0.5 OCI distribution-spec facade): OCI-specific manifest
+ * metadata. Serialized into the manifest's `ociMetadata` field when
+ * `kind === 'oci'`. The on-wire OCI manifest body (config + layers,
+ * or child manifests for an index) is the operator-signed JSON that
+ * gets stored verbatim in `canonical_bytes`; this struct is the
+ * row-side projection that the catalog / forensic API reads
+ * cheaply without re-parsing.
+ *
+ * Two discriminators:
+ *   - `isIndex` — true for multi-arch indexes (`vnd.oci.image.index`
+ *     or Docker `manifest.list`); false for single-platform manifests.
+ *   - `schemaVariant` — `'oci-v1'` for `vnd.oci.image.*`; `'docker-v2-2'`
+ *     for the Docker legacy types. Operators see the original media
+ *     type echoed back on GET via `Manifest.mediaType`; this field
+ *     exists so the catalog API can group rows by schema family.
+ */
+export interface OciManifestMetadata {
+  isIndex: boolean;
+  schemaVariant: "oci-v1" | "docker-v2-2";
+  /** Single-platform: config-blob digest (sha256:<hex>). */
+  configDigest?: string;
+  configMediaType?: string;
+  layerDigests?: string[];
+  totalSize?: number;
+  /** Image-index only: child manifest summaries. */
+  childManifests?: Array<{
+    digest: string;
+    mediaType: string;
+    size: number;
+    platform?: {
+      architecture: string;
+      os: string;
+      variant?: string;
+    };
+  }>;
+  /** OCI 1.1 referrers extension — descriptor of the subject (if any). */
+  subjectDigest?: string;
+  /** OCI 1.1 artifact-type field on the manifest itself, if present. */
+  artifactType?: string;
+}
+
+/**
  * v0.1.1 (npm facade): npm-specific manifest metadata.
  *
  * Serialized into the manifest's `npmMetadata` field when
@@ -249,6 +291,12 @@ export interface Manifest {
    * Operator-signed content; absent for other kinds.
    */
   npmMetadata?: NpmManifestMetadata;
+  /**
+   * WS10 (v0.5 OCI facade): OCI-specific metadata when `kind === 'oci'`.
+   * Server-side projection of the operator-signed manifest body.
+   * Absent for other kinds.
+   */
+  ociMetadata?: OciManifestMetadata;
   /** ISO-8601 UTC timestamp when the manifest was first written. */
   createdAt: string;
 }

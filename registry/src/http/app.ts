@@ -52,6 +52,7 @@ import {
 } from "../npm/index.js";
 import { proxyNpmPackument, proxyNpmTarball } from "../npm/virtual.js";
 import { mountForensicRoutes } from "./forensic.js";
+import { mountOciRoutes, type MountedOciHandles } from "../oci/mount.js";
 
 const VERSION = "0.0.1";
 const DEFAULT_BLOB_MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5 GiB
@@ -82,6 +83,26 @@ export interface AppOptions {
    * a stub that returns pre-canned responses.
    */
   virtualUpstreamFetch?: UpstreamFetch;
+  /**
+   * WS10 (v0.5 OCI facade): inject the reaper cadence + upload TTL.
+   * Production callers take the defaults; tests pass shorter values.
+   */
+  ociReaperIntervalMs?: number;
+  ociUploadTtlSeconds?: number;
+  /** WS10: max chunk body cap for a single PATCH/PUT. Default 5 GiB. */
+  ociMaxChunkBytes?: number;
+  /**
+   * WS10: deterministic clock for tests. Threads through the upload
+   * store + reaper so timestamp assertions are stable.
+   */
+  ociNow?: () => Date;
+}
+
+export interface AppHandles {
+  /** Stop background tasks (currently: the OCI upload reaper). */
+  stopBackgroundTasks(): void;
+  /** Programmatically trigger one OCI reaper sweep. */
+  ociReaperSweep(): Promise<number>;
 }
 
 export function buildApp(opts: AppOptions): Router {
@@ -322,6 +343,43 @@ export function buildApp(opts: AppOptions): Router {
     index: idxStorage.index,
   });
 
+  // ── OCI Distribution Spec v1.1 facade (WS10) ───────────────────
+  //
+  // Mounts the /v2/* surface alongside the existing /v1/* surface.
+  // Requires the LocalFsBlobStore + SqliteManifestIndex to drive the
+  // chunked-upload state machine; storage backings that lack those
+  // (a future S3 driver) will need their own mount block.
+  let oci: MountedOciHandles | null = null;
+  if (idxStorage.blobStore && idxStorage.index) {
+    oci = mountOciRoutes(router, {
+      storage,
+      index: idxStorage.index,
+      blobStore: idxStorage.blobStore,
+      ...(opts.publicBaseUrl ? { publicBaseUrl: opts.publicBaseUrl } : {}),
+      ...(opts.ociReaperIntervalMs !== undefined
+        ? { reaperIntervalMs: opts.ociReaperIntervalMs }
+        : {}),
+      ...(opts.ociUploadTtlSeconds !== undefined
+        ? { uploadTtlSeconds: opts.ociUploadTtlSeconds }
+        : {}),
+      ...(opts.ociMaxChunkBytes !== undefined
+        ? { maxChunkBytes: opts.ociMaxChunkBytes }
+        : {}),
+      ...(opts.ociNow ? { now: opts.ociNow } : {}),
+    });
+  }
+
+  // Attach handles to the router for callers that want to drive the
+  // reaper or shut down the server cleanly. Type-fudged because Router
+  // is shared infra; this is a registry-specific extension.
+  const handles: AppHandles = {
+    stopBackgroundTasks(): void {
+      oci?.stop();
+    },
+    ociReaperSweep: async () => oci?.reaperSweep() ?? 0,
+  };
+  (router as Router & { handles: AppHandles }).handles = handles;
+
   return router;
 }
 
@@ -427,6 +485,13 @@ function parseManifestBody(
     obj.npmMetadata && typeof obj.npmMetadata === "object"
       ? (obj.npmMetadata as import("../types.js").NpmManifestMetadata)
       : undefined;
+  // WS10 (v0.5 OCI facade): the generic /v1/manifests PUT also accepts
+  // ociMetadata so an operator pushing an OCI manifest through the
+  // generic surface round-trips identically to the /v2/* path.
+  const ociMetadata =
+    obj.ociMetadata && typeof obj.ociMetadata === "object"
+      ? (obj.ociMetadata as import("../types.js").OciManifestMetadata)
+      : undefined;
   return {
     name: expectedName,
     version: expectedVersion,
@@ -437,6 +502,7 @@ function parseManifestBody(
     ...(signature ? { signature } : {}),
     ...(cargoMetadata ? { cargoMetadata } : {}),
     ...(npmMetadata ? { npmMetadata } : {}),
+    ...(ociMetadata ? { ociMetadata } : {}),
     createdAt,
   };
 }

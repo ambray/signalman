@@ -19,7 +19,7 @@ import { mapError } from "./errors.js";
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
 const DEFAULT_STREAM_BODY_MAX = 1024 * 1024 * 1024;
 
-export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+export type HttpMethod = "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 /**
  * Auth context attached to every authenticated request. `tokenPrefix`
@@ -116,6 +116,9 @@ export class Router {
 
   get(path: string, handler: RouteHandler, options?: RouteOptions): void {
     this.route("GET", path, handler, options);
+  }
+  head(path: string, handler: RouteHandler, options?: RouteOptions): void {
+    this.route("HEAD", path, handler, options);
   }
   post(path: string, handler: RouteHandler, options?: RouteOptions): void {
     this.route("POST", path, handler, options);

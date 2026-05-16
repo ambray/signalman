@@ -1,8 +1,13 @@
 /**
  * Vitest coverage configuration for `@signalman/registry`.
  *
- * Coverage policy (per WS5 milestone Definition of Done):
- *   lines ≥ 80, statements ≥ 80, functions ≥ 80, branches ≥ 70.
+ * Coverage policy:
+ *   - Repo-wide: lines / statements / functions >= 80, branches >= 70
+ *     (the v0.4.0 / wave-3 gate; some legacy modules sit just above 70
+ *     on branches).
+ *   - WS10 (v0.5 OCI facade) scope, registry/src/oci/**: tighter
+ *     80/80/80/80 per the WS10 Definition of Done locked 2026-05-16.
+ *     Per-glob thresholds override the global numbers.
  *
  * Excludes mirror host's: test fixtures, compiled output, type-only
  * declarations, install scripts, generated barrels, and orchestration
@@ -20,6 +25,12 @@ export default defineConfig({
         functions: 80,
         branches: 70,
         statements: 80,
+        "src/oci/**/*.ts": {
+          lines: 80,
+          functions: 80,
+          branches: 80,
+          statements: 80,
+        },
       },
       exclude: [
         "**/__tests__/**",
