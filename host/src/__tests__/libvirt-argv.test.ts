@@ -376,7 +376,7 @@ describe("LibvirtBackend argv composition", () => {
     expect(calls[0].args).toEqual(["list", "--all", "--name"]);
   });
 
-  it("getVmIpAddress shells `domifaddr <name>` and parses the IPv4 column", async () => {
+  it("getVmIpAddress shells `domifaddr <name> --source lease` first and parses the IPv4 column", async () => {
     const { backend, calls } = makeBackend({
       stdout:
         " Name       MAC address          Protocol     Address\n" +
@@ -384,8 +384,16 @@ describe("LibvirtBackend argv composition", () => {
         " vnet0      52:54:00:8e:5b:c1    ipv4         10.0.0.7/24\n",
     });
     const ip = await backend.getVmIpAddress(HANDLE);
-    expect(calls[0].args).toEqual(["domifaddr", "vm-alpha"]);
+    expect(calls[0].args).toEqual([
+      "domifaddr",
+      "vm-alpha",
+      "--source",
+      "lease",
+    ]);
     expect(ip).toBe("10.0.0.7");
+    // First source returned a usable IP, so the backend short-circuits
+    // — there should be no follow-up to `agent` or `arp`.
+    expect(calls).toHaveLength(1);
   });
 
   it("isAvailable shells `version --daemon` with a short timeout", async () => {

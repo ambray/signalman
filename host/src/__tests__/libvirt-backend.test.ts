@@ -90,16 +90,53 @@ describe("LibvirtBackend integration", () => {
     expect(vms.every((v) => v.backend === "libvirt")).toBe(true);
   });
 
-  it("getStatus returns running + IPv4 when a lease exists", async () => {
-    const backend = makeStubBackend({
-      domstate: { stdout: fixtures.domstateRunning },
-      domifaddr: { stdout: fixtures.domifaddr },
+  it("getStatus returns running + IPv4 + reachable QGA when guest-ping succeeds", async () => {
+    // Use a custom exec instead of makeStubBackend: the verb-dispatch
+    // helper folds all qemu-* args away when finding the verb, so it
+    // can't distinguish qemu-agent-command from a regular virsh verb.
+    const backend = new LibvirtBackend({
+      exec: async (args) => {
+        const verb = args[0];
+        if (verb === "domstate") {
+          return { stdout: fixtures.domstateRunning, stderr: "", exitCode: 0 };
+        }
+        if (verb === "domifaddr") {
+          return { stdout: fixtures.domifaddr, stderr: "", exitCode: 0 };
+        }
+        if (verb === "qemu-agent-command") {
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
     });
     const status = await backend.getStatus(HANDLE);
     expect(status.state).toBe("running");
     expect(status.ipAddress).toBe("192.168.122.42");
-    // guestAgentReachable stays false until the orchestrator runs the
-    // gRPC health probe — that's not the backend's job.
+    expect(status.guestAgentReachable).toBe(true);
+  });
+
+  it("getStatus reports guestAgentReachable=false when guest-ping errors", async () => {
+    const backend = new LibvirtBackend({
+      exec: async (args) => {
+        const verb = args[0];
+        if (verb === "domstate") {
+          return { stdout: fixtures.domstateRunning, stderr: "", exitCode: 0 };
+        }
+        if (verb === "domifaddr") {
+          return { stdout: fixtures.domifaddr, stderr: "", exitCode: 0 };
+        }
+        if (verb === "qemu-agent-command") {
+          return {
+            stdout: "",
+            stderr: "error: Guest agent is not responding",
+            exitCode: 1,
+          };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    });
+    const status = await backend.getStatus(HANDLE);
+    expect(status.state).toBe("running");
     expect(status.guestAgentReachable).toBe(false);
   });
 
@@ -111,6 +148,53 @@ describe("LibvirtBackend integration", () => {
     const status = await backend.getStatus(HANDLE);
     expect(status.state).toBe("running");
     expect(status.ipAddress).toBeUndefined();
+  });
+
+  it("getVmIpAddress falls back from lease to agent when lease has no IPv4", async () => {
+    // The default makeStubBackend keys responses by verb — both calls
+    // hit the `domifaddr` verb. Use a custom exec that distinguishes
+    // by the `--source` flag value so we can hand the agent path a
+    // valid lease while the lease path returns empty.
+    const calls: string[] = [];
+    const backend = new LibvirtBackend({
+      exec: async (args) => {
+        const source = args[args.indexOf("--source") + 1];
+        calls.push(source);
+        if (source === "lease") {
+          return { stdout: "Name   MAC   Protocol   Address\n----\n", stderr: "", exitCode: 0 };
+        }
+        if (source === "agent") {
+          return {
+            stdout:
+              " Name       MAC address          Protocol     Address\n" +
+              "-------------------------------------------------------------------------------\n" +
+              " ens3       52:54:00:aa:bb:cc    ipv4         10.0.0.99/24\n",
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        // arp branch wouldn't be hit in the success case
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    });
+    const ip = await backend.getVmIpAddress(HANDLE);
+    expect(ip).toBe("10.0.0.99");
+    expect(calls).toEqual(["lease", "agent"]);
+  });
+
+  it("getVmIpAddress throws network_unavailable when all three sources fail", async () => {
+    const calls: string[] = [];
+    const backend = new LibvirtBackend({
+      exec: async (args) => {
+        const source = args[args.indexOf("--source") + 1];
+        calls.push(source);
+        return { stdout: "", stderr: "no addresses", exitCode: 1 };
+      },
+    });
+    await expect(backend.getVmIpAddress(HANDLE)).rejects.toMatchObject({
+      code: "network_unavailable",
+    });
+    expect(calls).toEqual(["lease", "agent", "arp"]);
   });
 
   it("listCheckpoints parses every fixture row", async () => {

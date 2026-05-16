@@ -730,6 +730,7 @@ export class LibvirtBackend implements HypervisorBackend {
     }
     const state = parseDomState(result.stdout);
     let ipAddress: string | undefined;
+    let guestAgentReachable = false;
     if (state === "running") {
       try {
         const ip = await this.getVmIpAddress(handle);
@@ -737,12 +738,17 @@ export class LibvirtBackend implements HypervisorBackend {
       } catch {
         // No IPv4 lease yet — non-fatal; caller may poll again later.
       }
+      // Probe the QGA channel directly. Cheap (`guest-ping` returns
+      // immediately) and replaces the previous always-false default
+      // so the orchestrator's parallel guest-readiness waits can
+      // actually succeed on libvirt.
+      guestAgentReachable = await this.qgaPing(name);
     }
     return {
       handle,
       state,
       ipAddress,
-      guestAgentReachable: false,
+      guestAgentReachable,
     };
   }
 
@@ -1007,6 +1013,29 @@ export class LibvirtBackend implements HypervisorBackend {
     }
   }
 
+  /**
+   * Probe the qemu-guest-agent channel via `guest-ping`. Returns
+   * `true` when the agent answered, `false` for any failure mode
+   * (channel not wired, agent down, RPC timeout, parse error).
+   * Used by {@link getStatus} to populate `guestAgentReachable`
+   * without throwing — the caller wants a boolean, not an exception.
+   */
+  private async qgaPing(vmName: string): Promise<boolean> {
+    try {
+      const result = await this.run(
+        [
+          "qemu-agent-command",
+          vmName,
+          JSON.stringify({ execute: "guest-ping" }),
+        ],
+        { timeoutMs: VIRSH_DEFAULT_TIMEOUT_MS },
+      );
+      return result.exitCode === 0;
+    } catch {
+      return false;
+    }
+  }
+
   /** Submit a `guest-file-close`. Throws `copy_failed` on failure. */
   private async qgaFileClose(vmName: string, fileHandle: number): Promise<void> {
     const payload = JSON.stringify({
@@ -1134,21 +1163,39 @@ export class LibvirtBackend implements HypervisorBackend {
 
   async getVmIpAddress(handle: VMHandle): Promise<string> {
     const name = sanitizeVmName(handle.name);
-    const result = await this.run(["domifaddr", name]);
-    if (result.exitCode !== 0) {
-      throw new LibvirtBackendError(
-        "network_unavailable",
-        `virsh domifaddr failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+    // Try sources in increasing order of operator-disruption cost:
+    //   1. lease  — libvirt's own DHCP record; instant, only works
+    //               for VMs on libvirt-managed networks (typical
+    //               `default` virbr0).
+    //   2. agent  — asks qemu-guest-agent over the virtio channel;
+    //               works for static-IP VMs but requires QGA to be
+    //               installed and the channel to be wired.
+    //   3. arp    — sniffs the host ARP table; works for bridged
+    //               VMs but only after some traffic has flowed.
+    //
+    // We surface the first IPv4 from any source. Each source error is
+    // suppressed so the next can try; only when all three return no
+    // IPv4 do we throw network_unavailable.
+    const sources = ["lease", "agent", "arp"] as const;
+    for (const source of sources) {
+      const result = await this.run(
+        ["domifaddr", name, "--source", source],
+        { timeoutMs: VIRSH_DEFAULT_TIMEOUT_MS },
       );
+      if (result.exitCode !== 0) {
+        // virsh non-zero on this source — try the next one. The most
+        // common case here is `--source agent` against a VM without
+        // qemu-guest-agent; that's not a real error, just "no answer
+        // from this source."
+        continue;
+      }
+      const ip = parseDomIfAddrIpv4(result.stdout);
+      if (ip) return ip;
     }
-    const ip = parseDomIfAddrIpv4(result.stdout);
-    if (!ip) {
-      throw new LibvirtBackendError(
-        "network_unavailable",
-        `no IPv4 lease reported for domain '${name}'`,
-      );
-    }
-    return ip;
+    throw new LibvirtBackendError(
+      "network_unavailable",
+      `no IPv4 address reported for domain '${name}' from any source (lease/agent/arp)`,
+    );
   }
 
 }
