@@ -94,6 +94,7 @@ import {
   runAuditAppend,
 } from "./verbs/control-plane.js";
 import { runSchedulerTick, startScheduler } from "./control-plane/scheduler/index.js";
+import { versionLine } from "./version.js";
 // PR 6 — `signalman serve` HTTP control plane.
 // PR 7 — `signalman api-key create`.
 // PR 8 — `signalman runner register/start`, `release build --remote`.
@@ -4598,6 +4599,10 @@ async function main(argv: string[]): Promise<number> {
     printHelp();
     return 0;
   }
+  if (argv[0] === "--version" || argv[0] === "-V") {
+    process.stdout.write(versionLine());
+    return 0;
+  }
   const [verb, ...rest] = argv;
   const args = parseArgs(rest);
 
@@ -4686,6 +4691,8 @@ function printHelp(): void {
   process.stdout.write(
     [
       "Usage: signalman <verb> [options]",
+      "       signalman --version",
+      "       signalman --help",
       "",
       "Verbs:",
       "  init [--name PROJECT] [--force] [--bootstrap] [--format json]",
