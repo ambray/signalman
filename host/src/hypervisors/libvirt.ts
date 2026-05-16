@@ -84,6 +84,17 @@ export const VIRSH_DEFAULT_TIMEOUT_MS = 30_000;
 /** Longer timeout for lifecycle ops that wait on the libvirt daemon. */
 export const VIRSH_LIFECYCLE_TIMEOUT_MS = 5 * 60_000;
 
+/**
+ * Initial backoff for the `guest-exec-status` poll loop. Most guest
+ * commands complete inside the first poll; the loop grows quickly
+ * past this baseline for longer-running commands to avoid hammering
+ * the QGA channel.
+ */
+export const QGA_POLL_INITIAL_MS = 50;
+
+/** Upper bound on `guest-exec-status` poll interval. */
+export const QGA_POLL_MAX_MS = 1_000;
+
 // ── Types ───────────────────────────────────────────────────────────
 
 /**
@@ -318,6 +329,117 @@ export function parseSnapshotList(raw: string): CheckpointInfo[] {
     });
   }
   return out;
+}
+
+/**
+ * Parse the JSON envelope returned by `virsh qemu-agent-command` for
+ * a `guest-exec` submit call.
+ *
+ * QGA shape: `{"return":{"pid":N}}`. Throws when the payload is
+ * malformed or the PID is missing — guest-exec without a pid is a
+ * QGA-side bug, not a network blip, so we surface it as a hard
+ * `command_failed` upstream.
+ *
+ * Exported so unit tests can hit the parser without a backend.
+ */
+export function parseGuestExecPid(raw: string): number {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `qemu-guest-agent guest-exec response was not valid JSON: ${(err as Error).message}`,
+    );
+  }
+  const ret = (parsed as { return?: { pid?: unknown } }).return;
+  const pid = ret?.pid;
+  if (typeof pid !== "number" || !Number.isFinite(pid)) {
+    throw new Error(
+      `qemu-guest-agent guest-exec response did not carry a numeric pid: ${raw}`,
+    );
+  }
+  return pid;
+}
+
+/**
+ * Parsed shape for a single `guest-exec-status` poll response.
+ *
+ * - `exited` mirrors QGA's terminal flag.
+ * - `exitcode` is present when `exited === true` AND the guest
+ *   reported one (QGA returns it for normal exits).
+ * - `signal` is set for processes killed by a signal (mutually
+ *   exclusive with `exitcode`).
+ * - `outData` / `errData` are the base64-decoded stdout/stderr bytes
+ *   captured by QGA. May be `undefined` when the guest wrote nothing.
+ * - `outTruncated` / `errTruncated` mirror QGA's overflow flags; the
+ *   backend logs a warning but does not error when they are set,
+ *   since truncation is a guest-side decision.
+ */
+export interface GuestExecStatus {
+  exited: boolean;
+  exitcode?: number;
+  signal?: number;
+  outData?: string;
+  errData?: string;
+  outTruncated?: boolean;
+  errTruncated?: boolean;
+}
+
+/**
+ * Parse the JSON envelope returned by `virsh qemu-agent-command` for
+ * a `guest-exec-status` poll call. Decodes the base64 `out-data` /
+ * `err-data` payloads using `Buffer.from(..., "base64").toString()`.
+ *
+ * Exported so unit tests can verify the base64 decode + field
+ * mapping without going through the backend.
+ */
+export function parseGuestExecStatus(raw: string): GuestExecStatus {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `qemu-guest-agent guest-exec-status response was not valid JSON: ${(err as Error).message}`,
+    );
+  }
+  const ret = (parsed as {
+    return?: {
+      exited?: unknown;
+      exitcode?: unknown;
+      signal?: unknown;
+      "out-data"?: unknown;
+      "err-data"?: unknown;
+      "out-truncated"?: unknown;
+      "err-truncated"?: unknown;
+    };
+  }).return;
+  if (!ret || typeof ret !== "object") {
+    throw new Error(
+      `qemu-guest-agent guest-exec-status response missing return body: ${raw}`,
+    );
+  }
+  const exited = ret.exited === true;
+  const status: GuestExecStatus = { exited };
+  if (typeof ret.exitcode === "number") status.exitcode = ret.exitcode;
+  if (typeof ret.signal === "number") status.signal = ret.signal;
+  if (typeof ret["out-data"] === "string") {
+    status.outData = Buffer.from(ret["out-data"], "base64").toString("utf8");
+  }
+  if (typeof ret["err-data"] === "string") {
+    status.errData = Buffer.from(ret["err-data"], "base64").toString("utf8");
+  }
+  if (ret["out-truncated"] === true) status.outTruncated = true;
+  if (ret["err-truncated"] === true) status.errTruncated = true;
+  return status;
+}
+
+/**
+ * Promise-based sleep used by the `guest-exec-status` poll loop.
+ * Kept module-local rather than imported from a util module so the
+ * backend stays standalone.
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -686,10 +808,10 @@ export class LibvirtBackend implements HypervisorBackend {
     }
     const safeTimeout = timeoutMs ?? VIRSH_DEFAULT_TIMEOUT_MS;
     const start = Date.now();
-    // qemu-guest-agent `guest-exec` JSON payload. We surface the full
-    // exec interface so callers can pass argv arrays without shell
-    // interpretation in the VM.
-    const payload = JSON.stringify({
+    const deadline = start + safeTimeout;
+
+    // Submit: guest-exec hands the guest a pid we can poll on.
+    const submitPayload = JSON.stringify({
       execute: "guest-exec",
       arguments: {
         path: command,
@@ -697,26 +819,81 @@ export class LibvirtBackend implements HypervisorBackend {
         "capture-output": true,
       },
     });
-    const result = await this.run(
-      ["qemu-agent-command", name, payload],
+    const submitResult = await this.run(
+      ["qemu-agent-command", name, submitPayload],
       { timeoutMs: safeTimeout },
     );
-    if (result.exitCode !== 0) {
+    if (submitResult.exitCode !== 0) {
       throw new LibvirtBackendError(
         "command_failed",
-        `guest-exec failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+        `guest-exec submit failed (exit ${submitResult.exitCode}): ${submitResult.stderr.trim()}`,
       );
     }
-    // qemu-agent returns JSON: { return: { pid: N } }. The orchestrator
-    // polls `guest-exec-status` for the terminal result; in this
-    // milestone we treat a successful submit as success and surface
-    // the agent's JSON in `stdout` for the caller to parse.
-    return {
-      exitCode: 0,
-      stdout: result.stdout,
-      stderr: result.stderr,
-      durationMs: Date.now() - start,
-    };
+    let pid: number;
+    try {
+      pid = parseGuestExecPid(submitResult.stdout);
+    } catch (err) {
+      throw new LibvirtBackendError(
+        "command_failed",
+        `guest-exec submit returned an unparseable response: ${(err as Error).message}`,
+        err,
+      );
+    }
+
+    // Poll: guest-exec-status until exited === true or the caller's
+    // deadline expires. Exponential backoff caps at QGA_POLL_MAX_MS so
+    // we never hammer the QGA channel on long-running commands.
+    let pollInterval = QGA_POLL_INITIAL_MS;
+    const statusPayload = JSON.stringify({
+      execute: "guest-exec-status",
+      arguments: { pid },
+    });
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new LibvirtBackendError(
+          "command_failed",
+          `guest-exec timed out waiting for pid ${pid} to exit after ${safeTimeout}ms`,
+        );
+      }
+      await sleep(Math.min(pollInterval, remaining));
+      pollInterval = Math.min(pollInterval * 2, QGA_POLL_MAX_MS);
+
+      const statusResult = await this.run(
+        ["qemu-agent-command", name, statusPayload],
+        { timeoutMs: VIRSH_DEFAULT_TIMEOUT_MS },
+      );
+      if (statusResult.exitCode !== 0) {
+        throw new LibvirtBackendError(
+          "command_failed",
+          `guest-exec-status failed (exit ${statusResult.exitCode}): ${statusResult.stderr.trim()}`,
+        );
+      }
+      let status: GuestExecStatus;
+      try {
+        status = parseGuestExecStatus(statusResult.stdout);
+      } catch (err) {
+        throw new LibvirtBackendError(
+          "command_failed",
+          `guest-exec-status returned an unparseable response: ${(err as Error).message}`,
+          err,
+        );
+      }
+      if (!status.exited) continue;
+      // Terminal: the guest signalled or exited normally. QGA reports
+      // `signal` for signal-killed processes and `exitcode` for normal
+      // exits. We map "killed by signal N" to exit code 128+N (the
+      // shell convention) so callers don't need to know about the QGA
+      // signal field to detect failure.
+      const exitCode =
+        status.exitcode ?? (status.signal !== undefined ? 128 + status.signal : 0);
+      return {
+        exitCode,
+        stdout: status.outData ?? "",
+        stderr: status.errData ?? "",
+        durationMs: Date.now() - start,
+      };
+    }
   }
 
   // ── Extended Operations ───────────────────────────────────────

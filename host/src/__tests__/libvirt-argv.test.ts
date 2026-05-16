@@ -14,7 +14,16 @@
 
 import { describe, it, expect } from "vitest";
 
-import { LibvirtBackend, buildArgv, parseDomState, parseDomainList, parseDomIfAddrIpv4, parseSnapshotList } from "../hypervisors/libvirt.js";
+import {
+  LibvirtBackend,
+  buildArgv,
+  parseDomState,
+  parseDomainList,
+  parseDomIfAddrIpv4,
+  parseSnapshotList,
+  parseGuestExecPid,
+  parseGuestExecStatus,
+} from "../hypervisors/libvirt.js";
 
 interface ExecCall {
   args: string[];
@@ -177,6 +186,76 @@ describe("parseSnapshotList", () => {
     const out = parseSnapshotList(raw);
     expect(out).toHaveLength(1);
     expect(out[0].createdAt.getTime()).toBe(0);
+  });
+});
+
+describe("parseGuestExecPid", () => {
+  it("extracts the numeric pid from a QGA submit envelope", () => {
+    expect(parseGuestExecPid('{"return":{"pid":1234}}')).toBe(1234);
+  });
+
+  it("throws when the payload is not valid JSON", () => {
+    expect(() => parseGuestExecPid("not-json")).toThrow(/not valid JSON/);
+  });
+
+  it("throws when the pid field is missing or non-numeric", () => {
+    expect(() => parseGuestExecPid('{"return":{}}')).toThrow(/numeric pid/);
+    expect(() => parseGuestExecPid('{"return":{"pid":"42"}}')).toThrow(
+      /numeric pid/,
+    );
+  });
+});
+
+describe("parseGuestExecStatus", () => {
+  it("decodes base64 out-data and err-data into utf8 strings", () => {
+    const out = Buffer.from("hello world\n").toString("base64");
+    const err = Buffer.from("oops\n").toString("base64");
+    const status = parseGuestExecStatus(
+      JSON.stringify({
+        return: {
+          exited: true,
+          exitcode: 0,
+          "out-data": out,
+          "err-data": err,
+        },
+      }),
+    );
+    expect(status.exited).toBe(true);
+    expect(status.exitcode).toBe(0);
+    expect(status.outData).toBe("hello world\n");
+    expect(status.errData).toBe("oops\n");
+  });
+
+  it("returns exited=false without exitcode while the guest is still running", () => {
+    const status = parseGuestExecStatus('{"return":{"exited":false}}');
+    expect(status.exited).toBe(false);
+    expect(status.exitcode).toBeUndefined();
+    expect(status.signal).toBeUndefined();
+  });
+
+  it("surfaces the signal field when the guest process was killed", () => {
+    const status = parseGuestExecStatus(
+      '{"return":{"exited":true,"signal":9}}',
+    );
+    expect(status.exited).toBe(true);
+    expect(status.signal).toBe(9);
+    expect(status.exitcode).toBeUndefined();
+  });
+
+  it("surfaces the truncated flags when QGA reports buffer overflow", () => {
+    const status = parseGuestExecStatus(
+      '{"return":{"exited":true,"exitcode":0,"out-truncated":true,"err-truncated":true}}',
+    );
+    expect(status.outTruncated).toBe(true);
+    expect(status.errTruncated).toBe(true);
+  });
+
+  it("throws when the payload is not valid JSON", () => {
+    expect(() => parseGuestExecStatus("not-json")).toThrow(/not valid JSON/);
+  });
+
+  it("throws when the return body is missing", () => {
+    expect(() => parseGuestExecStatus("{}")).toThrow(/missing return body/);
   });
 });
 

@@ -185,20 +185,127 @@ describe("LibvirtBackend integration", () => {
     ).rejects.toMatchObject({ code: "unsupported_operation" });
   });
 
-  it("executeCommand passes the qemu-agent JSON envelope verbatim", async () => {
-    let captured = "";
+  it("executeCommand submits guest-exec then polls guest-exec-status until exited", async () => {
+    // QGA submit returns a pid; the first poll says the guest is
+    // still running; the second poll signals terminal completion
+    // with base64-encoded stdout + stderr. The backend must round-trip
+    // both: real exitCode from the guest, real decoded stdout/stderr.
+    const out = Buffer.from("hello\n").toString("base64");
+    const err = Buffer.from("warn line\n").toString("base64");
+    const calls: { execute: string; pid?: number }[] = [];
+    let pollCount = 0;
     const backend = new LibvirtBackend({
       exec: async (args) => {
-        captured = args[args.length - 1];
-        return { stdout: '{"return":{"pid":42}}', stderr: "", exitCode: 0 };
+        const payload = JSON.parse(args[args.length - 1]) as {
+          execute: string;
+          arguments?: { pid?: number };
+        };
+        calls.push({ execute: payload.execute, pid: payload.arguments?.pid });
+        if (payload.execute === "guest-exec") {
+          return { stdout: '{"return":{"pid":42}}', stderr: "", exitCode: 0 };
+        }
+        pollCount += 1;
+        if (pollCount === 1) {
+          return {
+            stdout: '{"return":{"exited":false}}',
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        return {
+          stdout: JSON.stringify({
+            return: {
+              exited: true,
+              exitcode: 7,
+              "out-data": out,
+              "err-data": err,
+            },
+          }),
+          stderr: "",
+          exitCode: 0,
+        };
       },
     });
-    const result = await backend.executeCommand(HANDLE, "/bin/echo", ["hello"]);
-    const payload = JSON.parse(captured);
-    expect(payload.execute).toBe("guest-exec");
-    expect(payload.arguments.path).toBe("/bin/echo");
-    expect(payload.arguments.arg).toEqual(["hello"]);
-    expect(result.exitCode).toBe(0);
+    const result = await backend.executeCommand(HANDLE, "/bin/echo", ["hi"]);
+    expect(result.exitCode).toBe(7);
+    expect(result.stdout).toBe("hello\n");
+    expect(result.stderr).toBe("warn line\n");
+    expect(result.durationMs).toBeGreaterThanOrEqual(0);
+    // First call submits, the remainder poll on the returned pid.
+    expect(calls[0]).toEqual({ execute: "guest-exec", pid: undefined });
+    expect(calls.slice(1).every((c) => c.execute === "guest-exec-status")).toBe(true);
+    expect(calls.slice(1).every((c) => c.pid === 42)).toBe(true);
+  });
+
+  it("executeCommand maps signal-killed processes to 128+signal", async () => {
+    // QGA reports either `exitcode` (normal exit) or `signal` (killed).
+    // We translate signal-killed processes to the shell-convention
+    // 128 + signum so callers don't need to introspect the QGA field.
+    const backend = new LibvirtBackend({
+      exec: async (args) => {
+        const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+        if (payload.execute === "guest-exec") {
+          return { stdout: '{"return":{"pid":9}}', stderr: "", exitCode: 0 };
+        }
+        return {
+          stdout: '{"return":{"exited":true,"signal":15}}',
+          stderr: "",
+          exitCode: 0,
+        };
+      },
+    });
+    const result = await backend.executeCommand(HANDLE, "/bin/sleep", ["10"]);
+    expect(result.exitCode).toBe(143); // 128 + SIGTERM(15)
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
+  });
+
+  it("executeCommand surfaces command_failed when the submit RPC errors", async () => {
+    const backend = new LibvirtBackend({
+      exec: async () => ({
+        stdout: "",
+        stderr: "error: argument --domain is required for command 'qemu-agent-command'",
+        exitCode: 1,
+      }),
+    });
+    await expect(
+      backend.executeCommand(HANDLE, "/bin/true"),
+    ).rejects.toMatchObject({ code: "command_failed" });
+  });
+
+  it("executeCommand surfaces command_failed when the deadline expires before exit", async () => {
+    // Guest never reports `exited: true`. Backend's poll loop must
+    // give up at the caller's timeout and throw command_failed rather
+    // than spin forever.
+    const backend = new LibvirtBackend({
+      exec: async (args) => {
+        const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+        if (payload.execute === "guest-exec") {
+          return { stdout: '{"return":{"pid":3}}', stderr: "", exitCode: 0 };
+        }
+        return {
+          stdout: '{"return":{"exited":false}}',
+          stderr: "",
+          exitCode: 0,
+        };
+      },
+    });
+    await expect(
+      backend.executeCommand(HANDLE, "/bin/sleep", ["999"], 200),
+    ).rejects.toMatchObject({ code: "command_failed" });
+  });
+
+  it("executeCommand surfaces command_failed when QGA returns an unparseable submit response", async () => {
+    const backend = new LibvirtBackend({
+      exec: async () => ({
+        stdout: '{"return":{"not-a-pid":true}}',
+        stderr: "",
+        exitCode: 0,
+      }),
+    });
+    await expect(
+      backend.executeCommand(HANDLE, "/bin/true"),
+    ).rejects.toMatchObject({ code: "command_failed" });
   });
 
   it("executeCommand rejects empty commands with invalid_argument", async () => {
