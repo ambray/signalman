@@ -268,11 +268,200 @@ describe("LibvirtBackend integration", () => {
     });
   });
 
-  it("createVM is unsupported_operation pending the v0.4.1 XML builder", async () => {
-    const backend = makeStubBackend({});
-    await expect(
-      backend.createVM({ name: "vm-new" }),
-    ).rejects.toMatchObject({ code: "unsupported_operation" });
+  describe("createVM", () => {
+    const POOL_XML =
+      "<pool type='dir'>\n" +
+      "  <name>default</name>\n" +
+      "  <target><path>/var/lib/libvirt/images</path></target>\n" +
+      "</pool>";
+    type VirshCall = { args: string[] };
+    type QemuImgCall = { args: string[] };
+    function buildCreateBackend(opts: {
+      virshResponses?: Partial<Record<string, { stdout?: string; stderr?: string; exitCode?: number }>>;
+      qemuImgResult?: { stdout?: string; stderr?: string; exitCode?: number };
+    }) {
+      const virshCalls: VirshCall[] = [];
+      const qemuImgCalls: QemuImgCall[] = [];
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          virshCalls.push({ args });
+          const verb = args[0];
+          const r = opts.virshResponses?.[verb];
+          return {
+            stdout: r?.stdout ?? "",
+            stderr: r?.stderr ?? "",
+            exitCode: r?.exitCode ?? 0,
+          };
+        },
+        qemuImgExec: async (args) => {
+          qemuImgCalls.push({ args });
+          return {
+            stdout: opts.qemuImgResult?.stdout ?? "",
+            stderr: opts.qemuImgResult?.stderr ?? "",
+            exitCode: opts.qemuImgResult?.exitCode ?? 0,
+          };
+        },
+      });
+      return { backend, virshCalls, qemuImgCalls };
+    }
+
+    it("resolves the pool, calls qemu-img with backing file, then virsh define", async () => {
+      const { backend, virshCalls, qemuImgCalls } = buildCreateBackend({
+        virshResponses: {
+          "pool-dumpxml": { stdout: POOL_XML },
+        },
+      });
+      const handle = await backend.createVM({
+        name: "vm-new",
+        template: "/var/lib/libvirt/templates/ubuntu-noble.qcow2",
+        memoryMB: 4096,
+        cpus: 4,
+      });
+      expect(handle).toEqual({
+        id: "vm-new",
+        name: "vm-new",
+        backend: "libvirt",
+      });
+      expect(virshCalls[0].args).toEqual(["pool-dumpxml", "default"]);
+      expect(qemuImgCalls[0].args).toEqual([
+        "create",
+        "-f",
+        "qcow2",
+        "-F",
+        "qcow2",
+        "-b",
+        "/var/lib/libvirt/templates/ubuntu-noble.qcow2",
+        "/var/lib/libvirt/images/vm-new.qcow2",
+      ]);
+      const defineCall = virshCalls.find((c) => c.args[0] === "define");
+      expect(defineCall).toBeDefined();
+      expect(defineCall!.args.length).toBe(2);
+      expect(path.isAbsolute(defineCall!.args[1])).toBe(true);
+    });
+
+    it("rejects when config.template is missing", async () => {
+      const { backend } = buildCreateBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL_XML } },
+      });
+      await expect(
+        backend.createVM({ name: "vm-new" }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+    });
+
+    it("rejects a template path that isn't absolute", async () => {
+      const { backend } = buildCreateBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL_XML } },
+      });
+      await expect(
+        backend.createVM({
+          name: "vm-new",
+          template: "relative/path.qcow2",
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+    });
+
+    it("rejects out-of-range memory or cpus with invalid_argument", async () => {
+      const { backend } = buildCreateBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL_XML } },
+      });
+      await expect(
+        backend.createVM({
+          name: "vm-new",
+          template: "/abs/tpl.qcow2",
+          memoryMB: 0,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+      await expect(
+        backend.createVM({
+          name: "vm-new",
+          template: "/abs/tpl.qcow2",
+          cpus: 999,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+    });
+
+    it("surfaces invalid_argument with a copy-pasteable repair hint when the pool is missing", async () => {
+      const { backend } = buildCreateBackend({
+        virshResponses: {
+          "pool-dumpxml": {
+            stderr: "error: failed to get pool 'default'",
+            exitCode: 1,
+          },
+        },
+      });
+      await expect(
+        backend.createVM({
+          name: "vm-new",
+          template: "/abs/tpl.qcow2",
+        }),
+      ).rejects.toMatchObject({
+        code: "invalid_argument",
+        message: expect.stringContaining("virsh pool-define-as default"),
+      });
+    });
+
+    it("surfaces command_failed when qemu-img create fails", async () => {
+      const { backend } = buildCreateBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL_XML } },
+        qemuImgResult: {
+          stderr: "qemu-img: Could not open backing file",
+          exitCode: 1,
+        },
+      });
+      await expect(
+        backend.createVM({
+          name: "vm-new",
+          template: "/abs/tpl.qcow2",
+        }),
+      ).rejects.toMatchObject({ code: "command_failed" });
+    });
+
+    it("surfaces command_failed when virsh define fails", async () => {
+      const { backend } = buildCreateBackend({
+        virshResponses: {
+          "pool-dumpxml": { stdout: POOL_XML },
+          define: {
+            stderr: "error: Failed to define domain from /tmp/foo.xml",
+            exitCode: 1,
+          },
+        },
+      });
+      await expect(
+        backend.createVM({
+          name: "vm-new",
+          template: "/abs/tpl.qcow2",
+        }),
+      ).rejects.toMatchObject({ code: "command_failed" });
+    });
+
+    it("honors a custom storagePool option", async () => {
+      const calls: VirshCall[] = [];
+      const qcalls: QemuImgCall[] = [];
+      const backend = new LibvirtBackend({
+        storagePool: "ssd-pool",
+        exec: async (args) => {
+          calls.push({ args });
+          if (args[0] === "pool-dumpxml") {
+            return {
+              stdout:
+                "<pool><target><path>/mnt/ssd/images</path></target></pool>",
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+        qemuImgExec: async (args) => {
+          qcalls.push({ args });
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.createVM({ name: "vm-x", template: "/abs/tpl.qcow2" });
+      expect(calls[0].args).toEqual(["pool-dumpxml", "ssd-pool"]);
+      expect(qcalls[0].args[qcalls[0].args.length - 1]).toBe(
+        "/mnt/ssd/images/vm-x.qcow2",
+      );
+    });
   });
 
   it("executeCommand submits guest-exec then polls guest-exec-status until exited", async () => {

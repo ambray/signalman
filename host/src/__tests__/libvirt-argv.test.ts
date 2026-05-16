@@ -25,6 +25,8 @@ import {
   parseGuestExecStatus,
   parseGuestFileHandle,
   parseGuestFileRead,
+  parsePoolTargetPath,
+  buildDomainXml,
 } from "../hypervisors/libvirt.js";
 
 interface ExecCall {
@@ -300,6 +302,69 @@ describe("parseGuestFileRead", () => {
 
   it("throws when the return body is missing", () => {
     expect(() => parseGuestFileRead("{}")).toThrow(/missing return body/);
+  });
+});
+
+describe("parsePoolTargetPath", () => {
+  it("extracts the target path from a typical dir-pool dumpxml output", () => {
+    const xml =
+      "<pool type='dir'>\n" +
+      "  <name>default</name>\n" +
+      "  <target>\n" +
+      "    <path>/var/lib/libvirt/images</path>\n" +
+      "    <permissions><mode>0711</mode></permissions>\n" +
+      "  </target>\n" +
+      "</pool>\n";
+    expect(parsePoolTargetPath(xml)).toBe("/var/lib/libvirt/images");
+  });
+
+  it("returns null when the pool has no <target><path>", () => {
+    expect(parsePoolTargetPath("<pool type='iscsi'></pool>")).toBeNull();
+  });
+
+  it("trims surrounding whitespace from the path", () => {
+    const xml = "<pool><target><path>   /tmp/p   </path></target></pool>";
+    expect(parsePoolTargetPath(xml)).toBe("/tmp/p");
+  });
+});
+
+describe("buildDomainXml", () => {
+  it("renders a stable, opinionated domain XML for a minimal config", () => {
+    const xml = buildDomainXml({
+      name: "vm-test",
+      memoryMB: 2048,
+      cpus: 2,
+      diskPath: "/var/lib/libvirt/images/vm-test.qcow2",
+      networkName: "default",
+    });
+    expect(xml).toContain("<domain type='kvm'>");
+    expect(xml).toContain("<name>vm-test</name>");
+    expect(xml).toContain("<memory unit='MiB'>2048</memory>");
+    expect(xml).toContain("<currentMemory unit='MiB'>2048</currentMemory>");
+    expect(xml).toContain("<vcpu placement='static'>2</vcpu>");
+    expect(xml).toContain("<type arch='x86_64' machine='q35'>hvm</type>");
+    expect(xml).toContain("<cpu mode='host-passthrough'/>");
+    expect(xml).toContain(
+      "<source file='/var/lib/libvirt/images/vm-test.qcow2'/>",
+    );
+    expect(xml).toContain("<source network='default'/>");
+    expect(xml).toContain(
+      "<target type='virtio' name='org.qemu.guest_agent.0'/>",
+    );
+  });
+
+  it("XML-escapes name + paths + network so a stray special char can't break the XML", () => {
+    const xml = buildDomainXml({
+      name: "name&with<bad>",
+      memoryMB: 1024,
+      cpus: 1,
+      diskPath: "/path/with'apos.qcow2",
+      networkName: 'net"quote',
+    });
+    expect(xml).toContain("<name>name&amp;with&lt;bad&gt;</name>");
+    expect(xml).toContain("/path/with&apos;apos.qcow2");
+    expect(xml).toContain("net&quot;quote");
+    expect(xml).not.toMatch(/<name>name&with</);
   });
 });
 

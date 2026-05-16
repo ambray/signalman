@@ -58,6 +58,8 @@
 
 import { execFile as execFileCb } from "node:child_process";
 import * as fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 import type {
   CheckpointHandle,
@@ -78,6 +80,12 @@ const execFile = promisify(execFileCb);
 
 /** Default virsh binary lookup. Operators override via SIGNALMAN_VIRSH_BIN. */
 export const DEFAULT_VIRSH_BIN = "virsh";
+
+/** Default qemu-img binary used by `createVM` to build backing-file qcow2 disks. */
+export const DEFAULT_QEMU_IMG_BIN = "qemu-img";
+
+/** Default libvirt storage pool createVM writes its qcow2 disk into. */
+export const DEFAULT_STORAGE_POOL = "default";
 
 /** Default per-virsh-call timeout (most ops complete in <5s on healthy hosts). */
 export const VIRSH_DEFAULT_TIMEOUT_MS = 30_000;
@@ -187,6 +195,20 @@ export interface LibvirtBackendOptions {
   /** Path to the `virsh` binary. Defaults to {@link DEFAULT_VIRSH_BIN}. */
   virshPath?: string;
   /**
+   * Path to the `qemu-img` binary used by {@link LibvirtBackend.createVM}
+   * to create backing-file qcow2 disks. Defaults to
+   * {@link DEFAULT_QEMU_IMG_BIN}.
+   */
+  qemuImgPath?: string;
+  /**
+   * libvirt storage pool name. createVM writes its new qcow2 disk
+   * into this pool's target directory. Defaults to
+   * {@link DEFAULT_STORAGE_POOL} (`"default"`). Operators with
+   * non-default pools pass the pool name they want; the pool must
+   * exist and be active before createVM is called.
+   */
+  storagePool?: string;
+  /**
    * libvirt connection URI passed via `-c`. Defaults to the
    * libvirt-CLI default (`qemu:///system`).  Tests pass `test:///default`
    * to drive the deterministic in-memory test driver.
@@ -198,6 +220,15 @@ export interface LibvirtBackendOptions {
    * `node:child_process.execFile`.
    */
   exec?: LibvirtExec;
+  /**
+   * Optional separate injected exec for `qemu-img` calls. Production
+   * callers leave this undefined; the default spawns qemu-img via
+   * `node:child_process.execFile`. Kept distinct from {@link exec}
+   * because tests dispatch on which binary is being called, and
+   * mixing virsh + qemu-img into one mock complicates the test
+   * stubs that already exist for the other methods.
+   */
+  qemuImgExec?: LibvirtExec;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -452,6 +483,107 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Extract the storage-pool target directory from `virsh pool-dumpxml
+ * <name>` output. libvirt emits a stable XML envelope with a
+ * `<target><path>...</path></target>` block; we parse that path.
+ *
+ * Returns `null` when no `<target><path>` is present (rare — usually
+ * means the pool is of a type that doesn't have a filesystem path,
+ * like an iSCSI target).
+ *
+ * Exported for unit tests.
+ */
+export function parsePoolTargetPath(xml: string): string | null {
+  const m = xml.match(/<target>[\s\S]*?<path>\s*([^<]+?)\s*<\/path>[\s\S]*?<\/target>/);
+  if (!m) return null;
+  return m[1].trim();
+}
+
+/**
+ * Escape a string for safe inclusion in an XML text node or
+ * attribute value. We don't accept user input here — sanitizeVmName
+ * + sanitizePath already gate the values — but defense in depth
+ * costs nothing.
+ */
+function xmlEscape(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/** Options for {@link buildDomainXml}. All required — caller fills defaults. */
+export interface BuildDomainXmlOptions {
+  name: string;
+  memoryMB: number;
+  cpus: number;
+  diskPath: string;
+  networkName: string;
+}
+
+/**
+ * Render a minimal libvirt domain XML from `VMConfig` fields.
+ *
+ * Opinionated shape:
+ *  - `type='kvm'` (we don't ship a qemu-tcg fallback — operators on
+ *    KVM-incapable hosts use a different backend).
+ *  - `machine='q35'`, `arch='x86_64'`, `cpu mode='host-passthrough'`
+ *    — fastest baseline for modern guests.
+ *  - `<disk>` is a qcow2 backing-file disk at `opts.diskPath`. The
+ *    caller is responsible for creating the file before `virsh
+ *    define` (createVM does this via qemu-img).
+ *  - `<interface>` attaches to the named libvirt network with
+ *    virtio-net.
+ *  - `<channel name='org.qemu.guest_agent.0'>` wires the QGA
+ *    unix-socket so executeCommand / copyFileTo/FromVM /
+ *    guestAgentReachable work end-to-end.
+ *
+ * Operators with bespoke topology continue to `virsh define` their
+ * own XML and skip createVM.
+ *
+ * Exported for unit tests (XML snapshot assertions).
+ */
+export function buildDomainXml(opts: BuildDomainXmlOptions): string {
+  const name = xmlEscape(opts.name);
+  const diskPath = xmlEscape(opts.diskPath);
+  const networkName = xmlEscape(opts.networkName);
+  return `<domain type='kvm'>
+  <name>${name}</name>
+  <memory unit='MiB'>${opts.memoryMB}</memory>
+  <currentMemory unit='MiB'>${opts.memoryMB}</currentMemory>
+  <vcpu placement='static'>${opts.cpus}</vcpu>
+  <os>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+  </features>
+  <cpu mode='host-passthrough'/>
+  <devices>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='${diskPath}'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <interface type='network'>
+      <source network='${networkName}'/>
+      <model type='virtio'/>
+    </interface>
+    <channel type='unix'>
+      <source mode='bind'/>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
+    <console type='pty'/>
+  </devices>
+</domain>
+`;
+}
+
+/**
  * Parse the JSON envelope returned by `virsh qemu-agent-command` for
  * a `guest-file-open` call.
  *
@@ -566,13 +698,19 @@ function isConnectFailure(stderr: string): boolean {
 export class LibvirtBackend implements HypervisorBackend {
   readonly name = "libvirt";
   private readonly virshPath: string;
+  private readonly qemuImgPath: string;
+  private readonly storagePool: string;
   private readonly connectUri?: string;
   private readonly exec: LibvirtExec;
+  private readonly qemuImgExec: LibvirtExec;
 
   constructor(opts: LibvirtBackendOptions = {}) {
     this.virshPath = opts.virshPath ?? DEFAULT_VIRSH_BIN;
+    this.qemuImgPath = opts.qemuImgPath ?? DEFAULT_QEMU_IMG_BIN;
+    this.storagePool = opts.storagePool ?? DEFAULT_STORAGE_POOL;
     this.connectUri = opts.connectUri;
     this.exec = opts.exec ?? defaultExec(this.virshPath);
+    this.qemuImgExec = opts.qemuImgExec ?? defaultExec(this.qemuImgPath);
   }
 
   /**
@@ -632,17 +770,140 @@ export class LibvirtBackend implements HypervisorBackend {
 
   // ── VM Lifecycle ──────────────────────────────────────────────
 
-  async createVM(_config: VMConfig): Promise<VMHandle> {
-    // Building a libvirt domain XML from a generic VMConfig is out
-    // of scope for this milestone. Operators define domains via
-    // `virsh define <domain.xml>` and pass the resulting handle to
-    // `startVM` / `getStatus` / etc.
-    throw new LibvirtBackendError(
-      "unsupported_operation",
-      "Libvirt domain creation requires a definition XML; this backend " +
-        "supports lifecycle/snapshot/file/command operations on already-defined " +
-        "domains. Define the domain with `virsh define <domain.xml>` first.",
+  async createVM(config: VMConfig): Promise<VMHandle> {
+    // 1. Validate. We refuse to fabricate disks from thin air — the
+    //    operator must point us at an existing qcow2 template image
+    //    (Ubuntu cloud-image, custom golden image, etc.) that we use
+    //    as the backing file for the new disk.
+    const safeName = sanitizeVmName(config.name);
+    const memoryMB = config.memoryMB ?? 2048;
+    const cpus = config.cpus ?? 2;
+    if (!Number.isInteger(memoryMB) || memoryMB < 32 || memoryMB > 1_048_576) {
+      throw new LibvirtBackendError(
+        "invalid_argument",
+        `createVM: memoryMB must be an integer between 32 and 1048576 (got ${memoryMB}).`,
+      );
+    }
+    if (!Number.isInteger(cpus) || cpus < 1 || cpus > 240) {
+      throw new LibvirtBackendError(
+        "invalid_argument",
+        `createVM: cpus must be an integer between 1 and 240 (got ${cpus}).`,
+      );
+    }
+    const template = config.template;
+    if (!template || !path.isAbsolute(template)) {
+      throw new LibvirtBackendError(
+        "invalid_argument",
+        "createVM: config.template must be an absolute path to an existing " +
+          "qcow2 image used as the backing file. To pre-create the VM disk " +
+          "yourself and skip qcow2 backing-file mode, define the domain " +
+          "with `virsh define <domain.xml>` directly.",
+      );
+    }
+    const networkName = sanitizeLabel(
+      config.network?.switchName ?? "default",
     );
+
+    // 2. Resolve the configured storage pool's target directory. The
+    //    new disk image lives there so libvirt can manage it as a
+    //    first-class volume.
+    const poolPath = await this.resolveStoragePoolPath(this.storagePool);
+    const diskPath = path.join(poolPath, `${safeName}.qcow2`);
+
+    // 3. Create the backing-file qcow2. qemu-img preserves the
+    //    template (no in-place modification) and the new image starts
+    //    as a sparse copy-on-write child of it.
+    await this.qemuImgCreateBackingFile(diskPath, template);
+
+    // 4. Render the domain XML and hand it to `virsh define` via a
+    //    tempfile.
+    const xml = buildDomainXml({
+      name: safeName,
+      memoryMB,
+      cpus,
+      diskPath,
+      networkName,
+    });
+    const xmlDir = await fs.mkdtemp(path.join(os.tmpdir(), "libvirt-define-"));
+    const xmlFile = path.join(xmlDir, `${safeName}.xml`);
+    try {
+      await fs.writeFile(xmlFile, xml, "utf8");
+      const defineResult = await this.run(["define", xmlFile], {
+        timeoutMs: VIRSH_LIFECYCLE_TIMEOUT_MS,
+      });
+      if (defineResult.exitCode !== 0) {
+        throw new LibvirtBackendError(
+          "command_failed",
+          `virsh define failed (exit ${defineResult.exitCode}): ${defineResult.stderr.trim()}`,
+        );
+      }
+    } finally {
+      // The XML is now in libvirt's state dir; the tempfile is no
+      // longer needed.
+      await fs.rm(xmlDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+
+    return { id: safeName, name: safeName, backend: this.name };
+  }
+
+  /**
+   * Resolve the target directory for a named libvirt storage pool.
+   * Throws `invalid_argument` with a copy-pasteable repair command
+   * when the pool doesn't exist — first-time operators on a fresh
+   * libvirtd often haven't created `default` yet.
+   */
+  private async resolveStoragePoolPath(poolName: string): Promise<string> {
+    const result = await this.run(["pool-dumpxml", poolName]);
+    if (result.exitCode !== 0) {
+      throw new LibvirtBackendError(
+        "invalid_argument",
+        `libvirt storage pool '${poolName}' not found. Create it with:\n` +
+          `  virsh pool-define-as ${poolName} dir --target /var/lib/libvirt/images\n` +
+          `  virsh pool-build ${poolName}\n` +
+          `  virsh pool-start ${poolName}\n` +
+          `  virsh pool-autostart ${poolName}\n` +
+          `Original error: ${result.stderr.trim()}`,
+      );
+    }
+    const targetPath = parsePoolTargetPath(result.stdout);
+    if (!targetPath) {
+      throw new LibvirtBackendError(
+        "command_failed",
+        `Could not parse <target><path> from storage pool '${poolName}' XML; ` +
+          `is the pool a filesystem-backed pool (type 'dir')?`,
+      );
+    }
+    return targetPath;
+  }
+
+  /**
+   * Shell out to `qemu-img create -f qcow2 -F qcow2 -b <template>
+   * <diskPath>` to create a backing-file disk image. The new image
+   * is sparse and copy-on-write; the template is untouched.
+   */
+  private async qemuImgCreateBackingFile(
+    diskPath: string,
+    templatePath: string,
+  ): Promise<void> {
+    const result = await this.qemuImgExec(
+      [
+        "create",
+        "-f",
+        "qcow2",
+        "-F",
+        "qcow2",
+        "-b",
+        templatePath,
+        diskPath,
+      ],
+      { timeoutMs: VIRSH_LIFECYCLE_TIMEOUT_MS },
+    );
+    if (result.exitCode !== 0) {
+      throw new LibvirtBackendError(
+        "command_failed",
+        `qemu-img create failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+      );
+    }
   }
 
   async startVM(handle: VMHandle): Promise<void> {
