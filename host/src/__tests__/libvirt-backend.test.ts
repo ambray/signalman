@@ -690,6 +690,181 @@ describe("LibvirtBackend integration", () => {
     });
   });
 
+  // ── waitForHeartbeat / setVmMemory / setVmProcessor ─────────────
+
+  describe("waitForHeartbeat", () => {
+    it("returns true on the first successful guest-ping", async () => {
+      let pings = 0;
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          if (args[0] === "qemu-agent-command") {
+            pings += 1;
+            return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      expect(await backend.waitForHeartbeat(HANDLE, 1_000)).toBe(true);
+      expect(pings).toBe(1);
+    });
+
+    it("returns true after several failed pings once the agent comes up", async () => {
+      let pings = 0;
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          if (args[0] === "qemu-agent-command") {
+            pings += 1;
+            if (pings < 3) {
+              return {
+                stdout: "",
+                stderr: "Guest agent is not responding",
+                exitCode: 1,
+              };
+            }
+            return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      expect(await backend.waitForHeartbeat(HANDLE, 5_000)).toBe(true);
+      expect(pings).toBe(3);
+    });
+
+    it("returns false when the deadline expires", async () => {
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          if (args[0] === "qemu-agent-command") {
+            return {
+              stdout: "",
+              stderr: "Guest agent is not responding",
+              exitCode: 1,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      // 0ms deadline guarantees a single probe + return false.
+      expect(await backend.waitForHeartbeat(HANDLE, 0)).toBe(false);
+    });
+  });
+
+  describe("setVmMemory", () => {
+    it("issues setmaxmem then setmem with --config and KiB units", async () => {
+      const calls: string[][] = [];
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          calls.push(args);
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.setVmMemory(HANDLE, 4096);
+      expect(calls[0]).toEqual([
+        "setmaxmem",
+        "vm-alpha",
+        "4194304K",
+        "--config",
+      ]);
+      expect(calls[1]).toEqual([
+        "setmem",
+        "vm-alpha",
+        "4194304K",
+        "--config",
+      ]);
+    });
+
+    it("rejects out-of-range memory values with invalid_argument", async () => {
+      const backend = new LibvirtBackend({
+        exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      });
+      await expect(backend.setVmMemory(HANDLE, 0)).rejects.toMatchObject({
+        code: "invalid_argument",
+      });
+      await expect(backend.setVmMemory(HANDLE, 1_048_577)).rejects.toMatchObject({
+        code: "invalid_argument",
+      });
+      await expect(backend.setVmMemory(HANDLE, 1024.5)).rejects.toMatchObject({
+        code: "invalid_argument",
+      });
+    });
+
+    it("surfaces command_failed when setmaxmem returns non-zero", async () => {
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          if (args[0] === "setmaxmem") {
+            return {
+              stdout: "",
+              stderr: "error: maximum memory must be at least 32MiB",
+              exitCode: 1,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      await expect(backend.setVmMemory(HANDLE, 2048)).rejects.toMatchObject({
+        code: "command_failed",
+      });
+    });
+  });
+
+  describe("setVmProcessor", () => {
+    it("issues setvcpus --maximum --config then setvcpus --config", async () => {
+      const calls: string[][] = [];
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          calls.push(args);
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.setVmProcessor(HANDLE, 4);
+      expect(calls[0]).toEqual([
+        "setvcpus",
+        "vm-alpha",
+        "4",
+        "--maximum",
+        "--config",
+      ]);
+      expect(calls[1]).toEqual([
+        "setvcpus",
+        "vm-alpha",
+        "4",
+        "--config",
+      ]);
+    });
+
+    it("rejects out-of-range vCPU counts with invalid_argument", async () => {
+      const backend = new LibvirtBackend({
+        exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      });
+      await expect(backend.setVmProcessor(HANDLE, 0)).rejects.toMatchObject({
+        code: "invalid_argument",
+      });
+      await expect(backend.setVmProcessor(HANDLE, 241)).rejects.toMatchObject({
+        code: "invalid_argument",
+      });
+      await expect(backend.setVmProcessor(HANDLE, 2.5)).rejects.toMatchObject({
+        code: "invalid_argument",
+      });
+    });
+
+    it("surfaces command_failed when setvcpus returns non-zero", async () => {
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          if (args[0] === "setvcpus" && args.includes("--maximum")) {
+            return {
+              stdout: "",
+              stderr: "error: vCPU count exceeds maximum",
+              exitCode: 1,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      await expect(backend.setVmProcessor(HANDLE, 8)).rejects.toMatchObject({
+        code: "command_failed",
+      });
+    });
+  });
+
   it("isAvailable returns false when virsh is not installed", async () => {
     const backend = new LibvirtBackend({
       exec: async () => {

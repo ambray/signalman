@@ -1198,6 +1198,121 @@ export class LibvirtBackend implements HypervisorBackend {
     );
   }
 
+  /**
+   * Wait for the qemu-guest-agent to respond on the virtio channel.
+   *
+   * Polls `guest-ping` with the same exponential-backoff cadence as
+   * {@link executeCommand}'s status loop (50ms → 1s cap). Returns
+   * `true` on the first ping that comes back; returns `false` when
+   * `timeoutMs` expires.
+   *
+   * libvirt analogue of Hyper-V's `waitForHeartbeat` — both surface a
+   * boolean rather than throwing so callers (orchestrator's parallel
+   * readiness wait) can fan out + collect cleanly.
+   */
+  async waitForHeartbeat(handle: VMHandle, timeoutMs: number): Promise<boolean> {
+    const name = sanitizeVmName(handle.name);
+    const safeTimeout = Math.max(0, timeoutMs);
+    const deadline = Date.now() + safeTimeout;
+    let pollInterval = QGA_POLL_INITIAL_MS;
+    // Probe immediately — the most common case is "the VM is already
+    // up by the time the orchestrator gets here", and the test stubs
+    // expect a check before any delay.
+    if (await this.qgaPing(name)) return true;
+    while (Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await sleep(Math.min(pollInterval, remaining));
+      pollInterval = Math.min(pollInterval * 2, QGA_POLL_MAX_MS);
+      if (await this.qgaPing(name)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Set the configured memory allocation for a domain. Updates both
+   * the maximum and the current size in the persisted XML; callers
+   * who need a live resize on a running domain should stop the
+   * domain first (libvirt enforces maxmem on running domains).
+   *
+   * Memory is in MiB to match the {@link HypervisorBackend}
+   * interface. We translate to KiB at the virsh boundary because
+   * virsh's `setmem` / `setmaxmem` default unit is KiB.
+   */
+  async setVmMemory(handle: VMHandle, memoryMB: number): Promise<void> {
+    if (!Number.isInteger(memoryMB) || memoryMB < 32 || memoryMB > 1_048_576) {
+      throw new LibvirtBackendError(
+        "invalid_argument",
+        `Invalid memory value: ${memoryMB}MB. Must be an integer between 32 and 1048576.`,
+      );
+    }
+    const name = sanitizeVmName(handle.name);
+    const memKB = `${memoryMB * 1024}K`;
+    // setmaxmem first: setmem cannot exceed the configured max, so
+    // when the operator is growing the VM we have to raise the
+    // ceiling before setting the new size.
+    const maxResult = await this.run(
+      ["setmaxmem", name, memKB, "--config"],
+      { timeoutMs: VIRSH_DEFAULT_TIMEOUT_MS },
+    );
+    if (maxResult.exitCode !== 0) {
+      throw new LibvirtBackendError(
+        "command_failed",
+        `virsh setmaxmem failed (exit ${maxResult.exitCode}): ${maxResult.stderr.trim()}`,
+      );
+    }
+    const memResult = await this.run(
+      ["setmem", name, memKB, "--config"],
+      { timeoutMs: VIRSH_DEFAULT_TIMEOUT_MS },
+    );
+    if (memResult.exitCode !== 0) {
+      throw new LibvirtBackendError(
+        "command_failed",
+        `virsh setmem failed (exit ${memResult.exitCode}): ${memResult.stderr.trim()}`,
+      );
+    }
+  }
+
+  /**
+   * Set the configured vCPU count for a domain. Updates both the
+   * maximum and the active count in the persisted XML; callers who
+   * need a live resize on a running domain should stop the domain
+   * first (libvirt enforces the maximum on running domains).
+   */
+  async setVmProcessor(handle: VMHandle, count: number): Promise<void> {
+    if (!Number.isInteger(count) || count < 1 || count > 240) {
+      throw new LibvirtBackendError(
+        "invalid_argument",
+        `Invalid processor count: ${count}. Must be an integer between 1 and 240.`,
+      );
+    }
+    const name = sanitizeVmName(handle.name);
+    const countStr = String(count);
+    // setvcpus --maximum --config raises the configured ceiling. The
+    // second setvcpus --config sets the active count up to that
+    // ceiling.
+    const maxResult = await this.run(
+      ["setvcpus", name, countStr, "--maximum", "--config"],
+      { timeoutMs: VIRSH_DEFAULT_TIMEOUT_MS },
+    );
+    if (maxResult.exitCode !== 0) {
+      throw new LibvirtBackendError(
+        "command_failed",
+        `virsh setvcpus --maximum failed (exit ${maxResult.exitCode}): ${maxResult.stderr.trim()}`,
+      );
+    }
+    const setResult = await this.run(
+      ["setvcpus", name, countStr, "--config"],
+      { timeoutMs: VIRSH_DEFAULT_TIMEOUT_MS },
+    );
+    if (setResult.exitCode !== 0) {
+      throw new LibvirtBackendError(
+        "command_failed",
+        `virsh setvcpus failed (exit ${setResult.exitCode}): ${setResult.stderr.trim()}`,
+      );
+    }
+  }
+
 }
 
 // ── Public helpers (exported for argv tests) ────────────────────────
