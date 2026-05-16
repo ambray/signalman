@@ -17,7 +17,9 @@ import type { Router } from "../http/router.js";
 import type { SqliteManifestIndex } from "../storage/sqlite-index.js";
 import type { LocalFsBlobStore } from "../storage/local-fs.js";
 import type { RegistryStorage } from "../types.js";
+import { mountOciAuthRoutes } from "./auth.js";
 import { mountOciBlobRoutes } from "./blobs.js";
+import { mountOciCatalogRoutes } from "./catalog.js";
 import { mountOciManifestRoutes } from "./manifests.js";
 import { startReaper, type ReaperHandle } from "./reaper.js";
 import { TagStore } from "./tag-store.js";
@@ -43,6 +45,21 @@ export interface MountOciOptions {
   maxManifestBytes?: number;
   /** Operator-locked Q6: default-on; flip to disable manifest DELETE. */
   allowManifestDelete?: boolean;
+  /**
+   * M4: Ed25519 PEM private key for JWT minting via /oci/token. The
+   * matching public key is derived if `tokenPublicKeyPem` is absent.
+   * When both are absent the registry runs without the bearer-
+   * challenge flow (sk_<prefix>_<secret> bearers still work on /v2/*).
+   */
+  tokenSigningPrivateKeyPem?: string;
+  /** Override the derived JWT verification key. */
+  tokenPublicKeyPem?: string;
+  /** JWT lifetime, seconds. Default 3600. */
+  tokenTtlSeconds?: number;
+  /** Default page size for /v2/_catalog + /v2/<name>/tags/list. */
+  catalogDefaultPageSize?: number;
+  /** Hard cap for the same routes. */
+  catalogMaxPageSize?: number;
 }
 
 export interface MountedOciHandles {
@@ -96,6 +113,30 @@ export function mountOciRoutes(
       : {}),
     ...(opts.allowManifestDelete !== undefined
       ? { allowDelete: opts.allowManifestDelete }
+      : {}),
+    ...(opts.now ? { now: opts.now } : {}),
+  });
+
+  mountOciCatalogRoutes(router, {
+    index: opts.index,
+    tagStore,
+    ...(opts.publicBaseUrl ? { publicBaseUrl: opts.publicBaseUrl } : {}),
+    ...(opts.catalogDefaultPageSize !== undefined
+      ? { defaultPageSize: opts.catalogDefaultPageSize }
+      : {}),
+    ...(opts.catalogMaxPageSize !== undefined
+      ? { maxPageSize: opts.catalogMaxPageSize }
+      : {}),
+  });
+
+  mountOciAuthRoutes(router, {
+    ...(opts.tokenSigningPrivateKeyPem
+      ? { privateKeyPem: opts.tokenSigningPrivateKeyPem }
+      : {}),
+    ...(opts.tokenPublicKeyPem ? { publicKeyPem: opts.tokenPublicKeyPem } : {}),
+    ...(opts.publicBaseUrl ? { publicBaseUrl: opts.publicBaseUrl } : {}),
+    ...(opts.tokenTtlSeconds !== undefined
+      ? { ttlSeconds: opts.tokenTtlSeconds }
       : {}),
     ...(opts.now ? { now: opts.now } : {}),
   });

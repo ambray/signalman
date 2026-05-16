@@ -53,6 +53,7 @@ import {
 import { proxyNpmPackument, proxyNpmTarball } from "../npm/virtual.js";
 import { mountForensicRoutes } from "./forensic.js";
 import { mountOciRoutes, type MountedOciHandles } from "../oci/mount.js";
+import { publicKeyPemFromPrivate } from "../oci/jwt.js";
 
 const VERSION = "0.0.1";
 const DEFAULT_BLOB_MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5 GiB
@@ -105,6 +106,24 @@ export interface AppOptions {
    */
   ociAllowManifestDelete?: boolean;
   /**
+   * WS10 M4: Ed25519 PEM private key used by `/oci/token` to mint
+   * the JWTs Docker CLI expects after the bearer challenge. When
+   * absent, the challenge flow falls back to "no token endpoint
+   * configured" and only sk_<prefix>_<secret> bearers work on /v2/*.
+   */
+  ociTokenSigningPrivateKeyPem?: string;
+  /**
+   * WS10 M4: matching Ed25519 PEM public key used by the global
+   * authenticator to verify JWT bearers on /v2/* requests. Derived
+   * from `ociTokenSigningPrivateKeyPem` when omitted.
+   */
+  ociTokenPublicKeyPem?: string;
+  /** WS10 M4: JWT TTL seconds. Default 3600. */
+  ociTokenTtlSeconds?: number;
+  /** WS10 M4: page-size defaults for /v2/_catalog + /v2/<name>/tags/list. */
+  ociCatalogDefaultPageSize?: number;
+  ociCatalogMaxPageSize?: number;
+  /**
    * WS10: deterministic clock for tests. Threads through the upload
    * store + reaper so timestamp assertions are stable.
    */
@@ -120,10 +139,25 @@ export interface AppHandles {
 
 export function buildApp(opts: AppOptions): Router {
   const storage = opts.storage;
-  const authenticate = makeAuthenticator(opts.auth ?? {});
+  // WS10 M4: when a token-signing key is supplied, the global
+  // authenticator also accepts JWT bearers minted by /oci/token.
+  // Derive the public key from the private one when only the private
+  // is supplied — fewer config knobs for the common case.
+  let derivedPublicKeyPem: string | undefined =
+    opts.ociTokenPublicKeyPem ?? undefined;
+  if (!derivedPublicKeyPem && opts.ociTokenSigningPrivateKeyPem) {
+    derivedPublicKeyPem = publicKeyPemFromPrivate(opts.ociTokenSigningPrivateKeyPem);
+  }
+  const authenticate = makeAuthenticator({
+    ...(opts.auth ?? {}),
+    ...(derivedPublicKeyPem ? { jwtPublicKeyPem: derivedPublicKeyPem } : {}),
+  });
+  // /v2/ (support check) + /oci/token are owned by the OCI handlers
+  // themselves so they can write spec-compliant 401 + WWW-Authenticate
+  // responses instead of the registry's standard auth-failure shape.
   const router = new Router({
     authenticate,
-    publicPaths: new Set(["/v1/healthz"]),
+    publicPaths: new Set(["/v1/healthz", "/v2/", "/oci/token"]),
   });
   const blobMaxBytes = opts.blobMaxBytes ?? DEFAULT_BLOB_MAX_BYTES;
 
@@ -383,6 +417,19 @@ export function buildApp(opts: AppOptions): Router {
         : {}),
       ...(opts.ociAllowManifestDelete !== undefined
         ? { allowManifestDelete: opts.ociAllowManifestDelete }
+        : {}),
+      ...(opts.ociTokenSigningPrivateKeyPem
+        ? { tokenSigningPrivateKeyPem: opts.ociTokenSigningPrivateKeyPem }
+        : {}),
+      ...(derivedPublicKeyPem ? { tokenPublicKeyPem: derivedPublicKeyPem } : {}),
+      ...(opts.ociTokenTtlSeconds !== undefined
+        ? { tokenTtlSeconds: opts.ociTokenTtlSeconds }
+        : {}),
+      ...(opts.ociCatalogDefaultPageSize !== undefined
+        ? { catalogDefaultPageSize: opts.ociCatalogDefaultPageSize }
+        : {}),
+      ...(opts.ociCatalogMaxPageSize !== undefined
+        ? { catalogMaxPageSize: opts.ociCatalogMaxPageSize }
         : {}),
       ...(opts.ociNow ? { now: opts.ociNow } : {}),
     });
