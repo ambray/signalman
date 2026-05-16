@@ -47,6 +47,7 @@ export function buildBackendList(
   const libvirt = new LibvirtBackend({
     virshPath: config.hypervisor.virshPath,
     connectUri: config.hypervisor.libvirtUri,
+    storagePool: config.hypervisor.libvirtStoragePool,
   });
   const vmrun = new VmrunBackend({
     vmrunPath: config.hypervisor.vmrunPath,
