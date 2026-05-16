@@ -1260,9 +1260,14 @@ Prompts: [`ws9-signing-service.md`](docs/workstreams/prompts/ws9-signing-service
   so release-manifest signing, registry re-signing, and (after WS8
   merges) the service-side CA-key signing all route through one
   versioned interface. `LocalDiskProvider` keeps the existing on-disk
-  PEM flow as the v0.5 default; subsequent providers add HSM / Cloud
-  KMS / detached-operator support without touching call sites.
-  Design-gated. Closes WS8's deferred TPM/HSM scope.
+  PEM flow for v0.4.x-compatible classical-only keys; **new keys
+  default to hybrid Ed25519 + ML-DSA-65 (NIST FIPS 204) for
+  post-quantum readiness**. `AwsKmsProvider` ships in v0.5;
+  **detached-operator signing, Azure KV / GCP KMS providers, and HSM
+  / TPM providers are deferred to v0.6+**. Design-gated. Closes WS8's
+  deferred TPM/HSM scope. See
+  [`docs/design/signing-service.md`](docs/design/signing-service.md)
+  §Resolved decisions for the locked v0.5 surface.
 - **WS10 (Registry OCI distribution spec v1.1)** — close
   [`registry/ROADMAP.md`](registry/ROADMAP.md) §v0.1.2: add `/v2/*`
   route surface alongside `/v1/*`, OCI manifest + image-index media
