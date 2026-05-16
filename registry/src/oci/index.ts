@@ -73,6 +73,29 @@ export {
 } from "./tag-store.js";
 
 export {
+  mountOciAuthRoutes,
+  type MountOciAuthOptions,
+} from "./auth.js";
+
+export {
+  mountOciCatalogRoutes,
+  type MountOciCatalogOptions,
+} from "./catalog.js";
+
+export {
+  mintJwt,
+  verifyJwt,
+  looksLikeJwt,
+  publicKeyPemFromPrivate,
+  JwtError,
+  type JwtClaims,
+  type MintJwtOptions,
+  type MintedJwt,
+  type VerifyJwtOptions,
+  type VerifiedJwt,
+} from "./jwt.js";
+
+export {
   mountOciRoutes,
   type MountOciOptions,
   type MountedOciHandles,

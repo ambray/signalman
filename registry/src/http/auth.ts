@@ -73,16 +73,46 @@ export interface AuthOptions {
    * undefined and rely on `acceptAnyValidShape`.
    */
   validateToken?: (token: ParsedToken) => Promise<AuthContext | null> | AuthContext | null;
+  /**
+   * WS10 M4 — Ed25519 SubjectPublicKeyInfo PEM used to verify JWTs
+   * issued by the registry's own `/oci/token` endpoint. When supplied,
+   * the authenticator accepts JWT bearers alongside `sk_<prefix>_<secret>`
+   * bearers (the JWT path is what Docker CLI uses after the bearer
+   * challenge). When absent, JWT-shaped bearers are rejected.
+   */
+  jwtPublicKeyPem?: string;
 }
 
 export function makeAuthenticator(opts: AuthOptions = {}): Authenticator {
   const acceptAnyValidShape = opts.acceptAnyValidShape ?? true;
   const allowLoopback = opts.allowLoopbackBypass ?? false;
   const validateToken = opts.validateToken;
+  const jwtPublicKeyPem = opts.jwtPublicKeyPem;
 
   return async (pre): Promise<AuthContext> => {
     const authHeader = pre.headers.authorization;
     if (typeof authHeader === "string" && /^Bearer\s+/i.test(authHeader)) {
+      const raw = authHeader.replace(/^Bearer\s+/i, "").trim();
+      // WS10 M4: Bearer values come in two shapes — the federated
+      // `sk_<prefix>_<secret>` token (direct CLI / curl / oras path)
+      // and a JWT minted by `/oci/token` for the Docker CLI flow.
+      // The shapes are mutually disjoint (different alphabets +
+      // separators) so we can dispatch on inspection.
+      if (jwtPublicKeyPem && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(raw)) {
+        // Lazy import — avoids a circular path through the oci/
+        // module tree for the cargo + npm + forensic suites that
+        // do not exercise JWT.
+        const { verifyJwt, JwtError } = await import("../oci/jwt.js");
+        try {
+          const result = verifyJwt({ token: raw, publicKeyPem: jwtPublicKeyPem });
+          return { tokenPrefix: result.claims.sub, scopes: ["admin"] };
+        } catch (err) {
+          if (err instanceof JwtError) {
+            throw unauthorized(`JWT verification failed: ${err.reason}`);
+          }
+          throw err;
+        }
+      }
       const token = parseBearerToken(authHeader);
       if (validateToken) {
         const ctx = await validateToken(token);
