@@ -1,12 +1,12 @@
 /**
- * LocalDiskProvider unit tests — WS9 Milestone 1a.
+ * LocalDiskProvider unit tests — WS9 Milestones 1a + 1b.
  *
  * Covers the new provider abstraction directly; the legacy
  * signManifest/verifyManifest shim is tested separately in
  * signing.test.ts (preserved from v0.4.x) and signing-byte-parity.test.ts.
  *
- * Hybrid + ml-dsa-65 paths land in Milestone 1b — those tests stay
- * marked TODO here until liboqs-node lands.
+ * Milestone 1b additions are in signing-mldsa.test.ts and
+ * signing-hybrid.test.ts (ML-DSA-65 + hybrid keys + verifier modes).
  */
 
 import * as crypto from "node:crypto";
@@ -19,7 +19,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   AlgorithmNotImplementedError,
   LocalDiskProvider,
-  type PublicKeyRef,
   type SignRequest,
   SigningError,
   freshNonce,
@@ -69,13 +68,13 @@ function makeRequest(overrides: Partial<SignRequest> = {}): SignRequest {
 }
 
 describe("LocalDiskProvider: identity", () => {
-  it("has the stable provider id and ed25519+ecdsa algorithm support", () => {
+  it("has the stable provider id and the v0.5.0 algorithm support set", () => {
     const p = new LocalDiskProvider();
     expect(p.id).toBe("local-disk");
     expect(p.supportedAlgorithms).toContain("ed25519");
     expect(p.supportedAlgorithms).toContain("ecdsa-p256-sha256");
-    // Milestone 1a explicitly does NOT advertise ml-dsa-65.
-    expect(p.supportedAlgorithms).not.toContain("ml-dsa-65");
+    // Milestone 1b: ml-dsa-65 is now supported.
+    expect(p.supportedAlgorithms).toContain("ml-dsa-65");
   });
 });
 
@@ -185,7 +184,7 @@ describe("LocalDiskProvider.sign + verify roundtrip", () => {
     const req = makeRequest();
     const env = await p.sign(req);
     const keyRef = publicKeyRefFromPem(kp.publicKeyPem);
-    const result = await p.verify(env, req.payload, keyRef, "strict");
+    const result = await p.verify(env, req.payload, [keyRef], "strict");
     expect(result.ok).toBe(true);
   });
 
@@ -195,7 +194,7 @@ describe("LocalDiskProvider.sign + verify roundtrip", () => {
     const req = makeRequest();
     const env = await p.sign(req);
     const keyRef = publicKeyRefFromPem(kp.publicKeyPem);
-    const result = await p.verify(env, req.payload, keyRef, "strict");
+    const result = await p.verify(env, req.payload, [keyRef], "strict");
     expect(result.ok).toBe(true);
   });
 
@@ -206,7 +205,7 @@ describe("LocalDiskProvider.sign + verify roundtrip", () => {
     const req = makeRequest();
     const env = await p.sign(req);
     const otherKeyRef = publicKeyRefFromPem(otherKp.publicKeyPem);
-    const result = await p.verify(env, req.payload, otherKeyRef, "strict");
+    const result = await p.verify(env, req.payload, [otherKeyRef], "strict");
     expect(result.ok).toBe(false);
     expect(result.reasonCode).toBe("fingerprint-mismatch");
   });
@@ -218,7 +217,7 @@ describe("LocalDiskProvider.sign + verify roundtrip", () => {
     const env = await p.sign(req);
     const tampered = new TextEncoder().encode("hello WORLD");
     const keyRef = publicKeyRefFromPem(kp.publicKeyPem);
-    const result = await p.verify(env, tampered, keyRef, "strict");
+    const result = await p.verify(env, tampered, [keyRef], "strict");
     expect(result.ok).toBe(false);
     expect(result.reasonCode).toBe("bad-signature");
   });
@@ -236,7 +235,7 @@ describe("LocalDiskProvider.sign + verify roundtrip", () => {
           .digest("hex"),
       },
       new TextEncoder().encode("abc"),
-      keyRef,
+      [keyRef],
       "strict",
     );
     expect(result.ok).toBe(false);
@@ -349,7 +348,7 @@ describe("LocalDiskProvider: sign by alias from keysDir", () => {
     const verify = await p.verify(
       env,
       makeRequest().payload,
-      keyRef,
+      [keyRef],
       "strict",
     );
     expect(verify.ok).toBe(true);
@@ -376,50 +375,16 @@ describe("LocalDiskProvider: sign by alias from keysDir", () => {
     const p = new LocalDiskProvider({ keysDir: tmp });
     await expect(
       p.sign(makeRequest({ keyId: "no-such-key" })),
-    ).rejects.toThrow(/key file not found|key-not-found/);
+    ).rejects.toThrow(/key file not found|key-not-found|no key files found/);
   });
 });
 
-describe("LocalDiskProvider: ml-dsa-65 surfaces AlgorithmNotImplementedError in 1a", () => {
-  it("verifying an envelope claiming algorithm=ml-dsa-65 against a matching keyRef surfaces algorithm-not-implemented", async () => {
-    // We can't sign ml-dsa-65 yet (no key type available), but we can
-    // construct an envelope that CLAIMS to be ml-dsa-65 and assert
-    // the verify path surfaces a clean not-implemented error.
-    const p = new LocalDiskProvider();
-    // Construct a synthetic PublicKeyRef in ml-dsa-65 shape. The
-    // fingerprint comparison passes (signedBy === keyRef.fingerprint)
-    // so the verifier reaches the runVerify dispatch which throws
-    // AlgorithmNotImplementedError on ml-dsa-65.
-    const fakeKeyRef: PublicKeyRef = {
-      keyId: "fake",
-      provider: "local-disk",
-      algorithm: "ml-dsa-65",
-      publicKeyB64: Buffer.from("fake-pq-key").toString("base64"),
-      fingerprint: "deadbeefcafef00d",
-    };
-    const fakeEnv = {
-      signatures: [
-        {
-          signatureB64: Buffer.from("fake").toString("base64"),
-          signedBy: "deadbeefcafef00d",
-          algorithm: "ml-dsa-65" as const,
-          signedAt: new Date().toISOString(),
-        },
-      ],
-      nonce: "0".repeat(32),
-      payloadSha256: crypto.createHash("sha256").update("payload").digest("hex"),
-    };
-    const result = await p.verify(
-      fakeEnv,
-      new TextEncoder().encode("payload"),
-      fakeKeyRef,
-      "strict",
-    );
-    expect(result.ok).toBe(false);
-    expect(result.reasonCode).toBe("algorithm-not-implemented");
-  });
-
-  it("AlgorithmNotImplementedError extends SigningError with the expected code", () => {
+describe("AlgorithmNotImplementedError", () => {
+  // Milestone 1b ships ml-dsa-65; positive ML-DSA-65 + hybrid tests
+  // live in signing-mldsa.test.ts and signing-hybrid.test.ts. This
+  // suite keeps the type-shape assertion so a future algorithm
+  // addition (slh-dsa, rsa-2048) lands the error path consistently.
+  it("extends SigningError with a stable code and an algorithm-named message", () => {
     const err = new AlgorithmNotImplementedError("ml-dsa-65");
     expect(err).toBeInstanceOf(SigningError);
     expect(err.code).toBe("algorithm-not-implemented");

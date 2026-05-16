@@ -144,7 +144,7 @@ describe("WS9 byte-parity invariants", () => {
       nonce: "00000000000000000000000000000000",
       payloadSha256: crypto.createHash("sha256").update(bytes).digest("hex"),
     };
-    const result = provider.verifySync(envelope, bytes, publicKeyRef, "strict");
+    const result = provider.verifySync(envelope, bytes, [publicKeyRef], "strict");
     expect(result.ok).toBe(true);
   });
 

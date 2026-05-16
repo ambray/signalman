@@ -249,7 +249,7 @@ export function verifyManifest(
     payloadSha256,
   };
   const provider = new LocalDiskProvider();
-  const result = provider.verifySync(envelope, bytes, publicKeyRef, "strict");
+  const result = provider.verifySync(envelope, bytes, [publicKeyRef], "strict");
   if (!result.ok) {
     throw new SignatureVerificationError(
       "signature is cryptographically invalid (manifest tampered or wrong key)",

@@ -40,7 +40,11 @@ export {
 export {
   LocalDiskProvider,
   freshNonce,
+  publicKeyRefFromMldsa65,
   publicKeyRefFromPem,
 } from "./providers/local-disk.js";
 
-export type { LocalDiskProviderOptions } from "./providers/local-disk.js";
+export type {
+  GenerateHybridKeyResult,
+  LocalDiskProviderOptions,
+} from "./providers/local-disk.js";

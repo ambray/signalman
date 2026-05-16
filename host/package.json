@@ -55,6 +55,7 @@
     "@grpc/grpc-js": "^1.12.0",
     "@grpc/proto-loader": "^0.7.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "@noble/post-quantum": "^0.6.1",
     "marked": "^12.0.0",
     "nodemailer": "^8.0.7",
     "pg": "^8.13.0",

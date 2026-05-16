@@ -286,7 +286,7 @@ export function verifyManifest(
   const provider = new LocalDiskProvider();
   let result;
   try {
-    result = provider.verifySync(envelope, canonicalBytes, publicKeyRef, "strict");
+    result = provider.verifySync(envelope, canonicalBytes, [publicKeyRef], "strict");
   } catch (err) {
     if (err instanceof SigningError) {
       throw new SignatureVerificationError(err.message);
