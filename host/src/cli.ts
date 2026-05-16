@@ -561,9 +561,21 @@ async function cmdVmCreate(args: ParsedArgs): Promise<number> {
   }
 
   // Build VMConfig from the template + CLI overrides.
+  //
+  // The `template` field on VMConfig is consumed differently per
+  // backend: Hyper-V ignores it (uses New-VM with an empty disk;
+  // disk attach happens later via provisioning), libvirt's createVM
+  // requires it to be an absolute filesystem path to an existing
+  // qcow2 used as the backing file. Pass the resolved disk path when
+  // we have one (base_image_path or fetched vhdxPath) so the libvirt
+  // path "just works" with template-registry entries that point at
+  // a real image.
   const cfg = {
     name: vmName,
-    template: template.name,
+    template:
+      template.base_image_path ??
+      template.vhdxPath ??
+      template.name,
     cpus: template.processorCount,
     memoryMB: template.memoryMB,
     network: { switchName: template.networkSwitch },
