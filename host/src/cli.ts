@@ -561,9 +561,21 @@ async function cmdVmCreate(args: ParsedArgs): Promise<number> {
   }
 
   // Build VMConfig from the template + CLI overrides.
+  //
+  // The `template` field on VMConfig is consumed differently per
+  // backend: Hyper-V ignores it (uses New-VM with an empty disk;
+  // disk attach happens later via provisioning), libvirt's createVM
+  // requires it to be an absolute filesystem path to an existing
+  // qcow2 used as the backing file. Pass the resolved disk path when
+  // we have one (base_image_path or fetched vhdxPath) so the libvirt
+  // path "just works" with template-registry entries that point at
+  // a real image.
   const cfg = {
     name: vmName,
-    template: template.name,
+    template:
+      template.base_image_path ??
+      template.vhdxPath ??
+      template.name,
     cpus: template.processorCount,
     memoryMB: template.memoryMB,
     network: { switchName: template.networkSwitch },
@@ -603,7 +615,9 @@ async function cmdVm(args: ParsedArgs): Promise<number> {
   const sub = args.positional.shift();
   if (!sub) {
     usageError(
-      "vm requires a subcommand (e.g. start, stop, status, fetch-template, provision, cleanup, install-bundle)",
+      "vm requires a subcommand (e.g. start, stop, status, fetch-template, provision, cleanup, install-bundle, " +
+        "delete, pause, resume, wait-heartbeat, set-memory, set-processor, checkpoint, list-checkpoints, " +
+        "restore, delete-checkpoint)",
     );
   }
 
@@ -630,6 +644,26 @@ async function cmdVm(args: ParsedArgs): Promise<number> {
       return await cmdVmExec(args);
     case "copy-file":
       return await cmdVmCopyFile(args);
+    case "delete":
+      return await cmdVmDelete(args);
+    case "pause":
+      return await cmdVmPause(args);
+    case "resume":
+      return await cmdVmResume(args);
+    case "wait-heartbeat":
+      return await cmdVmWaitHeartbeat(args);
+    case "set-memory":
+      return await cmdVmSetMemory(args);
+    case "set-processor":
+      return await cmdVmSetProcessor(args);
+    case "checkpoint":
+      return await cmdVmCheckpoint(args);
+    case "list-checkpoints":
+      return await cmdVmListCheckpoints(args);
+    case "restore":
+      return await cmdVmRestore(args);
+    case "delete-checkpoint":
+      return await cmdVmDeleteCheckpoint(args);
     default:
       usageError(`unknown vm subcommand: ${sub}`);
   }
@@ -1034,6 +1068,282 @@ async function cmdVmStatus(args: ParsedArgs): Promise<number> {
     return 0;
   } catch (err) {
     console.error(`signalman vm status: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// ── vm delete ──────────────────────────────────────────────────────
+//
+// Shells `backend.deleteVM(handle)` which on libvirt issues
+// `virsh destroy` (best-effort) + `virsh undefine --remove-all-storage`;
+// on hyper-v it's `Stop-VM -TurnOff` + `Remove-VM -Force`. The VM
+// definition AND its disk image both go away.
+async function cmdVmDelete(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm delete requires <name>");
+  const format = args.options.get("format");
+  const backend = await getCliBackend();
+  try {
+    const handle = await resolveVmHandleByName(backend, name);
+    process.stderr.write(`[vm delete] deleting VM '${name}'...\n`);
+    await backend.deleteVM(handle);
+    if (format === "json") {
+      emitJson({ vmName: name, backend: backend.name, deleted: true });
+    } else {
+      process.stdout.write(`VM '${name}' deleted.\n`);
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman vm delete: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// ── vm pause / vm resume ───────────────────────────────────────────
+async function cmdVmPause(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm pause requires <name>");
+  const format = args.options.get("format");
+  const backend = await getCliBackend();
+  try {
+    const handle = await resolveVmHandleByName(backend, name);
+    await backend.pauseVM(handle);
+    if (format === "json") {
+      emitJson({ vmName: name, backend: backend.name, paused: true });
+    } else {
+      process.stdout.write(`VM '${name}' paused.\n`);
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman vm pause: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdVmResume(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm resume requires <name>");
+  const format = args.options.get("format");
+  const backend = await getCliBackend();
+  try {
+    const handle = await resolveVmHandleByName(backend, name);
+    await backend.resumeVM(handle);
+    if (format === "json") {
+      emitJson({ vmName: name, backend: backend.name, resumed: true });
+    } else {
+      process.stdout.write(`VM '${name}' resumed.\n`);
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman vm resume: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// ── vm wait-heartbeat ──────────────────────────────────────────────
+//
+// Wraps backend.waitForHeartbeat?(handle, timeoutMs) when the backend
+// implements it (libvirt + hyper-v). On backends without the optional
+// method we surface a clear "not supported" error rather than silently
+// no-op'ing.
+async function cmdVmWaitHeartbeat(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm wait-heartbeat requires <name>");
+  const timeoutMs = parseInt(args.options.get("timeout") ?? "120000", 10);
+  const format = args.options.get("format");
+  const backend = await getCliBackend();
+  try {
+    if (!backend.waitForHeartbeat) {
+      throw new Error(
+        `Backend '${backend.name}' does not implement waitForHeartbeat. ` +
+          `Use 'vm status' in a poll loop instead.`,
+      );
+    }
+    const handle = await resolveVmHandleByName(backend, name);
+    process.stderr.write(
+      `[vm wait-heartbeat] waiting up to ${timeoutMs}ms for guest agent on '${name}'...\n`,
+    );
+    const reachable = await backend.waitForHeartbeat(handle, timeoutMs);
+    if (format === "json") {
+      emitJson({ vmName: name, backend: backend.name, reachable, timeoutMs });
+    } else {
+      process.stdout.write(
+        reachable
+          ? `Guest agent on '${name}' is reachable.\n`
+          : `Guest agent on '${name}' did not respond within ${timeoutMs}ms.\n`,
+      );
+    }
+    return reachable ? 0 : 5;
+  } catch (err) {
+    console.error(`signalman vm wait-heartbeat: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// ── vm set-memory / vm set-processor ──────────────────────────────
+//
+// Both delegate to optional interface methods; backends without them
+// raise a "not supported" error. Memory is in MiB to match the
+// HypervisorBackend contract; CPU count is an integer.
+async function cmdVmSetMemory(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm set-memory requires <name> --mb <N>");
+  const mbRaw = args.options.get("mb");
+  if (!mbRaw) usageError("vm set-memory: --mb <N> is required");
+  const mb = parseInt(mbRaw, 10);
+  if (!Number.isFinite(mb)) usageError("vm set-memory: --mb must be an integer");
+  const format = args.options.get("format");
+  const backend = await getCliBackend();
+  try {
+    if (!backend.setVmMemory) {
+      throw new Error(`Backend '${backend.name}' does not implement setVmMemory.`);
+    }
+    const handle = await resolveVmHandleByName(backend, name);
+    await backend.setVmMemory(handle, mb);
+    if (format === "json") {
+      emitJson({ vmName: name, backend: backend.name, memoryMB: mb });
+    } else {
+      process.stdout.write(`VM '${name}' memory set to ${mb} MiB.\n`);
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman vm set-memory: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdVmSetProcessor(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm set-processor requires <name> --count <N>");
+  const countRaw = args.options.get("count");
+  if (!countRaw) usageError("vm set-processor: --count <N> is required");
+  const count = parseInt(countRaw, 10);
+  if (!Number.isFinite(count)) usageError("vm set-processor: --count must be an integer");
+  const format = args.options.get("format");
+  const backend = await getCliBackend();
+  try {
+    if (!backend.setVmProcessor) {
+      throw new Error(`Backend '${backend.name}' does not implement setVmProcessor.`);
+    }
+    const handle = await resolveVmHandleByName(backend, name);
+    await backend.setVmProcessor(handle, count);
+    if (format === "json") {
+      emitJson({ vmName: name, backend: backend.name, cpus: count });
+    } else {
+      process.stdout.write(`VM '${name}' vCPU count set to ${count}.\n`);
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman vm set-processor: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// ── vm checkpoint / list-checkpoints / restore / delete-checkpoint ─
+//
+// Snapshot lifecycle. `vm start --checkpoint <label>` already wraps
+// restoreCheckpoint as a side-channel; these stand-alone verbs are
+// the operator-facing surface for managing snapshots without a
+// concurrent start.
+async function cmdVmCheckpoint(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm checkpoint requires <name> --label <L>");
+  const label = args.options.get("label");
+  if (!label) usageError("vm checkpoint: --label <L> is required");
+  const format = args.options.get("format");
+  const backend = await getCliBackend();
+  try {
+    const handle = await resolveVmHandleByName(backend, name);
+    const cp = await backend.createCheckpoint(handle, label);
+    if (format === "json") {
+      emitJson({ vmName: name, label: cp.label, checkpointId: cp.id });
+    } else {
+      process.stdout.write(`Checkpoint '${cp.label}' created on VM '${name}'.\n`);
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman vm checkpoint: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdVmListCheckpoints(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm list-checkpoints requires <name>");
+  const format = args.options.get("format");
+  const backend = await getCliBackend();
+  try {
+    const handle = await resolveVmHandleByName(backend, name);
+    const checkpoints = await backend.listCheckpoints(handle);
+    if (format === "json") {
+      emitJson({
+        vmName: name,
+        backend: backend.name,
+        checkpoints: checkpoints.map((c) => ({
+          id: c.id,
+          label: c.label,
+          createdAt: c.createdAt.toISOString(),
+          parentId: c.parentId,
+        })),
+      });
+    } else if (checkpoints.length === 0) {
+      process.stdout.write(`No checkpoints for VM '${name}'.\n`);
+    } else {
+      emitTable(
+        checkpoints.map((c) => ({
+          label: c.label,
+          id: c.id,
+          createdAt: c.createdAt.toISOString(),
+        })),
+      );
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman vm list-checkpoints: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdVmRestore(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm restore requires <name> --label <L>");
+  const label = args.options.get("label");
+  if (!label) usageError("vm restore: --label <L> is required");
+  const format = args.options.get("format");
+  const backend = await getCliBackend();
+  try {
+    const handle = await resolveVmHandleByName(backend, name);
+    await backend.restoreCheckpoint({ id: "", vmHandle: handle, label });
+    if (format === "json") {
+      emitJson({ vmName: name, restored: label });
+    } else {
+      process.stdout.write(`VM '${name}' restored to checkpoint '${label}'.\n`);
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman vm restore: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+async function cmdVmDeleteCheckpoint(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm delete-checkpoint requires <name> --label <L>");
+  const label = args.options.get("label");
+  if (!label) usageError("vm delete-checkpoint: --label <L> is required");
+  const format = args.options.get("format");
+  const backend = await getCliBackend();
+  try {
+    const handle = await resolveVmHandleByName(backend, name);
+    await backend.deleteCheckpoint({ id: "", vmHandle: handle, label });
+    if (format === "json") {
+      emitJson({ vmName: name, deletedCheckpoint: label });
+    } else {
+      process.stdout.write(`Checkpoint '${label}' deleted from VM '${name}'.\n`);
+    }
+    return 0;
+  } catch (err) {
+    console.error(`signalman vm delete-checkpoint: ${(err as Error).message}`);
     return 4;
   }
 }

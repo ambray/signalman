@@ -6,8 +6,9 @@
  */
 
 import type { ToolDefinition, ToolResult } from "./types.js";
-import type { HypervisorBackend } from "../hypervisors/interface.js";
+import type { HypervisorBackend, VMConfig } from "../hypervisors/interface.js";
 import { cacheVM, globalVmCache, resolveVM } from "../vm-cache.js";
+import { sanitizeVmName, sanitizeLabel } from "../sanitize.js";
 
 /**
  * Creates VM lifecycle tool definitions bound to a backend resolver.
@@ -138,6 +139,214 @@ export function createVmLifecycleTools(
         const status = await backend.getStatus(handle);
         return {
           content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
+        };
+      },
+    },
+    {
+      name: "vm_create",
+      description:
+        "Create a new VM from a backend-specific config (Modifies host state). " +
+        "On libvirt, `template` must be an absolute path to an existing qcow2; " +
+        "the new disk is a sparse copy-on-write child created via qemu-img. " +
+        "On hyper-v, a new empty disk is created.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+          template: {
+            type: "string",
+            description: "Template path or image name (backend-specific)",
+          },
+          cpus: { type: "number", description: "vCPU count (default 2)" },
+          memoryMB: {
+            type: "number",
+            description: "Memory in MiB (default 2048)",
+          },
+          diskGB: { type: "number", description: "Disk size in GB" },
+          switchName: {
+            type: "string",
+            description: "Virtual switch / network name (default 'default')",
+          },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const name = sanitizeVmName(params.name as string);
+        const config: VMConfig = {
+          name,
+          template: params.template as string | undefined,
+          cpus: params.cpus as number | undefined,
+          memoryMB: params.memoryMB as number | undefined,
+          diskGB: params.diskGB as number | undefined,
+          network: params.switchName
+            ? { switchName: sanitizeLabel(params.switchName as string) }
+            : undefined,
+        };
+        const backend = await getBackend();
+        const handle = await backend.createVM(config);
+        cacheVM(handle);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `VM '${name}' created (id: ${handle.id}, backend: ${handle.backend}).`,
+            },
+          ],
+        };
+      },
+    },
+    {
+      name: "vm_pause",
+      description: "Pause a running VM",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const name = sanitizeVmName(params.name as string);
+        const backend = await getBackend();
+        const handle = await resolveVM(backend, name);
+        await backend.pauseVM(handle);
+        return {
+          content: [{ type: "text", text: `VM '${name}' paused.` }],
+        };
+      },
+    },
+    {
+      name: "vm_resume",
+      description: "Resume a paused VM",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const name = sanitizeVmName(params.name as string);
+        const backend = await getBackend();
+        const handle = await resolveVM(backend, name);
+        await backend.resumeVM(handle);
+        return {
+          content: [{ type: "text", text: `VM '${name}' resumed.` }],
+        };
+      },
+    },
+    {
+      name: "vm_wait_heartbeat",
+      description:
+        "Wait for the guest agent to respond. Returns reachable=true on first " +
+        "successful probe or false when timeoutMs expires. Not all backends " +
+        "implement this — surfaces a clear error when unsupported.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+          timeoutMs: {
+            type: "number",
+            description: "Wait timeout in milliseconds (default 120000)",
+          },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const name = sanitizeVmName(params.name as string);
+        const timeoutMs = (params.timeoutMs as number | undefined) ?? 120_000;
+        const backend = await getBackend();
+        if (!backend.waitForHeartbeat) {
+          throw new Error(
+            `Backend '${backend.name}' does not implement waitForHeartbeat. ` +
+              `Use vm_status in a poll loop instead.`,
+          );
+        }
+        const handle = await resolveVM(backend, name);
+        const reachable = await backend.waitForHeartbeat(handle, timeoutMs);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ name, reachable, timeoutMs }, null, 2),
+            },
+          ],
+        };
+      },
+    },
+    {
+      name: "vm_set_memory",
+      description:
+        "Set the configured memory allocation in MiB (Modifies VM state). " +
+        "Backend may persist to next-boot config rather than live-resize. " +
+        "Not all backends implement this.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+          memoryMB: {
+            type: "number",
+            description: "Memory in MiB (32-1048576)",
+          },
+        },
+        required: ["name", "memoryMB"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const name = sanitizeVmName(params.name as string);
+        const memoryMB = params.memoryMB as number;
+        const backend = await getBackend();
+        if (!backend.setVmMemory) {
+          throw new Error(
+            `Backend '${backend.name}' does not implement setVmMemory.`,
+          );
+        }
+        const handle = await resolveVM(backend, name);
+        await backend.setVmMemory(handle, memoryMB);
+        return {
+          content: [
+            { type: "text", text: `VM '${name}' memory set to ${memoryMB} MiB.` },
+          ],
+        };
+      },
+    },
+    {
+      name: "vm_set_processor",
+      description:
+        "Set the configured vCPU count (Modifies VM state). " +
+        "Backend may persist to next-boot config rather than live-resize. " +
+        "Not all backends implement this.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+          count: {
+            type: "number",
+            description: "vCPU count (1-240)",
+          },
+        },
+        required: ["name", "count"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        const name = sanitizeVmName(params.name as string);
+        const count = params.count as number;
+        const backend = await getBackend();
+        if (!backend.setVmProcessor) {
+          throw new Error(
+            `Backend '${backend.name}' does not implement setVmProcessor.`,
+          );
+        }
+        const handle = await resolveVM(backend, name);
+        await backend.setVmProcessor(handle, count);
+        return {
+          content: [
+            { type: "text", text: `VM '${name}' vCPU count set to ${count}.` },
+          ],
         };
       },
     },

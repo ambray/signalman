@@ -46,6 +46,8 @@ export interface SignalmanConfig {
     virshPath?: string;
     /** libvirt connect URI, e.g. `qemu:///system`. */
     libvirtUri?: string;
+    /** libvirt storage pool name for `vm create` (default: "default"). */
+    libvirtStoragePool?: string;
     /** Default guest credentials for hypervisor-level operations. */
     guestCredentials?: {
       username: string;
@@ -476,6 +478,10 @@ function applyEnvOverrides(config: SignalmanConfig): SignalmanConfig {
   }
   if (process.env.LIBVIRT_DEFAULT_URI) {
     result.hypervisor.libvirtUri = process.env.LIBVIRT_DEFAULT_URI;
+  }
+  if (process.env.SIGNALMAN_LIBVIRT_STORAGE_POOL) {
+    result.hypervisor.libvirtStoragePool =
+      process.env.SIGNALMAN_LIBVIRT_STORAGE_POOL;
   }
 
   const guestPort = process.env.SIGNALMAN_GUEST_PORT;

@@ -106,5 +106,37 @@ export function createVmCheckpointTools(
         };
       },
     },
+    {
+      name: "vm_delete_checkpoint",
+      description: "Delete a checkpoint (irreversible)",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "VM name" },
+          label: {
+            type: "string",
+            description: "Checkpoint label to delete",
+          },
+        },
+        required: ["name", "label"],
+        additionalProperties: false,
+      },
+      handler: async (params): Promise<ToolResult> => {
+        // Defense-in-depth: sanitize at tool handler level before backend
+        const name = sanitizeVmName(params.name as string);
+        const label = sanitizeLabel(params.label as string);
+        const backend = await getBackend();
+        const handle = await resolveVM(backend, name);
+        await backend.deleteCheckpoint({ id: "", vmHandle: handle, label });
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Checkpoint '${label}' deleted from VM '${name}'.`,
+            },
+          ],
+        };
+      },
+    },
   ];
 }

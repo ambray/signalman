@@ -8,12 +8,18 @@
  * argv composition directly.
  */
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
+import * as fsp from "node:fs/promises";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-import { LibvirtBackend, LibvirtBackendError } from "../hypervisors/libvirt.js";
+import {
+  LibvirtBackend,
+  LibvirtBackendError,
+  QGA_FILE_CHUNK_BYTES,
+} from "../hypervisors/libvirt.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.resolve(__dirname, "fixtures");
@@ -84,16 +90,53 @@ describe("LibvirtBackend integration", () => {
     expect(vms.every((v) => v.backend === "libvirt")).toBe(true);
   });
 
-  it("getStatus returns running + IPv4 when a lease exists", async () => {
-    const backend = makeStubBackend({
-      domstate: { stdout: fixtures.domstateRunning },
-      domifaddr: { stdout: fixtures.domifaddr },
+  it("getStatus returns running + IPv4 + reachable QGA when guest-ping succeeds", async () => {
+    // Use a custom exec instead of makeStubBackend: the verb-dispatch
+    // helper folds all qemu-* args away when finding the verb, so it
+    // can't distinguish qemu-agent-command from a regular virsh verb.
+    const backend = new LibvirtBackend({
+      exec: async (args) => {
+        const verb = args[0];
+        if (verb === "domstate") {
+          return { stdout: fixtures.domstateRunning, stderr: "", exitCode: 0 };
+        }
+        if (verb === "domifaddr") {
+          return { stdout: fixtures.domifaddr, stderr: "", exitCode: 0 };
+        }
+        if (verb === "qemu-agent-command") {
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
     });
     const status = await backend.getStatus(HANDLE);
     expect(status.state).toBe("running");
     expect(status.ipAddress).toBe("192.168.122.42");
-    // guestAgentReachable stays false until the orchestrator runs the
-    // gRPC health probe — that's not the backend's job.
+    expect(status.guestAgentReachable).toBe(true);
+  });
+
+  it("getStatus reports guestAgentReachable=false when guest-ping errors", async () => {
+    const backend = new LibvirtBackend({
+      exec: async (args) => {
+        const verb = args[0];
+        if (verb === "domstate") {
+          return { stdout: fixtures.domstateRunning, stderr: "", exitCode: 0 };
+        }
+        if (verb === "domifaddr") {
+          return { stdout: fixtures.domifaddr, stderr: "", exitCode: 0 };
+        }
+        if (verb === "qemu-agent-command") {
+          return {
+            stdout: "",
+            stderr: "error: Guest agent is not responding",
+            exitCode: 1,
+          };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    });
+    const status = await backend.getStatus(HANDLE);
+    expect(status.state).toBe("running");
     expect(status.guestAgentReachable).toBe(false);
   });
 
@@ -105,6 +148,53 @@ describe("LibvirtBackend integration", () => {
     const status = await backend.getStatus(HANDLE);
     expect(status.state).toBe("running");
     expect(status.ipAddress).toBeUndefined();
+  });
+
+  it("getVmIpAddress falls back from lease to agent when lease has no IPv4", async () => {
+    // The default makeStubBackend keys responses by verb — both calls
+    // hit the `domifaddr` verb. Use a custom exec that distinguishes
+    // by the `--source` flag value so we can hand the agent path a
+    // valid lease while the lease path returns empty.
+    const calls: string[] = [];
+    const backend = new LibvirtBackend({
+      exec: async (args) => {
+        const source = args[args.indexOf("--source") + 1];
+        calls.push(source);
+        if (source === "lease") {
+          return { stdout: "Name   MAC   Protocol   Address\n----\n", stderr: "", exitCode: 0 };
+        }
+        if (source === "agent") {
+          return {
+            stdout:
+              " Name       MAC address          Protocol     Address\n" +
+              "-------------------------------------------------------------------------------\n" +
+              " ens3       52:54:00:aa:bb:cc    ipv4         10.0.0.99/24\n",
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        // arp branch wouldn't be hit in the success case
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    });
+    const ip = await backend.getVmIpAddress(HANDLE);
+    expect(ip).toBe("10.0.0.99");
+    expect(calls).toEqual(["lease", "agent"]);
+  });
+
+  it("getVmIpAddress throws network_unavailable when all three sources fail", async () => {
+    const calls: string[] = [];
+    const backend = new LibvirtBackend({
+      exec: async (args) => {
+        const source = args[args.indexOf("--source") + 1];
+        calls.push(source);
+        return { stdout: "", stderr: "no addresses", exitCode: 1 };
+      },
+    });
+    await expect(backend.getVmIpAddress(HANDLE)).rejects.toMatchObject({
+      code: "network_unavailable",
+    });
+    expect(calls).toEqual(["lease", "agent", "arp"]);
   });
 
   it("listCheckpoints parses every fixture row", async () => {
@@ -178,27 +268,323 @@ describe("LibvirtBackend integration", () => {
     });
   });
 
-  it("createVM is unsupported_operation pending the v0.4.1 XML builder", async () => {
-    const backend = makeStubBackend({});
-    await expect(
-      backend.createVM({ name: "vm-new" }),
-    ).rejects.toMatchObject({ code: "unsupported_operation" });
+  describe("createVM", () => {
+    const POOL_XML =
+      "<pool type='dir'>\n" +
+      "  <name>default</name>\n" +
+      "  <target><path>/var/lib/libvirt/images</path></target>\n" +
+      "</pool>";
+    type VirshCall = { args: string[] };
+    type QemuImgCall = { args: string[] };
+    function buildCreateBackend(opts: {
+      virshResponses?: Partial<Record<string, { stdout?: string; stderr?: string; exitCode?: number }>>;
+      qemuImgResult?: { stdout?: string; stderr?: string; exitCode?: number };
+    }) {
+      const virshCalls: VirshCall[] = [];
+      const qemuImgCalls: QemuImgCall[] = [];
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          virshCalls.push({ args });
+          const verb = args[0];
+          const r = opts.virshResponses?.[verb];
+          return {
+            stdout: r?.stdout ?? "",
+            stderr: r?.stderr ?? "",
+            exitCode: r?.exitCode ?? 0,
+          };
+        },
+        qemuImgExec: async (args) => {
+          qemuImgCalls.push({ args });
+          return {
+            stdout: opts.qemuImgResult?.stdout ?? "",
+            stderr: opts.qemuImgResult?.stderr ?? "",
+            exitCode: opts.qemuImgResult?.exitCode ?? 0,
+          };
+        },
+      });
+      return { backend, virshCalls, qemuImgCalls };
+    }
+
+    it("resolves the pool, calls qemu-img with backing file, then virsh define", async () => {
+      const { backend, virshCalls, qemuImgCalls } = buildCreateBackend({
+        virshResponses: {
+          "pool-dumpxml": { stdout: POOL_XML },
+        },
+      });
+      const handle = await backend.createVM({
+        name: "vm-new",
+        template: "/var/lib/libvirt/templates/ubuntu-noble.qcow2",
+        memoryMB: 4096,
+        cpus: 4,
+      });
+      expect(handle).toEqual({
+        id: "vm-new",
+        name: "vm-new",
+        backend: "libvirt",
+      });
+      expect(virshCalls[0].args).toEqual(["pool-dumpxml", "default"]);
+      expect(qemuImgCalls[0].args).toEqual([
+        "create",
+        "-f",
+        "qcow2",
+        "-F",
+        "qcow2",
+        "-b",
+        "/var/lib/libvirt/templates/ubuntu-noble.qcow2",
+        "/var/lib/libvirt/images/vm-new.qcow2",
+      ]);
+      const defineCall = virshCalls.find((c) => c.args[0] === "define");
+      expect(defineCall).toBeDefined();
+      expect(defineCall!.args.length).toBe(2);
+      expect(path.isAbsolute(defineCall!.args[1])).toBe(true);
+    });
+
+    it("rejects when config.template is missing", async () => {
+      const { backend } = buildCreateBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL_XML } },
+      });
+      await expect(
+        backend.createVM({ name: "vm-new" }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+    });
+
+    it("rejects a template path that isn't absolute", async () => {
+      const { backend } = buildCreateBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL_XML } },
+      });
+      await expect(
+        backend.createVM({
+          name: "vm-new",
+          template: "relative/path.qcow2",
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+    });
+
+    it("rejects out-of-range memory or cpus with invalid_argument", async () => {
+      const { backend } = buildCreateBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL_XML } },
+      });
+      await expect(
+        backend.createVM({
+          name: "vm-new",
+          template: "/abs/tpl.qcow2",
+          memoryMB: 0,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+      await expect(
+        backend.createVM({
+          name: "vm-new",
+          template: "/abs/tpl.qcow2",
+          cpus: 999,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+    });
+
+    it("surfaces invalid_argument with a copy-pasteable repair hint when the pool is missing", async () => {
+      const { backend } = buildCreateBackend({
+        virshResponses: {
+          "pool-dumpxml": {
+            stderr: "error: failed to get pool 'default'",
+            exitCode: 1,
+          },
+        },
+      });
+      await expect(
+        backend.createVM({
+          name: "vm-new",
+          template: "/abs/tpl.qcow2",
+        }),
+      ).rejects.toMatchObject({
+        code: "invalid_argument",
+        message: expect.stringContaining("virsh pool-define-as default"),
+      });
+    });
+
+    it("surfaces command_failed when qemu-img create fails", async () => {
+      const { backend } = buildCreateBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL_XML } },
+        qemuImgResult: {
+          stderr: "qemu-img: Could not open backing file",
+          exitCode: 1,
+        },
+      });
+      await expect(
+        backend.createVM({
+          name: "vm-new",
+          template: "/abs/tpl.qcow2",
+        }),
+      ).rejects.toMatchObject({ code: "command_failed" });
+    });
+
+    it("surfaces command_failed when virsh define fails", async () => {
+      const { backend } = buildCreateBackend({
+        virshResponses: {
+          "pool-dumpxml": { stdout: POOL_XML },
+          define: {
+            stderr: "error: Failed to define domain from /tmp/foo.xml",
+            exitCode: 1,
+          },
+        },
+      });
+      await expect(
+        backend.createVM({
+          name: "vm-new",
+          template: "/abs/tpl.qcow2",
+        }),
+      ).rejects.toMatchObject({ code: "command_failed" });
+    });
+
+    it("honors a custom storagePool option", async () => {
+      const calls: VirshCall[] = [];
+      const qcalls: QemuImgCall[] = [];
+      const backend = new LibvirtBackend({
+        storagePool: "ssd-pool",
+        exec: async (args) => {
+          calls.push({ args });
+          if (args[0] === "pool-dumpxml") {
+            return {
+              stdout:
+                "<pool><target><path>/mnt/ssd/images</path></target></pool>",
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+        qemuImgExec: async (args) => {
+          qcalls.push({ args });
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.createVM({ name: "vm-x", template: "/abs/tpl.qcow2" });
+      expect(calls[0].args).toEqual(["pool-dumpxml", "ssd-pool"]);
+      expect(qcalls[0].args[qcalls[0].args.length - 1]).toBe(
+        "/mnt/ssd/images/vm-x.qcow2",
+      );
+    });
   });
 
-  it("executeCommand passes the qemu-agent JSON envelope verbatim", async () => {
-    let captured = "";
+  it("executeCommand submits guest-exec then polls guest-exec-status until exited", async () => {
+    // QGA submit returns a pid; the first poll says the guest is
+    // still running; the second poll signals terminal completion
+    // with base64-encoded stdout + stderr. The backend must round-trip
+    // both: real exitCode from the guest, real decoded stdout/stderr.
+    const out = Buffer.from("hello\n").toString("base64");
+    const err = Buffer.from("warn line\n").toString("base64");
+    const calls: { execute: string; pid?: number }[] = [];
+    let pollCount = 0;
     const backend = new LibvirtBackend({
       exec: async (args) => {
-        captured = args[args.length - 1];
-        return { stdout: '{"return":{"pid":42}}', stderr: "", exitCode: 0 };
+        const payload = JSON.parse(args[args.length - 1]) as {
+          execute: string;
+          arguments?: { pid?: number };
+        };
+        calls.push({ execute: payload.execute, pid: payload.arguments?.pid });
+        if (payload.execute === "guest-exec") {
+          return { stdout: '{"return":{"pid":42}}', stderr: "", exitCode: 0 };
+        }
+        pollCount += 1;
+        if (pollCount === 1) {
+          return {
+            stdout: '{"return":{"exited":false}}',
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        return {
+          stdout: JSON.stringify({
+            return: {
+              exited: true,
+              exitcode: 7,
+              "out-data": out,
+              "err-data": err,
+            },
+          }),
+          stderr: "",
+          exitCode: 0,
+        };
       },
     });
-    const result = await backend.executeCommand(HANDLE, "/bin/echo", ["hello"]);
-    const payload = JSON.parse(captured);
-    expect(payload.execute).toBe("guest-exec");
-    expect(payload.arguments.path).toBe("/bin/echo");
-    expect(payload.arguments.arg).toEqual(["hello"]);
-    expect(result.exitCode).toBe(0);
+    const result = await backend.executeCommand(HANDLE, "/bin/echo", ["hi"]);
+    expect(result.exitCode).toBe(7);
+    expect(result.stdout).toBe("hello\n");
+    expect(result.stderr).toBe("warn line\n");
+    expect(result.durationMs).toBeGreaterThanOrEqual(0);
+    // First call submits, the remainder poll on the returned pid.
+    expect(calls[0]).toEqual({ execute: "guest-exec", pid: undefined });
+    expect(calls.slice(1).every((c) => c.execute === "guest-exec-status")).toBe(true);
+    expect(calls.slice(1).every((c) => c.pid === 42)).toBe(true);
+  });
+
+  it("executeCommand maps signal-killed processes to 128+signal", async () => {
+    // QGA reports either `exitcode` (normal exit) or `signal` (killed).
+    // We translate signal-killed processes to the shell-convention
+    // 128 + signum so callers don't need to introspect the QGA field.
+    const backend = new LibvirtBackend({
+      exec: async (args) => {
+        const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+        if (payload.execute === "guest-exec") {
+          return { stdout: '{"return":{"pid":9}}', stderr: "", exitCode: 0 };
+        }
+        return {
+          stdout: '{"return":{"exited":true,"signal":15}}',
+          stderr: "",
+          exitCode: 0,
+        };
+      },
+    });
+    const result = await backend.executeCommand(HANDLE, "/bin/sleep", ["10"]);
+    expect(result.exitCode).toBe(143); // 128 + SIGTERM(15)
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
+  });
+
+  it("executeCommand surfaces command_failed when the submit RPC errors", async () => {
+    const backend = new LibvirtBackend({
+      exec: async () => ({
+        stdout: "",
+        stderr: "error: argument --domain is required for command 'qemu-agent-command'",
+        exitCode: 1,
+      }),
+    });
+    await expect(
+      backend.executeCommand(HANDLE, "/bin/true"),
+    ).rejects.toMatchObject({ code: "command_failed" });
+  });
+
+  it("executeCommand surfaces command_failed when the deadline expires before exit", async () => {
+    // Guest never reports `exited: true`. Backend's poll loop must
+    // give up at the caller's timeout and throw command_failed rather
+    // than spin forever.
+    const backend = new LibvirtBackend({
+      exec: async (args) => {
+        const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+        if (payload.execute === "guest-exec") {
+          return { stdout: '{"return":{"pid":3}}', stderr: "", exitCode: 0 };
+        }
+        return {
+          stdout: '{"return":{"exited":false}}',
+          stderr: "",
+          exitCode: 0,
+        };
+      },
+    });
+    await expect(
+      backend.executeCommand(HANDLE, "/bin/sleep", ["999"], 200),
+    ).rejects.toMatchObject({ code: "command_failed" });
+  });
+
+  it("executeCommand surfaces command_failed when QGA returns an unparseable submit response", async () => {
+    const backend = new LibvirtBackend({
+      exec: async () => ({
+        stdout: '{"return":{"not-a-pid":true}}',
+        stderr: "",
+        exitCode: 0,
+      }),
+    });
+    await expect(
+      backend.executeCommand(HANDLE, "/bin/true"),
+    ).rejects.toMatchObject({ code: "command_failed" });
   });
 
   it("executeCommand rejects empty commands with invalid_argument", async () => {
@@ -206,6 +592,466 @@ describe("LibvirtBackend integration", () => {
     await expect(
       backend.executeCommand(HANDLE, "", []),
     ).rejects.toMatchObject({ code: "invalid_argument" });
+  });
+
+  // ── QGA file transfer ──────────────────────────────────────────
+
+  describe("copyFileToVM", () => {
+    const tmpFiles: string[] = [];
+    afterEach(async () => {
+      while (tmpFiles.length > 0) {
+        const f = tmpFiles.pop()!;
+        await fsp.unlink(f).catch(() => undefined);
+      }
+    });
+    async function makeHostFile(contents: Buffer | string): Promise<string> {
+      const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "libvirt-m2-"));
+      const file = path.join(dir, "src");
+      await fsp.writeFile(file, contents);
+      tmpFiles.push(file);
+      return file;
+    }
+
+    it("opens with mode=w, writes the host file in chunks, then closes", async () => {
+      const contents = Buffer.from("hello QGA world\n", "utf8");
+      const hostFile = await makeHostFile(contents);
+      const sequence: { execute: string; payload: object }[] = [];
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as {
+            execute: string;
+            arguments?: Record<string, unknown>;
+          };
+          sequence.push({ execute: payload.execute, payload: payload.arguments ?? {} });
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":17}', stderr: "", exitCode: 0 };
+          }
+          if (payload.execute === "guest-file-write") {
+            return {
+              stdout: '{"return":{"count":16,"eof":false}}',
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          // guest-file-close
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.copyFileToVM(HANDLE, hostFile, "/tmp/dst");
+      expect(sequence.map((s) => s.execute)).toEqual([
+        "guest-file-open",
+        "guest-file-write",
+        "guest-file-close",
+      ]);
+      const openArgs = sequence[0].payload as { path: string; mode: string };
+      expect(openArgs).toEqual({ path: "/tmp/dst", mode: "w" });
+      const writeArgs = sequence[1].payload as { handle: number; "buf-b64": string };
+      expect(writeArgs.handle).toBe(17);
+      expect(Buffer.from(writeArgs["buf-b64"], "base64").toString("utf8")).toBe(
+        "hello QGA world\n",
+      );
+      const closeArgs = sequence[2].payload as { handle: number };
+      expect(closeArgs.handle).toBe(17);
+    });
+
+    it("opens + closes even when the host file is empty (no write call)", async () => {
+      const hostFile = await makeHostFile("");
+      const verbs: string[] = [];
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+          verbs.push(payload.execute);
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":9}', stderr: "", exitCode: 0 };
+          }
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.copyFileToVM(HANDLE, hostFile, "/tmp/empty");
+      expect(verbs).toEqual(["guest-file-open", "guest-file-close"]);
+    });
+
+    it("chunks files larger than QGA_FILE_CHUNK_BYTES into multiple writes", async () => {
+      // 2.5 chunks worth of data — ensures the loop terminates only
+      // when fs.read reports 0 bytes, not after a fixed chunk count.
+      const bytes = Math.floor(QGA_FILE_CHUNK_BYTES * 2.5);
+      const buf = Buffer.alloc(bytes);
+      for (let i = 0; i < bytes; i += 1) buf[i] = i % 256;
+      const hostFile = await makeHostFile(buf);
+      const writeChunks: Buffer[] = [];
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as {
+            execute: string;
+            arguments?: { "buf-b64"?: string };
+          };
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":1}', stderr: "", exitCode: 0 };
+          }
+          if (payload.execute === "guest-file-write") {
+            writeChunks.push(
+              Buffer.from(payload.arguments!["buf-b64"]!, "base64"),
+            );
+            return {
+              stdout: '{"return":{"count":1,"eof":false}}',
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.copyFileToVM(HANDLE, hostFile, "/tmp/big");
+      expect(writeChunks.length).toBe(3);
+      expect(writeChunks[0].length).toBe(QGA_FILE_CHUNK_BYTES);
+      expect(writeChunks[1].length).toBe(QGA_FILE_CHUNK_BYTES);
+      expect(writeChunks[2].length).toBe(bytes - 2 * QGA_FILE_CHUNK_BYTES);
+      const combined = Buffer.concat(writeChunks);
+      expect(combined.length).toBe(bytes);
+      expect(combined.equals(buf)).toBe(true);
+    });
+
+    it("still closes the guest handle when a chunk write fails midway", async () => {
+      const hostFile = await makeHostFile(Buffer.alloc(QGA_FILE_CHUNK_BYTES * 2));
+      const verbs: string[] = [];
+      let writeCount = 0;
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+          verbs.push(payload.execute);
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":5}', stderr: "", exitCode: 0 };
+          }
+          if (payload.execute === "guest-file-write") {
+            writeCount += 1;
+            if (writeCount === 1) {
+              return {
+                stdout: '{"return":{"count":1,"eof":false}}',
+                stderr: "",
+                exitCode: 0,
+              };
+            }
+            return {
+              stdout: "",
+              stderr: "guest-file-write: disk full",
+              exitCode: 1,
+            };
+          }
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      await expect(
+        backend.copyFileToVM(HANDLE, hostFile, "/tmp/dst"),
+      ).rejects.toMatchObject({ code: "copy_failed" });
+      // Even on failure, the close is attempted — the guest must not
+      // leak file handles when the host gives up partway through.
+      expect(verbs).toContain("guest-file-close");
+    });
+
+    it("surfaces copy_failed when guest-file-open returns a non-numeric handle", async () => {
+      const hostFile = await makeHostFile("x");
+      const backend = new LibvirtBackend({
+        exec: async () => ({
+          stdout: '{"return":"not-a-number"}',
+          stderr: "",
+          exitCode: 0,
+        }),
+      });
+      await expect(
+        backend.copyFileToVM(HANDLE, hostFile, "/tmp/dst"),
+      ).rejects.toMatchObject({ code: "copy_failed" });
+    });
+  });
+
+  describe("copyFileFromVM", () => {
+    const tmpDirs: string[] = [];
+    afterEach(async () => {
+      while (tmpDirs.length > 0) {
+        const d = tmpDirs.pop()!;
+        await fsp.rm(d, { recursive: true, force: true });
+      }
+    });
+    async function makeHostTarget(): Promise<string> {
+      const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "libvirt-m2-"));
+      tmpDirs.push(dir);
+      return path.join(dir, "dst");
+    }
+
+    it("reads guest file in chunks until eof and writes to the host", async () => {
+      const target = await makeHostTarget();
+      const part1 = Buffer.from("foo");
+      const part2 = Buffer.from("bar");
+      let readCount = 0;
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":3}', stderr: "", exitCode: 0 };
+          }
+          if (payload.execute === "guest-file-read") {
+            readCount += 1;
+            const chunk = readCount === 1 ? part1 : part2;
+            const eof = readCount >= 2;
+            return {
+              stdout: JSON.stringify({
+                return: {
+                  count: chunk.length,
+                  "buf-b64": chunk.toString("base64"),
+                  eof,
+                },
+              }),
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.copyFileFromVM(HANDLE, "/guest/src", target);
+      const written = await fsp.readFile(target);
+      expect(written.equals(Buffer.concat([part1, part2]))).toBe(true);
+    });
+
+    it("handles eof on the first read (empty guest file)", async () => {
+      const target = await makeHostTarget();
+      const verbs: string[] = [];
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+          verbs.push(payload.execute);
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":42}', stderr: "", exitCode: 0 };
+          }
+          if (payload.execute === "guest-file-read") {
+            return {
+              stdout: '{"return":{"count":0,"eof":true}}',
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.copyFileFromVM(HANDLE, "/guest/empty", target);
+      expect(verbs).toEqual([
+        "guest-file-open",
+        "guest-file-read",
+        "guest-file-close",
+      ]);
+      const written = await fsp.readFile(target);
+      expect(written.length).toBe(0);
+    });
+
+    it("still closes the guest handle when a read fails midway", async () => {
+      const target = await makeHostTarget();
+      const verbs: string[] = [];
+      let reads = 0;
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+          verbs.push(payload.execute);
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":7}', stderr: "", exitCode: 0 };
+          }
+          if (payload.execute === "guest-file-read") {
+            reads += 1;
+            if (reads === 1) {
+              return {
+                stdout:
+                  '{"return":{"count":3,"buf-b64":"Zm9v","eof":false}}',
+                stderr: "",
+                exitCode: 0,
+              };
+            }
+            return {
+              stdout: "",
+              stderr: "guest-file-read: I/O error",
+              exitCode: 1,
+            };
+          }
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      await expect(
+        backend.copyFileFromVM(HANDLE, "/guest/src", target),
+      ).rejects.toMatchObject({ code: "copy_failed" });
+      expect(verbs).toContain("guest-file-close");
+    });
+  });
+
+  // ── waitForHeartbeat / setVmMemory / setVmProcessor ─────────────
+
+  describe("waitForHeartbeat", () => {
+    it("returns true on the first successful guest-ping", async () => {
+      let pings = 0;
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          if (args[0] === "qemu-agent-command") {
+            pings += 1;
+            return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      expect(await backend.waitForHeartbeat(HANDLE, 1_000)).toBe(true);
+      expect(pings).toBe(1);
+    });
+
+    it("returns true after several failed pings once the agent comes up", async () => {
+      let pings = 0;
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          if (args[0] === "qemu-agent-command") {
+            pings += 1;
+            if (pings < 3) {
+              return {
+                stdout: "",
+                stderr: "Guest agent is not responding",
+                exitCode: 1,
+              };
+            }
+            return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      expect(await backend.waitForHeartbeat(HANDLE, 5_000)).toBe(true);
+      expect(pings).toBe(3);
+    });
+
+    it("returns false when the deadline expires", async () => {
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          if (args[0] === "qemu-agent-command") {
+            return {
+              stdout: "",
+              stderr: "Guest agent is not responding",
+              exitCode: 1,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      // 0ms deadline guarantees a single probe + return false.
+      expect(await backend.waitForHeartbeat(HANDLE, 0)).toBe(false);
+    });
+  });
+
+  describe("setVmMemory", () => {
+    it("issues setmaxmem then setmem with --config and KiB units", async () => {
+      const calls: string[][] = [];
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          calls.push(args);
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.setVmMemory(HANDLE, 4096);
+      expect(calls[0]).toEqual([
+        "setmaxmem",
+        "vm-alpha",
+        "4194304K",
+        "--config",
+      ]);
+      expect(calls[1]).toEqual([
+        "setmem",
+        "vm-alpha",
+        "4194304K",
+        "--config",
+      ]);
+    });
+
+    it("rejects out-of-range memory values with invalid_argument", async () => {
+      const backend = new LibvirtBackend({
+        exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      });
+      await expect(backend.setVmMemory(HANDLE, 0)).rejects.toMatchObject({
+        code: "invalid_argument",
+      });
+      await expect(backend.setVmMemory(HANDLE, 1_048_577)).rejects.toMatchObject({
+        code: "invalid_argument",
+      });
+      await expect(backend.setVmMemory(HANDLE, 1024.5)).rejects.toMatchObject({
+        code: "invalid_argument",
+      });
+    });
+
+    it("surfaces command_failed when setmaxmem returns non-zero", async () => {
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          if (args[0] === "setmaxmem") {
+            return {
+              stdout: "",
+              stderr: "error: maximum memory must be at least 32MiB",
+              exitCode: 1,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      await expect(backend.setVmMemory(HANDLE, 2048)).rejects.toMatchObject({
+        code: "command_failed",
+      });
+    });
+  });
+
+  describe("setVmProcessor", () => {
+    it("issues setvcpus --maximum --config then setvcpus --config", async () => {
+      const calls: string[][] = [];
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          calls.push(args);
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      await backend.setVmProcessor(HANDLE, 4);
+      expect(calls[0]).toEqual([
+        "setvcpus",
+        "vm-alpha",
+        "4",
+        "--maximum",
+        "--config",
+      ]);
+      expect(calls[1]).toEqual([
+        "setvcpus",
+        "vm-alpha",
+        "4",
+        "--config",
+      ]);
+    });
+
+    it("rejects out-of-range vCPU counts with invalid_argument", async () => {
+      const backend = new LibvirtBackend({
+        exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      });
+      await expect(backend.setVmProcessor(HANDLE, 0)).rejects.toMatchObject({
+        code: "invalid_argument",
+      });
+      await expect(backend.setVmProcessor(HANDLE, 241)).rejects.toMatchObject({
+        code: "invalid_argument",
+      });
+      await expect(backend.setVmProcessor(HANDLE, 2.5)).rejects.toMatchObject({
+        code: "invalid_argument",
+      });
+    });
+
+    it("surfaces command_failed when setvcpus returns non-zero", async () => {
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          if (args[0] === "setvcpus" && args.includes("--maximum")) {
+            return {
+              stdout: "",
+              stderr: "error: vCPU count exceeds maximum",
+              exitCode: 1,
+            };
+          }
+          return { stdout: "", stderr: "", exitCode: 0 };
+        },
+      });
+      await expect(backend.setVmProcessor(HANDLE, 8)).rejects.toMatchObject({
+        code: "command_failed",
+      });
+    });
   });
 
   it("isAvailable returns false when virsh is not installed", async () => {

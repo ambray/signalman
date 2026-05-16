@@ -14,7 +14,20 @@
 
 import { describe, it, expect } from "vitest";
 
-import { LibvirtBackend, buildArgv, parseDomState, parseDomainList, parseDomIfAddrIpv4, parseSnapshotList } from "../hypervisors/libvirt.js";
+import {
+  LibvirtBackend,
+  buildArgv,
+  parseDomState,
+  parseDomainList,
+  parseDomIfAddrIpv4,
+  parseSnapshotList,
+  parseGuestExecPid,
+  parseGuestExecStatus,
+  parseGuestFileHandle,
+  parseGuestFileRead,
+  parsePoolTargetPath,
+  buildDomainXml,
+} from "../hypervisors/libvirt.js";
 
 interface ExecCall {
   args: string[];
@@ -180,6 +193,181 @@ describe("parseSnapshotList", () => {
   });
 });
 
+describe("parseGuestExecPid", () => {
+  it("extracts the numeric pid from a QGA submit envelope", () => {
+    expect(parseGuestExecPid('{"return":{"pid":1234}}')).toBe(1234);
+  });
+
+  it("throws when the payload is not valid JSON", () => {
+    expect(() => parseGuestExecPid("not-json")).toThrow(/not valid JSON/);
+  });
+
+  it("throws when the pid field is missing or non-numeric", () => {
+    expect(() => parseGuestExecPid('{"return":{}}')).toThrow(/numeric pid/);
+    expect(() => parseGuestExecPid('{"return":{"pid":"42"}}')).toThrow(
+      /numeric pid/,
+    );
+  });
+});
+
+describe("parseGuestExecStatus", () => {
+  it("decodes base64 out-data and err-data into utf8 strings", () => {
+    const out = Buffer.from("hello world\n").toString("base64");
+    const err = Buffer.from("oops\n").toString("base64");
+    const status = parseGuestExecStatus(
+      JSON.stringify({
+        return: {
+          exited: true,
+          exitcode: 0,
+          "out-data": out,
+          "err-data": err,
+        },
+      }),
+    );
+    expect(status.exited).toBe(true);
+    expect(status.exitcode).toBe(0);
+    expect(status.outData).toBe("hello world\n");
+    expect(status.errData).toBe("oops\n");
+  });
+
+  it("returns exited=false without exitcode while the guest is still running", () => {
+    const status = parseGuestExecStatus('{"return":{"exited":false}}');
+    expect(status.exited).toBe(false);
+    expect(status.exitcode).toBeUndefined();
+    expect(status.signal).toBeUndefined();
+  });
+
+  it("surfaces the signal field when the guest process was killed", () => {
+    const status = parseGuestExecStatus(
+      '{"return":{"exited":true,"signal":9}}',
+    );
+    expect(status.exited).toBe(true);
+    expect(status.signal).toBe(9);
+    expect(status.exitcode).toBeUndefined();
+  });
+
+  it("surfaces the truncated flags when QGA reports buffer overflow", () => {
+    const status = parseGuestExecStatus(
+      '{"return":{"exited":true,"exitcode":0,"out-truncated":true,"err-truncated":true}}',
+    );
+    expect(status.outTruncated).toBe(true);
+    expect(status.errTruncated).toBe(true);
+  });
+
+  it("throws when the payload is not valid JSON", () => {
+    expect(() => parseGuestExecStatus("not-json")).toThrow(/not valid JSON/);
+  });
+
+  it("throws when the return body is missing", () => {
+    expect(() => parseGuestExecStatus("{}")).toThrow(/missing return body/);
+  });
+});
+
+describe("parseGuestFileHandle", () => {
+  it("extracts the numeric handle from a QGA open envelope", () => {
+    expect(parseGuestFileHandle('{"return":42}')).toBe(42);
+  });
+
+  it("throws when the payload is not valid JSON", () => {
+    expect(() => parseGuestFileHandle("not-json")).toThrow(/not valid JSON/);
+  });
+
+  it("throws when the handle is missing or not a number", () => {
+    expect(() => parseGuestFileHandle("{}")).toThrow(/numeric handle/);
+    expect(() => parseGuestFileHandle('{"return":"x"}')).toThrow(
+      /numeric handle/,
+    );
+  });
+});
+
+describe("parseGuestFileRead", () => {
+  it("decodes buf-b64 into a Buffer and surfaces eof", () => {
+    const b64 = Buffer.from("hello", "utf8").toString("base64");
+    const out = parseGuestFileRead(
+      JSON.stringify({ return: { count: 5, "buf-b64": b64, eof: false } }),
+    );
+    expect(out.buf.toString("utf8")).toBe("hello");
+    expect(out.eof).toBe(false);
+  });
+
+  it("returns an empty buffer when buf-b64 is absent (eof case)", () => {
+    const out = parseGuestFileRead('{"return":{"count":0,"eof":true}}');
+    expect(out.buf.length).toBe(0);
+    expect(out.eof).toBe(true);
+  });
+
+  it("throws when the payload is not valid JSON", () => {
+    expect(() => parseGuestFileRead("not-json")).toThrow(/not valid JSON/);
+  });
+
+  it("throws when the return body is missing", () => {
+    expect(() => parseGuestFileRead("{}")).toThrow(/missing return body/);
+  });
+});
+
+describe("parsePoolTargetPath", () => {
+  it("extracts the target path from a typical dir-pool dumpxml output", () => {
+    const xml =
+      "<pool type='dir'>\n" +
+      "  <name>default</name>\n" +
+      "  <target>\n" +
+      "    <path>/var/lib/libvirt/images</path>\n" +
+      "    <permissions><mode>0711</mode></permissions>\n" +
+      "  </target>\n" +
+      "</pool>\n";
+    expect(parsePoolTargetPath(xml)).toBe("/var/lib/libvirt/images");
+  });
+
+  it("returns null when the pool has no <target><path>", () => {
+    expect(parsePoolTargetPath("<pool type='iscsi'></pool>")).toBeNull();
+  });
+
+  it("trims surrounding whitespace from the path", () => {
+    const xml = "<pool><target><path>   /tmp/p   </path></target></pool>";
+    expect(parsePoolTargetPath(xml)).toBe("/tmp/p");
+  });
+});
+
+describe("buildDomainXml", () => {
+  it("renders a stable, opinionated domain XML for a minimal config", () => {
+    const xml = buildDomainXml({
+      name: "vm-test",
+      memoryMB: 2048,
+      cpus: 2,
+      diskPath: "/var/lib/libvirt/images/vm-test.qcow2",
+      networkName: "default",
+    });
+    expect(xml).toContain("<domain type='kvm'>");
+    expect(xml).toContain("<name>vm-test</name>");
+    expect(xml).toContain("<memory unit='MiB'>2048</memory>");
+    expect(xml).toContain("<currentMemory unit='MiB'>2048</currentMemory>");
+    expect(xml).toContain("<vcpu placement='static'>2</vcpu>");
+    expect(xml).toContain("<type arch='x86_64' machine='q35'>hvm</type>");
+    expect(xml).toContain("<cpu mode='host-passthrough'/>");
+    expect(xml).toContain(
+      "<source file='/var/lib/libvirt/images/vm-test.qcow2'/>",
+    );
+    expect(xml).toContain("<source network='default'/>");
+    expect(xml).toContain(
+      "<target type='virtio' name='org.qemu.guest_agent.0'/>",
+    );
+  });
+
+  it("XML-escapes name + paths + network so a stray special char can't break the XML", () => {
+    const xml = buildDomainXml({
+      name: "name&with<bad>",
+      memoryMB: 1024,
+      cpus: 1,
+      diskPath: "/path/with'apos.qcow2",
+      networkName: 'net"quote',
+    });
+    expect(xml).toContain("<name>name&amp;with&lt;bad&gt;</name>");
+    expect(xml).toContain("/path/with&apos;apos.qcow2");
+    expect(xml).toContain("net&quot;quote");
+    expect(xml).not.toMatch(/<name>name&with</);
+  });
+});
+
 // ── Backend.run argv tests (per verb) ────────────────────────────
 
 describe("LibvirtBackend argv composition", () => {
@@ -253,7 +441,7 @@ describe("LibvirtBackend argv composition", () => {
     expect(calls[0].args).toEqual(["list", "--all", "--name"]);
   });
 
-  it("getVmIpAddress shells `domifaddr <name>` and parses the IPv4 column", async () => {
+  it("getVmIpAddress shells `domifaddr <name> --source lease` first and parses the IPv4 column", async () => {
     const { backend, calls } = makeBackend({
       stdout:
         " Name       MAC address          Protocol     Address\n" +
@@ -261,8 +449,16 @@ describe("LibvirtBackend argv composition", () => {
         " vnet0      52:54:00:8e:5b:c1    ipv4         10.0.0.7/24\n",
     });
     const ip = await backend.getVmIpAddress(HANDLE);
-    expect(calls[0].args).toEqual(["domifaddr", "vm-alpha"]);
+    expect(calls[0].args).toEqual([
+      "domifaddr",
+      "vm-alpha",
+      "--source",
+      "lease",
+    ]);
     expect(ip).toBe("10.0.0.7");
+    // First source returned a usable IP, so the backend short-circuits
+    // — there should be no follow-up to `agent` or `arp`.
+    expect(calls).toHaveLength(1);
   });
 
   it("isAvailable shells `version --daemon` with a short timeout", async () => {
