@@ -1,40 +1,63 @@
 /**
  * Manifest signing — Ed25519 over the canonical manifest JSON.
  *
- * Why Ed25519:
- *   * Pure crypto, no infrastructure (no Fulcio/Rekor like sigstore,
- *     no keyserver like classic GPG). Operators hold a keypair on
- *     disk; that's it.
- *   * Compact: 32-byte public key, 64-byte signature.
- *   * Fast: signing and verifying are sub-millisecond.
- *   * Native: Node's built-in `crypto` supports Ed25519 since 12.0;
- *     no third-party dep.
+ * This module is the **legacy public API surface** for release-manifest
+ * signing. Its function signatures (`signManifest`, `verifyManifest`,
+ * `generateKeypair`, `fingerprintPublicKey`) and exported types
+ * (`Keypair`, `SignedManifest`, `SignatureVerificationError`) are
+ * byte-stable with v0.4.x; downstream callers (build/executor.ts,
+ * server.ts, cli.ts, verbs/control-plane.ts) compile and run
+ * unchanged after WS9.
  *
- * Key on-disk format:
- *   * Public key  → DER (SubjectPublicKeyInfo), base64-wrapped PEM
- *     with `-----BEGIN PUBLIC KEY-----` markers.
- *   * Private key → DER (PKCS#8), PEM with `-----BEGIN PRIVATE KEY-----`.
- *   This is what Node's `crypto.generateKeyPairSync('ed25519')` emits
- *   when asked for `pem` format — interoperable with openssl and other
- *   Ed25519 toolchains.
+ * Internally, signing and verifying route through the new
+ * SigningProvider abstraction at `../signing/` (Milestone 1a of WS9 —
+ * see docs/design/signing-service.md). The default provider is
+ * `LocalDiskProvider.fromInlinePem(privateKeyPem)`, which preserves
+ * the in-memory-key trust posture v0.4.x established. Subsequent
+ * milestones add `AwsKmsProvider` and post-quantum hybrid keys; both
+ * surface through the new `signing/` module, not through this shim.
+ *
+ * Byte-parity invariant: for the same (manifest, ed25519-private-key)
+ * inputs, `signManifest()` produces signature bytes identical to its
+ * v0.4.x output. The `signing.byte-parity.test.ts` regression test
+ * locks this against future drift.
+ *
+ * Why keep this shim:
+ *   - The v0.4.x callers (build/executor.ts, verbs/control-plane.ts)
+ *     don't need to know about the provider abstraction; their
+ *     workflow is "the operator handed me a PEM, sign with it."
+ *   - Async ergonomics: this surface stays synchronous so existing
+ *     callers don't need to be reworked to `await`.
+ *   - The Ed25519-only contract is preserved here so an accidental
+ *     ECDSA key doesn't silently pass — even though the underlying
+ *     provider supports both, the legacy public surface remains
+ *     Ed25519-only until call sites are explicitly opted-in.
+ *
+ * Why Ed25519 (historical, unchanged):
+ *   * Compact (32-byte public key, 64-byte signature) and fast
+ *     (sub-millisecond sign/verify).
+ *   * Native: Node's built-in `crypto` supports Ed25519 since 12.0.
+ *   * Deterministic: same key + message always produces the same
+ *     signature, which is what makes the byte-parity invariant a
+ *     stable test rather than a probabilistic one.
+ *
+ * Key on-disk format (unchanged):
+ *   * Public key  → DER SubjectPublicKeyInfo, PEM-wrapped
+ *     (`-----BEGIN PUBLIC KEY-----`).
+ *   * Private key → DER PKCS#8, PEM-wrapped
+ *     (`-----BEGIN PRIVATE KEY-----`).
  *
  * Signing identity:
- *   * `signed_by` on the release row stores the first 16 hex chars of
- *     sha256(DER-encoded public key). Sufficient to identify which
- *     key signed a given release; the full public key is what's
- *     needed to actually verify.
- *
- * Manifest canonicalization:
- *   * We sign the canonical JSON of the ReleaseManifest (sorted keys,
- *     no whitespace) produced by `hashManifest`'s upstream
- *     canonicalizer. The `manifestSha256` already commits to that
- *     canonical form; we sign the same bytes the hash was computed
- *     over, which means a release-row tuple of
- *     (manifest_sha256, signature_b64, signed_by) is self-consistent
- *     even when the original manifest JSON isn't stored verbatim.
+ *   * `signed_by` is the first 16 hex chars of sha256(DER public key).
  */
 
 import * as crypto from "node:crypto";
+
+import {
+  LocalDiskProvider,
+  freshNonce,
+  publicKeyRefFromPem,
+} from "../signing/index.js";
 import type { ReleaseManifest } from "./manifest.js";
 
 export interface Keypair {
@@ -74,6 +97,11 @@ export function generateKeypair(): Keypair {
  * Compute the public-key fingerprint stored in `release.signed_by`.
  * Operators with the public-key PEM can compute this independently
  * and compare against the value the build executor wrote.
+ *
+ * This helper does not route through the provider — it's a pure
+ * PEM-to-fingerprint transformation that doesn't need key state.
+ * Keeping it as a top-level function preserves the v0.4.x call
+ * shape used by server.ts, cli.ts, and operator scripts.
  */
 export function fingerprintPublicKey(publicKeyPem: string): string {
   const keyObject = crypto.createPublicKey(publicKeyPem);
@@ -105,12 +133,33 @@ function canonicalize(value: unknown): string {
 }
 
 /**
+ * Synthesize a SignRequest actor for legacy in-process callers.
+ * Milestone 1a callers don't yet thread a WS8 identity-cert actor;
+ * the synthetic actor is recorded in the audit log when Milestone 2
+ * wires the audit path. The legacy shim's algorithm gate (Ed25519
+ * only) preserves the v0.4.x contract regardless of what the
+ * provider accepts.
+ */
+const LEGACY_ACTOR = {
+  kind: "service" as const,
+  cn: "legacy-build-signing",
+  orgId: "default",
+};
+
+/**
  * Sign a manifest. Returns the base64 signature and the public-key
  * fingerprint to store alongside on the release row.
  *
  * Important: the caller is responsible for protecting the private key.
  * This module does not load keys from disk; that's the CLI verb's
  * job. Tests pass keys in-memory.
+ *
+ * Internally routes through `LocalDiskProvider.fromInlinePem(...)` so
+ * the provider-side audit-log / replay-protection wiring (Milestone 2)
+ * applies uniformly. The Ed25519-only contract is enforced at this
+ * layer to preserve the v0.4.x error shape; opting into ECDSA P-256
+ * or post-quantum hybrid requires using the new
+ * `host/src/control-plane/signing/` surface directly.
  */
 export function signManifest(
   manifest: ReleaseManifest,
@@ -123,17 +172,24 @@ export function signManifest(
     );
   }
   const bytes = canonicalManifestBytes(manifest);
-  const sig = crypto.sign(null, bytes, keyObject);
-  const publicKey = crypto.createPublicKey(keyObject);
-  const der = publicKey.export({ type: "spki", format: "der" });
-  const fingerprint = crypto
-    .createHash("sha256")
-    .update(der)
-    .digest("hex")
-    .slice(0, 16);
+  const provider = LocalDiskProvider.fromInlinePem(privateKeyPem);
+  const envelope = provider.signSync({
+    keyId: "inline",
+    payload: bytes,
+    nonce: freshNonce(),
+    requestedAt: new Date().toISOString(),
+    purpose: "release.manifest.legacy",
+    actor: LEGACY_ACTOR,
+  });
+  const entry = envelope.signatures[0];
+  if (!entry) {
+    // Defensive: signSync always returns at least one entry. If this
+    // ever fires, the provider abstraction is broken.
+    throw new Error("LocalDiskProvider.signSync returned an empty envelope");
+  }
   return {
-    signatureB64: sig.toString("base64"),
-    signedBy: fingerprint,
+    signatureB64: entry.signatureB64,
+    signedBy: entry.signedBy,
   };
 }
 
@@ -144,6 +200,11 @@ export function signManifest(
  *     isn't the one that signed this release)
  *   * cryptographic failure (manifest tampered, signature corrupt,
  *     or wrong key entirely)
+ *
+ * Internally routes through `LocalDiskProvider.verifySync(...)`. The
+ * Ed25519-only contract is preserved here; the underlying provider
+ * also supports ECDSA P-256 but the legacy `verifyManifest` shim
+ * stays Ed25519-only to match v0.4.x.
  */
 export function verifyManifest(
   manifest: ReleaseManifest,
@@ -157,26 +218,39 @@ export function verifyManifest(
       `public key must be Ed25519, got ${keyObject.asymmetricKeyType}`,
     );
   }
-  const der = keyObject.export({ type: "spki", format: "der" });
-  const fp = crypto
-    .createHash("sha256")
-    .update(der)
-    .digest("hex")
-    .slice(0, 16);
+  // Reuse fingerprintPublicKey's transformation so the v0.4.x error
+  // shape (which named the supplied vs. expected fingerprints) stays
+  // identical down to the variable order.
+  const fp = fingerprintPublicKey(publicKeyPem);
   if (fp !== signedByFingerprint) {
     throw new SignatureVerificationError(
       `public-key fingerprint mismatch: release signed by ${signedByFingerprint}, you provided ${fp}`,
     );
   }
   const bytes = canonicalManifestBytes(manifest);
-  let sig: Buffer;
-  try {
-    sig = Buffer.from(signatureB64, "base64");
-  } catch {
-    throw new SignatureVerificationError("signature_b64 is not valid base64");
-  }
-  const ok = crypto.verify(null, bytes, keyObject, sig);
-  if (!ok) {
+  // Run the cryptographic verify through the provider. The fingerprint
+  // check above already gated the failure path with the v0.4.x error
+  // message shape; the provider verify here covers the bad-signature
+  // case. We pass the same fingerprint as signedBy + key.fingerprint
+  // so the provider's internal fingerprint-match check is trivially
+  // satisfied — the v0.4.x error message wins on mismatch above.
+  const publicKeyRef = publicKeyRefFromPem(publicKeyPem);
+  const payloadSha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+  const envelope = {
+    signatures: [
+      {
+        signatureB64,
+        signedBy: signedByFingerprint,
+        algorithm: "ed25519" as const,
+        signedAt: new Date(0).toISOString(),
+      },
+    ],
+    nonce: "00000000000000000000000000000000",
+    payloadSha256,
+  };
+  const provider = new LocalDiskProvider();
+  const result = provider.verifySync(envelope, bytes, publicKeyRef, "strict");
+  if (!result.ok) {
     throw new SignatureVerificationError(
       "signature is cryptographically invalid (manifest tampered or wrong key)",
     );
