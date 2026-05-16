@@ -52,6 +52,7 @@ unless noted:
 | **WS3 — Webhooks (Epic 2)** | `webhook-dispatcher.test.ts`, `webhook-hmac.test.ts`, `webhook-slack.test.ts`, `webhook-e2e.test.ts` |
 | **WS3 — Scheduled health (Epic 3)** | `health-scheduler.test.ts`, `health-scheduler-integration.test.ts`, `health-verbs.test.ts` |
 | **WS4 — Cross-platform parity** | `tart-backend.test.ts`, `libvirt-backend.test.ts`, `libvirt-argv.test.ts`, plus guest-side `platform/` unit tests |
+| **WS11 — v0.5 libvirt parity** | `libvirt-backend.test.ts` (extended), `libvirt-argv.test.ts` (extended), `libvirt-system.test.ts` (new — real `virsh` against `test:///default`, gated by `SIGNALMAN_LIBVIRT_TESTS=1`) |
 | **WS5 — Registry** | `registry/src/**/*.test.ts` (14 files), plus host-side `signalman-registry-blob.test.ts`, `cloud-registry.test.ts` |
 | **WS6 — Cloud + k8s** | `cloud-{aws,azure,connection,cost,credentials,deploy,dialers,plan-cost,reaper,registry,tofu,types}.test.ts`, `k8s-{driver,helm,kubectl,executor-integration}.test.ts`, `runner-deploy-k8s.test.ts`, `cli-cloud-*.test.ts`, `server-{cloud,k8s}-tools.test.ts` |
 | **Release-signing (cross-wave)** | `signing.test.ts`, `release-signing-e2e.test.ts` |
@@ -393,6 +394,31 @@ looking for `last_run_at` older than `interval_seconds`). Use the
 `fakeNowAfter(schedule, offsetMs)` helper which anchors the fake
 clock to the row's real `createdAt` — naive `vi.setSystemTime()` will
 race with the row insert and produce flaky tests.
+
+## libvirt system lane (v0.5 WS11)
+
+A focused system lane sits between the fully-mocked
+`libvirt-backend.test.ts` integration suite and the Hyper-V-anchored
+E2E lane above. It drives the **real** `virsh` binary against
+libvirt's in-memory test driver (`test:///default`), which ships
+with libvirt itself — no QEMU, no storage pools, no real network.
+
+```bash
+# Linux host with libvirt-clients installed:
+SIGNALMAN_LIBVIRT_TESTS=1 npm test -- libvirt-system
+```
+
+Properties:
+
+- Gated by `SIGNALMAN_LIBVIRT_TESTS=1`. Default invocations skip
+  the suite (and the file's seven cases collapse to one always-on
+  documentation case).
+- Linux-only (`describe.skipIf` checks `process.platform`).
+- Catches parser / argv drift that the mocked suite can't see —
+  e.g. a virsh point release changing the `domifaddr` column shape.
+- Runs in <1 second when enabled; no operator-side fixtures
+  required because the test driver is fully self-contained inside
+  the libvirt daemon.
 
 ## Gated E2E lane (preview — P7.3 D4)
 

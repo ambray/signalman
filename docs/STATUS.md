@@ -29,6 +29,16 @@ Recent waves of work shipped to `main` since v0.2.1:
 - **v0.4.0-4** (WS4) — cross-platform completion: `Platform` trait
   in the guest agent, Linux/macOS support, libvirt backend, vmrun
   parallel-track backend.
+- **v0.5 libvirt parity** (WS11) — `LibvirtBackend` now implements
+  every method on `HypervisorBackend` (required + optional) with
+  parity to `hyperv.ts`. Real `executeCommand` via `guest-exec-status`
+  polling, real `copyFileTo/FromVM` via QGA file ops with chunked
+  base64, `guestAgentReachable` via `guest-ping`, `domifaddr` source
+  fallback (lease→agent→arp), `setVmMemory` / `setVmProcessor` /
+  `waitForHeartbeat`, minimal `createVM` XML builder backed by
+  `qemu-img` qcow2 backing-file disks. New gated system-lane test
+  drives real `virsh` against the in-memory `test:///default` driver
+  (`SIGNALMAN_LIBVIRT_TESTS=1`). 107 libvirt tests; 2827 total.
 - **`@signalman/registry` v0.1.0/v0.1.1** (WS5/WS6) — standalone OSS
   registry with cargo + npm protocol facades, virtual-upstream
   pull-through with Ed25519 re-signing, forensic + provenance HTTP
