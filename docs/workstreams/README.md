@@ -39,6 +39,7 @@ This directory is the planning artifact for the six parallel workstreams kicked 
 | 5 | Artifact registry | `feat/v0.4.0-registry` | Package skeleton + blob format + signing port | Merged into main (2026-05) |
 | 6 | Audit + skills | `chore/audit-and-skills` | Capability matrix + top P0 skill gaps | Merged into main (2026-05) |
 | 7 | Claude Code plugin | `feat/v0.5-claude-plugin` | v0.1.0 MVP per [`plugin/ROADMAP.md`](../../plugin/ROADMAP.md) | Awaiting session launch (2026-05-15) |
+| 8 | Per-user identity certs | `feat/v0.5-identity-certs` | Schema + repo per [`docs/design/per-user-identity-certs.md`](../design/per-user-identity-certs.md) | Awaiting session launch (2026-05-16) |
 
 WS1–WS6 ran on the parallel-worktree pattern (one `signalman-<stream>/` worktree per stream); that scaffolding was retired after consolidation. **WS7 onward runs directly off `main` with a feature branch** — no separate worktree. The 2026-05-15 cleanup removed the stale worktrees and branches; see the post-merge state notes for context.
 

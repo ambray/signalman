@@ -1233,9 +1233,16 @@ to land in v0.5–v0.6 are:
 - **vmrun ↔ VMware backend convergence** — close the gap between the
   vmrun-driven path and the broader VMware-backend interface so the
   same scenario runs on both without per-backend hand-tuning.
-- **Per-user identity certs** — extend the one-CA-many-VMs model from
-  v0.1.x into the per-VM identity-cert seed work flagged in
-  [`docs/supply-chain.md`](docs/supply-chain.md#key-model).
+- **Per-user identity certs (WS8)** — extend the one-CA-many-VMs
+  model from v0.1.x into named-identity mTLS with per-identity
+  revocation, replacing the v0.1.x cert-pin stopgap
+  (`guest/src/cert_pin.rs`). Three identity kinds
+  (user / machine / service); SPIFFE-compatible URI SAN convention;
+  signed serial-denylist for revocation; opt-in → default-on →
+  sole migration over v0.2.0 → v0.2.1 → v0.3.0. Design doc:
+  [`docs/design/per-user-identity-certs.md`](docs/design/per-user-identity-certs.md).
+  Workstream prompt:
+  [`docs/workstreams/prompts/ws8-per-user-identity-certs.md`](docs/workstreams/prompts/ws8-per-user-identity-certs.md).
 - **OSS-hygiene trio** — CI coverage gates, Contributor Covenant,
   CONTRIBUTING.md polish. Closes the GitHub community-profile checklist.
 
