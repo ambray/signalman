@@ -1198,6 +1198,52 @@ stable enough to commit to a wire contract.
 
 ---
 
+## v0.5+ — Claude Code plugin + next-10 epics (NEW 2026-05-15)
+
+Forward roadmap items kicked off after v0.4.0 + Wave-3 consolidation.
+These run in parallel — pick whichever has owner bandwidth.
+
+### Claude Code plugin (WS7) — v0.5
+
+Package the existing 44-skill / 27-CLI-verb / MCP-exposed surface into
+a one-click-install Claude Code plugin, with a clean open-core boundary
+(OSS plugin in this repo; proprietary sibling plugin in
+`signalman-cloud`).
+
+- Full roadmap: [`plugin/ROADMAP.md`](plugin/ROADMAP.md)
+- Workstream prompt:
+  [`docs/workstreams/prompts/ws7-claude-plugin.md`](docs/workstreams/prompts/ws7-claude-plugin.md)
+- MVP scope: plugin scaffold + MCP registration + 6 skills +
+  `/signalman-status` slash command + permission preset
+- v0.2.0 scope: full 44-skill coverage, incident-responder subagent,
+  destructive-command hooks, cloud-aware skill loading
+- v1.0.0 scope: split into `signalman` (OSS) + `signalman-cloud`
+  (proprietary) plugins
+
+### Other next-10 epics (running in parallel with WS7)
+
+The full next-10 list lives in operator notes; the items most likely
+to land in v0.5–v0.6 are:
+
+- **Signing service provider + infrastructure** — Loom is drafting
+  requirements; will gate at the spec stage before workstream kickoff.
+- **macOS UI automation parity** — AppleScript + AX driver matching
+  the Windows `UiAutomation` shape. See
+  [`docs/mac-virtualization.md`](docs/mac-virtualization.md) §Recommendation.
+- **vmrun ↔ VMware backend convergence** — close the gap between the
+  vmrun-driven path and the broader VMware-backend interface so the
+  same scenario runs on both without per-backend hand-tuning.
+- **Per-user identity certs** — extend the one-CA-many-VMs model from
+  v0.1.x into the per-VM identity-cert seed work flagged in
+  [`docs/supply-chain.md`](docs/supply-chain.md#key-model).
+- **OSS-hygiene trio** — CI coverage gates, Contributor Covenant,
+  CONTRIBUTING.md polish. Closes the GitHub community-profile checklist.
+
+These are placeholders; each gets its own workstream prompt under
+`docs/workstreams/prompts/` when it's pulled active.
+
+---
+
 ## Product-specific scenarios
 
 Scenarios that exercise a specific product's behavior (kernel-driver

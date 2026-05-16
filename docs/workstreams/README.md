@@ -32,11 +32,14 @@ This directory is the planning artifact for the six parallel workstreams kicked 
 
 | # | Stream | Branch | First milestone | Status |
 |---|---|---|---|---|
-| 1 | Cloud completion | `feat/v0.3.0-5-cloud-finish` | Sub-task 5: cost-guardrails reaper | In progress (this session) |
-| 2 | Kubernetes | `feat/v0.3.0-6-kubernetes` | k8s deploy target + runners | Awaiting session launch |
-| 3 | Release ops | `feat/v0.4.0-release-ops` | Scheduled health (first of 3 epics) | Awaiting session launch |
-| 4 | Cross-platform | `feat/v0.4.0-cross-platform` | Guest platform-trait split | Awaiting session launch |
-| 5 | Artifact registry | `feat/v0.4.0-registry` | Package skeleton + blob format + signing port | Awaiting session launch |
-| 6 | Audit + skills | `chore/audit-and-skills` | Capability matrix + top P0 skill gaps | Awaiting session launch |
+| 1 | Cloud completion | `feat/v0.3.0-5-cloud-finish` | Sub-task 5: cost-guardrails reaper | Merged into main (2026-05) |
+| 2 | Kubernetes | `feat/v0.3.0-6-kubernetes` | k8s deploy target + runners | Merged into main (2026-05) |
+| 3 | Release ops | `feat/v0.4.0-release-ops` | Scheduled health (first of 3 epics) | Merged into main (2026-05) |
+| 4 | Cross-platform | `feat/v0.4.0-cross-platform` | Guest platform-trait split | Merged into main (2026-05) |
+| 5 | Artifact registry | `feat/v0.4.0-registry` | Package skeleton + blob format + signing port | Merged into main (2026-05) |
+| 6 | Audit + skills | `chore/audit-and-skills` | Capability matrix + top P0 skill gaps | Merged into main (2026-05) |
+| 7 | Claude Code plugin | `feat/v0.5-claude-plugin` | v0.1.0 MVP per [`plugin/ROADMAP.md`](../../plugin/ROADMAP.md) | Awaiting session launch (2026-05-15) |
 
-Each workstream updates this table by editing the Status column when its first milestone lands. Subsequent milestones are tracked in the workstream's own `.workstream-status.md` at its worktree root.
+WS1–WS6 ran on the parallel-worktree pattern (one `signalman-<stream>/` worktree per stream); that scaffolding was retired after consolidation. **WS7 onward runs directly off `main` with a feature branch** — no separate worktree. The 2026-05-15 cleanup removed the stale worktrees and branches; see the post-merge state notes for context.
+
+Each workstream updates this table by editing the Status column when its first milestone lands. Subsequent milestones are tracked in the workstream's own `.workstream-status.md` at the repo root (no more per-worktree status files).
