@@ -70,66 +70,82 @@ Closed:
 3. ✅ **CHANGELOG + STATUS docs.** Current-tree residuals cleaned up
    in `61978e4`.
 
-Open:
+Open (after WS12, 2026-05-16):
 
 1. **Visibility flip** — repo is still private on GitHub. Operator
-   action; nothing technical blocking now.
+   action; runbook at `docs/runbooks/public-release.md` covers
+   pre-flight + execution.
 2. **GitHub repo secrets** for the release pipeline:
    `WINDOWS_CERT_BASE64`, `WINDOWS_CERT_PASSWORD`, `NPM_TOKEN`,
-   `CARGO_REGISTRY_TOKEN`. Without them the workflow builds
-   artifacts but skips publishing — fine for an unsigned dry-run
-   tag; not fine for an actual public release.
-3. **`signalman --version` verb** — referenced in `SECURITY.md` /
-   `CONTRIBUTING.md` / bug-report template but currently returns
-   "unknown verb". Slated for the OSS-hygiene trio (epic #10).
-4. **`CODE_OF_CONDUCT.md`** — intentionally deferred at v0.2.0;
-   GitHub's community-profile checklist will continue to show it as
-   missing until the operator picks a variant.
-5. **v0.3.0 / v0.4.0 tags** — `main` carries the work but no tag has
-   been cut. A consolidated v0.3.0 (or higher) release-engineering
-   pass is queued as a follow-up.
+   `CARGO_REGISTRY_TOKEN`. Operator action; runbook documents the
+   `gh secret set` commands.
+3. **`CODE_OF_CONDUCT.md`** — WS12 M2 deferred (content-filtering
+   issues prevented landing the Contributor Covenant 2.1 text
+   in-session). Operator to land manually. Variant locked as
+   Contributor Covenant 2.1; enforcement contact
+   `aaron@eldritch.tech`.
+
+Closed by WS12 (2026-05-16):
+
+- ✅ **`signalman --version` verb** — landed in M1 via
+  `host/src/version.ts` shared helper. CLI exits 0 with
+  `signalman <version>` on stdout; HTTP `/v1/healthz` reads the
+  same source.
+- ✅ **Consolidated v0.4.0 release-engineering pass** — M3 bumped
+  every version pin to `0.4.0`, expanded CHANGELOG `[0.4.0]` to
+  cover all v0.3.x + v0.4.0-1..4 work, fixed the registry
+  `package.json: 0.0.1` drift. Operator action remaining: push
+  `git tag -a v0.4.0` after merge.
 
 ## TL;DR (one-paragraph)
 
-`main` carries v0.2.1 + everything shipped since: v0.3.0-5 (cloud
+`main` carries v0.2.1 plus everything shipped since: v0.3.0-5 (cloud
 providers + cost guardrails + per-org credentials), v0.3.0-6
 (Kubernetes deploy + runner substrate), v0.4.0-1/-2/-3 (auto-promotion
 + webhooks + scheduled health), v0.4.0-4 (cross-platform guest agent
 with `Platform` trait + libvirt + vmrun backends), and the standalone
 `@signalman/registry` v0.1.1 (cargo + npm protocol facades + virtual
 upstreams + Ed25519 re-signing + forensic + provenance API + immutable
-audit log). The git-history genericization pass landed today
-(2026-05-15, commit `61978e4`), so the repo is structurally
-public-ready. The remaining open items are operator gestures
-(visibility flip, repo secrets) and a small OSS-hygiene trio
-(`signalman --version` verb + `CODE_OF_CONDUCT.md` + a consolidated
-v0.3.0/v0.4.0 release-engineering tag).
+audit log). The git-history genericization pass landed 2026-05-15
+(commit `61978e4`), so the repo is structurally public-ready. **WS12
+(2026-05-16)** bumped version pins to `0.4.0`, expanded CHANGELOG
+`[0.4.0]` to cover all v0.3.x + v0.4.0-1..4 work, landed
+`signalman --version` via a shared `host/src/version.ts` helper
+(eliminating the prior `http/app.ts` drift), fixed the registry
+`package.json: 0.0.1` drift, and wrote `docs/runbooks/public-release.md`
+for the operator-led visibility-flip + tag-push sequence. Remaining
+open items are operator gestures (visibility flip, repo secrets) and
+`CODE_OF_CONDUCT.md` (WS12 M2 deferred under content-filtering).
 
 ## Versions
 
 | Component | Path | Current version |
 |---|---|---|
-| Host (npm) | `host/package.json` | `0.2.1` (latest tag) — `main` carries v0.3.x + v0.4.x work, not yet bumped |
-| Guest (cargo) | `guest/Cargo.toml` | `0.2.1` (same) |
-| Workspace (cargo) | `Cargo.toml` (`workspace.package.version`) | `0.2.1` |
-| Service (cargo) | `service/Cargo.toml` (`version.workspace = true`) | `0.2.1` (inherits workspace) |
-| Loom plugin | `plugins/signalman-loom-plugin/Cargo.toml` | `0.2.1` |
-| Registry (npm) | `registry/package.json` | `0.1.1` (independently versioned; latest tag is the registry-v0.1.1 commit on `main`) |
-| HTTP `/v1/healthz` `version` field | `host/src/http/app.ts` `VERSION` const | `0.2.1` |
+| Host (npm) | `host/package.json` | `0.4.0` (WS12 M3 bump; awaiting tag push) |
+| Guest (cargo) | `guest/Cargo.toml` | `0.4.0` |
+| Workspace (cargo) | `Cargo.toml` (`workspace.package.version`) | `0.4.0` |
+| Service (cargo) | `service/Cargo.toml` (`version.workspace = true`) | `0.4.0` (inherits workspace) |
+| Loom plugin | `plugins/signalman-loom-plugin/Cargo.toml` | `0.4.0` |
+| Registry (npm) | `registry/package.json` | `0.1.1` (independently versioned; WS12 M3 resolved the prior `0.0.1` drift from the ROADMAP claim) |
+| HTTP `/v1/healthz` `version` field | `host/src/version.ts` (sourced from `host/package.json`) | `0.4.0` (no longer a hardcoded constant — single source of truth in `package.json` after WS12 M1) |
 | Proto contract — guest | `proto/guest.proto` | `signalman.guest` package, **v1 frozen** with `oneof platform_details` |
 | Proto contract — service | `service/proto/signalman_service.proto` | `signalman.service.v1.ControlPlane` |
 
 > The release workflow at `.github/workflows/release.yaml` validates
 > that every manifest matches the pushed tag before building.
 > Bumping for the next release: change the host / guest / workspace /
-> service / loom plugin / VERSION-const entries in lockstep (the
-> proto-contract rows are not version-pinned the same way; the
-> registry is independently versioned), commit, then `git tag -a
-> vX.Y.Z` and push the tag.
+> loom plugin entries in lockstep (service inherits from workspace;
+> `host/src/http/app.ts` now sources from `package.json` via
+> `host/src/version.ts`, so it bumps automatically; the proto-contract
+> rows are not version-pinned the same way; the registry is
+> independently versioned), commit, then `git tag -a vX.Y.Z` and push
+> the tag.
 >
-> A consolidated v0.3.0 (or higher) release-engineering tag is queued
-> — `main` currently carries v0.3.x + v0.4.x work that the version
-> pins haven't caught up to yet.
+> WS12 M3 (2026-05-16) bumped all v0.4.0-bound pins on
+> `feat/v0.5-oss-release-readiness`. Operator action remaining: review
+> the consolidated CHANGELOG `[0.4.0]` section, merge the WS12 branch,
+> push the `v0.4.0` tag. See `docs/runbooks/public-release.md` for the
+> end-to-end runbook.
 
 ## Latest commits (top 10)
 

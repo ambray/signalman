@@ -30,15 +30,18 @@ jobs:
       - name: Tests
         working-directory: host
         run: npx vitest run
-      - name: Coverage
+      - name: Coverage (enforced)
         working-directory: host
-        # vitest.config.ts holds the v8 provider + reporter config and
-        # the (currently commented) 80/80/70/80 threshold policy. P7
-        # baseline numbers + enforcement notes live in that config's
-        # header comment. continue-on-error stays until coverage
-        # catches up to the documented thresholds.
-        run: npm run coverage
-        continue-on-error: true
+        # Thresholds live in host/vitest.config.ts:
+        #   lines: 80, functions: 80, branches: 70, statements: 80
+        # Vitest exits non-zero when any threshold is unmet, so this
+        # step fails CI on a coverage regression. Co-located with the
+        # config so a future contributor adjusting one knows where the
+        # other lives. WS12 M4 (2026-05-16) removed the prior
+        # continue-on-error escape hatch — the held-core coverage now
+        # comfortably exceeds the thresholds (see CHANGELOG [0.4.0]
+        # §Tests for current numbers).
+        run: npm run coverage -- --testTimeout=30000
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

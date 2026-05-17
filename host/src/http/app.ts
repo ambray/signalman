@@ -75,8 +75,7 @@ import {
   validateGitRef,
   validateRepoUrl,
 } from "../control-plane/build/git.js";
-
-const VERSION = "0.2.1";
+import { VERSION } from "../version.js";
 
 export interface AppOptions {
   controlPlane: ControlPlane;
