@@ -266,45 +266,58 @@ async function addAwsKmsHybridKey(
       "aws-kms hybrid registration requires either --pq-key-id <pq-arn> (KMS ML-DSA-65 in your region) or --pq-fallback local (generate a local PQ keypair)",
     );
   }
-  if (input.pqKeyId) {
-    // Both-halves-in-KMS path: needs AwsKmsProvider to support
-    // ml-dsa-65 (algorithm gate in fetchPublicKey rejects non-P-256
-    // SPKI today). Deferred to a future milestone gated on AWS KMS
-    // ML-DSA GA confirmation in the operator's region.
-    throw new SigningError(
-      "algorithm-not-implemented",
-      "aws-kms ML-DSA-65 (--pq-key-id) is not yet wired (requires operator-confirmed AWS KMS ML-DSA GA + AwsKmsProvider algorithm-gate update). Use --pq-fallback local for now.",
-    );
-  }
-
   // Fetch the classical half's public key from KMS.
   const provider = await buildAwsKmsProvider(cp, orgId, input);
   const classicalCached = await provider.fetchPublicKey(input.keyId);
   const pairId = newId();
 
-  // Local-fallback PQ path. Generate ML-DSA-65 keypair via
-  // LocalDiskProvider.generateHybridKey + take only the PQ half.
-  const keysDir =
-    input.keysDir ?? path.join(os.homedir(), ".signalman", "keys");
-  await fs.mkdir(keysDir, { recursive: true });
-  const tmpAlias = `${input.alias}-pq-${Date.now()}`;
-  const local = new LocalDiskProvider({ keysDir });
-  const gen = local.generateHybridKey(tmpAlias);
-  // Discard the classical half we just generated; we only want the
-  // PQ half. Move it to the operator-facing alias name.
-  await fs.rm(gen.classicalKeyPath);
-  await fs.rm(gen.classicalPubPath);
-  const finalPqKeyPath = path.join(keysDir, `${input.alias}-mldsa65.key`);
-  const finalPqPubPath = path.join(keysDir, `${input.alias}-mldsa65.pub`);
-  await fs.rename(gen.pqKeyPath, finalPqKeyPath);
-  await fs.rename(gen.pqPubPath, finalPqPubPath);
-  const pqKeyPath = finalPqKeyPath;
-  const pqPubPath = finalPqPubPath;
-  const pqFingerprint = gen.pqFingerprint;
-  const pqPubBytes = (await fs.readFile(finalPqPubPath)).subarray(4);
-  const pqPublicKeyB64 = Buffer.from(pqPubBytes).toString("base64");
-  const pqKeyIdForCatalog = `${input.alias}-mldsa65`;
-  const pqProviderTag = "local-disk";
+  let pqKeyPath: string | undefined;
+  let pqPubPath: string | undefined;
+  let pqFingerprint: string;
+  let pqPublicKeyB64: string;
+  let pqKeyIdForCatalog: string;
+  let pqProviderTag: "aws-kms" | "local-disk";
+
+  if (input.pqKeyId) {
+    // Both-KMS-keys path (M8): the second ARN holds an ML-DSA-65
+    // KMS key. AwsKmsProvider.fetchPublicKey decodes the SPKI,
+    // extracts the FIPS 204 raw bytes, and caches them for verify.
+    const pqCached = await provider.fetchPublicKey(input.pqKeyId);
+    if (pqCached.algorithm !== "ml-dsa-65") {
+      throw new SigningError(
+        "algorithm-not-implemented",
+        `--pq-key-id ${input.pqKeyId} resolved to ${pqCached.algorithm}; expected ml-dsa-65 (KMS KeySpec=ML_DSA_65)`,
+      );
+    }
+    pqFingerprint = pqCached.fingerprint;
+    pqPublicKeyB64 = pqCached.publicKeyDer.toString("base64");
+    pqKeyIdForCatalog = input.pqKeyId;
+    pqProviderTag = "aws-kms";
+  } else {
+    // Local-fallback PQ path. Generate ML-DSA-65 keypair via
+    // LocalDiskProvider.generateHybridKey + take only the PQ half.
+    const keysDir =
+      input.keysDir ?? path.join(os.homedir(), ".signalman", "keys");
+    await fs.mkdir(keysDir, { recursive: true });
+    const tmpAlias = `${input.alias}-pq-${Date.now()}`;
+    const local = new LocalDiskProvider({ keysDir });
+    const gen = local.generateHybridKey(tmpAlias);
+    // Discard the classical half we just generated; we only want the
+    // PQ half. Move it to the operator-facing alias name.
+    await fs.rm(gen.classicalKeyPath);
+    await fs.rm(gen.classicalPubPath);
+    const finalPqKeyPath = path.join(keysDir, `${input.alias}-mldsa65.key`);
+    const finalPqPubPath = path.join(keysDir, `${input.alias}-mldsa65.pub`);
+    await fs.rename(gen.pqKeyPath, finalPqKeyPath);
+    await fs.rename(gen.pqPubPath, finalPqPubPath);
+    pqKeyPath = finalPqKeyPath;
+    pqPubPath = finalPqPubPath;
+    pqFingerprint = gen.pqFingerprint;
+    const pqPubBytes = (await fs.readFile(finalPqPubPath)).subarray(4);
+    pqPublicKeyB64 = Buffer.from(pqPubBytes).toString("base64");
+    pqKeyIdForCatalog = `${input.alias}-mldsa65`;
+    pqProviderTag = "local-disk";
+  }
 
   // Insert both rows under the shared pair_id.
   const classicalRow = await cp.signingProviderKeys.insert({
@@ -477,14 +490,47 @@ async function addSingleAlgoLocalDiskKey(
   algorithm: SigAlgorithm,
 ): Promise<KeysAddResult> {
   if (algorithm === "ml-dsa-65") {
-    // PQ-only single-algorithm keys land in M3+ — for now, gen via
-    // generateHybridKey and discard the classical half. Functional,
-    // not pretty; future iteration can split generateHybridKey into
-    // generateClassical + generateMldsa65 if there's operator demand.
-    throw new SigningError(
-      "algorithm-not-implemented",
-      "PQ-only (ml-dsa-65) single-algorithm key generation is not yet exposed by the CLI in M3; use --algorithm hybrid or run `signing keys add --provider local-disk --algorithm ed25519` for classical-only",
-    );
+    // M8 (v0.5.1): PQ-only single-algorithm keys via the CLI. We
+    // generate a hybrid keypair under a throwaway alias, discard
+    // the classical half, then rename the PQ half to the operator's
+    // alias so it resolves via LocalDiskProvider's flat-alias path
+    // (MLDA magic + raw FIPS 204 bytes). Splitting
+    // generateHybridKey into generateClassical + generateMldsa65
+    // would be cleaner, but reusing the existing helper keeps the
+    // key-format behavior locked in one place.
+    const local = new LocalDiskProvider({ keysDir });
+    const tmpAlias = `${input.alias}-gen-${Date.now()}`;
+    const gen = local.generateHybridKey(tmpAlias);
+    await fs.rm(gen.classicalKeyPath);
+    await fs.rm(gen.classicalPubPath);
+    const finalKeyPath = path.join(keysDir, `${input.alias}.key`);
+    const finalPubPath = path.join(keysDir, `${input.alias}.pub`);
+    await fs.rename(gen.pqKeyPath, finalKeyPath);
+    await fs.rename(gen.pqPubPath, finalPubPath);
+    const pqPubBytes = (await fs.readFile(finalPubPath)).subarray(4);
+    const row = await cp.signingProviderKeys.insert({
+      orgId,
+      provider: "local-disk",
+      keyId: input.alias,
+      algorithm: "ml-dsa-65",
+      fingerprint: gen.pqFingerprint,
+      publicKeyB64: Buffer.from(pqPubBytes).toString("base64"),
+      label: input.label ?? null,
+      addedBy: input.actor,
+    });
+    await writeKeyAddedRow(cp.auditLog, {
+      orgId,
+      actor: input.actor,
+      fingerprint: gen.pqFingerprint,
+      detail: {
+        provider: "local-disk",
+        keyId: input.alias,
+        algorithm: "ml-dsa-65",
+        fingerprint: gen.pqFingerprint,
+        label: input.label ?? null,
+      },
+    });
+    return { added: [row], classicalPath: finalKeyPath };
   }
   if (algorithm !== "ed25519" && algorithm !== "ecdsa-p256-sha256") {
     throw new SigningError("unknown-algorithm", `unknown algorithm ${algorithm}`);

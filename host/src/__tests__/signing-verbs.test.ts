@@ -190,16 +190,26 @@ describe("runSigningKeysAdd", () => {
     ).rejects.toThrow(/not yet supported/);
   });
 
-  it("rejects ml-dsa-65 single-algorithm (deferred from M3)", async () => {
-    await expect(
-      runSigningKeysAdd(cp, orgId, {
-        provider: "local-disk",
-        alias: "pq-only",
-        algorithm: "ml-dsa-65",
-        keysDir: tmp,
-        actor: "test",
-      }),
-    ).rejects.toThrow(/algorithm-not-implemented|not yet exposed/);
+  it("ml-dsa-65 single-algorithm (v0.5.1 M8): creates one PQ-only catalog row + flat .{pub,key} files", async () => {
+    const result = await runSigningKeysAdd(cp, orgId, {
+      provider: "local-disk",
+      alias: "pq-only",
+      algorithm: "ml-dsa-65",
+      keysDir: tmp,
+      actor: "test",
+    });
+    expect(result.added.length).toBe(1);
+    expect(result.added[0]!.algorithm).toBe("ml-dsa-65");
+    expect(result.added[0]!.provider).toBe("local-disk");
+    expect(result.added[0]!.pairId).toBeNull();
+    expect(result.added[0]!.keyId).toBe("pq-only");
+    // Public key bytes are raw 1952 FIPS 204 bytes (no SPKI wrap).
+    expect(Buffer.from(result.added[0]!.publicKeyB64, "base64").length).toBe(1952);
+    // Flat .{pub,key} files exist with MLDA magic header.
+    expect(fs.existsSync(path.join(tmp, "pq-only.pub"))).toBe(true);
+    expect(fs.existsSync(path.join(tmp, "pq-only.key"))).toBe(true);
+    const pubHead = fs.readFileSync(path.join(tmp, "pq-only.pub")).subarray(0, 4);
+    expect(pubHead.toString("ascii")).toBe("MLDA");
   });
 });
 

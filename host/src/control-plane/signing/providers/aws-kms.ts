@@ -46,6 +46,7 @@ import {
   SignCommand,
   SigningAlgorithmSpec,
 } from "@aws-sdk/client-kms";
+import { ml_dsa65 } from "@noble/post-quantum/ml-dsa.js";
 
 import type { AwsCredentialPlaintext } from "../../../cloud/credentials.js";
 import {
@@ -65,7 +66,23 @@ import {
 
 const PROVIDER_ID = "aws-kms";
 
-const SUPPORTED_ALGORITHMS_M4: readonly SigAlgorithm[] = ["ecdsa-p256-sha256"];
+const SUPPORTED_ALGORITHMS_M4: readonly SigAlgorithm[] = [
+  "ecdsa-p256-sha256",
+  // M8 (v0.5.1): ml-dsa-65 via KMS (KeySpec=ML_DSA_65,
+  // SigningAlgorithm=ML_DSA_SHAKE_256). Region-dependent; operator
+  // confirms availability at credential setup.
+  "ml-dsa-65",
+];
+
+/** ML-DSA-65 OID per FIPS 204 (id-ml-dsa-65 = 2.16.840.1.101.3.4.3.18).
+ *  DER-encoded with explicit length: this is the AlgorithmIdentifier
+ *  discriminator inside an SPKI returned by kms:GetPublicKey when
+ *  the KMS KeySpec is ML_DSA_65. */
+const ML_DSA_65_OID_BYTES = Buffer.from([
+  0x06, 0x0b, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x12,
+]);
+
+const MLDSA65_RAW_PUBKEY_BYTES = 1952;
 
 /** Minimal subset of the KMS client surface AwsKmsProvider uses. The
  *  full client is large; this is the shape mocks need to satisfy. */
@@ -127,13 +144,17 @@ export class AwsKmsProvider implements SigningProvider {
     this.validateRequest(req, now);
 
     const cached = await this.publicKeyFor(req.keyId);
-    if (cached.algorithm !== "ecdsa-p256-sha256") {
+    if (!SUPPORTED_ALGORITHMS_M4.includes(cached.algorithm)) {
       throw new SigningError(
         "algorithm-not-implemented",
-        `AwsKmsProvider only supports ecdsa-p256-sha256 in M4; key ${req.keyId} is ${cached.algorithm}`,
+        `AwsKmsProvider does not support algorithm ${cached.algorithm} for key ${req.keyId}`,
       );
     }
 
+    const kmsAlgorithm =
+      cached.algorithm === "ml-dsa-65"
+        ? SigningAlgorithmSpec.ML_DSA_SHAKE_256
+        : SigningAlgorithmSpec.ECDSA_SHA_256;
     let result: { Signature?: Uint8Array };
     try {
       result = await this.client.send(
@@ -141,7 +162,7 @@ export class AwsKmsProvider implements SigningProvider {
           KeyId: req.keyId,
           Message: req.payload,
           MessageType: MessageType.RAW,
-          SigningAlgorithm: SigningAlgorithmSpec.ECDSA_SHA_256,
+          SigningAlgorithm: kmsAlgorithm,
         }),
       );
     } catch (err) {
@@ -167,7 +188,7 @@ export class AwsKmsProvider implements SigningProvider {
     const entry: SigEntry = {
       signatureB64: sigBytes.toString("base64"),
       signedBy: cached.fingerprint,
-      algorithm: "ecdsa-p256-sha256",
+      algorithm: cached.algorithm,
       signedAt: new Date().toISOString(),
     };
     return {
@@ -226,11 +247,11 @@ export class AwsKmsProvider implements SigningProvider {
     let anyVerified = false;
     let firstFailure: VerifyResult | null = null;
     for (const entry of considered) {
-      if (entry.algorithm !== "ecdsa-p256-sha256") {
+      if (!SUPPORTED_ALGORITHMS_M4.includes(entry.algorithm)) {
         const failure: VerifyResult = {
           ok: false,
           reasonCode: "algorithm-not-implemented",
-          reason: `AwsKmsProvider.verify() only supports ecdsa-p256-sha256; got ${entry.algorithm}`,
+          reason: `AwsKmsProvider.verify() does not support algorithm ${entry.algorithm}`,
         };
         if (mode === "strict" || mode === "classical-only") return failure;
         firstFailure ??= failure;
@@ -249,13 +270,23 @@ export class AwsKmsProvider implements SigningProvider {
         firstFailure ??= failure;
         continue;
       }
-      const publicKey = crypto.createPublicKey({
-        key: Buffer.from(key.publicKeyB64, "base64"),
-        format: "der",
-        type: "spki",
-      });
       const sigBytes = Buffer.from(entry.signatureB64, "base64");
-      const ok = crypto.verify("sha256", payload, publicKey, sigBytes);
+      let ok: boolean;
+      if (entry.algorithm === "ml-dsa-65") {
+        // The cached PublicKeyRef.publicKeyB64 for an ml-dsa-65 KMS
+        // key is the RAW FIPS 204 1952-byte public-key bytes that
+        // publicKeyFor extracted from the kms:GetPublicKey SPKI
+        // wrapper. @noble/post-quantum takes those bytes directly.
+        const rawPub = Buffer.from(key.publicKeyB64, "base64");
+        ok = ml_dsa65.verify(sigBytes, payload, rawPub);
+      } else {
+        const publicKey = crypto.createPublicKey({
+          key: Buffer.from(key.publicKeyB64, "base64"),
+          format: "der",
+          type: "spki",
+        });
+        ok = crypto.verify("sha256", payload, publicKey, sigBytes);
+      }
       if (ok) {
         anyVerified = true;
         if (mode === "transition") return { ok: true };
@@ -307,10 +338,10 @@ export class AwsKmsProvider implements SigningProvider {
     algorithm: SigAlgorithm;
     fingerprint: string;
   }): void {
-    if (args.algorithm !== "ecdsa-p256-sha256") {
+    if (!SUPPORTED_ALGORITHMS_M4.includes(args.algorithm)) {
       throw new SigningError(
         "algorithm-not-implemented",
-        `AwsKmsProvider.cachePublicKey: only ecdsa-p256-sha256 supported in M4; got ${args.algorithm}`,
+        `AwsKmsProvider.cachePublicKey: algorithm ${args.algorithm} not supported`,
       );
     }
     this.pubKeyCache.set(args.keyId, {
@@ -355,14 +386,23 @@ export class AwsKmsProvider implements SigningProvider {
         `kms:GetPublicKey for ${keyId} returned an empty key`,
       );
     }
-    const algorithm = detectAlgorithmFromSpki(Buffer.from(result.PublicKey));
-    if (algorithm !== "ecdsa-p256-sha256") {
+    const spkiBytes = Buffer.from(result.PublicKey);
+    const algorithm = detectAlgorithmFromSpki(spkiBytes);
+    if (!SUPPORTED_ALGORITHMS_M4.includes(algorithm)) {
       throw new SigningError(
         "algorithm-not-implemented",
-        `KMS key ${keyId} is ${algorithm}; AwsKmsProvider M4 supports only ecdsa-p256-sha256`,
+        `KMS key ${keyId} is ${algorithm}; AwsKmsProvider supports ${SUPPORTED_ALGORITHMS_M4.join(", ")}`,
       );
     }
-    const publicKeyDer = Buffer.from(result.PublicKey);
+    // For ml-dsa-65, the catalog stores the RAW FIPS 204 public key
+    // bytes (1952 bytes), not the SPKI wrapper. This matches the
+    // LocalDiskProvider PQ-half format (which writes MLDA-prefixed
+    // raw bytes to disk) and lets verifiers feed bytes directly into
+    // @noble/post-quantum's ml_dsa65.verify().
+    const publicKeyDer =
+      algorithm === "ml-dsa-65"
+        ? extractMldsa65RawPublicKey(spkiBytes)
+        : spkiBytes;
     const fingerprint = crypto
       .createHash("sha256")
       .update(publicKeyDer)
@@ -420,12 +460,23 @@ export class AwsKmsProvider implements SigningProvider {
 }
 
 /**
- * Detect the algorithm of a SubjectPublicKeyInfo DER blob via Node's
- * crypto. Used after `kms:GetPublicKey` returns SPKI bytes. Throws if
- * the key is anything other than the algorithms AwsKmsProvider M4
- * supports — caller rewraps as SigningError.
+ * Detect the algorithm of a SubjectPublicKeyInfo DER blob. Two paths:
+ *
+ *   1. ML-DSA-65 (FIPS 204): we look for the id-ml-dsa-65 OID inside
+ *      the AlgorithmIdentifier sequence. Node's `crypto.createPublicKey`
+ *      doesn't recognize ML-DSA SPKI as of Node 22, so we MUST detect
+ *      it ourselves via a byte-pattern scan.
+ *   2. Classical (ECDSA P-256 / Ed25519): defer to Node `crypto`.
+ *
+ * The OID scan is a substring search rather than a full ASN.1 walk.
+ * False-positive risk is negligible — the OID bytes are 11 bytes long
+ * and there's no benign reason a classical SPKI would happen to
+ * contain them.
  */
 function detectAlgorithmFromSpki(spki: Buffer): SigAlgorithm {
+  if (spki.includes(ML_DSA_65_OID_BYTES)) {
+    return "ml-dsa-65";
+  }
   let publicKey: crypto.KeyObject;
   try {
     publicKey = crypto.createPublicKey({
@@ -456,8 +507,70 @@ function detectAlgorithmFromSpki(spki: Buffer): SigAlgorithm {
   }
   throw new SigningError(
     "unknown-algorithm",
-    `KMS public key has asymmetricKeyType ${kind ?? "unknown"}; only ed25519/ec(P-256) supported`,
+    `KMS public key has asymmetricKeyType ${kind ?? "unknown"}; only ed25519/ec(P-256) / ml-dsa-65 supported`,
   );
+}
+
+/**
+ * Extract the raw FIPS 204 ML-DSA-65 public-key bytes (1952 bytes)
+ * from an SPKI wrapper.
+ *
+ * SPKI structure:
+ *   SEQUENCE {
+ *     SEQUENCE { -- AlgorithmIdentifier
+ *       OID id-ml-dsa-65 -- 2.16.840.1.101.3.4.3.18
+ *     }
+ *     BIT STRING { unused-bits=0, <1952 raw bytes> }
+ *   }
+ *
+ * Parser strategy: find the OID match, then locate the FIRST BIT
+ * STRING tag (0x03) AFTER the OID's end. Read the length, skip the
+ * unused-bits byte (0x00), return the next 1952 bytes.
+ */
+function extractMldsa65RawPublicKey(spki: Buffer): Buffer {
+  const oidStart = spki.indexOf(ML_DSA_65_OID_BYTES);
+  if (oidStart === -1) {
+    throw new SigningError(
+      "io-error",
+      "extractMldsa65RawPublicKey: no id-ml-dsa-65 OID found in SPKI",
+    );
+  }
+  const oidEnd = oidStart + ML_DSA_65_OID_BYTES.length;
+  // Find the BIT STRING tag (0x03) after the OID. SPKI for ML-DSA
+  // has a fixed shape so the next 0x03 byte is the BIT STRING header.
+  let i = oidEnd;
+  while (i < spki.length && spki[i] !== 0x03) i += 1;
+  if (i >= spki.length) {
+    throw new SigningError(
+      "io-error",
+      "extractMldsa65RawPublicKey: no BIT STRING tag after OID",
+    );
+  }
+  // Parse BIT STRING length. DER long-form: high bit set on first
+  // length byte indicates number of length bytes follow.
+  let lengthByteCount = 1;
+  let payloadOffset = i + 2; // tag + 1 length byte
+  const firstLen = spki[i + 1]!;
+  if ((firstLen & 0x80) !== 0) {
+    lengthByteCount = firstLen & 0x7f;
+    payloadOffset = i + 2 + lengthByteCount;
+  }
+  void lengthByteCount;
+  // First payload byte is unused-bits count (must be 0 for our use).
+  if (spki[payloadOffset] !== 0x00) {
+    throw new SigningError(
+      "io-error",
+      `extractMldsa65RawPublicKey: unexpected unused-bits=${spki[payloadOffset]} in BIT STRING`,
+    );
+  }
+  const raw = spki.subarray(payloadOffset + 1);
+  if (raw.length !== MLDSA65_RAW_PUBKEY_BYTES) {
+    throw new SigningError(
+      "io-error",
+      `extractMldsa65RawPublicKey: expected ${MLDSA65_RAW_PUBKEY_BYTES} bytes, got ${raw.length}`,
+    );
+  }
+  return Buffer.from(raw);
 }
 
 /**

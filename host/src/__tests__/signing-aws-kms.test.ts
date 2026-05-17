@@ -92,7 +92,7 @@ function makeRequest(keyId: string, payload = "hello world") {
 }
 
 describe("AwsKmsProvider: identity", () => {
-  it("has the stable provider id + supports only ecdsa-p256-sha256 in M4", () => {
+  it("has the stable provider id + supports ecdsa-p256-sha256 + ml-dsa-65 (M8)", () => {
     const { client } = buildMockKms();
     const p = new AwsKmsProvider({
       region: "us-east-1",
@@ -100,9 +100,9 @@ describe("AwsKmsProvider: identity", () => {
       client,
     });
     expect(p.id).toBe("aws-kms");
-    expect(p.supportedAlgorithms).toEqual(["ecdsa-p256-sha256"]);
+    expect(p.supportedAlgorithms).toContain("ecdsa-p256-sha256");
+    expect(p.supportedAlgorithms).toContain("ml-dsa-65"); // M8 lifted the gate
     expect(p.supportedAlgorithms).not.toContain("ed25519");
-    expect(p.supportedAlgorithms).not.toContain("ml-dsa-65");
   });
 });
 
@@ -372,7 +372,10 @@ describe("AwsKmsProvider: error mapping", () => {
 });
 
 describe("AwsKmsProvider: algorithm rejection", () => {
-  it("rejects ml-dsa-65 envelopes in verify with algorithm-not-implemented", async () => {
+  it("ml-dsa-65 with malformed signature bytes surfaces bad-signature (M8: algorithm IS supported but the sig is junk)", async () => {
+    // M4 used to reject ml-dsa-65 envelopes outright; M8 supports them
+    // via @noble/post-quantum local verify. A junk signature against a
+    // valid (but wrong) public-key blob fails verify cryptographically.
     const { client } = buildMockKms();
     const p = new AwsKmsProvider({
       region: "us-east-1",
@@ -383,13 +386,16 @@ describe("AwsKmsProvider: algorithm rejection", () => {
       keyId: "arn:pq",
       provider: "aws-kms",
       algorithm: "ml-dsa-65",
-      publicKeyB64: Buffer.from("fake").toString("base64"),
+      // 1952 zero bytes — not a real ML-DSA-65 pubkey, but
+      // @noble/post-quantum accepts the length and returns false on
+      // verify because the sig won't match.
+      publicKeyB64: Buffer.alloc(1952).toString("base64"),
       fingerprint: "deadbeefcafef00d",
     };
     const fakeEnv = {
       signatures: [
         {
-          signatureB64: Buffer.from("sig").toString("base64"),
+          signatureB64: Buffer.alloc(3309).toString("base64"),
           signedBy: "deadbeefcafef00d",
           algorithm: "ml-dsa-65" as const,
           signedAt: new Date().toISOString(),
@@ -408,7 +414,7 @@ describe("AwsKmsProvider: algorithm rejection", () => {
       "strict",
     );
     expect(result.ok).toBe(false);
-    expect(result.reasonCode).toBe("algorithm-not-implemented");
+    expect(result.reasonCode).toBe("bad-signature");
   });
 
   it("rejects an ed25519 KMS key surfacing during GetPublicKey", async () => {
@@ -676,20 +682,31 @@ describe("AwsKmsProvider: listKeys + cachePublicKey", () => {
     expect(callCounts.getPublicKey).toBe(0);
   });
 
-  it("cachePublicKey() rejects non-ecdsa-p256 algorithms", () => {
+  it("cachePublicKey() rejects unsupported algorithms (M8: ml-dsa-65 is now supported; ed25519 is not)", () => {
     const { client } = buildMockKms();
     const p = new AwsKmsProvider({
       region: "us-east-1",
       credentials: { access_key_id: "k", secret_access_key: "s" },
       client,
     });
+    // ed25519 via KMS not supported yet — covered by the
+    // SUPPORTED_ALGORITHMS_M4 list.
     expect(() =>
       p.cachePublicKey({
         keyId: "x",
         publicKeyDer: Buffer.from("x"),
-        algorithm: "ml-dsa-65",
+        algorithm: "ed25519",
         fingerprint: "deadbeef00000000",
       }),
     ).toThrow(SigningError);
+    // ml-dsa-65 IS supported (M8 lifted the gate); should NOT throw.
+    expect(() =>
+      p.cachePublicKey({
+        keyId: "x2",
+        publicKeyDer: Buffer.alloc(1952),
+        algorithm: "ml-dsa-65",
+        fingerprint: "deadbeef00000001",
+      }),
+    ).not.toThrow();
   });
 });

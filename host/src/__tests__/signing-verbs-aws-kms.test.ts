@@ -68,6 +68,63 @@ async function newCp(): Promise<{ cp: ControlPlane; orgId: string; tmp: string }
  * shape as the one in `signing-aws-kms.test.ts` but stripped down to
  * what registration needs (sign + get public key).
  */
+/** Build a mock KMS client for an ML-DSA-65 KMS key (KeySpec=ML_DSA_65,
+ *  SigningAlgorithm=ML_DSA_SHAKE_256). Returns the SPKI-wrapped pubkey
+ *  for GetPublicKey + a @noble-based local Sign. */
+async function buildMockMldsaKms(): Promise<{
+  client: KmsClientLike;
+  rawPublicKey: Uint8Array;
+  secretKey: Uint8Array;
+}> {
+  const { ml_dsa65 } = await import("@noble/post-quantum/ml-dsa.js");
+  const kp = ml_dsa65.keygen();
+  const rawPublicKey = kp.publicKey;
+  const secretKey = kp.secretKey;
+  // Wrap raw FIPS 204 1952-byte pubkey in an SPKI envelope matching
+  // what AWS KMS returns for KeySpec=ML_DSA_65.
+  const oidBytes = Buffer.from([
+    0x06, 0x0b, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x12,
+  ]);
+  const algId = Buffer.concat([Buffer.from([0x30, 0x0b]), oidBytes]);
+  const bitStringLen = rawPublicKey.length + 1;
+  const bitStringHeader = Buffer.from([
+    0x03,
+    0x82,
+    (bitStringLen >> 8) & 0xff,
+    bitStringLen & 0xff,
+    0x00,
+  ]);
+  const innerLen = algId.length + bitStringHeader.length + rawPublicKey.length;
+  const outerHeader = Buffer.from([
+    0x30,
+    0x82,
+    (innerLen >> 8) & 0xff,
+    innerLen & 0xff,
+  ]);
+  const spki = Buffer.concat([
+    outerHeader,
+    algId,
+    bitStringHeader,
+    Buffer.from(rawPublicKey),
+  ]);
+
+  const client: KmsClientLike = {
+    send: vi.fn(async (cmd: unknown) => {
+      const name = (cmd as { constructor: { name: string } }).constructor.name;
+      if (name === "GetPublicKeyCommand") {
+        return { PublicKey: new Uint8Array(spki) };
+      }
+      if (name === "SignCommand") {
+        const input = (cmd as { input: { Message?: Uint8Array } }).input;
+        const sig = ml_dsa65.sign(input.Message!, secretKey);
+        return { Signature: sig };
+      }
+      throw new Error(`unexpected KMS command: ${name}`);
+    }) as KmsClientLike["send"],
+  };
+  return { client, rawPublicKey, secretKey };
+}
+
 function buildMockKms(): {
   client: KmsClientLike;
   publicKeyDer: Buffer;
@@ -317,16 +374,74 @@ describe("runSigningKeysAdd: provider=aws-kms --algorithm hybrid", () => {
     });
   });
 
-  it("hybrid with --pq-key-id (both-KMS path) is deferred with a clean error", async () => {
-    const { client } = buildMockKms();
+  it("hybrid with --pq-key-id (both-KMS path, v0.5.1 M8): registers paired aws-kms classical + aws-kms ml-dsa-65 rows", async () => {
+    // Build a dual-purpose mocked KMS client that answers
+    // GetPublicKey + Sign for both ECDSA P-256 (classical) and
+    // ML-DSA-65 (pq) based on the requested ARN.
+    const ecdsa = buildMockKms();
+    const mldsa = await buildMockMldsaKms();
+    const classicalArn = "arn:aws:kms:us-east-1:1234:key/classical";
+    const pqArn = "arn:aws:kms:us-east-1:1234:key/pq";
+    const combined: KmsClientLike = {
+      send: (async (cmd: unknown) => {
+        const name = (cmd as { constructor: { name: string } }).constructor.name;
+        const input = (cmd as { input?: { KeyId?: string } }).input ?? {};
+        if (input.KeyId === pqArn) return mldsa.client.send(cmd as never);
+        if (name === "GetPublicKeyCommand" || name === "SignCommand") {
+          return ecdsa.client.send(cmd as never);
+        }
+        throw new Error(`unexpected: ${name}`);
+      }) as KmsClientLike["send"],
+    };
+
+    const result = await runSigningKeysAdd(cp, orgId, {
+      provider: "aws-kms",
+      alias: "hybrid-both-kms",
+      algorithm: "hybrid",
+      keyId: classicalArn,
+      pqKeyId: pqArn,
+      awsKmsClient: combined,
+      actor: "test",
+    });
+    expect(result.added.length).toBe(2);
+
+    const classical = result.added.find((r) => r.pairRole === "classical")!;
+    expect(classical.provider).toBe("aws-kms");
+    expect(classical.algorithm).toBe("ecdsa-p256-sha256");
+    expect(classical.keyId).toBe(classicalArn);
+
+    const pq = result.added.find((r) => r.pairRole === "post-quantum")!;
+    expect(pq.provider).toBe("aws-kms"); // <-- key M8 assertion: PQ is AWS, not local
+    expect(pq.algorithm).toBe("ml-dsa-65");
+    expect(pq.keyId).toBe(pqArn);
+    // PQ catalog row stores raw 1952-byte FIPS 204 bytes (base64'd).
+    expect(Buffer.from(pq.publicKeyB64, "base64").length).toBe(1952);
+
+    expect(classical.pairId).toBe(pq.pairId);
+
+    // Audit detail tags pqProvider = aws-kms.
+    const auditRows = await cp.auditLog.listForOrg(orgId);
+    const added = auditRows.find(
+      (r) => r.action === SIGNING_ACTION_CODES.KEY_ADDED,
+    );
+    expect(added?.detail).toMatchObject({
+      provider: "aws-kms",
+      pqProvider: "aws-kms",
+    });
+  });
+
+  it("--pq-key-id resolving to non-ml-dsa-65 surfaces a clear error", async () => {
+    // Operator points --pq-key-id at an ECDSA key by mistake.
+    const ecdsa = buildMockKms();
+    const both: KmsClientLike = ecdsa.client; // returns ECDSA for any key
     await expect(
       runSigningKeysAdd(cp, orgId, {
         provider: "aws-kms",
-        alias: "h",
+        alias: "wrong-pq",
         algorithm: "hybrid",
         keyId: "arn:classical",
-        pqKeyId: "arn:pq",
-        awsKmsClient: client,
+        pqKeyId: "arn:also-classical",
+        awsKmsClient: both,
         actor: "test",
       }),
     ).rejects.toMatchObject({ code: "algorithm-not-implemented" });
