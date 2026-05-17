@@ -168,6 +168,31 @@ Tradeoffs:
   implemented, credentials are passed to `vmrun`, and macOS image automation is
   weaker than Tart.
 
+## Non-option: libvirt/KVM (v0.5 explicit non-support)
+
+The `LibvirtBackend` does **not** support macOS guests. Any
+`config.osProfile` value starting with `macos` raises
+`invalid_argument` at `createVM` with a "use Tart" message.
+
+Two reasons:
+
+1. **License.** Apple's macOS EULA constrains the OS to Apple
+   hardware. Running macOS on a non-Apple host (which is the
+   typical libvirt/KVM deployment) is outside the license terms,
+   regardless of whether technical workarounds (OSX-KVM,
+   OpenCore, etc.) exist to make it boot.
+2. **Architecture.** Modern macOS targets Apple Silicon (ARM64).
+   x86 KVM hosts can only run Intel macOS, which Apple no longer
+   ships installers for. ARM64 KVM on non-Apple hardware can boot
+   Apple Silicon macOS only via the Asahi-style firmware ports,
+   which are research-grade and not a stable surface.
+
+Operators who need macOS testing as part of a signalman scenario
+run use the **Tart backend on Apple Silicon hardware**. The Tart
+backend (`host/src/hypervisors/tart.ts`) ships in v0.2.0+ and
+supports the full lifecycle / snapshot / file-transfer /
+command-run surface that scenarios depend on.
+
 ## Recommendation
 
 **v0.2.0 (shipped).** Tart is the primary Mac runner backend. The

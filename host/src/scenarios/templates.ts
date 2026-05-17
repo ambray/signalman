@@ -95,6 +95,27 @@ export interface VmTemplate {
    * `base_image_url` is set. 64 lowercase hex chars.
    */
   base_image_sha256?: string;
+
+  // ── v0.5 multi-OS guest profile (libvirt backend) ────────────────
+  //
+  // These fields are passed through to `VMConfig` by `vm create`'s
+  // CLI handler. Backends that don't consume them (hyper-v, tart,
+  // vmware) ignore them silently; the libvirt backend resolves
+  // osProfile → firmware/TPM/Secure Boot/disk-bus/NIC defaults at
+  // createVM time.
+
+  /** Guest OS profile. See VMConfig.osProfile in interface.ts. */
+  osProfile?: "linux" | "linux-uefi" | "windows-10" | "windows-11";
+  /** Override firmware ('bios' or 'efi'). */
+  firmware?: "bios" | "efi";
+  /** Override Secure Boot. */
+  secureBoot?: boolean;
+  /** Override TPM. */
+  tpm?: "none" | "tpm-2.0";
+  /** Override disk bus. */
+  diskBus?: "virtio" | "sata" | "scsi";
+  /** Override NIC model. */
+  nicModel?: "virtio" | "e1000e" | "rtl8139";
 }
 
 // ── Validation ─────────────────────────────────────────────────────
