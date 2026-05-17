@@ -1,6 +1,8 @@
 # `@signalman/registry` — multi-ecosystem facade (PyPI, Maven, NuGet, HuggingFace, Go, RubyGems)
 
-**Status:** design proposal (2026-05-17). No code shipped yet.
+**Status:** design proposal (2026-05-17). M0 gate locked — all 14
+decisions confirmed by operator at M0 close. No code shipped yet;
+M1 (PyPI) is the first code milestone.
 **Owner:** WS13 (`docs/workstreams/prompts/ws13-multi-ecosystem.md`).
 **Target release:** v0.6.0 (may split to v0.6 + v0.7 if audit quality
 slips past M5 — see §Critique below).
@@ -368,63 +370,26 @@ each milestone gate.
 
 ## Decisions required (operator gate — M0)
 
-Operator-locked decisions from the chat that opened this design
-doc:
+**Status:** all 14 decisions locked 2026-05-17 (4 pre-locked in chat
++ 10 surfaced at M0 gate; every answer accepted the recommendation).
 
-| # | Topic | Decision |
+| # | Topic | Decision (locked) |
 |---|---|---|
-| 1 | Priority order | PyPI → Maven → NuGet → **HuggingFace** → Go-A → RubyGems → Go-C |
-| 2 | Go publish | Phased: A (non-standard PUT) in M5, C (hybrid) in M7 |
-| 3 | CLI shape | Per-ecosystem subverbs under `virtual`; `--kind` retained as escape hatch |
-| 3 | MCP shape | Generic ecosystem-parameterized tools (6 added) |
-| 4 | Workstream split | Single workstream (10 milestones), with PM-flagged checkpoint at M5 to consider split |
-
-Open questions to lock at M0 gate (before any code lands):
-
-1. **PEP 691 JSON only, or PEP 503 HTML + PEP 691 JSON?** — pip
-   22.3+ prefers JSON; older clients need HTML. Default rec:
-   serve both with content-negotiation by `Accept` header.
-2. **Maven snapshot policy default** — accept `-SNAPSHOT` PUTs by
-   default, or require operator opt-in? Default rec: opt-in
-   (immutable-by-default keeps the supply-chain story clean).
-3. **NuGet v2 OData legacy support** — required, optional, or out
-   of scope? Default rec: out of scope for v0.6 (modern dotnet
-   prefers v3; v2 lands in v0.7 if operators ask).
-4. **HF publish shape** — flattened file upload, or full git push?
-   Default rec: flattened for v0.6 (simpler, matches operator's
-   "publish a fine-tuned model" mental model); full git as a v0.7
-   stretch.
-5. **HF file-size cap** — model weights routinely exceed 5 GiB.
-   Bump the per-blob upload cap from 5 GiB to 50 GiB for HF? Or
-   require operators to use the chunked-upload state machine
-   from M2? Default rec: extend chunked-upload state machine to
-   the HF flow (no per-blob cap raise).
-6. **Go GOSUMDB** — operator runs own notary, sets `GOSUMDB=off`
-   in CI, or proxies through to `sum.golang.org`? Default rec:
-   document `GOSUMDB=off` for internal modules in M5; provide
-   a notary in v0.7 if operators ask.
-7. **Maven .asc GPG signature handling** — Maven Central
-   requires `.asc` companion files on publish. Should the
-   registry verify GPG signatures on upload, or accept-and-store
-   verbatim? Default rec: accept-and-store; GPG verification
-   is the consumer's job (matches Maven Central's own behaviour).
-8. **HuggingFace pull-through for LFS-only files** — when an
-   HF repo references a 50 GB weight via LFS pointer, do we
-   stream-mirror it on first GET, or refuse and require explicit
-   `prefetch`? Default rec: stream-mirror on first GET (matches
-   operator expectation of "transparent proxy"); operators with
-   bandwidth/storage concerns set `deny_patterns` on the
-   virtual_upstream row.
-9. **Conformance suites** — wire PyPI's `warehouse` conformance
-   tests + NuGet's API conformance suite into CI lanes (gated
-   like WS10's `SIGNALMAN_OCI_CONFORMANCE=1`)? Default rec: yes
-   for PyPI + NuGet; Maven + RubyGems don't have official
-   conformance harnesses, manual smoke per ecosystem.
-10. **MCP tool addition timing** — M8 (cross-cutting at the end)
-    or in-milestone (each ecosystem adds its own tool support
-    inline)? Default rec: M8 cross-cutting, after all ecosystems
-    are wired — keeps the tool semantics consistent across
-    ecosystems and avoids per-ecosystem reshape work.
+| Priority | Ecosystem order | PyPI → Maven → NuGet → **HuggingFace** → Go-A → RubyGems → Go-C |
+| Go publish | Strategy | Phased: A (non-standard PUT) in M5, C (VCS-integrated hybrid) in M7 |
+| CLI | Shape | Per-ecosystem subverbs under `virtual`; `--kind` retained as escape hatch |
+| MCP | Shape | 6 generic ecosystem-parameterized tools added in M8 |
+| WS split | Cadence | Single workstream (10 milestones); PM-checkpoint at M5 close re. split |
+| Q1 | PyPI serving format | **Serve both PEP 503 HTML + PEP 691 JSON** with Accept-header negotiation. pip 22.3+ gets JSON; older pip gets HTML. |
+| Q2 | Maven snapshot policy | **Reject `-SNAPSHOT` PUTs by default.** Operators flip per-repo `snapshot_policy: allow` for projects that need them. Immutable-by-default preserves the supply-chain story. |
+| Q3 | NuGet v2 OData | **Out of scope for v0.6.** Modern `dotnet` prefers v3. v2 lands in v0.7 if operators ask. |
+| Q4 | HF publish shape | **Flattened file upload for v0.6.** Operator POSTs a tarball or per-file. Full `git push` semantics deferred to v0.7. |
+| Q5 | HF blob-size cap | **Extend M2's chunked-upload state machine to the HF flow.** No per-blob cap raise (single-shot stays at 5 GiB). HF uploads > 5 GiB chunk through POST/PATCH/PUT just like OCI blobs. |
+| Q6 | Go GOSUMDB | **Document `GOSUMDB=off` for internal modules at M5 ship.** Notary endpoint inside Signalman deferred to v0.7 stretch. Internal modules are trusted-by-org. |
+| Q7 | Maven .asc | **Accept-and-store verbatim.** GPG verification is the consumer's job (`mvn verify`). Matches Maven Central's own behaviour. |
+| Q8 | HF LFS pull-through | **Stream-mirror on first GET.** Transparent proxy semantics. Operators with bandwidth/storage concerns set `deny_patterns` on the virtual_upstream row. |
+| Q9 | Conformance CI | **PyPI + NuGet conformance lanes gated by env var** (`SIGNALMAN_PYPI_CONFORMANCE=1` + `SIGNALMAN_NUGET_CONFORMANCE=1`). Manual smoke for Maven + HF + Go + RubyGems (no official upstream harnesses for those four). |
+| Q10 | MCP tool timing | **All 6 added in M8 cross-cutting**, after M1–M7 ship the ecosystems. Uniform tool schema across all ecosystems. |
 
 ## Cross-references
 
