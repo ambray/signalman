@@ -256,7 +256,7 @@ WS1 cohort. Closes ROADMAP `v0.3.0-5`.
   dialers. Packer golden-image scaffolding. Multi-transport
   deploy integration tests.
 
-### Added — `@signalman/registry` (independently versioned, v0.1.0 / v0.1.1)
+### Added — `@signalman/registry` (independently versioned, v0.1.0 → v0.1.2)
 
 Built in parallel with the host work as a standalone OSS package
 at `registry/`. Federates with `@signalman/host` via the existing
@@ -271,6 +271,16 @@ at `registry/`. Federates with `@signalman/host` via the existing
   federation works.
 - **v0.1.1**: npm protocol facade — publish + install +
   virtual mirror (cargo facade landed earlier in wave-3).
+- **v0.1.2 (WS10, 2026-05-17)**: OCI Distribution Spec v1.1
+  facade. `docker push` / `docker pull` / `crane copy` /
+  `cosign verify` work end to end. Multi-arch image indexes,
+  bearer-challenge auth flow, virtual upstreams against Docker
+  Hub + GHCR + ECR, cosign-style signing on the `<digest>.sig`
+  tag convention, `oci sign`/`oci verify` CLI verbs, OCI
+  Distribution Spec conformance lane scaffolded (CI gated by
+  `SIGNALMAN_OCI_CONFORMANCE=1`). 578 tests across 33 files
+  at v0.1.2 close; coverage on `registry/src/oci/` 92.64
+  stmts / 85.95 branches / 96.71 funcs / 92.64 lines.
 
 ### Tests
 
