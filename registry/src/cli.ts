@@ -164,6 +164,11 @@ export async function runCli(
         return await runForensicVerb(rest, out, err);
       }
 
+      // WS10 — OCI verbs (cosign sign / verify).
+      case "oci": {
+        return await runOciVerb(rest, out, err);
+      }
+
       default: {
         err(`unknown verb: ${verb}`);
         err(usage());
@@ -383,6 +388,161 @@ async function runForensicVerb(
   }
 }
 
+// ── WS10 — OCI cosign sign / verify CLI verbs ─────────────────────
+
+async function runOciVerb(
+  rest: string[],
+  out: (s: string) => void,
+  err: (s: string) => void,
+): Promise<CliResult> {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const localOut = (s: string) => {
+    out(s);
+    stdout.push(s);
+  };
+  const localErr = (s: string) => {
+    err(s);
+    stderr.push(s);
+  };
+  const [sub, ...subRest] = rest;
+  if (sub && sub !== "--help" && sub !== "-h" && sub !== "sign" && sub !== "verify") {
+    localErr(`unknown oci subcommand: ${sub}`);
+    return done(stdout, stderr, 2);
+  }
+  if (!sub || sub === "--help" || sub === "-h") {
+    localOut(
+      [
+        "Usage: signalman-registry oci <sign|verify> <org>/<repo>:<tag>",
+        "                              --storage-root <p>",
+        "                              [--key <pem-path>]",
+        "                              [--public-key <pem-path>]",
+        "                              [--expected-docker-reference <ref>]",
+        "",
+        "  sign    --key <pem>           sign the tag's manifest with the operator",
+        "                                Ed25519 private key. Persists the cosign",
+        "                                signature manifest at sha256-<hex>.sig in",
+        "                                the same repository.",
+        "  verify  --public-key <pem>    verify a previously-signed manifest using",
+        "                                the operator public key. Optional",
+        "                                --expected-docker-reference rejects",
+        "                                signatures whose payload names a different",
+        "                                docker-reference.",
+      ].join("\n"),
+    );
+    return done(stdout, stderr, sub ? 0 : 2);
+  }
+
+  let parsed: ReturnType<typeof parseFlags>;
+  try {
+    parsed = parseFlags(subRest, [
+      "storage-root",
+      "key",
+      "public-key",
+      "expected-docker-reference",
+    ]);
+  } catch (parseErr) {
+    localErr(`${(parseErr as Error).message}`);
+    return done(stdout, stderr, 2);
+  }
+  const target = parsed.positional[0];
+  if (!target) {
+    localErr("expected <org>/<repo>:<tag> as a positional argument");
+    return done(stdout, stderr, 2);
+  }
+  const storageRoot = parsed.flags["storage-root"];
+  if (!storageRoot) {
+    localErr("--storage-root is required");
+    return done(stdout, stderr, 2);
+  }
+
+  // Lazy import keeps the cosign module out of the CLI hot-path for
+  // verbs that don't need it.
+  const { parseRepoTagRef, signAndCommitCosign, verifyCosign, TagStore } =
+    await import("./oci/index.js");
+
+  let ref: ReturnType<typeof parseRepoTagRef>;
+  try {
+    ref = parseRepoTagRef(target);
+  } catch (refErr) {
+    localErr(`${(refErr as Error).message}`);
+    return done(stdout, stderr, 2);
+  }
+
+  const storage = LocalFsRegistryStorage.fromRoot(storageRoot);
+  try {
+    const tagStore = new TagStore({ index: storage.index });
+    const tagRow = tagStore.get(ref.storageName, ref.tag);
+    if (!tagRow) {
+      localErr(`tag '${ref.tag}' not found in '${ref.storageName}'`);
+      return done(stdout, stderr, 1);
+    }
+    const manifestDigest = `sha256:${tagRow.manifestSha256}`;
+
+    if (sub === "sign") {
+      const keyPath = parsed.flags.key;
+      if (!keyPath) {
+        localErr("--key <pem> is required for `oci sign`");
+        return done(stdout, stderr, 2);
+      }
+      const privateKeyPem = await fsp.readFile(keyPath, "utf-8");
+      const result = await signAndCommitCosign({
+        index: storage.index,
+        blobStore: storage.blobStore,
+        tagStore,
+        storageName: ref.storageName,
+        dockerReference: ref.dockerReference,
+        manifestDigest,
+        privateKeyPem,
+      });
+      localOut(`signed ${ref.dockerReference}:${ref.tag}`);
+      localOut(`  manifest_digest=${manifestDigest}`);
+      localOut(`  signature_manifest=${result.signatureManifestDigest}`);
+      localOut(`  cosign_tag=${result.tag}`);
+      localOut(`  payload_digest=${result.payloadDigest}`);
+      return done(stdout, stderr, 0);
+    }
+    if (sub === "verify") {
+      const keyPath = parsed.flags["public-key"];
+      if (!keyPath) {
+        localErr("--public-key <pem> is required for `oci verify`");
+        return done(stdout, stderr, 2);
+      }
+      const publicKeyPem = await fsp.readFile(keyPath, "utf-8");
+      try {
+        const verified = await verifyCosign({
+          index: storage.index,
+          blobStore: storage.blobStore,
+          tagStore,
+          storageName: ref.storageName,
+          manifestDigest,
+          publicKeyPem,
+          ...(parsed.flags["expected-docker-reference"]
+            ? {
+                expectedDockerReference:
+                  parsed.flags["expected-docker-reference"],
+              }
+            : {}),
+        });
+        localOut(`signature OK for ${ref.dockerReference}:${ref.tag}`);
+        localOut(`  manifest_digest=${manifestDigest}`);
+        localOut(`  signature_manifest=${verified.signatureManifestDigest}`);
+        localOut(
+          `  docker_reference=${verified.payload.critical.identity["docker-reference"]}`,
+        );
+        return done(stdout, stderr, 0);
+      } catch (verifyErr) {
+        localErr(`signature verification FAILED: ${(verifyErr as Error).message}`);
+        return done(stdout, stderr, 1);
+      }
+    }
+    localErr(`unknown oci subcommand: ${sub}`);
+    return done(stdout, stderr, 2);
+  } finally {
+    storage.close();
+  }
+}
+
 function done(stdout: string[], stderr: string[], exitCode: number): CliResult {
   return { exitCode, stdout: stdout.join("\n"), stderr: stderr.join("\n") };
 }
@@ -456,6 +616,14 @@ function usage(): string {
     "      Manifest counts grouped by (kind, provenance.source).",
     "  forensic upstreams --storage-root <p>",
     "      Per-upstream counts of proxy_cache manifests.",
+    "",
+    "  oci sign   <org>/<repo>:<tag> --storage-root <p> --key <pem>",
+    "      Sign the tag's OCI manifest with the operator Ed25519 private key.",
+    "      Writes the cosign signature manifest at sha256-<hex>.sig in the",
+    "      same repository.",
+    "  oci verify <org>/<repo>:<tag> --storage-root <p> --public-key <pem>",
+    "              [--expected-docker-reference <ref>]",
+    "      Verify a previously-signed manifest against the operator public key.",
   ].join("\n");
 }
 
