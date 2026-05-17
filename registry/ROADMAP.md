@@ -84,20 +84,52 @@ half-way to "all self-hosted" (still need OCI for container images
 - npm audit endpoint (`POST /-/v1/security/audits`) — feeds the
   v0.1.3 OSV-integration milestone
 
-### v0.1.2 — OCI distribution spec v1.1
+### v0.1.2 — OCI distribution spec v1.1 ✅ SHIPPED (v0.5 / WS10, 2026-05-17)
 
-The single most-requested feature for "a real registry":
+The single most-requested feature for "a real registry" — operator
+locked the eight open product questions on 2026-05-16 and the seven
+milestones merged into local main across 2026-05-16 and 2026-05-17.
+See `docs/design/registry-oci.md` for the full design + decision
+record. Shipped surface:
 
 - Container image manifests (`application/vnd.oci.image.manifest.v1+json`)
-- Index / manifest list (`application/vnd.oci.image.index.v1+json`)
-- `/v2/` prefix routes alongside the v0.4.0 `/v1/` surface
-- In-router namespacing — `team/svc` parses without `%2F` encoding
-- Cosign-style signing aligns with the existing Ed25519 keypair
-  model. Notation / PKI variant deferred.
-- Virtual-upstream pull-through against Docker Hub, GHCR, ECR
+  + Docker v2.2 legacy types accepted on the same routes.
+- Image index / manifest list (`application/vnd.oci.image.index.v1+json`)
+  with child-manifest existence enforcement.
+- `/v2/*` prefix routes mounted alongside the existing `/v1/*` surface
+  via `mountOciRoutes`. Per-org namespacing matches cargo + npm.
+- In-router namespacing via the `*name` wildcard — `team/svc` parses
+  without `%2F` encoding.
+- **Bearer-challenge auth flow** (`/v2/` + `/oci/token`) — Docker CLI
+  works end to end. JWT minted with operator's Ed25519 key, verified
+  inline by the global authenticator on subsequent `/v2/*` calls.
+  `sk_<prefix>_<secret>` bearers still accepted directly for curl /
+  oras / crane.
+- **Cosign-style signing** at the `<digest>.sig` tag convention,
+  signed with the operator's existing Ed25519 keypair. Notation /
+  PKI variant remains deferred to v0.6+.
+- **Virtual-upstream pull-through** against Docker Hub (anonymous
+  token flow), GHCR (operator PAT or workload-identity), and ECR
+  (AWS SigV4 GetAuthorizationToken). All three on day one per
+  operator-locked Q2.
+- Spec-compliant `OciErrorEnvelope` on every 4XX path. Spec
+  `Docker-Content-Digest` header on every GET / HEAD success.
+- `Link: <…>; rel="next"` pagination on `_catalog` + `tags/list`.
+- 24-hour persisted chunked-upload UUIDs (Q8) with a 5-minute
+  reaper that sweeps SQL row + tmp file as a pair.
+- 562 tests across 32 files; coverage on `registry/src/oci/`
+  92.64 / 85.89 / 96.71 / 92.64 (above the WS10 80/80 across-
+  directory gate).
 
-**Closes**: agent installers + scenario images served as OCI
-artifacts. `docker pull` works against a Signalman registry.
+**Closed**: `docker push` / `docker pull` / `cosign sign|verify` /
+`crane copy` all work against a Signalman registry today. Agent
+installers + scenario images can ship as OCI artifacts through
+the same audit + provenance surface that cargo + npm artifacts
+already use.
+
+**Pending**: distribution-spec conformance harness CI lane
+scaffolded (`.github/workflows/oci-conformance.yaml`); first
+gated nightly run is the v0.5.1 ship gate.
 
 ### v0.1.3 — security integration (OSV + firewall passthroughs)
 

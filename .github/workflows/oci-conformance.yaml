@@ -1,0 +1,103 @@
+name: OCI Distribution Spec conformance
+
+# Gated CI lane that runs the upstream
+# `opencontainers/distribution-spec/conformance` harness against the
+# signalman registry. Off by default — flip the repository variable
+# `SIGNALMAN_OCI_CONFORMANCE=1` (or set it on a workflow_dispatch run)
+# to enable. Also runs nightly when enabled.
+#
+# The harness needs Docker + ~5 minutes of wall time, which makes it
+# expensive to run on every PR. Gated runs preserve the spec-
+# compliance signal without blocking the default fast lane.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly 03:00 UTC. Skipped when SIGNALMAN_OCI_CONFORMANCE != 1.
+    - cron: "0 3 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "registry/src/oci/**"
+      - "registry/src/http/**"
+      - "registry/src/storage/**"
+      - ".github/workflows/oci-conformance.yaml"
+
+jobs:
+  conformance:
+    if: ${{ vars.SIGNALMAN_OCI_CONFORMANCE == '1' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: registry/package-lock.json
+
+      - name: Install registry deps + build
+        working-directory: registry
+        run: |
+          npm ci
+          npm run build
+
+      - name: Generate ephemeral signing key for /oci/token
+        run: |
+          mkdir -p /tmp/signalman/keys
+          openssl genpkey -algorithm ED25519 -out /tmp/signalman/keys/signing.key
+          openssl pkey -in /tmp/signalman/keys/signing.key -pubout -out /tmp/signalman/keys/signing.pub
+
+      - name: Start signalman registry
+        working-directory: registry
+        env:
+          SIGNALMAN_STORAGE_ROOT: /tmp/signalman/data
+          SIGNALMAN_TOKEN_KEY: /tmp/signalman/keys/signing.key
+        run: |
+          mkdir -p $SIGNALMAN_STORAGE_ROOT
+          # Mint a bearer the conformance harness can wrap as Basic.
+          BEARER="sk_TESTPREFIX_${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
+          echo "BEARER=$BEARER" >> $GITHUB_ENV
+          node dist/cli.js serve \
+            --port 5000 \
+            --storage-root $SIGNALMAN_STORAGE_ROOT \
+            --token-signing-key $SIGNALMAN_TOKEN_KEY \
+            &
+          # Allow the server to bind.
+          for i in 1 2 3 4 5; do
+            curl -sf http://localhost:5000/v1/healthz && break
+            sleep 1
+          done
+
+      - name: Run upstream conformance harness
+        env:
+          OCI_ROOT_URL: http://host.docker.internal:5000
+          OCI_NAMESPACE: conformance/test-image
+          OCI_USERNAME: ${{ env.BEARER }}
+          OCI_PASSWORD: ${{ env.BEARER }}
+          OCI_TEST_PULL: "1"
+          OCI_TEST_PUSH: "1"
+          OCI_TEST_CONTENT_DISCOVERY: "1"
+          OCI_TEST_CONTENT_MANAGEMENT: "1"
+        run: |
+          docker run --rm \
+            --network host \
+            -e OCI_ROOT_URL \
+            -e OCI_NAMESPACE \
+            -e OCI_USERNAME \
+            -e OCI_PASSWORD \
+            -e OCI_TEST_PULL \
+            -e OCI_TEST_PUSH \
+            -e OCI_TEST_CONTENT_DISCOVERY \
+            -e OCI_TEST_CONTENT_MANAGEMENT \
+            ghcr.io/opencontainers/distribution-spec/conformance:v1.1.0
+
+      - name: Upload conformance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oci-conformance-report
+          path: |
+            junit.xml
+            report.html
+          retention-days: 14

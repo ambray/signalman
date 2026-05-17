@@ -1,8 +1,27 @@
 # `@signalman/registry` — OCI Distribution Spec v1.1 facade
 
-**Status:** design proposal (2026-05-16). No code shipped yet.
+**Status:** **shipped in v0.5.0** (M0 design 2026-05-16; M1–M7
+merged into local `main` across 2026-05-16 → 2026-05-17). The eight
+locked decisions below are the as-shipped record.
 **Owner:** WS10 (`docs/workstreams/prompts/ws10-registry-oci.md`).
-**Branch:** `feat/v0.5-registry-oci`.
+**Branch:** `feat/v0.5-registry-oci` (seven `--no-ff` merges into
+local `main`, not yet pushed to `origin`).
+**As-shipped commits on the branch:**
+- `9a51816` — M0 design doc + open questions
+- `dfed03f` — M1 manifest schema + types + migration 0004
+- `be151da` — M2 blob protocol + chunked upload + reaper
+- `b9dc4db` — M3 manifest protocol + tag table
+- `4f8d4ad` — M4 catalog + tags + bearer challenge
+- `02c7536` — M5 Docker Hub + GHCR + ECR virtual upstreams
+- `405cca1` — M6 cosign-style signing on OCI manifests
+- (M7) docs closure + conformance scaffold
+
+**Operator-approved deviations from the recommended defaults**:
+- Q2 (upstreams): operator chose **Docker Hub + GHCR + ECR on day one**
+  rather than the recommended "Docker Hub only at v0.5". M5 ships
+  three adapters as a result; the SigV4 implementation is fully
+  inline (no AWS SDK dependency).
+- All other questions resolved to the recommended defaults.
 **Predecessor:** the v0.4.0 generic blob + signed-manifest registry
 (`registry/src/types.ts`), the cargo facade (M10.2–M10.4), and the
 npm facade (v0.1.1). This doc is the third protocol facade promised
