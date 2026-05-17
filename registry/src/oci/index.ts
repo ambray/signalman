@@ -121,6 +121,19 @@ export {
 export { signSigV4Request, type SignSigV4Options, type SignedRequest } from "./sigv4.js";
 
 export {
+  signCosign,
+  commitCosign,
+  signAndCommitCosign,
+  verifyCosign,
+  cosignTagFor,
+  parseRepoTagRef,
+  type SignCosignOptions,
+  type SignCosignResult,
+  type VerifyCosignOptions,
+  type VerifyCosignResult,
+} from "./cosign.js";
+
+export {
   mountOciRoutes,
   type MountOciOptions,
   type MountedOciHandles,
