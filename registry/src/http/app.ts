@@ -54,6 +54,7 @@ import { proxyNpmPackument, proxyNpmTarball } from "../npm/virtual.js";
 import { mountForensicRoutes } from "./forensic.js";
 import { mountOciRoutes, type MountedOciHandles } from "../oci/mount.js";
 import { publicKeyPemFromPrivate } from "../oci/jwt.js";
+import { mountPypiRoutes } from "../pypi/index.js";
 
 const VERSION = "0.0.1";
 const DEFAULT_BLOB_MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5 GiB
@@ -438,6 +439,28 @@ export function buildApp(opts: AppOptions): Router {
         ? { virtualResignPrivateKeyPem: opts.virtualResignPrivateKeyPem }
         : {}),
       ...(opts.ociNow ? { now: opts.ociNow } : {}),
+    });
+  }
+
+  // ── PyPI facade (WS13 M1) ──────────────────────────────────────
+  //
+  // Mounts the /pypi/<org>/* surface alongside cargo + npm + OCI.
+  // Reuses the virtualUpstreamFetch + virtualResignPrivateKeyPem
+  // knobs already plumbed through for cargo/npm/OCI virtual
+  // upstreams; PyPI shares the same operator-configured upstream
+  // table and re-sign key.
+  if (idxStorage.index) {
+    mountPypiRoutes(router, {
+      storage,
+      index: idxStorage.index,
+      ...(idxStorage.blobStore ? { blobStore: idxStorage.blobStore } : {}),
+      ...(opts.publicBaseUrl ? { publicBaseUrl: opts.publicBaseUrl } : {}),
+      ...(opts.virtualUpstreamFetch
+        ? { virtualUpstreamFetch: opts.virtualUpstreamFetch }
+        : {}),
+      ...(opts.virtualResignPrivateKeyPem
+        ? { virtualResignPrivateKeyPem: opts.virtualResignPrivateKeyPem }
+        : {}),
     });
   }
 

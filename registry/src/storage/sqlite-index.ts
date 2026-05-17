@@ -39,6 +39,7 @@ import {
   type NpmManifestMetadata,
   type OciManifestMetadata,
   type Provenance,
+  type PypiManifestMetadata,
   validateManifestName,
   validateManifestVersion,
 } from "../types.js";
@@ -84,6 +85,8 @@ interface ManifestRow {
   npm_metadata_json: string | null;
   // WS10 (v0.5 OCI facade):
   oci_metadata_json: string | null;
+  // WS13 M1 (v0.6 PyPI facade):
+  pypi_metadata_json: string | null;
 }
 
 interface BlobRow {
@@ -175,8 +178,8 @@ export class SqliteManifestIndex {
            name, version, media_type, blobs_json, annotations_json,
            signature_b64, signed_by, canonical_bytes, created_at,
            kind, provenance_json, cargo_metadata_json, npm_metadata_json,
-           oci_metadata_json
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           oci_metadata_json, pypi_metadata_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.name,
@@ -193,6 +196,7 @@ export class SqliteManifestIndex {
         input.cargoMetadata ? JSON.stringify(input.cargoMetadata) : null,
         input.npmMetadata ? JSON.stringify(input.npmMetadata) : null,
         input.ociMetadata ? JSON.stringify(input.ociMetadata) : null,
+        input.pypiMetadata ? JSON.stringify(input.pypiMetadata) : null,
       );
     return {
       ...input,
@@ -630,7 +634,7 @@ export class SqliteManifestIndex {
         `SELECT name, version, media_type, blobs_json, annotations_json,
                 signature_b64, signed_by, canonical_bytes, created_at,
                 kind, provenance_json, cargo_metadata_json, npm_metadata_json,
-                oci_metadata_json
+                oci_metadata_json, pypi_metadata_json
          FROM manifest
          WHERE name = ? AND version = ?`,
       )
@@ -659,6 +663,9 @@ function rowToManifest(row: ManifestRow): Manifest {
   const ociMetadata: OciManifestMetadata | undefined = row.oci_metadata_json
     ? (JSON.parse(row.oci_metadata_json) as OciManifestMetadata)
     : undefined;
+  const pypiMetadata: PypiManifestMetadata | undefined = row.pypi_metadata_json
+    ? (JSON.parse(row.pypi_metadata_json) as PypiManifestMetadata)
+    : undefined;
   // WS6 wave-3 (M10): only surface `kind` when the row actually
   // recorded a non-default value, so v0.4.0 manifests round-trip
   // signature-compatible.
@@ -674,13 +681,21 @@ function rowToManifest(row: ManifestRow): Manifest {
     ...(cargoMetadata ? { cargoMetadata } : {}),
     ...(npmMetadata ? { npmMetadata } : {}),
     ...(ociMetadata ? { ociMetadata } : {}),
+    ...(pypiMetadata ? { pypiMetadata } : {}),
     createdAt: row.created_at,
   };
 }
 
 // ── Virtual upstream types (WS6 wave-3 M10.4) ───────────────────────
 
-export type VirtualUpstreamKind = "cargo" | "npm" | "oci" | "maven" | "pip" | "helm";
+export type VirtualUpstreamKind =
+  | "cargo"
+  | "npm"
+  | "oci"
+  | "maven"
+  | "pip"
+  | "pypi"
+  | "helm";
 
 /**
  * Per-upstream config. Free-form so future facades can carry their
