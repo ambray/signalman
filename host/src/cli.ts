@@ -93,6 +93,19 @@ import {
   runAuditQuery,
   runAuditAppend,
 } from "./verbs/control-plane.js";
+import {
+  runSigningKeysAdd,
+  runSigningKeysList,
+  runSigningKeysRevoke,
+  runSigningKeysRotate,
+  runSigningNonceSweep,
+  runSigningProvidersList,
+  runSigningVerify,
+} from "./verbs/signing.js";
+import type {
+  SigAlgorithm,
+  SignEnvelope,
+} from "./control-plane/signing/index.js";
 import { runSchedulerTick, startScheduler } from "./control-plane/scheduler/index.js";
 // PR 6 — `signalman serve` HTTP control plane.
 // PR 7 — `signalman api-key create`.
@@ -4967,6 +4980,8 @@ async function main(argv: string[]): Promise<number> {
         return await cmdStack(args);
       case "audit":
         return await cmdAudit(args);
+      case "signing":
+        return await cmdSigning(args);
       default:
         usageError(`unknown verb: ${verb}`);
     }
@@ -4990,6 +5005,256 @@ async function main(argv: string[]): Promise<number> {
     console.error(`signalman: unhandled error: ${(err as Error).message}`);
     return 4;
   }
+}
+
+// ── WS9 M3 — `signalman signing` ────────────────────────────────────
+
+async function cmdSigning(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) {
+    usageError(
+      "signing requires a subcommand (providers, keys, verify, nonce-sweep)",
+    );
+  }
+  switch (sub) {
+    case "providers":
+      return await cmdSigningProviders(args);
+    case "keys":
+      return await cmdSigningKeys(args);
+    case "verify":
+      return await cmdSigningVerify(args);
+    case "nonce-sweep":
+      return await cmdSigningNonceSweep(args);
+    default:
+      usageError(`unknown signing subcommand: ${sub}`);
+  }
+}
+
+async function cmdSigningProviders(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (sub !== "list") {
+    usageError("signing providers requires 'list' subcommand");
+  }
+  const format = args.options.get("format");
+  const result = await withControlPlane(async (cp) => {
+    const { defaultOrg } = await cp.init();
+    return runSigningProvidersList(cp, defaultOrg.id);
+  });
+  if (format === "json") {
+    emitJson(result);
+  } else {
+    process.stdout.write("provider".padEnd(16) + "keys  configured\n");
+    for (const r of result) {
+      process.stdout.write(
+        `${r.provider.padEnd(16)}${String(r.keyCount).padEnd(6)}${r.configured ? "yes" : "no"}\n`,
+      );
+    }
+  }
+  return 0;
+}
+
+async function cmdSigningKeys(args: ParsedArgs): Promise<number> {
+  const sub = args.positional.shift();
+  if (!sub) usageError("signing keys requires a subcommand (list, add, revoke, rotate)");
+  switch (sub) {
+    case "list":
+      return await cmdSigningKeysList(args);
+    case "add":
+      return await cmdSigningKeysAdd(args);
+    case "revoke":
+      return await cmdSigningKeysRevoke(args);
+    case "rotate":
+      return await cmdSigningKeysRotate(args);
+    default:
+      usageError(`unknown signing keys subcommand: ${sub}`);
+  }
+}
+
+async function cmdSigningKeysList(args: ParsedArgs): Promise<number> {
+  const provider = args.options.get("provider");
+  const includeRevoked = args.flags.has("include-revoked");
+  const format = args.options.get("format");
+  const rows = await withControlPlane(async (cp) => {
+    const { defaultOrg } = await cp.init();
+    return runSigningKeysList(cp, defaultOrg.id, { provider, includeRevoked });
+  });
+  if (format === "json") {
+    emitJson(rows);
+  } else if (rows.length === 0) {
+    process.stdout.write("(no keys registered)\n");
+  } else {
+    for (const r of rows) {
+      const tag = r.pairId
+        ? `${r.hybridAlias} (${r.pairRole})`
+        : r.keyId;
+      const status = r.revokedAt ? "revoked" : "active";
+      process.stdout.write(
+        `${r.fingerprint}  ${r.algorithm.padEnd(20)}${r.provider.padEnd(12)}${tag.padEnd(28)}${status}\n`,
+      );
+    }
+  }
+  return 0;
+}
+
+async function cmdSigningKeysAdd(args: ParsedArgs): Promise<number> {
+  const provider = args.options.get("provider") ?? "local-disk";
+  const alias = args.options.get("alias");
+  if (!alias) usageError("signing keys add requires --alias <NAME>");
+  const algorithmRaw = args.options.get("algorithm");
+  const algorithm = algorithmRaw
+    ? (algorithmRaw as "hybrid" | SigAlgorithm)
+    : "hybrid";
+  const label = args.options.get("label");
+  const keysDir = args.options.get("keys-dir");
+  const format = args.options.get("format");
+  const result = await withControlPlane(async (cp) => {
+    const { defaultOrg } = await cp.init();
+    return runSigningKeysAdd(cp, defaultOrg.id, {
+      provider,
+      alias,
+      algorithm,
+      label: label ?? undefined,
+      keysDir: keysDir ?? undefined,
+      actor: "cli:signing-keys-add",
+    });
+  });
+  if (format === "json") {
+    emitJson({
+      added: result.added,
+      classical_path: result.classicalPath ?? null,
+      pq_path: result.pqPath ?? null,
+    });
+  } else {
+    process.stdout.write(`Registered ${result.added.length} catalog row(s):\n`);
+    for (const r of result.added) {
+      process.stdout.write(
+        `  ${r.fingerprint}  ${r.algorithm}  (alias=${r.keyId})\n`,
+      );
+    }
+    if (result.classicalPath)
+      process.stdout.write(`  classical key file: ${result.classicalPath}\n`);
+    if (result.pqPath) process.stdout.write(`  PQ key file:        ${result.pqPath}\n`);
+  }
+  return 0;
+}
+
+async function cmdSigningKeysRevoke(args: ParsedArgs): Promise<number> {
+  const identifier = args.positional[0];
+  if (!identifier)
+    usageError("signing keys revoke requires <fingerprint|alias>");
+  const reason = args.options.get("reason");
+  if (!reason) usageError("signing keys revoke requires --reason <REASON>");
+  const format = args.options.get("format");
+  const revoked = await withControlPlane(async (cp) => {
+    const { defaultOrg } = await cp.init();
+    return runSigningKeysRevoke(cp, defaultOrg.id, {
+      identifier,
+      reason,
+      actor: "cli:signing-keys-revoke",
+    });
+  });
+  if (format === "json") {
+    emitJson({ revoked });
+  } else {
+    process.stdout.write(`Revoked ${revoked.length} key(s):\n`);
+    for (const r of revoked)
+      process.stdout.write(`  ${r.fingerprint}  ${r.algorithm}\n`);
+  }
+  return 0;
+}
+
+async function cmdSigningKeysRotate(args: ParsedArgs): Promise<number> {
+  const identifier = args.positional[0];
+  if (!identifier)
+    usageError("signing keys rotate requires <fingerprint|alias>");
+  const keysDir = args.options.get("keys-dir");
+  const format = args.options.get("format");
+  const result = await withControlPlane(async (cp) => {
+    const { defaultOrg } = await cp.init();
+    return runSigningKeysRotate(cp, defaultOrg.id, {
+      identifier,
+      actor: "cli:signing-keys-rotate",
+      keysDir: keysDir ?? undefined,
+    });
+  });
+  if (format === "json") {
+    emitJson({
+      old_keys: result.oldKeys,
+      new_keys: result.newKeys,
+    });
+  } else {
+    process.stdout.write(
+      `Rotated ${result.oldKeys.length} → ${result.newKeys.length}:\n`,
+    );
+    for (let i = 0; i < result.oldKeys.length; i += 1) {
+      const old = result.oldKeys[i]!;
+      const repl = result.newKeys.find((n) => n.algorithm === old.algorithm);
+      process.stdout.write(
+        `  ${old.fingerprint} → ${repl?.fingerprint ?? "(no replacement)"}  ${old.algorithm}\n`,
+      );
+    }
+  }
+  return 0;
+}
+
+async function cmdSigningVerify(args: ParsedArgs): Promise<number> {
+  const manifestPath = args.positional[0] ?? args.options.get("manifest");
+  if (!manifestPath)
+    usageError("signing verify requires <manifest-file> (path to a signed JSON envelope)");
+  const modeRaw = args.options.get("mode");
+  const mode = modeRaw as "strict" | "transition" | "classical-only" | undefined;
+  const format = args.options.get("format");
+  const json = await fsp.readFile(manifestPath, "utf-8");
+  const parsed = JSON.parse(json) as {
+    envelope: SignEnvelope;
+    payload_base64: string;
+  };
+  const payload = Buffer.from(parsed.payload_base64, "base64");
+  const result = await withControlPlane(async (cp) => {
+    const { defaultOrg } = await cp.init();
+    return runSigningVerify(cp, defaultOrg.id, {
+      envelope: parsed.envelope,
+      payload,
+      mode,
+    });
+  });
+  if (format === "json") {
+    emitJson(result);
+  } else {
+    process.stdout.write(`Verify: ${result.ok ? "OK" : "FAIL"}\n`);
+    if (!result.ok)
+      process.stdout.write(`  reason: ${result.reasonCode ?? "unknown"}: ${result.reason ?? ""}\n`);
+    if (result.matchedKeys.length > 0) {
+      process.stdout.write(`  matched: ${result.matchedKeys.map((k) => k.fingerprint).join(", ")}\n`);
+    }
+    if (result.missingKeys.length > 0) {
+      process.stdout.write(`  missing: ${result.missingKeys.map((k) => k.fingerprint).join(", ")}\n`);
+    }
+  }
+  return result.ok ? 0 : 1;
+}
+
+async function cmdSigningNonceSweep(args: ParsedArgs): Promise<number> {
+  const hoursRaw = args.options.get("older-than-hours");
+  const olderThanHours = hoursRaw ? parseInt(hoursRaw, 10) : undefined;
+  if (
+    olderThanHours !== undefined &&
+    (Number.isNaN(olderThanHours) || olderThanHours <= 0)
+  ) {
+    usageError("--older-than-hours must be a positive integer");
+  }
+  const format = args.options.get("format");
+  const result = await withControlPlane(async (cp) =>
+    runSigningNonceSweep(cp, { olderThanHours }),
+  );
+  if (format === "json") {
+    emitJson({ deleted_rows: result.deletedRows, cutoff: result.cutoff });
+  } else {
+    process.stdout.write(
+      `Swept ${result.deletedRows} nonce row(s) older than ${result.cutoff}\n`,
+    );
+  }
+  return 0;
 }
 
 function printHelp(): void {
@@ -5024,6 +5289,7 @@ function printHelp(): void {
       "  cloud <subcommand>     (provision, terminate, status, list, backends, reaper, budget, creds, connection-descriptor)",
       "  stack <subcommand>     (apply, destroy, plan-cost — OpenTofu stack lifecycle)",
       "  audit <subcommand>     (query, append — immutable audit log)",
+      "  signing <subcommand>   (providers list, keys list|add|revoke|rotate, verify, nonce-sweep)",
       "",
       "Exit codes (per docs/design/p0-mcp-surface.md §5):",
       "  0  pass        2  workflow fail        4  infra error",

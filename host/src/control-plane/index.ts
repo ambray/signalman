@@ -160,4 +160,11 @@ export class ControlPlane {
   get runners() {
     return this.storage.runners;
   }
+  // WS9 M2 — signing catalog + replay-dedup ledger:
+  get signingProviderKeys() {
+    return this.storage.signingProviderKeys;
+  }
+  get signingNonces() {
+    return this.storage.signingNonces;
+  }
 }

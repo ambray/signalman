@@ -75,6 +75,14 @@ import {
   runPromotionTickVerb,
   withControlPlane,
 } from "./verbs/control-plane.js";
+import {
+  runSigningKeysAdd,
+  runSigningKeysList,
+  runSigningKeysRevoke,
+  runSigningKeysRotate,
+  runSigningVerify,
+} from "./verbs/signing.js";
+import type { SignEnvelope } from "./control-plane/signing/index.js";
 import { runSchedulerTick } from "./control-plane/scheduler/index.js";
 // WS6 M2: P1 MCP wrapper deps
 import * as fs from "node:fs";
@@ -2720,6 +2728,193 @@ server.tool(
           created_at: entry.createdAt,
         },
       });
+    }),
+);
+
+// ── WS9 M3 — signing-service MCP tools ───────────────────────────
+
+server.tool(
+  "signalman_signing_keys_list",
+  "List signing keys registered in the WS9 catalog for the active org. Filter by provider with `provider`; include revoked rows with `include_revoked=true`. Hybrid keys appear as two rows sharing a `pair_id` and `hybrid_alias` (one classical, one post-quantum).",
+  {
+    provider: z
+      .string()
+      .optional()
+      .describe("Filter to a single provider id (e.g. 'local-disk', 'aws-kms')."),
+    include_revoked: z
+      .boolean()
+      .optional()
+      .describe("Include revoked rows. Default false."),
+  },
+  async (params) =>
+    withRecording("signalman_signing_keys_list", params, async () => {
+      const p = params as { provider?: string; include_revoked?: boolean };
+      const rows = await withControlPlane(async (cp) => {
+        const { defaultOrg } = await cp.init();
+        return runSigningKeysList(cp, defaultOrg.id, {
+          provider: p.provider,
+          includeRevoked: p.include_revoked,
+        });
+      });
+      return asMcpResult({ keys: rows });
+    }),
+);
+
+server.tool(
+  "signalman_signing_keys_add",
+  "Register a new signing key with the WS9 catalog. v0.5.0 supports `provider=local-disk` only (AwsKmsProvider lands in M4). Default `algorithm=hybrid` creates a paired Ed25519 + ML-DSA-65 key (post-quantum ready); operator can opt to `ed25519` or `ecdsa-p256-sha256` for classical-only. Files are written under `keys_dir` (default `~/.signalman/keys`).",
+  {
+    provider: z
+      .string()
+      .optional()
+      .describe("Provider id. Default 'local-disk'."),
+    alias: z
+      .string()
+      .describe(
+        "Operator-facing alias. For local-disk, becomes the filesystem stem (`<alias>-ed25519.{pub,key}` etc. for hybrid, or `<alias>.{pub,key}` for single-algorithm).",
+      ),
+    algorithm: z
+      .enum(["hybrid", "ed25519", "ecdsa-p256-sha256"])
+      .optional()
+      .describe(
+        "Algorithm choice. Default 'hybrid' (Ed25519 + ML-DSA-65, post-quantum ready). 'ml-dsa-65' single-algorithm not yet exposed in M3.",
+      ),
+    label: z
+      .string()
+      .optional()
+      .describe("Human label for the catalog row."),
+    keys_dir: z
+      .string()
+      .optional()
+      .describe("Override the default keys directory (~/.signalman/keys)."),
+  },
+  async (params) =>
+    withRecording("signalman_signing_keys_add", params, async () => {
+      const p = params as {
+        provider?: string;
+        alias: string;
+        algorithm?: "hybrid" | "ed25519" | "ecdsa-p256-sha256";
+        label?: string;
+        keys_dir?: string;
+      };
+      const result = await withControlPlane(async (cp) => {
+        const { defaultOrg } = await cp.init();
+        return runSigningKeysAdd(cp, defaultOrg.id, {
+          provider: p.provider ?? "local-disk",
+          alias: p.alias,
+          algorithm: p.algorithm,
+          label: p.label,
+          keysDir: p.keys_dir,
+          actor: "mcp:signing-keys-add",
+        });
+      });
+      return asMcpResult({
+        added: result.added,
+        classical_path: result.classicalPath ?? null,
+        pq_path: result.pqPath ?? null,
+      });
+    }),
+);
+
+server.tool(
+  "signalman_signing_keys_revoke",
+  "Revoke a signing key in the catalog. Identifier is a 16-hex fingerprint OR an alias (hybrid alias revokes both halves). The row is preserved so past signatures still verify; revoked keys are filtered from the default `signalman_signing_keys_list` output.",
+  {
+    identifier: z
+      .string()
+      .describe("Fingerprint (16 hex) or alias."),
+    reason: z
+      .string()
+      .describe("Human-readable revocation reason; recorded in the audit log."),
+  },
+  async (params) =>
+    withRecording("signalman_signing_keys_revoke", params, async () => {
+      const p = params as { identifier: string; reason: string };
+      const revoked = await withControlPlane(async (cp) => {
+        const { defaultOrg } = await cp.init();
+        return runSigningKeysRevoke(cp, defaultOrg.id, {
+          identifier: p.identifier,
+          reason: p.reason,
+          actor: "mcp:signing-keys-revoke",
+        });
+      });
+      return asMcpResult({ revoked });
+    }),
+);
+
+server.tool(
+  "signalman_signing_keys_rotate",
+  "Rotate a signing key (local-disk only in M3). Generates a fresh key under an alias-derived stem, records the rotation linkage (old fingerprint → new fingerprint) in the catalog, and audit-logs `signing.key_rotated`. Hybrid keys rotate both halves atomically.",
+  {
+    identifier: z
+      .string()
+      .describe("Fingerprint (16 hex) or alias of the key(s) to rotate."),
+    keys_dir: z
+      .string()
+      .optional()
+      .describe("Override the default keys directory."),
+  },
+  async (params) =>
+    withRecording("signalman_signing_keys_rotate", params, async () => {
+      const p = params as { identifier: string; keys_dir?: string };
+      const result = await withControlPlane(async (cp) => {
+        const { defaultOrg } = await cp.init();
+        return runSigningKeysRotate(cp, defaultOrg.id, {
+          identifier: p.identifier,
+          keysDir: p.keys_dir,
+          actor: "mcp:signing-keys-rotate",
+        });
+      });
+      return asMcpResult({
+        old_keys: result.oldKeys,
+        new_keys: result.newKeys,
+      });
+    }),
+);
+
+server.tool(
+  "signalman_signing_verify",
+  "Verify a signing envelope against the catalog. Caller supplies the envelope + payload (base64); the verifier looks up each entry's public key by fingerprint, then runs verify in the requested mode. Mode `transition` (default) accepts any one entry verifying; `strict` requires every entry; `classical-only` ignores ml-dsa-65 entries.",
+  {
+    envelope: z
+      .object({
+        signatures: z.array(
+          z.object({
+            signatureB64: z.string(),
+            signedBy: z.string(),
+            algorithm: z.string(),
+            signedAt: z.string(),
+          }),
+        ),
+        nonce: z.string(),
+        payloadSha256: z.string(),
+      })
+      .describe("SignEnvelope to verify (as produced by sign())."),
+    payload_base64: z
+      .string()
+      .describe("Base64-encoded payload bytes that were signed."),
+    mode: z
+      .enum(["strict", "transition", "classical-only"])
+      .optional()
+      .describe("Verifier mode. Default 'transition'."),
+  },
+  async (params) =>
+    withRecording("signalman_signing_verify", params, async () => {
+      const p = params as {
+        envelope: SignEnvelope;
+        payload_base64: string;
+        mode?: "strict" | "transition" | "classical-only";
+      };
+      const payload = Buffer.from(p.payload_base64, "base64");
+      const result = await withControlPlane(async (cp) => {
+        const { defaultOrg } = await cp.init();
+        return runSigningVerify(cp, defaultOrg.id, {
+          envelope: p.envelope,
+          payload,
+          mode: p.mode,
+        });
+      });
+      return asMcpResult(result);
     }),
 );
 
