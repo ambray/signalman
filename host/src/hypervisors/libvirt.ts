@@ -1357,12 +1357,16 @@ export class LibvirtBackend implements HypervisorBackend {
     // domain with N snapshots"), which surprised the 2026-05-16
     // demo when `vm checkpoint` had been called.
     //
-    // --delete-storage-volume-snapshots cleans up *external*
-    // snapshots — separate qcow2 chains that --remove-all-storage
-    // alone leaves on disk. The flag is a no-op on directory pools
-    // (qcow2 internal snapshots travel with the file) but matters
-    // for pool drivers that track snapshots as separate volumes
-    // (some iSCSI / ZFS backends). Safe to always emit.
+    // We do NOT pass --delete-storage-volume-snapshots: libvirt's
+    // directory-pool storage backend (the common case) returns
+    // `unsupported flags (0x2) in function
+    // virStorageBackendVolDeleteLocal` when the flag is present,
+    // and the undefine half-completes (domain gone, qcow2 left).
+    // For external-snapshot setups on pool drivers that *do*
+    // support the flag (some iSCSI / ZFS backends), operators can
+    // run `virsh undefine ... --delete-storage-volume-snapshots`
+    // by hand after a regular `vm delete`. See the v0.5 deferred
+    // list in `.workstream-status-ws11.md`.
     await this.exec(this.argv(["destroy", name]), {
       timeoutMs: VIRSH_LIFECYCLE_TIMEOUT_MS,
     });
@@ -1371,7 +1375,6 @@ export class LibvirtBackend implements HypervisorBackend {
         "undefine",
         name,
         "--remove-all-storage",
-        "--delete-storage-volume-snapshots",
         "--snapshots-metadata",
         "--checkpoints-metadata",
         "--nvram",

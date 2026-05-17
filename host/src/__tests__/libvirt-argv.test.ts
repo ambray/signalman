@@ -634,17 +634,17 @@ describe("LibvirtBackend argv composition", () => {
     await backend.deleteVM(HANDLE);
     expect(calls[0].args).toEqual(["destroy", "vm-alpha"]);
     // The full flag set covers: disk volume (--remove-all-storage),
-    // external snapshot volumes (--delete-storage-volume-snapshots,
-    // no-op on directory pools but cleans separate snapshot files
-    // on backends that track them), snapshot metadata
-    // (--snapshots-metadata, required to undefine domains with
-    // any snapshots), checkpoint metadata (--checkpoints-metadata),
-    // and the nvram file (--nvram for UEFI domains).
+    // snapshot metadata (--snapshots-metadata, required to undefine
+    // domains with any snapshots), checkpoint metadata
+    // (--checkpoints-metadata), and the nvram file (--nvram for
+    // UEFI domains). Note: --delete-storage-volume-snapshots is
+    // intentionally NOT in this list — libvirt's directory-pool
+    // backend rejects it with "unsupported flags (0x2)", which
+    // half-completes undefine (domain gone, disk orphaned).
     expect(calls[1].args).toEqual([
       "undefine",
       "vm-alpha",
       "--remove-all-storage",
-      "--delete-storage-volume-snapshots",
       "--snapshots-metadata",
       "--checkpoints-metadata",
       "--nvram",
