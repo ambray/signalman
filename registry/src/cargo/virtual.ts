@@ -76,7 +76,11 @@ import { cargoManifestName, sparseIndexPathFor } from "./paths.js";
  */
 export type UpstreamFetch = (
   url: string,
-  init?: { headers?: Record<string, string> },
+  init?: {
+    method?: "GET" | "POST" | "HEAD";
+    headers?: Record<string, string>;
+    body?: string;
+  },
 ) => Promise<UpstreamFetchResult>;
 
 export interface UpstreamFetchResult {

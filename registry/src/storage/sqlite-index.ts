@@ -712,6 +712,23 @@ export interface VirtualUpstreamConfig {
    * (immutable cache; operator manually busts via DELETE manifest).
    */
   cache_ttl_seconds?: number;
+  /**
+   * WS10 M5 — OCI-only knobs. The OCI virtual-upstream layer reads
+   * these on each proxy attempt; absent values fall back to sensible
+   * defaults (1:1 repo mapping, anonymous auth).
+   */
+  upstream_flavor?: "dockerhub" | "ghcr" | "ecr";
+  /** Repo-name template, e.g. `library/{repo}` for Docker Hub library. */
+  upstream_repo_template?: string;
+  /** AWS-only fields, used by the ECR adapter. */
+  aws_region?: string;
+  aws_access_key_id?: string;
+  aws_secret_access_key?: string;
+  aws_session_token?: string;
+  api_endpoint?: string;
+  /** Docker-Hub-only overrides. */
+  token_endpoint?: string;
+  token_service?: string;
 }
 
 export interface VirtualUpstream {

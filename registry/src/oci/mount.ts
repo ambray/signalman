@@ -25,6 +25,8 @@ import { startReaper, type ReaperHandle } from "./reaper.js";
 import { TagStore } from "./tag-store.js";
 import { UploadFsStore } from "./upload-fs.js";
 import { UploadStore } from "./upload-store.js";
+import { proxyOciBlob, proxyOciManifest } from "./virtual.js";
+import type { UpstreamFetch } from "../cargo/index.js";
 
 export interface MountOciOptions {
   storage: RegistryStorage;
@@ -60,6 +62,19 @@ export interface MountOciOptions {
   catalogDefaultPageSize?: number;
   /** Hard cap for the same routes. */
   catalogMaxPageSize?: number;
+  /**
+   * WS10 M5 — injectable upstream fetcher for virtual pull-through.
+   * Production callers leave this unset (falls back to globalThis.fetch);
+   * tests pass a stubbed response.
+   */
+  virtualUpstreamFetch?: UpstreamFetch;
+  /**
+   * WS10 M5 — Ed25519 PEM used to re-sign proxy-cached manifests
+   * when the upstream's `resign_on_cache` flag is set. Without this
+   * the proxy still caches but does not attach a registry-side
+   * signature (audit log records the skip).
+   */
+  virtualResignPrivateKeyPem?: string;
 }
 
 export interface MountedOciHandles {
@@ -90,6 +105,21 @@ export function mountOciRoutes(
     ...(opts.now ? { now: opts.now } : {}),
   });
 
+  // WS10 M5: compose the proxy hooks if either an upstream fetcher
+  // or a virtual_upstream config row may exist. The hooks themselves
+  // are no-ops when no virtual upstream rows match at request time,
+  // so wiring them unconditionally is safe.
+  const virtualOpts = {
+    storage: opts.storage,
+    index: opts.index,
+    tagStore,
+    ...(opts.virtualUpstreamFetch ? { fetch: opts.virtualUpstreamFetch } : {}),
+    ...(opts.virtualResignPrivateKeyPem
+      ? { signingPrivateKeyPem: opts.virtualResignPrivateKeyPem }
+      : {}),
+    ...(opts.now ? { now: opts.now } : {}),
+  };
+
   mountOciBlobRoutes(router, {
     storage: opts.storage,
     index: opts.index,
@@ -101,6 +131,8 @@ export function mountOciRoutes(
       ? { maxChunkBytes: opts.maxChunkBytes }
       : {}),
     ...(opts.now ? { now: opts.now } : {}),
+    proxyBlob: (org, repo, digestHex) =>
+      proxyOciBlob(virtualOpts, org, repo, digestHex),
   });
 
   mountOciManifestRoutes(router, {
@@ -115,6 +147,8 @@ export function mountOciRoutes(
       ? { allowDelete: opts.allowManifestDelete }
       : {}),
     ...(opts.now ? { now: opts.now } : {}),
+    proxyManifest: (org, repo, reference) =>
+      proxyOciManifest(virtualOpts, org, repo, reference),
   });
 
   mountOciCatalogRoutes(router, {

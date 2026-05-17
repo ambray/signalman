@@ -94,6 +94,18 @@ export interface MountOciManifestOptions {
    * the handler then returns 405 UNSUPPORTED.
    */
   allowDelete?: boolean;
+  /**
+   * WS10 M5 — proxy fallback for GET on cache miss. Wired by
+   * `mount.ts` when a virtual-upstream signing key is configured.
+   * Receives the parsed org / repo / reference and returns either
+   * the proxied bytes (already cached as side-effect) or null when
+   * no upstream matched.
+   */
+  proxyManifest?: (
+    org: string,
+    repo: string,
+    reference: { kind: "tag" | "digest"; value: string },
+  ) => Promise<{ digestHex: string; mediaType: string; body: Buffer } | null>;
   now?: () => Date;
 }
 
@@ -137,6 +149,7 @@ export function mountOciManifestRoutes(
   const allowDelete = opts.allowDelete ?? true;
   const now = opts.now ?? (() => new Date());
   const baseUrl = opts.publicBaseUrl ?? "";
+  const proxyManifest = opts.proxyManifest;
 
   // ── PUT /v2/<name>/manifests/:reference ─────────────────────────
   router.put(
@@ -415,21 +428,31 @@ export function mountOciManifestRoutes(
     const repo = parseRepositoryParam(ctx.params.name);
     const ref = parseOciReference(ctx.params.reference);
 
-    let hex: string;
+    let hex: string | null = null;
     if (ref.kind === "digest") {
       hex = ref.hex;
     } else {
       const tagRow = tagStore.get(repo.storageName, ref.value);
-      if (!tagRow) {
-        throw new OciError(
-          OCI_ERROR_CODES.MANIFEST_UNKNOWN,
-          `tag ${ref.value} not found in ${repo.storageName}`,
-        );
-      }
-      hex = tagRow.manifestSha256;
+      if (tagRow) hex = tagRow.manifestSha256;
     }
-    const manifest = await storage.getManifest(repo.storageName, hex);
-    if (!manifest) {
+    let manifest = hex
+      ? await storage.getManifest(repo.storageName, hex)
+      : null;
+
+    // WS10 M5: proxy-through fallback on cache miss.
+    if (!manifest && proxyManifest) {
+      const refForProxy =
+        ref.kind === "digest"
+          ? ({ kind: "digest", value: ref.value } as const)
+          : ({ kind: "tag", value: ref.value } as const);
+      const proxied = await proxyManifest(repo.org, repo.repo, refForProxy);
+      if (proxied) {
+        hex = proxied.digestHex;
+        manifest = await storage.getManifest(repo.storageName, hex);
+      }
+    }
+
+    if (!manifest || !hex) {
       throw new OciError(
         OCI_ERROR_CODES.MANIFEST_UNKNOWN,
         `manifest ${ref.value} not found`,
