@@ -179,10 +179,10 @@ describe("runSigningKeysAdd", () => {
     ).rejects.toThrow(SigningError);
   });
 
-  it("rejects an unsupported provider (M3 ships local-disk only)", async () => {
+  it("rejects an unsupported provider (M4 ships local-disk + aws-kms)", async () => {
     await expect(
       runSigningKeysAdd(cp, orgId, {
-        provider: "aws-kms",
+        provider: "azure-key-vault",
         alias: "k",
         keysDir: tmp,
         actor: "test",

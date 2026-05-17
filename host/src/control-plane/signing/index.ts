@@ -57,3 +57,9 @@ export {
   writeRequestedRow,
 } from "./audit.js";
 export type { SigningActionCode } from "./audit.js";
+
+export { AwsKmsProvider } from "./providers/aws-kms.js";
+export type {
+  AwsKmsProviderOptions,
+  KmsClientLike,
+} from "./providers/aws-kms.js";

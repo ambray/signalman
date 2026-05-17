@@ -35,6 +35,8 @@ import * as path from "node:path";
 import { newId } from "../control-plane/ids.js";
 import type { ControlPlane } from "../control-plane/index.js";
 import {
+  AwsKmsProvider,
+  type KmsClientLike,
   LocalDiskProvider,
   SIGNING_ACTION_CODES,
   SigningError,
@@ -46,6 +48,10 @@ import type {
   AuditLogRepo,
   SigningProviderKey,
 } from "../control-plane/storage/driver.js";
+import {
+  loadCredentialForOrg,
+  type AwsCredentialPlaintext,
+} from "../cloud/credentials.js";
 
 // ── Provider list ───────────────────────────────────────────────────
 
@@ -104,14 +110,19 @@ export interface KeysAddInput {
   /** Operator-facing alias. For local-disk, becomes the filesystem
    *  alias (`<alias>-ed25519.{pub,key}` + `<alias>-mldsa65.{pub,key}`
    *  for hybrid). For cloud-KMS, becomes the catalog row's keyId
-   *  alongside the cloud-side key reference. */
+   *  display alias (alongside the actual ARN). */
   alias: string;
   /** Algorithm choice. Defaults to "hybrid" (Ed25519 + ML-DSA-65)
-   *  per Q2 resolution. Single-algorithm keys are operator opt-outs. */
+   *  per Q2 resolution. For aws-kms in M4, only `ecdsa-p256-sha256`
+   *  is supported; `hybrid` is rejected. */
   algorithm?: "hybrid" | SigAlgorithm;
   /** For cloud-KMS providers: the cloud-side key id (ARN / vault path).
    *  Local-disk ignores this (the local-disk alias IS the key id). */
   keyId?: string;
+  /** AWS region for aws-kms (defaults to AWS_REGION env var → "us-east-1"). */
+  awsRegion?: string;
+  /** Test seam: a mocked KMS client for `aws-kms` registration tests. */
+  awsKmsClient?: KmsClientLike;
   /** Human label for the catalog row. */
   label?: string;
   /** Local-disk override: where to write key files. Default is
@@ -133,10 +144,13 @@ export async function runSigningKeysAdd(
   input: KeysAddInput,
 ): Promise<KeysAddResult> {
   validateAlias(input.alias);
+  if (input.provider === "aws-kms") {
+    return addAwsKmsKey(cp, orgId, input);
+  }
   if (input.provider !== "local-disk") {
     throw new SigningError(
       "internal-error",
-      `provider "${input.provider}" is not yet supported by signing keys add (v0.5.0 ships local-disk; aws-kms in M4)`,
+      `provider "${input.provider}" is not yet supported by signing keys add (v0.5.0 ships local-disk + aws-kms)`,
     );
   }
   const algorithm = input.algorithm ?? "hybrid";
@@ -147,6 +161,108 @@ export async function runSigningKeysAdd(
     return addHybridLocalDiskKey(cp, orgId, input, keysDir);
   }
   return addSingleAlgoLocalDiskKey(cp, orgId, input, keysDir, algorithm);
+}
+
+async function addAwsKmsKey(
+  cp: ControlPlane,
+  orgId: string,
+  input: KeysAddInput,
+): Promise<KeysAddResult> {
+  if (!input.keyId) {
+    throw new SigningError(
+      "internal-error",
+      "aws-kms registration requires --key-id <ARN>",
+    );
+  }
+  // Hybrid via AWS KMS is operator-tagged (KMS ML-DSA or local-fallback);
+  // not in M4 scope. Default-hybrid input must be downgraded explicitly.
+  const algorithm = input.algorithm ?? "ecdsa-p256-sha256";
+  if (algorithm === "hybrid") {
+    throw new SigningError(
+      "algorithm-not-implemented",
+      "hybrid via aws-kms is deferred; pass --algorithm ecdsa-p256-sha256 to register a classical-only KMS key in M4",
+    );
+  }
+  if (algorithm !== "ecdsa-p256-sha256") {
+    throw new SigningError(
+      "algorithm-not-implemented",
+      `aws-kms in M4 supports ecdsa-p256-sha256 only; got ${algorithm}`,
+    );
+  }
+
+  // Resolve credentials + build the provider.
+  const provider = await buildAwsKmsProvider(cp, orgId, input);
+  const cached = await provider.fetchPublicKey(input.keyId);
+
+  // Persist into the catalog with the cached public-key bytes so
+  // verify() never needs KMS access.
+  const row = await cp.signingProviderKeys.insert({
+    orgId,
+    provider: "aws-kms",
+    keyId: input.keyId,
+    algorithm: "ecdsa-p256-sha256",
+    fingerprint: cached.fingerprint,
+    publicKeyB64: cached.publicKeyDer.toString("base64"),
+    label: input.label ?? input.alias ?? null,
+    addedBy: input.actor,
+  });
+  await writeKeyAddedRow(cp.auditLog, {
+    orgId,
+    actor: input.actor,
+    fingerprint: cached.fingerprint,
+    detail: {
+      provider: "aws-kms",
+      keyId: input.keyId,
+      algorithm: "ecdsa-p256-sha256",
+      fingerprint: cached.fingerprint,
+      alias: input.alias,
+      label: input.label ?? null,
+    },
+  });
+  return { added: [row] };
+}
+
+async function buildAwsKmsProvider(
+  cp: ControlPlane,
+  orgId: string,
+  input: KeysAddInput,
+): Promise<AwsKmsProvider> {
+  let credentials: AwsCredentialPlaintext | undefined;
+  if (input.awsKmsClient) {
+    // Test seam: a mocked client is supplied; credentials are
+    // synthesized because the real client never runs.
+    credentials = {
+      access_key_id: "test-access-key",
+      secret_access_key: "test-secret",
+    };
+  } else {
+    const plaintext = await loadCredentialForOrg(
+      cp.cloudCredentials,
+      orgId,
+      "aws",
+    );
+    if (!plaintext) {
+      throw new SigningError(
+        "internal-error",
+        `aws-kms registration requires AWS credentials for org ${orgId}. Run \`signalman cloud creds set --provider aws --org-id ${orgId} ...\` first.`,
+      );
+    }
+    // Discriminator: aws-shaped plaintext has access_key_id.
+    if (!("access_key_id" in plaintext)) {
+      throw new SigningError(
+        "internal-error",
+        `org ${orgId} has non-AWS credentials registered under backend=aws; cannot proceed`,
+      );
+    }
+    credentials = plaintext as AwsCredentialPlaintext;
+  }
+  const region =
+    input.awsRegion ?? process.env.AWS_REGION ?? "us-east-1";
+  return new AwsKmsProvider({
+    region,
+    credentials,
+    client: input.awsKmsClient,
+  });
 }
 
 async function addHybridLocalDiskKey(
