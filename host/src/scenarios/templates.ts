@@ -116,6 +116,12 @@ export interface VmTemplate {
   diskBus?: "virtio" | "sata" | "scsi";
   /** Override NIC model. */
   nicModel?: "virtio" | "e1000e" | "rtl8139";
+  /**
+   * Absolute paths to ISO files to attach as read-only CDROMs at
+   * domain-define time. See `VMConfig.extraCdroms` for use cases
+   * (virtio-win drivers, cloud-init seed, installer ISOs).
+   */
+  extraCdroms?: string[];
 }
 
 // ── Validation ─────────────────────────────────────────────────────

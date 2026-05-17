@@ -28,6 +28,7 @@ import {
   parsePoolTargetPath,
   buildDomainXml,
   resolveOsProfileDefaults,
+  parseDomInfoUsedMemoryMB,
 } from "../hypervisors/libvirt.js";
 import type { OsProfileDefaults } from "../hypervisors/libvirt.js";
 
@@ -162,6 +163,29 @@ describe("parseDomIfAddrIpv4", () => {
       " vnet0      52:54:00:8e:5b:c1    ipv6         fe80::5054:ff:fe8e:5bc1/64\n" +
       " vnet0      52:54:00:8e:5b:c1    ipv4         10.0.0.5/24\n";
     expect(parseDomIfAddrIpv4(raw)).toBe("10.0.0.5");
+  });
+});
+
+describe("parseDomInfoUsedMemoryMB", () => {
+  it("converts 'Used memory: <KiB>' to MiB (rounded down)", () => {
+    const raw =
+      "Id:             1\nName:           test\nMax memory:     4194304 KiB\n" +
+      "Used memory:    2097152 KiB\nPersistent:     yes\n";
+    expect(parseDomInfoUsedMemoryMB(raw)).toBe(2048);
+  });
+
+  it("returns 0 when balloon hasn't reported yet (shown as '-')", () => {
+    const raw = "Used memory:    - KiB\n";
+    expect(parseDomInfoUsedMemoryMB(raw)).toBe(0);
+  });
+
+  it("returns null when the line is missing", () => {
+    expect(parseDomInfoUsedMemoryMB("Name: x\nState: shut off\n")).toBeNull();
+  });
+
+  it("rounds non-power-of-2 values down to whole MiB", () => {
+    // 2147483 KiB = ~2097.155 MiB → 2097
+    expect(parseDomInfoUsedMemoryMB("Used memory:    2147483 KiB")).toBe(2097);
   });
 });
 
@@ -517,6 +541,62 @@ describe("buildDomainXml", () => {
     expect(xml).toContain("<model type='e1000e'/>");
     expect(xml).not.toContain("<model type='virtio'/>");
   });
+
+  it("extraCdroms: virtio-as-primary places CDROMs starting at sda", () => {
+    const xml = buildDomainXml({
+      name: "win-vm",
+      memoryMB: 4096,
+      cpus: 2,
+      diskPath: "/var/lib/libvirt/images/win-vm.qcow2",
+      networkName: "default",
+      os: resolveOsProfileDefaults("windows-11"),
+      extraCdroms: [
+        "/iso/virtio-win.iso",
+        "/iso/win11-installer.iso",
+      ],
+    });
+    expect(xml).toContain("<target dev='vda' bus='virtio'/>"); // primary
+    expect(xml).toContain("<source file='/iso/virtio-win.iso'/>");
+    expect(xml).toContain("<target dev='sda' bus='sata'/>"); // first cdrom
+    expect(xml).toContain("<source file='/iso/win11-installer.iso'/>");
+    expect(xml).toContain("<target dev='sdb' bus='sata'/>"); // second cdrom
+    // Both CDROMs are readonly + raw-format.
+    expect(
+      (xml.match(/<disk type='file' device='cdrom'>/g) ?? []).length,
+    ).toBe(2);
+    expect((xml.match(/<readonly\/>/g) ?? []).length).toBe(2);
+    expect((xml.match(/<driver name='qemu' type='raw'\/>/g) ?? []).length).toBe(
+      2,
+    );
+  });
+
+  it("extraCdroms: sata-as-primary offsets CDROMs starting at sdb", () => {
+    const xml = buildDomainXml({
+      name: "win-bare",
+      memoryMB: 4096,
+      cpus: 2,
+      diskPath: "/var/lib/libvirt/images/win-bare.qcow2",
+      networkName: "default",
+      os: { ...resolveOsProfileDefaults("windows-10"), diskBus: "sata" },
+      extraCdroms: ["/iso/win10-installer.iso"],
+    });
+    expect(xml).toContain("<target dev='sda' bus='sata'/>"); // primary at sda
+    expect(xml).toContain("<source file='/iso/win10-installer.iso'/>");
+    expect(xml).toContain("<target dev='sdb' bus='sata'/>"); // cdrom at sdb
+  });
+
+  it("extraCdroms: empty array (or unset) emits no <disk device='cdrom'>", () => {
+    const xml = buildDomainXml({
+      name: "vm",
+      memoryMB: 2048,
+      cpus: 2,
+      diskPath: "/tmp/d.qcow2",
+      networkName: "default",
+      os: resolveOsProfileDefaults("linux"),
+    });
+    expect(xml).not.toContain("device='cdrom'");
+    expect(xml).not.toContain("<readonly/>");
+  });
 });
 
 // ── Backend.run argv tests (per verb) ────────────────────────────
@@ -554,14 +634,17 @@ describe("LibvirtBackend argv composition", () => {
     await backend.deleteVM(HANDLE);
     expect(calls[0].args).toEqual(["destroy", "vm-alpha"]);
     // The full flag set covers: disk volume (--remove-all-storage),
-    // snapshot metadata (--snapshots-metadata, required to undefine
-    // domains with any snapshots), checkpoint metadata
-    // (--checkpoints-metadata), and the nvram file (--nvram for
-    // UEFI domains).
+    // external snapshot volumes (--delete-storage-volume-snapshots,
+    // no-op on directory pools but cleans separate snapshot files
+    // on backends that track them), snapshot metadata
+    // (--snapshots-metadata, required to undefine domains with
+    // any snapshots), checkpoint metadata (--checkpoints-metadata),
+    // and the nvram file (--nvram for UEFI domains).
     expect(calls[1].args).toEqual([
       "undefine",
       "vm-alpha",
       "--remove-all-storage",
+      "--delete-storage-volume-snapshots",
       "--snapshots-metadata",
       "--checkpoints-metadata",
       "--nvram",

@@ -90,7 +90,7 @@ describe("LibvirtBackend integration", () => {
     expect(vms.every((v) => v.backend === "libvirt")).toBe(true);
   });
 
-  it("getStatus returns running + IPv4 + reachable QGA when guest-ping succeeds", async () => {
+  it("getStatus returns running + IPv4 + reachable QGA + memoryUsedMB when guest-ping + dominfo both succeed", async () => {
     // Use a custom exec instead of makeStubBackend: the verb-dispatch
     // helper folds all qemu-* args away when finding the verb, so it
     // can't distinguish qemu-agent-command from a regular virsh verb.
@@ -106,6 +106,15 @@ describe("LibvirtBackend integration", () => {
         if (verb === "qemu-agent-command") {
           return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
         }
+        if (verb === "dominfo") {
+          return {
+            stdout:
+              "Id:             1\nName:           vm-alpha\nState:          running\n" +
+              "Max memory:     4194304 KiB\nUsed memory:    2097152 KiB\n",
+            stderr: "",
+            exitCode: 0,
+          };
+        }
         return { stdout: "", stderr: "", exitCode: 0 };
       },
     });
@@ -113,6 +122,34 @@ describe("LibvirtBackend integration", () => {
     expect(status.state).toBe("running");
     expect(status.ipAddress).toBe("192.168.122.42");
     expect(status.guestAgentReachable).toBe(true);
+    expect(status.memoryUsedMB).toBe(2048);
+    // uptimeSeconds intentionally undefined on libvirt — see getStatus
+    // comment. virsh doesn't expose wall-clock uptime.
+    expect(status.uptimeSeconds).toBeUndefined();
+  });
+
+  it("getStatus leaves memoryUsedMB undefined when dominfo fails", async () => {
+    const backend = new LibvirtBackend({
+      exec: async (args) => {
+        const verb = args[0];
+        if (verb === "domstate") {
+          return { stdout: fixtures.domstateRunning, stderr: "", exitCode: 0 };
+        }
+        if (verb === "domifaddr") {
+          return { stdout: fixtures.domifaddr, stderr: "", exitCode: 0 };
+        }
+        if (verb === "qemu-agent-command") {
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        }
+        if (verb === "dominfo") {
+          return { stdout: "", stderr: "error: dominfo failed", exitCode: 1 };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    });
+    const status = await backend.getStatus(HANDLE);
+    expect(status.state).toBe("running");
+    expect(status.memoryUsedMB).toBeUndefined();
   });
 
   it("getStatus reports guestAgentReachable=false when guest-ping errors", async () => {
@@ -768,6 +805,39 @@ describe("LibvirtBackend integration", () => {
         }),
       ).rejects.toMatchObject({ code: "invalid_argument" });
     });
+
+    it("extraCdroms: emits the CDROM disks in the produced XML", async () => {
+      const POOL =
+        "<pool><target><path>/var/lib/libvirt/images</path></target></pool>";
+      const { backend, getXml } = buildXmlCapturingBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL } },
+      });
+      await backend.createVM({
+        name: "win-vm",
+        template: "/abs/win11.qcow2",
+        osProfile: "windows-11",
+        extraCdroms: ["/iso/virtio-win.iso", "/iso/win11.iso"],
+      });
+      const xml = getXml();
+      expect(xml).toContain("<source file='/iso/virtio-win.iso'/>");
+      expect(xml).toContain("<source file='/iso/win11.iso'/>");
+      expect((xml.match(/device='cdrom'/g) ?? []).length).toBe(2);
+    });
+
+    it("extraCdroms: rejects relative paths with invalid_argument", async () => {
+      const POOL =
+        "<pool><target><path>/var/lib/libvirt/images</path></target></pool>";
+      const { backend } = buildXmlCapturingBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL } },
+      });
+      await expect(
+        backend.createVM({
+          name: "vm-bad",
+          template: "/abs/tpl.qcow2",
+          extraCdroms: ["relative/path.iso"],
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+    });
   });
 
   it("executeCommand submits guest-exec then polls guest-exec-status until exited", async () => {
@@ -1067,6 +1137,42 @@ describe("LibvirtBackend integration", () => {
         backend.copyFileToVM(HANDLE, hostFile, "/tmp/dst"),
       ).rejects.toMatchObject({ code: "copy_failed" });
     });
+
+    it("invokes progress callback with (bytesTransferred, totalBytes) at start + after each chunk", async () => {
+      // 2.5 chunks worth of data → 4 callback events expected:
+      // (0, total), (chunk1, total), (chunk1+chunk2, total),
+      // (chunk1+chunk2+remainder, total).
+      const bytes = Math.floor(QGA_FILE_CHUNK_BYTES * 2.5);
+      const hostFile = await makeHostFile(Buffer.alloc(bytes));
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":11}', stderr: "", exitCode: 0 };
+          }
+          if (payload.execute === "guest-file-write") {
+            return {
+              stdout: '{"return":{"count":1,"eof":false}}',
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      const events: Array<[number, number]> = [];
+      await backend.copyFileToVM(HANDLE, hostFile, "/tmp/dst", (bt, tb) => {
+        events.push([bt, tb]);
+      });
+      expect(events[0]).toEqual([0, bytes]);
+      expect(events[events.length - 1]).toEqual([bytes, bytes]);
+      // Strictly monotonic; bytesTransferred never exceeds totalBytes.
+      for (let i = 1; i < events.length; i += 1) {
+        expect(events[i][0]).toBeGreaterThanOrEqual(events[i - 1][0]);
+        expect(events[i][0]).toBeLessThanOrEqual(events[i][1]);
+        expect(events[i][1]).toBe(bytes);
+      }
+    });
   });
 
   describe("copyFileFromVM", () => {
@@ -1182,6 +1288,49 @@ describe("LibvirtBackend integration", () => {
         backend.copyFileFromVM(HANDLE, "/guest/src", target),
       ).rejects.toMatchObject({ code: "copy_failed" });
       expect(verbs).toContain("guest-file-close");
+    });
+
+    it("invokes progress callback with bytesTransferred as both args (total unknown)", async () => {
+      // Guest sends two non-trivial chunks then EOF. Expect 3 events:
+      // (0, 0), (chunk1, chunk1), (chunk1+chunk2, chunk1+chunk2).
+      const target = await makeHostTarget();
+      const part1 = Buffer.from("hello");
+      const part2 = Buffer.from("world!");
+      let reads = 0;
+      const backend = new LibvirtBackend({
+        exec: async (args) => {
+          const payload = JSON.parse(args[args.length - 1]) as { execute: string };
+          if (payload.execute === "guest-file-open") {
+            return { stdout: '{"return":17}', stderr: "", exitCode: 0 };
+          }
+          if (payload.execute === "guest-file-read") {
+            reads += 1;
+            const chunk = reads === 1 ? part1 : part2;
+            const eof = reads >= 2;
+            return {
+              stdout: JSON.stringify({
+                return: {
+                  count: chunk.length,
+                  "buf-b64": chunk.toString("base64"),
+                  eof,
+                },
+              }),
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return { stdout: '{"return":{}}', stderr: "", exitCode: 0 };
+        },
+      });
+      const events: Array<[number, number]> = [];
+      await backend.copyFileFromVM(HANDLE, "/guest/src", target, (bt, tb) => {
+        events.push([bt, tb]);
+      });
+      expect(events[0]).toEqual([0, 0]);
+      // After each chunk, bytesTransferred grows; total mirrors it
+      // since guest-side total is unknown.
+      expect(events[events.length - 1][0]).toBe(part1.length + part2.length);
+      expect(events[events.length - 1][0]).toBe(events[events.length - 1][1]);
     });
   });
 
