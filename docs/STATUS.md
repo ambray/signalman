@@ -36,9 +36,24 @@ Recent waves of work shipped to `main` since v0.2.1:
   base64, `guestAgentReachable` via `guest-ping`, `domifaddr` source
   fallback (lease→agent→arp), `setVmMemory` / `setVmProcessor` /
   `waitForHeartbeat`, minimal `createVM` XML builder backed by
-  `qemu-img` qcow2 backing-file disks. New gated system-lane test
-  drives real `virsh` against the in-memory `test:///default` driver
-  (`SIGNALMAN_LIBVIRT_TESTS=1`). 107 libvirt tests; 2827 total.
+  libvirt-managed qcow2 backing-file volumes (via `vol-create-as` —
+  pool-tracked, so `vm delete` cleans up the disk). New gated
+  system-lane test drives real `virsh` against the in-memory
+  `test:///default` driver (`SIGNALMAN_LIBVIRT_TESTS=1`).
+- **v0.5 libvirt multi-OS** (WS11 follow-up) — `VMConfig.osProfile`
+  selects firmware + security primitives + device defaults per
+  guest OS family. Profiles ship: `linux` (BIOS + virtio + UTC —
+  backwards-compatible default), `linux-uefi` (UEFI without Secure
+  Boot/TPM), `windows-10` (UEFI + virtio + localtime + USB tablet +
+  QXL/VNC; operator may opt into TPM + Secure Boot), `windows-11`
+  (UEFI + Secure Boot + TPM 2.0 + SMM, all mandatory — Win11
+  refuses to boot otherwise so operator overrides for these three
+  raise `invalid_argument` at createVM). macOS rejected with a
+  "use Tart" message — see `docs/mac-virtualization.md`. Granular
+  per-field overrides for `firmware` / `secureBoot` / `tpm` /
+  `diskBus` / `nicModel` cover edge cases (e.g. Windows install
+  without virtio-win staged → SATA + e1000e fallback). 122 libvirt
+  tests; 2989 total.
 - **`@signalman/registry` v0.1.0/v0.1.1** (WS5/WS6) — standalone OSS
   registry with cargo + npm protocol facades, virtual-upstream
   pull-through with Ed25519 re-signing, forensic + provenance HTTP

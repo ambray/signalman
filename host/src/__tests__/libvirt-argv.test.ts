@@ -27,7 +27,9 @@ import {
   parseGuestFileRead,
   parsePoolTargetPath,
   buildDomainXml,
+  resolveOsProfileDefaults,
 } from "../hypervisors/libvirt.js";
+import type { OsProfileDefaults } from "../hypervisors/libvirt.js";
 
 interface ExecCall {
   args: string[];
@@ -328,14 +330,64 @@ describe("parsePoolTargetPath", () => {
   });
 });
 
+describe("resolveOsProfileDefaults", () => {
+  it("linux: BIOS + virtio + UTC, no TPM/Secure Boot, no Windows extras", () => {
+    expect(resolveOsProfileDefaults("linux")).toEqual({
+      firmware: "bios",
+      secureBoot: false,
+      tpm: "none",
+      diskBus: "virtio",
+      nicModel: "virtio",
+      clockOffset: "utc",
+      windowsExtras: false,
+    });
+  });
+
+  it("linux-uefi: UEFI without Secure Boot/TPM", () => {
+    const d = resolveOsProfileDefaults("linux-uefi");
+    expect(d.firmware).toBe("efi");
+    expect(d.secureBoot).toBe(false);
+    expect(d.tpm).toBe("none");
+    expect(d.clockOffset).toBe("utc");
+    expect(d.windowsExtras).toBe(false);
+  });
+
+  it("windows-10: UEFI + virtio, localtime clock, Windows extras on", () => {
+    const d = resolveOsProfileDefaults("windows-10");
+    expect(d.firmware).toBe("efi");
+    expect(d.secureBoot).toBe(false);
+    expect(d.tpm).toBe("none");
+    expect(d.clockOffset).toBe("localtime");
+    expect(d.windowsExtras).toBe(true);
+  });
+
+  it("windows-11: UEFI + Secure Boot + TPM 2.0 + Windows extras (all mandatory at createVM)", () => {
+    expect(resolveOsProfileDefaults("windows-11")).toEqual({
+      firmware: "efi",
+      secureBoot: true,
+      tpm: "tpm-2.0",
+      diskBus: "virtio",
+      nicModel: "virtio",
+      clockOffset: "localtime",
+      windowsExtras: true,
+    });
+  });
+});
+
 describe("buildDomainXml", () => {
-  it("renders a stable, opinionated domain XML for a minimal config", () => {
+  /** Build the linux-profile defaults (legacy v0.5 baseline). */
+  function linuxOs(): OsProfileDefaults {
+    return resolveOsProfileDefaults("linux");
+  }
+
+  it("renders a stable, opinionated domain XML for the linux baseline", () => {
     const xml = buildDomainXml({
       name: "vm-test",
       memoryMB: 2048,
       cpus: 2,
       diskPath: "/var/lib/libvirt/images/vm-test.qcow2",
       networkName: "default",
+      os: linuxOs(),
     });
     expect(xml).toContain("<domain type='kvm'>");
     expect(xml).toContain("<name>vm-test</name>");
@@ -351,6 +403,14 @@ describe("buildDomainXml", () => {
     expect(xml).toContain(
       "<target type='virtio' name='org.qemu.guest_agent.0'/>",
     );
+    // linux baseline: BIOS firmware (no firmware='efi' attribute),
+    // virtio disk (vda), UTC clock, no TPM, no Windows extras.
+    expect(xml).not.toContain("firmware='efi'");
+    expect(xml).toContain("<target dev='vda' bus='virtio'/>");
+    expect(xml).toContain("<clock offset='utc'/>");
+    expect(xml).not.toContain("<tpm");
+    expect(xml).not.toContain("<input type='tablet'");
+    expect(xml).not.toContain("<smm");
   });
 
   it("XML-escapes name + paths + network so a stray special char can't break the XML", () => {
@@ -360,11 +420,102 @@ describe("buildDomainXml", () => {
       cpus: 1,
       diskPath: "/path/with'apos.qcow2",
       networkName: 'net"quote',
+      os: linuxOs(),
     });
     expect(xml).toContain("<name>name&amp;with&lt;bad&gt;</name>");
     expect(xml).toContain("/path/with&apos;apos.qcow2");
     expect(xml).toContain("net&quot;quote");
     expect(xml).not.toMatch(/<name>name&with</);
+  });
+
+  it("linux-uefi: emits firmware='efi' + secure-boot=no + UTC clock + no Windows extras", () => {
+    const xml = buildDomainXml({
+      name: "vm",
+      memoryMB: 2048,
+      cpus: 2,
+      diskPath: "/tmp/d.qcow2",
+      networkName: "default",
+      os: resolveOsProfileDefaults("linux-uefi"),
+    });
+    expect(xml).toContain("<os firmware='efi'>");
+    expect(xml).toContain("<feature enabled='no' name='secure-boot'/>");
+    expect(xml).toContain("<feature enabled='no' name='enrolled-keys'/>");
+    expect(xml).toContain("<clock offset='utc'/>");
+    expect(xml).not.toContain("<smm");
+    expect(xml).not.toContain("<tpm");
+    expect(xml).not.toContain("<input type='tablet'");
+  });
+
+  it("windows-10: UEFI + virtio + localtime clock + Windows extras (tablet/QXL/VNC); no Secure Boot or TPM by default", () => {
+    const xml = buildDomainXml({
+      name: "win10",
+      memoryMB: 4096,
+      cpus: 2,
+      diskPath: "/tmp/win10.qcow2",
+      networkName: "default",
+      os: resolveOsProfileDefaults("windows-10"),
+    });
+    expect(xml).toContain("<os firmware='efi'>");
+    expect(xml).toContain("<feature enabled='no' name='secure-boot'/>");
+    expect(xml).toContain("<clock offset='localtime'>");
+    expect(xml).toContain("<timer name='rtc' tickpolicy='catchup'/>");
+    expect(xml).toContain("<timer name='hpet' present='no'/>");
+    expect(xml).toContain("<target dev='vda' bus='virtio'/>");
+    expect(xml).toContain("<input type='tablet' bus='usb'/>");
+    expect(xml).toContain("<model type='qxl'/>");
+    expect(xml).toContain(
+      "<graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>",
+    );
+    expect(xml).not.toContain("<tpm");
+    expect(xml).not.toContain("<smm");
+  });
+
+  it("windows-11: UEFI + Secure Boot=yes + TPM 2.0 + SMM + Windows extras", () => {
+    const xml = buildDomainXml({
+      name: "win11",
+      memoryMB: 4096,
+      cpus: 2,
+      diskPath: "/tmp/win11.qcow2",
+      networkName: "default",
+      os: resolveOsProfileDefaults("windows-11"),
+    });
+    expect(xml).toContain("<os firmware='efi'>");
+    expect(xml).toContain("<feature enabled='yes' name='secure-boot'/>");
+    expect(xml).toContain("<feature enabled='yes' name='enrolled-keys'/>");
+    expect(xml).toContain("<smm state='on'/>");
+    expect(xml).toContain(
+      "<tpm model='tpm-crb'>\n      <backend type='emulator' version='2.0'/>\n    </tpm>",
+    );
+    expect(xml).toContain("<clock offset='localtime'>");
+    expect(xml).toContain("<input type='tablet' bus='usb'/>");
+    expect(xml).toContain("<model type='qxl'/>");
+    expect(xml).toContain("<target dev='vda' bus='virtio'/>");
+  });
+
+  it("disk bus override: sata yields <target dev='sda' bus='sata'/>", () => {
+    const xml = buildDomainXml({
+      name: "vm",
+      memoryMB: 2048,
+      cpus: 2,
+      diskPath: "/tmp/d.qcow2",
+      networkName: "default",
+      os: { ...resolveOsProfileDefaults("windows-10"), diskBus: "sata" },
+    });
+    expect(xml).toContain("<target dev='sda' bus='sata'/>");
+    expect(xml).not.toContain("<target dev='vda'");
+  });
+
+  it("NIC override: e1000e yields <model type='e1000e'/>", () => {
+    const xml = buildDomainXml({
+      name: "vm",
+      memoryMB: 2048,
+      cpus: 2,
+      diskPath: "/tmp/d.qcow2",
+      networkName: "default",
+      os: { ...resolveOsProfileDefaults("linux"), nicModel: "e1000e" },
+    });
+    expect(xml).toContain("<model type='e1000e'/>");
+    expect(xml).not.toContain("<model type='virtio'/>");
   });
 });
 

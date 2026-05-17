@@ -25,6 +25,25 @@ existing Hyper-V provisioning flow). Use this when:
   - Or an absolute path to an existing qcow2 image (skill walks the
     user through writing the template YAML first; libvirt's backend
     refuses path-less templates with `invalid_argument`).
+- **Guest OS profile** (v0.5 multi-OS) — `osProfile`. Picks
+  firmware + security primitives + device defaults appropriate
+  for the guest. Defaults to `linux`:
+  - `linux` — BIOS, virtio disk/NIC, UTC clock, no TPM/Secure Boot.
+    Modern Linux distros (Ubuntu, Alpine, Fedora, Debian) that ship
+    virtio drivers in-kernel. **Default; matches v0.5 baseline.**
+  - `linux-uefi` — UEFI without Secure Boot. For distros that need
+    UEFI but don't enforce keys.
+  - `windows-10` — UEFI, virtio, localtime clock, USB tablet input,
+    QXL video, VNC. TPM + Secure Boot off by default; operator may
+    opt in.
+  - `windows-11` — UEFI + Secure Boot + TPM 2.0 + SMM, **all
+    mandatory**. Operator overrides for firmware / secureBoot / tpm
+    raise `invalid_argument` (Win11 refuses to boot without all
+    three; fail-loud at createVM is friendlier than a half-installed
+    VM).
+- **macOS is NOT supported.** Any `osProfile` starting with `macos`
+  is rejected at createVM with a "use Tart" message. See
+  `docs/mac-virtualization.md §Non-option: libvirt/KVM`.
 - **Memory** — `memoryMB` (default 2048). Integer; range 32-1048576.
 - **vCPUs** — `cpus` (default 2). Integer; range 1-240.
 - **Disk capacity** — `diskGB` (default 20). Sparse qcow2 backing-file,
@@ -33,6 +52,32 @@ existing Hyper-V provisioning flow). Use this when:
 - (Optional) **Network** — defaults to the libvirt `default` virbr0
   bridge. Override via `switchName` to point at a different libvirt
   network.
+- (Optional) **Per-field overrides** — for unusual setups, the
+  operator may set `firmware`, `secureBoot`, `tpm`, `diskBus`,
+  `nicModel` individually. Most common case: a Windows 10 VM with
+  no virtio-win driver staged — set `diskBus: 'sata'` and
+  `nicModel: 'e1000e'` so the in-box Windows drivers handle the
+  hardware. Once virtio-win is installed inside the guest the
+  operator can flip back to virtio for performance.
+
+## Host prerequisites by profile
+
+| Profile | Host package(s) | Why |
+|---|---|---|
+| `linux` | `libvirt-clients`, `libvirt-daemon-system`, `qemu-kvm` | Baseline KVM |
+| `linux-uefi` | + `ovmf` (OVMF firmware) | UEFI loader |
+| `windows-10` | + `ovmf` (always-on UEFI in this profile) | UEFI loader |
+| `windows-11` | + `ovmf`, `swtpm`, `swtpm-tools` | vTPM 2.0 emulator |
+
+Ubuntu 26.04 / Debian trixie + ships all of these in the default
+repos. Verify before kicking off a Windows-11 create:
+
+```bash
+# OVMF firmware variants:
+ls /usr/share/OVMF/                 # expect OVMF_CODE_4M.ms.fd + OVMF_VARS_4M.ms.fd
+# swtpm for TPM 2.0 emulation:
+which swtpm swtpm_setup             # expect /usr/bin/swtpm
+```
 
 ## Prerequisites (verify before invoking)
 
@@ -97,37 +142,89 @@ writing the template YAML first.
 
 ## How to invoke
 
-**MCP:**
+**MCP — Linux baseline (default profile):**
 
 ```jsonc
 // signalman_vm_create
 {
-  "name": "ws-demo",
+  "name": "ubuntu-vm",
   "template": "/home/aaron/libvirt-images/ubuntu-noble.qcow2",
   "cpus": 2,
   "memoryMB": 2048,
   "diskGB": 20,
   "switchName": "default"
+  // osProfile omitted → defaults to "linux" (BIOS + virtio + UTC)
 }
 ```
 
-Note: the MCP `signalman_vm_create` tool takes the template as an
-**absolute path** directly (no registry lookup). The CLI's `vm
-create` does the registry-name → path resolution; the MCP form is
-the direct backend call.
+**MCP — Windows 11 with all mandatory security primitives:**
 
-**CLI:**
+```jsonc
+{
+  "name": "win11-vm",
+  "template": "/home/aaron/libvirt-images/win11-template.qcow2",
+  "cpus": 4,
+  "memoryMB": 8192,
+  "diskGB": 64,
+  "osProfile": "windows-11"
+  // → UEFI + Secure Boot + TPM 2.0 + virtio + localtime + tablet + QXL + VNC.
+  // Operator overrides for firmware/secureBoot/tpm raise invalid_argument.
+}
+```
+
+**MCP — Windows 10 with no virtio-win staged (in-box SATA driver):**
+
+```jsonc
+{
+  "name": "win10-bare",
+  "template": "/home/aaron/libvirt-images/win10-template.qcow2",
+  "osProfile": "windows-10",
+  "diskBus": "sata",
+  "nicModel": "e1000e"
+  // → UEFI + localtime + tablet, but SATA disk + e1000e NIC so a
+  // fresh Windows install can see the hardware without virtio-win.
+  // Switch back to virtio after installing virtio-win in the guest.
+}
+```
+
+Note: the MCP `signalman_advanced_vm_create` tool takes the
+template as an **absolute path** directly (no registry lookup).
+The CLI's `vm create` does the registry-name → path resolution.
+
+**CLI** — `vm create` reads `osProfile` (plus the firmware /
+secureBoot / tpm / diskBus / nicModel overrides) from the template
+YAML and threads them through to `backend.createVM`. Example
+Win11 template:
+
+```yaml
+# .signalman/templates/win11-base.yaml
+name: win11-base
+base_image_path: /home/aaron/libvirt-images/win11-template.qcow2
+memoryMB: 8192
+processorCount: 4
+networkSwitch: default
+osProfile: windows-11
+```
+
+Then:
 
 ```bash
-# With a registered template:
+# Linux (baseline):
 SIGNALMAN_BACKEND=libvirt \
-  signalman vm create ws-demo --template ubuntu-noble
+  signalman vm create ubuntu-vm --template ubuntu-noble
 
-# With overrides on the libvirt-specific pool:
+# Win11 (the template's osProfile field drives the libvirt
+# backend; UEFI + Secure Boot + TPM 2.0 auto-applied):
 SIGNALMAN_BACKEND=libvirt \
 SIGNALMAN_LIBVIRT_STORAGE_POOL=user-pool \
-  signalman vm create ws-demo --template ubuntu-noble
+  signalman vm create win11-vm --template win11-base
 ```
+
+`vm create` reads templates from `.signalman/templates/<name>.yaml`
+and merges defaults (the existing v0.4.x BYO template surface) with
+the new osProfile fields. Backends other than libvirt ignore the
+profile fields silently — Hyper-V uses Generation 1/2 selection
+internally; Tart picks per-image firmware.
 
 ## Expected response envelope
 

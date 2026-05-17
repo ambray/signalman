@@ -584,6 +584,12 @@ async function cmdVmCreate(args: ParsedArgs): Promise<number> {
   // we have one (base_image_path or fetched vhdxPath) so the libvirt
   // path "just works" with template-registry entries that point at
   // a real image.
+  //
+  // v0.5 multi-OS: pass through osProfile + per-field overrides so
+  // a Win11 template YAML translates to a Win11 libvirt domain (UEFI
+  // + Secure Boot + TPM 2.0) without the operator having to drive
+  // the backend directly. Backends other than libvirt ignore these
+  // fields.
   const cfg = {
     name: vmName,
     template:
@@ -593,6 +599,12 @@ async function cmdVmCreate(args: ParsedArgs): Promise<number> {
     cpus: template.processorCount,
     memoryMB: template.memoryMB,
     network: { switchName: template.networkSwitch },
+    ...(template.osProfile !== undefined ? { osProfile: template.osProfile } : {}),
+    ...(template.firmware !== undefined ? { firmware: template.firmware } : {}),
+    ...(template.secureBoot !== undefined ? { secureBoot: template.secureBoot } : {}),
+    ...(template.tpm !== undefined ? { tpm: template.tpm } : {}),
+    ...(template.diskBus !== undefined ? { diskBus: template.diskBus } : {}),
+    ...(template.nicModel !== undefined ? { nicModel: template.nicModel } : {}),
   };
   const handle = await backend.createVM(cfg);
 

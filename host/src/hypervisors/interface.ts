@@ -22,6 +22,49 @@ export interface VMConfig {
   network?: NetworkConfig;
   /** Guest agent port (default: 50051). */
   guestAgentPort?: number;
+
+  // ── Guest OS profile (v0.5 multi-OS) ──────────────────────────
+  //
+  // Backends may use these to pick OS-appropriate firmware (BIOS vs
+  // UEFI), security primitives (TPM 2.0, Secure Boot), and device
+  // models (virtio vs SATA, virtio-net vs e1000e). Today implemented
+  // by the libvirt backend; Hyper-V continues to ignore them
+  // (Hyper-V uses Generation 1/2 selection internally).
+
+  /**
+   * Guest OS profile. Picks firmware + security + device defaults
+   * appropriate for the guest OS family. Defaults to 'linux' (BIOS +
+   * virtio + UTC clock — matches v0.5 baseline behavior).
+   *
+   * - 'linux' — BIOS, virtio disk/NIC, UTC clock, no TPM. Modern
+   *   Linux distros (Ubuntu, Alpine, Fedora, Debian) that ship
+   *   virtio drivers in-kernel.
+   * - 'linux-uefi' — Same devices as 'linux' but UEFI firmware. For
+   *   distros that require UEFI.
+   * - 'windows-10' — UEFI by default, virtio disk/NIC (needs
+   *   virtio-win ISO), localtime clock, USB tablet input. TPM +
+   *   Secure Boot off by default; operator may opt in.
+   * - 'windows-11' — UEFI + Secure Boot + TPM 2.0, all mandatory.
+   *   Windows 11 refuses to install/boot without all three. Operator
+   *   overrides for firmware / secureBoot / tpm raise
+   *   invalid_argument for this profile.
+   *
+   * macOS guests are NOT supported on the libvirt backend (Apple
+   * EULA + technical reality). Use the Tart backend on Apple
+   * Silicon. Any osProfile beginning with 'macos' raises
+   * invalid_argument at createVM.
+   */
+  osProfile?: "linux" | "linux-uefi" | "windows-10" | "windows-11";
+  /** Override firmware. Defaults from osProfile. */
+  firmware?: "bios" | "efi";
+  /** Override Secure Boot. Defaults from osProfile. Requires firmware='efi'. */
+  secureBoot?: boolean;
+  /** Override TPM. Defaults from osProfile. Requires firmware='efi'. */
+  tpm?: "none" | "tpm-2.0";
+  /** Override disk bus. Defaults from osProfile. */
+  diskBus?: "virtio" | "sata" | "scsi";
+  /** Override NIC model. Defaults from osProfile. */
+  nicModel?: "virtio" | "e1000e" | "rtl8139";
 }
 
 /** Network configuration for a VM. */
