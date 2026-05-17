@@ -74,7 +74,7 @@ export interface ManifestSignature {
  * - `oci` — OCI image manifest. (Schema reserved; v0.4.1 in the
  *   WS5 ROADMAP.)
  */
-export type ManifestKind = "generic" | "cargo" | "npm" | "oci";
+export type ManifestKind = "generic" | "cargo" | "npm" | "oci" | "pypi";
 
 /**
  * WS6 wave-3 carve-out #9 (M10): cargo-specific metadata.
@@ -240,6 +240,53 @@ export interface Provenance {
   originalSignature?: ManifestSignature;
 }
 
+/**
+ * WS13 M1 (v0.6 PyPI facade): per-file row metadata. One manifest row
+ * per uploaded PyPI file (wheel or sdist) under `name = 'pypi/<org>/<pkg>'`
+ * keyed on `version = <filename>`. The filename is unique-by-PEP-491/PEP-625
+ * binary-distribution naming, so it makes a sound PRIMARY KEY component.
+ *
+ * The /simple/<pkg>/ read endpoint aggregates these rows into a PEP 503
+ * HTML or PEP 691 JSON response; the /files/<pkg>/<filename> endpoint
+ * fetches one row's blob bytes.
+ */
+export interface PypiManifestMetadata {
+  /** PEP 440 version string, e.g. "1.2.3". */
+  version: string;
+  /** Same as `manifest.version` — duplicated here for read-path convenience. */
+  filename: string;
+  filetype: "sdist" | "bdist_wheel";
+  /** PEP 345 / PEP 440 requires-python spec, e.g. ">=3.8,<4". */
+  requires_python?: string;
+  /** PEP 592: truthy string when yanked. */
+  yanked?: string | true;
+  /** PEP 658: per-file core-metadata pointer. */
+  core_metadata?: { sha256: string };
+  /** Wheel-only tags (parsed from filename per PEP 491). */
+  python_version?: string;
+  abi?: string;
+  platform?: string;
+  /** Legacy hashes that pip + twine include. */
+  md5_digest?: string;
+  blake2_256_digest?: string;
+  /** Optional PKG-INFO / METADATA fields the upload form carried. */
+  summary?: string;
+  description?: string;
+  description_content_type?: string;
+  author?: string;
+  author_email?: string;
+  maintainer?: string;
+  maintainer_email?: string;
+  license?: string;
+  keywords?: string;
+  home_page?: string;
+  project_urls?: Record<string, string>;
+  classifiers?: string[];
+  requires_dist?: string[];
+  provides_dist?: string[];
+  obsoletes_dist?: string[];
+}
+
 export interface Manifest {
   /**
    * Manifest name. Lowercase alphanumeric plus `-`, `_`, `.`, `/`;
@@ -297,6 +344,12 @@ export interface Manifest {
    * Absent for other kinds.
    */
   ociMetadata?: OciManifestMetadata;
+  /**
+   * WS13 M1 (v0.6 PyPI facade): per-file metadata when `kind === 'pypi'`.
+   * One manifest row per uploaded wheel / sdist; this carries the
+   * file's PEP 440 version + PEP 345 metadata + PEP 491 wheel tags.
+   */
+  pypiMetadata?: PypiManifestMetadata;
   /** ISO-8601 UTC timestamp when the manifest was first written. */
   createdAt: string;
 }
