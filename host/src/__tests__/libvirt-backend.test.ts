@@ -518,6 +518,256 @@ describe("LibvirtBackend integration", () => {
       const defineCall = virshCalls.find((c) => c.args[0] === "define");
       expect(defineCall).toBeDefined();
     });
+
+    // ── osProfile resolution ────────────────────────────────────
+
+    /**
+     * Build a backend that captures the XML written to the
+     * tempfile before `virsh define` runs. We snapshot the file
+     * inside the exec callback (synchronously async — fs.readFile)
+     * so the cleanup-on-finally doesn't race the read.
+     */
+    function buildXmlCapturingBackend(opts: {
+      storagePool?: string;
+      virshResponses?: Partial<
+        Record<string, { stdout?: string; stderr?: string; exitCode?: number }>
+      >;
+    }) {
+      let capturedXml = "";
+      const virshCalls: VirshCall[] = [];
+      const backend = new LibvirtBackend({
+        storagePool: opts.storagePool,
+        exec: async (args) => {
+          virshCalls.push({ args });
+          const verb = args[0];
+          if (verb === "define") {
+            // Synchronously read the XML file before returning
+            // success — the cleanup finally only fires after we
+            // resolve, so we're safe.
+            try {
+              capturedXml = await fsp.readFile(args[1], "utf8");
+            } catch {
+              // ignore
+            }
+            return { stdout: "", stderr: "", exitCode: 0 };
+          }
+          if (verb === "vol-path" && !opts.virshResponses?.["vol-path"]) {
+            const volName = args[args.length - 1];
+            return {
+              stdout: `/var/lib/libvirt/images/${volName}\n`,
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          const r = opts.virshResponses?.[verb];
+          return {
+            stdout: r?.stdout ?? "",
+            stderr: r?.stderr ?? "",
+            exitCode: r?.exitCode ?? 0,
+          };
+        },
+      });
+      return {
+        backend,
+        virshCalls,
+        getXml: () => capturedXml,
+      };
+    }
+
+    it("defaults osProfile to 'linux' for backwards compat", async () => {
+      const POOL =
+        "<pool><target><path>/var/lib/libvirt/images</path></target></pool>";
+      const { backend, getXml } = buildXmlCapturingBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL } },
+      });
+      await backend.createVM({
+        name: "vm-default",
+        template: "/abs/tpl.qcow2",
+      });
+      const xml = getXml();
+      // linux baseline: BIOS (no firmware='efi'), virtio, no TPM,
+      // no SMM, UTC clock, no tablet input.
+      expect(xml).not.toContain("firmware='efi'");
+      expect(xml).toContain("<target dev='vda' bus='virtio'/>");
+      expect(xml).toContain("<clock offset='utc'/>");
+      expect(xml).not.toContain("<tpm");
+      expect(xml).not.toContain("<input type='tablet'");
+    });
+
+    it("osProfile 'windows-11' renders UEFI + Secure Boot + TPM 2.0 + SMM", async () => {
+      const POOL =
+        "<pool><target><path>/var/lib/libvirt/images</path></target></pool>";
+      const { backend, getXml } = buildXmlCapturingBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL } },
+      });
+      await backend.createVM({
+        name: "win11",
+        template: "/abs/win11-tpl.qcow2",
+        osProfile: "windows-11",
+      });
+      const xml = getXml();
+      expect(xml).toContain("<os firmware='efi'>");
+      expect(xml).toContain("<feature enabled='yes' name='secure-boot'/>");
+      expect(xml).toContain("<feature enabled='yes' name='enrolled-keys'/>");
+      expect(xml).toContain("<smm state='on'/>");
+      expect(xml).toContain("<tpm model='tpm-crb'>");
+      expect(xml).toContain("<backend type='emulator' version='2.0'/>");
+      expect(xml).toContain("<clock offset='localtime'>");
+      expect(xml).toContain("<input type='tablet' bus='usb'/>");
+    });
+
+    it("osProfile 'windows-11' refuses operator override that disables Secure Boot", async () => {
+      const POOL =
+        "<pool><target><path>/var/lib/libvirt/images</path></target></pool>";
+      const { backend } = buildXmlCapturingBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL } },
+      });
+      await expect(
+        backend.createVM({
+          name: "win11",
+          template: "/abs/win11-tpl.qcow2",
+          osProfile: "windows-11",
+          secureBoot: false,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+    });
+
+    it("osProfile 'windows-11' refuses operator override that disables TPM", async () => {
+      const POOL =
+        "<pool><target><path>/var/lib/libvirt/images</path></target></pool>";
+      const { backend } = buildXmlCapturingBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL } },
+      });
+      await expect(
+        backend.createVM({
+          name: "win11",
+          template: "/abs/win11-tpl.qcow2",
+          osProfile: "windows-11",
+          tpm: "none",
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+    });
+
+    it("osProfile 'windows-11' refuses operator override to BIOS firmware", async () => {
+      const POOL =
+        "<pool><target><path>/var/lib/libvirt/images</path></target></pool>";
+      const { backend } = buildXmlCapturingBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL } },
+      });
+      await expect(
+        backend.createVM({
+          name: "win11",
+          template: "/abs/win11-tpl.qcow2",
+          osProfile: "windows-11",
+          firmware: "bios",
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+    });
+
+    it("osProfile 'windows-10' allows operator to opt into TPM + Secure Boot", async () => {
+      const POOL =
+        "<pool><target><path>/var/lib/libvirt/images</path></target></pool>";
+      const { backend, getXml } = buildXmlCapturingBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL } },
+      });
+      await backend.createVM({
+        name: "win10-secure",
+        template: "/abs/win10-tpl.qcow2",
+        osProfile: "windows-10",
+        secureBoot: true,
+        tpm: "tpm-2.0",
+      });
+      const xml = getXml();
+      expect(xml).toContain("<feature enabled='yes' name='secure-boot'/>");
+      expect(xml).toContain("<smm state='on'/>");
+      expect(xml).toContain("<tpm model='tpm-crb'>");
+    });
+
+    it("osProfile 'windows-10' supports operator-overridden SATA disk + e1000e NIC for the no-virtio-driver path", async () => {
+      const POOL =
+        "<pool><target><path>/var/lib/libvirt/images</path></target></pool>";
+      const { backend, getXml } = buildXmlCapturingBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL } },
+      });
+      await backend.createVM({
+        name: "win10-bare",
+        template: "/abs/win10-tpl.qcow2",
+        osProfile: "windows-10",
+        diskBus: "sata",
+        nicModel: "e1000e",
+      });
+      const xml = getXml();
+      expect(xml).toContain("<target dev='sda' bus='sata'/>");
+      expect(xml).toContain("<model type='e1000e'/>");
+    });
+
+    it("rejects osProfile 'macos' with a 'use Tart' message", async () => {
+      const POOL =
+        "<pool><target><path>/var/lib/libvirt/images</path></target></pool>";
+      const { backend } = buildXmlCapturingBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL } },
+      });
+      await expect(
+        backend.createVM({
+          name: "macos-vm",
+          template: "/abs/tpl.qcow2",
+          // @ts-expect-error — macos is intentionally outside the union type
+          osProfile: "macos",
+        }),
+      ).rejects.toMatchObject({
+        code: "invalid_argument",
+        message: expect.stringContaining("Tart"),
+      });
+    });
+
+    it("rejects unknown osProfile values", async () => {
+      const POOL =
+        "<pool><target><path>/var/lib/libvirt/images</path></target></pool>";
+      const { backend } = buildXmlCapturingBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL } },
+      });
+      await expect(
+        backend.createVM({
+          name: "vm-x",
+          template: "/abs/tpl.qcow2",
+          // @ts-expect-error — bogus value
+          osProfile: "freebsd",
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+    });
+
+    it("refuses secureBoot override when firmware='bios'", async () => {
+      const POOL =
+        "<pool><target><path>/var/lib/libvirt/images</path></target></pool>";
+      const { backend } = buildXmlCapturingBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL } },
+      });
+      await expect(
+        backend.createVM({
+          name: "vm-bad",
+          template: "/abs/tpl.qcow2",
+          osProfile: "linux",
+          // linux default is BIOS; secureBoot=true conflicts.
+          secureBoot: true,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+    });
+
+    it("refuses tpm override when firmware='bios'", async () => {
+      const POOL =
+        "<pool><target><path>/var/lib/libvirt/images</path></target></pool>";
+      const { backend } = buildXmlCapturingBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL } },
+      });
+      await expect(
+        backend.createVM({
+          name: "vm-bad",
+          template: "/abs/tpl.qcow2",
+          osProfile: "linux",
+          tpm: "tpm-2.0",
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+    });
   });
 
   it("executeCommand submits guest-exec then polls guest-exec-status until exited", async () => {

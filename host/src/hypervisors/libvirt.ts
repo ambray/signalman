@@ -508,6 +508,115 @@ function xmlEscape(s: string): string {
     .replace(/'/g, "&apos;");
 }
 
+/**
+ * Supported guest-OS profile names. Mirrors `VMConfig.osProfile`
+ * from `interface.ts`; kept here too so backend-internal callers
+ * don't have to import the full VMConfig type.
+ */
+export type OsProfile =
+  | "linux"
+  | "linux-uefi"
+  | "windows-10"
+  | "windows-11";
+
+/**
+ * Resolved per-OS defaults consumed by {@link buildDomainXml}. The
+ * top-level `createVM` flow resolves an {@link OsProfile} (plus
+ * operator overrides) down to this shape before rendering.
+ */
+export interface OsProfileDefaults {
+  firmware: "bios" | "efi";
+  secureBoot: boolean;
+  tpm: "none" | "tpm-2.0";
+  diskBus: "virtio" | "sata" | "scsi";
+  nicModel: "virtio" | "e1000e" | "rtl8139";
+  /**
+   * Clock offset. Windows hardware-clock convention is localtime;
+   * Linux is UTC. Mismatch causes time skew + log timestamp confusion.
+   */
+  clockOffset: "utc" | "localtime";
+  /**
+   * Whether to add Windows-friendly device defaults: USB tablet
+   * input (so the cursor tracks the guest pointer instead of
+   * needing capture/release), QXL video adapter (Windows expects a
+   * graphics device), and a localhost VNC graphics endpoint
+   * (operator attaches a viewer during install).
+   */
+  windowsExtras: boolean;
+}
+
+/**
+ * Return the canonical defaults for a given {@link OsProfile}.
+ *
+ * Defaults are operator-friendly: every profile chooses the
+ * fastest-known-good combination for that OS family. v0.5 baseline
+ * (BIOS + virtio + UTC) corresponds to the 'linux' profile so
+ * existing callers that omit `osProfile` get unchanged behavior.
+ *
+ * - linux       — BIOS, virtio disk/NIC, no TPM, no Secure Boot, UTC.
+ * - linux-uefi  — UEFI but no Secure Boot / TPM (faster boot for
+ *                 distros that require UEFI without enforcing keys).
+ * - windows-10  — UEFI, virtio disk/NIC, no TPM/SecureBoot (operator
+ *                 may opt in), localtime, Windows extras on.
+ * - windows-11  — UEFI + Secure Boot + TPM 2.0, virtio devices,
+ *                 localtime, Windows extras on. All three security
+ *                 features mandatory — Windows 11 refuses to boot
+ *                 without them; `createVM` raises invalid_argument
+ *                 if the operator tries to override.
+ *
+ * Exported for unit tests + for the skill / docs to reference the
+ * canonical defaults without re-encoding them.
+ */
+export function resolveOsProfileDefaults(profile: OsProfile): OsProfileDefaults {
+  switch (profile) {
+    case "linux":
+      return {
+        firmware: "bios",
+        secureBoot: false,
+        tpm: "none",
+        diskBus: "virtio",
+        nicModel: "virtio",
+        clockOffset: "utc",
+        windowsExtras: false,
+      };
+    case "linux-uefi":
+      return {
+        firmware: "efi",
+        secureBoot: false,
+        tpm: "none",
+        diskBus: "virtio",
+        nicModel: "virtio",
+        clockOffset: "utc",
+        windowsExtras: false,
+      };
+    case "windows-10":
+      return {
+        firmware: "efi",
+        secureBoot: false,
+        tpm: "none",
+        diskBus: "virtio",
+        nicModel: "virtio",
+        clockOffset: "localtime",
+        windowsExtras: true,
+      };
+    case "windows-11":
+      return {
+        firmware: "efi",
+        secureBoot: true,
+        tpm: "tpm-2.0",
+        diskBus: "virtio",
+        nicModel: "virtio",
+        clockOffset: "localtime",
+        windowsExtras: true,
+      };
+  }
+}
+
+/** Map a disk bus to its conventional device-letter prefix. */
+function diskDevForBus(bus: "virtio" | "sata" | "scsi"): string {
+  return bus === "virtio" ? "vda" : "sda";
+}
+
 /** Options for {@link buildDomainXml}. All required — caller fills defaults. */
 export interface BuildDomainXmlOptions {
   name: string;
@@ -515,24 +624,29 @@ export interface BuildDomainXmlOptions {
   cpus: number;
   diskPath: string;
   networkName: string;
+  /** Resolved profile + override stack. See {@link resolveOsProfileDefaults}. */
+  os: OsProfileDefaults;
 }
 
 /**
- * Render a minimal libvirt domain XML from `VMConfig` fields.
+ * Render a libvirt domain XML from `VMConfig` fields + a resolved
+ * OS profile. The profile dictates firmware (BIOS vs UEFI), security
+ * (Secure Boot, TPM 2.0), device models (virtio vs SATA/e1000e),
+ * clock offset, and Windows-friendly extras (tablet input + QXL
+ * video + VNC graphics).
  *
- * Opinionated shape:
- *  - `type='kvm'` (we don't ship a qemu-tcg fallback — operators on
- *    KVM-incapable hosts use a different backend).
+ * Opinionated shape (constant across profiles):
+ *  - `type='kvm'` (no qemu-tcg fallback — operators on KVM-incapable
+ *    hosts use a different backend).
  *  - `machine='q35'`, `arch='x86_64'`, `cpu mode='host-passthrough'`
  *    — fastest baseline for modern guests.
- *  - `<disk>` is a qcow2 backing-file disk at `opts.diskPath`. The
- *    caller is responsible for creating the file before `virsh
- *    define` (createVM does this via qemu-img).
- *  - `<interface>` attaches to the named libvirt network with
- *    virtio-net.
+ *  - qcow2 backing-file disk at `opts.diskPath` (created by
+ *    `vol-create-as` in createVM).
  *  - `<channel name='org.qemu.guest_agent.0'>` wires the QGA
  *    unix-socket so executeCommand / copyFileTo/FromVM /
- *    guestAgentReachable work end-to-end.
+ *    guestAgentReachable work end-to-end *when QGA is installed in
+ *    the guest*. Linux distros ship QGA; Windows needs the
+ *    virtio-win package's qemu-ga.msi.
  *
  * Operators with bespoke topology continue to `virsh define` their
  * own XML and skip createVM.
@@ -543,38 +657,110 @@ export function buildDomainXml(opts: BuildDomainXmlOptions): string {
   const name = xmlEscape(opts.name);
   const diskPath = xmlEscape(opts.diskPath);
   const networkName = xmlEscape(opts.networkName);
-  return `<domain type='kvm'>
-  <name>${name}</name>
-  <memory unit='MiB'>${opts.memoryMB}</memory>
-  <currentMemory unit='MiB'>${opts.memoryMB}</currentMemory>
-  <vcpu placement='static'>${opts.cpus}</vcpu>
-  <os>
-    <type arch='x86_64' machine='q35'>hvm</type>
-    <boot dev='hd'/>
-  </os>
-  <features>
-    <acpi/>
-    <apic/>
-  </features>
-  <cpu mode='host-passthrough'/>
-  <devices>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2'/>
-      <source file='${diskPath}'/>
-      <target dev='vda' bus='virtio'/>
-    </disk>
-    <interface type='network'>
-      <source network='${networkName}'/>
-      <model type='virtio'/>
-    </interface>
-    <channel type='unix'>
-      <source mode='bind'/>
-      <target type='virtio' name='org.qemu.guest_agent.0'/>
-    </channel>
-    <console type='pty'/>
-  </devices>
-</domain>
-`;
+  const { os } = opts;
+  const diskDev = diskDevForBus(os.diskBus);
+
+  // ── <os> block ────────────────────────────────────────────────
+  //
+  // libvirt's `firmware='efi'` attribute on <os> turns on the
+  // "managed firmware" path: libvirt selects the right OVMF binary
+  // automatically based on the <firmware><feature/> hints below.
+  // No explicit <loader>/<nvram> paths — the host's
+  // /usr/share/qemu/firmware/ JSON descriptors do the matching.
+  let osBlock: string;
+  if (os.firmware === "efi") {
+    const sbValue = os.secureBoot ? "yes" : "no";
+    osBlock =
+      `  <os firmware='efi'>\n` +
+      `    <type arch='x86_64' machine='q35'>hvm</type>\n` +
+      `    <firmware>\n` +
+      `      <feature enabled='${sbValue}' name='secure-boot'/>\n` +
+      `      <feature enabled='${sbValue}' name='enrolled-keys'/>\n` +
+      `    </firmware>\n` +
+      `    <boot dev='hd'/>\n` +
+      `  </os>\n`;
+  } else {
+    osBlock =
+      `  <os>\n` +
+      `    <type arch='x86_64' machine='q35'>hvm</type>\n` +
+      `    <boot dev='hd'/>\n` +
+      `  </os>\n`;
+  }
+
+  // ── <features> block ──────────────────────────────────────────
+  //
+  // <smm state='on'/> is required by OVMF to enforce Secure Boot;
+  // without it OVMF silently degrades to "secure-boot off". Always
+  // include acpi+apic — modern guests assume them.
+  const features = os.secureBoot
+    ? `  <features>\n    <acpi/>\n    <apic/>\n    <smm state='on'/>\n  </features>\n`
+    : `  <features>\n    <acpi/>\n    <apic/>\n  </features>\n`;
+
+  // ── <clock> block ─────────────────────────────────────────────
+  //
+  // Windows uses RTC=localtime; Linux uses RTC=UTC. The Windows
+  // timer hints (catchup/delay + hpet off) match libvirt's
+  // virt-install recommendations and silence the W10/11 boot-time
+  // clock-skew warning.
+  const clock =
+    os.clockOffset === "localtime"
+      ? `  <clock offset='localtime'>\n    <timer name='rtc' tickpolicy='catchup'/>\n    <timer name='pit' tickpolicy='delay'/>\n    <timer name='hpet' present='no'/>\n  </clock>\n`
+      : `  <clock offset='utc'/>\n`;
+
+  // ── <tpm> block ───────────────────────────────────────────────
+  //
+  // The CRB ("Command Response Buffer") interface is what Windows
+  // expects for TPM 2.0 on q35. libvirt auto-spawns swtpm on the
+  // host side; no per-VM TPM seed needs to live in our XML.
+  const tpmBlock =
+    os.tpm === "tpm-2.0"
+      ? `    <tpm model='tpm-crb'>\n      <backend type='emulator' version='2.0'/>\n    </tpm>\n`
+      : "";
+
+  // ── Windows extras ────────────────────────────────────────────
+  //
+  // USB tablet input gives synchronized cursor in the SPICE/VNC
+  // viewer (no capture/release dance). QXL video is the standard
+  // Windows-friendly emulated card; cirrus is too old, virtio-gpu
+  // needs Windows drivers that don't ship out of the box. Listen
+  // on 127.0.0.1 only — operator port-forwards if they need
+  // remote access during install.
+  const windowsExtras = os.windowsExtras
+    ? `    <input type='tablet' bus='usb'/>\n` +
+      `    <video>\n      <model type='qxl'/>\n    </video>\n` +
+      `    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>\n`
+    : "";
+
+  return (
+    `<domain type='kvm'>\n` +
+    `  <name>${name}</name>\n` +
+    `  <memory unit='MiB'>${opts.memoryMB}</memory>\n` +
+    `  <currentMemory unit='MiB'>${opts.memoryMB}</currentMemory>\n` +
+    `  <vcpu placement='static'>${opts.cpus}</vcpu>\n` +
+    osBlock +
+    features +
+    `  <cpu mode='host-passthrough'/>\n` +
+    clock +
+    `  <devices>\n` +
+    `    <disk type='file' device='disk'>\n` +
+    `      <driver name='qemu' type='qcow2'/>\n` +
+    `      <source file='${diskPath}'/>\n` +
+    `      <target dev='${diskDev}' bus='${os.diskBus}'/>\n` +
+    `    </disk>\n` +
+    `    <interface type='network'>\n` +
+    `      <source network='${networkName}'/>\n` +
+    `      <model type='${os.nicModel}'/>\n` +
+    `    </interface>\n` +
+    `    <channel type='unix'>\n` +
+    `      <source mode='bind'/>\n` +
+    `      <target type='virtio' name='org.qemu.guest_agent.0'/>\n` +
+    `    </channel>\n` +
+    tpmBlock +
+    windowsExtras +
+    `    <console type='pty'/>\n` +
+    `  </devices>\n` +
+    `</domain>\n`
+  );
 }
 
 /**
@@ -801,6 +987,81 @@ export class LibvirtBackend implements HypervisorBackend {
       );
     }
 
+    // ── OS profile resolution ────────────────────────────────────
+    //
+    // macOS is rejected up front: Apple's EULA constrains macOS to
+    // Apple hardware, and even technical workarounds (OSX-KVM) are
+    // legally murky on non-Apple hosts. Operators who need macOS
+    // testing use the Tart backend on real Apple Silicon.
+    const rawProfile = (
+      config.osProfile ?? "linux"
+    ) as string;
+    if (rawProfile.toLowerCase().startsWith("macos")) {
+      throw new LibvirtBackendError(
+        "invalid_argument",
+        `createVM: osProfile '${rawProfile}' is not supported on the libvirt ` +
+          `backend. macOS guests require Apple hardware per Apple's EULA; use the ` +
+          `Tart backend on Apple Silicon for macOS testing.`,
+      );
+    }
+    if (
+      rawProfile !== "linux" &&
+      rawProfile !== "linux-uefi" &&
+      rawProfile !== "windows-10" &&
+      rawProfile !== "windows-11"
+    ) {
+      throw new LibvirtBackendError(
+        "invalid_argument",
+        `createVM: osProfile '${rawProfile}' is not recognized. Supported: ` +
+          `linux, linux-uefi, windows-10, windows-11.`,
+      );
+    }
+    const profile = rawProfile as OsProfile;
+    const profileDefaults = resolveOsProfileDefaults(profile);
+    // Operator overrides for firmware / secureBoot / tpm are
+    // refused on windows-11 because Windows 11 refuses to install
+    // or boot without all three of UEFI + Secure Boot + TPM 2.0.
+    // We'd rather fail loudly at createVM than silently produce a
+    // VM that refuses to finish setup.
+    if (profile === "windows-11") {
+      if (
+        (config.firmware !== undefined && config.firmware !== "efi") ||
+        (config.secureBoot !== undefined && config.secureBoot !== true) ||
+        (config.tpm !== undefined && config.tpm !== "tpm-2.0")
+      ) {
+        throw new LibvirtBackendError(
+          "invalid_argument",
+          `createVM: osProfile 'windows-11' requires UEFI + Secure Boot + TPM 2.0; ` +
+            `operator overrides for firmware / secureBoot / tpm are not permitted ` +
+            `for this profile. Use 'windows-10' if you need a Windows guest without ` +
+            `those requirements.`,
+        );
+      }
+    }
+    const resolvedOs: OsProfileDefaults = {
+      ...profileDefaults,
+      ...(config.firmware !== undefined ? { firmware: config.firmware } : {}),
+      ...(config.secureBoot !== undefined ? { secureBoot: config.secureBoot } : {}),
+      ...(config.tpm !== undefined ? { tpm: config.tpm } : {}),
+      ...(config.diskBus !== undefined ? { diskBus: config.diskBus } : {}),
+      ...(config.nicModel !== undefined ? { nicModel: config.nicModel } : {}),
+    };
+    // Secure Boot only makes sense on UEFI. Same for TPM (libvirt
+    // accepts TPM on BIOS but the Windows install workflow we
+    // support expects UEFI + TPM together).
+    if (resolvedOs.secureBoot && resolvedOs.firmware !== "efi") {
+      throw new LibvirtBackendError(
+        "invalid_argument",
+        `createVM: secureBoot requires firmware='efi' (got firmware='${resolvedOs.firmware}').`,
+      );
+    }
+    if (resolvedOs.tpm !== "none" && resolvedOs.firmware !== "efi") {
+      throw new LibvirtBackendError(
+        "invalid_argument",
+        `createVM: tpm='${resolvedOs.tpm}' requires firmware='efi' (got firmware='${resolvedOs.firmware}').`,
+      );
+    }
+
     // 2. Verify the storage pool exists (the volume create + path
     //    lookup below will surface a clearer error than the raw
     //    pool-not-found stderr).
@@ -828,6 +1089,7 @@ export class LibvirtBackend implements HypervisorBackend {
       cpus,
       diskPath,
       networkName,
+      os: resolvedOs,
     });
     const xmlDir = await fs.mkdtemp(path.join(os.tmpdir(), "libvirt-define-"));
     const xmlFile = path.join(xmlDir, `${safeName}.xml`);
