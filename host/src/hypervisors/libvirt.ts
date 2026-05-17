@@ -81,11 +81,20 @@ const execFile = promisify(execFileCb);
 /** Default virsh binary lookup. Operators override via SIGNALMAN_VIRSH_BIN. */
 export const DEFAULT_VIRSH_BIN = "virsh";
 
-/** Default qemu-img binary used by `createVM` to build backing-file qcow2 disks. */
-export const DEFAULT_QEMU_IMG_BIN = "qemu-img";
-
 /** Default libvirt storage pool createVM writes its qcow2 disk into. */
 export const DEFAULT_STORAGE_POOL = "default";
+
+/**
+ * Default capacity (in GiB) for the qcow2 child disk produced by
+ * `createVM` when the caller doesn't specify `config.diskGB`.
+ *
+ * Since the disk is a sparse copy-on-write child of the template,
+ * physical-on-disk usage stays bounded by what the guest actually
+ * writes. The capacity is the maximum size the guest may grow into.
+ * 20 GiB suits cloud-image-style guests; oversized for tiny test
+ * images (CirrOS, Alpine) but harmless thanks to sparse storage.
+ */
+export const DEFAULT_DISK_GB = 20;
 
 /** Default per-virsh-call timeout (most ops complete in <5s on healthy hosts). */
 export const VIRSH_DEFAULT_TIMEOUT_MS = 30_000;
@@ -195,12 +204,6 @@ export interface LibvirtBackendOptions {
   /** Path to the `virsh` binary. Defaults to {@link DEFAULT_VIRSH_BIN}. */
   virshPath?: string;
   /**
-   * Path to the `qemu-img` binary used by {@link LibvirtBackend.createVM}
-   * to create backing-file qcow2 disks. Defaults to
-   * {@link DEFAULT_QEMU_IMG_BIN}.
-   */
-  qemuImgPath?: string;
-  /**
    * libvirt storage pool name. createVM writes its new qcow2 disk
    * into this pool's target directory. Defaults to
    * {@link DEFAULT_STORAGE_POOL} (`"default"`). Operators with
@@ -220,15 +223,6 @@ export interface LibvirtBackendOptions {
    * `node:child_process.execFile`.
    */
   exec?: LibvirtExec;
-  /**
-   * Optional separate injected exec for `qemu-img` calls. Production
-   * callers leave this undefined; the default spawns qemu-img via
-   * `node:child_process.execFile`. Kept distinct from {@link exec}
-   * because tests dispatch on which binary is being called, and
-   * mixing virsh + qemu-img into one mock complicates the test
-   * stubs that already exist for the other methods.
-   */
-  qemuImgExec?: LibvirtExec;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -698,19 +692,15 @@ function isConnectFailure(stderr: string): boolean {
 export class LibvirtBackend implements HypervisorBackend {
   readonly name = "libvirt";
   private readonly virshPath: string;
-  private readonly qemuImgPath: string;
   private readonly storagePool: string;
   private readonly connectUri?: string;
   private readonly exec: LibvirtExec;
-  private readonly qemuImgExec: LibvirtExec;
 
   constructor(opts: LibvirtBackendOptions = {}) {
     this.virshPath = opts.virshPath ?? DEFAULT_VIRSH_BIN;
-    this.qemuImgPath = opts.qemuImgPath ?? DEFAULT_QEMU_IMG_BIN;
     this.storagePool = opts.storagePool ?? DEFAULT_STORAGE_POOL;
     this.connectUri = opts.connectUri;
     this.exec = opts.exec ?? defaultExec(this.virshPath);
-    this.qemuImgExec = opts.qemuImgExec ?? defaultExec(this.qemuImgPath);
   }
 
   /**
@@ -803,17 +793,32 @@ export class LibvirtBackend implements HypervisorBackend {
     const networkName = sanitizeLabel(
       config.network?.switchName ?? "default",
     );
+    const diskGB = config.diskGB ?? DEFAULT_DISK_GB;
+    if (!Number.isFinite(diskGB) || diskGB <= 0) {
+      throw new LibvirtBackendError(
+        "invalid_argument",
+        `createVM: diskGB must be a positive number (got ${diskGB}).`,
+      );
+    }
 
-    // 2. Resolve the configured storage pool's target directory. The
-    //    new disk image lives there so libvirt can manage it as a
-    //    first-class volume.
-    const poolPath = await this.resolveStoragePoolPath(this.storagePool);
-    const diskPath = path.join(poolPath, `${safeName}.qcow2`);
+    // 2. Verify the storage pool exists (the volume create + path
+    //    lookup below will surface a clearer error than the raw
+    //    pool-not-found stderr).
+    await this.resolveStoragePoolPath(this.storagePool);
 
-    // 3. Create the backing-file qcow2. qemu-img preserves the
-    //    template (no in-place modification) and the new image starts
-    //    as a sparse copy-on-write child of it.
-    await this.qemuImgCreateBackingFile(diskPath, template);
+    // 3. Create the backing-file qcow2 *as a libvirt-managed volume*
+    //    via `virsh vol-create-as`. This is the critical difference
+    //    vs. raw `qemu-img create`: libvirt tracks the volume in the
+    //    pool, so `virsh undefine --remove-all-storage` at `deleteVM`
+    //    time actually deletes the disk. Raw qemu-img orphans it.
+    //    The new volume is sparse and copy-on-write; the template is
+    //    untouched.
+    const diskPath = await this.libvirtCreateVolume(
+      `${safeName}.qcow2`,
+      this.storagePool,
+      template,
+      diskGB,
+    );
 
     // 4. Render the domain XML and hand it to `virsh define` via a
     //    tempfile.
@@ -877,33 +882,67 @@ export class LibvirtBackend implements HypervisorBackend {
   }
 
   /**
-   * Shell out to `qemu-img create -f qcow2 -F qcow2 -b <template>
-   * <diskPath>` to create a backing-file disk image. The new image
-   * is sparse and copy-on-write; the template is untouched.
+   * Create a libvirt-managed qcow2 volume in `poolName` whose backing
+   * store is `templatePath`. Returns the absolute on-disk path of the
+   * new volume via `virsh vol-path`.
+   *
+   * The volume is registered with libvirt's storage manager — that's
+   * the whole point of preferring `vol-create-as` over raw `qemu-img
+   * create`: at `deleteVM` time, `virsh undefine
+   * --remove-all-storage` walks the domain's volume references and
+   * deletes them. A raw qemu-img-produced file is invisible to that
+   * walker and orphans on the filesystem.
+   *
+   * `capacityGiB` is the maximum size the guest may grow into. Since
+   * the qcow2 is copy-on-write over the backing template, actual
+   * physical consumption stays bounded by guest writes; over-sizing
+   * is harmless.
    */
-  private async qemuImgCreateBackingFile(
-    diskPath: string,
+  private async libvirtCreateVolume(
+    volumeName: string,
+    poolName: string,
     templatePath: string,
-  ): Promise<void> {
-    const result = await this.qemuImgExec(
+    capacityGiB: number,
+  ): Promise<string> {
+    const createResult = await this.run(
       [
-        "create",
-        "-f",
+        "vol-create-as",
+        poolName,
+        volumeName,
+        `${capacityGiB}G`,
+        "--format",
         "qcow2",
-        "-F",
-        "qcow2",
-        "-b",
+        "--backing-vol",
         templatePath,
-        diskPath,
+        "--backing-vol-format",
+        "qcow2",
       ],
       { timeoutMs: VIRSH_LIFECYCLE_TIMEOUT_MS },
     );
-    if (result.exitCode !== 0) {
+    if (createResult.exitCode !== 0) {
       throw new LibvirtBackendError(
         "command_failed",
-        `qemu-img create failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+        `virsh vol-create-as failed (exit ${createResult.exitCode}): ${createResult.stderr.trim()}`,
       );
     }
+    const pathResult = await this.run(
+      ["vol-path", "--pool", poolName, volumeName],
+      { timeoutMs: VIRSH_DEFAULT_TIMEOUT_MS },
+    );
+    if (pathResult.exitCode !== 0) {
+      throw new LibvirtBackendError(
+        "command_failed",
+        `virsh vol-path failed (exit ${pathResult.exitCode}): ${pathResult.stderr.trim()}`,
+      );
+    }
+    const diskPath = pathResult.stdout.trim();
+    if (!diskPath) {
+      throw new LibvirtBackendError(
+        "command_failed",
+        `virsh vol-path returned an empty path for volume '${volumeName}' in pool '${poolName}'.`,
+      );
+    }
+    return diskPath;
   }
 
   async startVM(handle: VMHandle): Promise<void> {
@@ -965,13 +1004,26 @@ export class LibvirtBackend implements HypervisorBackend {
   async deleteVM(handle: VMHandle): Promise<void> {
     const name = sanitizeVmName(handle.name);
     // Best-effort destroy first (no-op if shut off), then undefine
-    // with --remove-all-storage so backing disks vanish too.
+    // with the full cleanup-flag set so backing disks + snapshot
+    // metadata + checkpoint metadata + nvram all vanish together.
+    // Without --snapshots-metadata libvirt refuses to undefine
+    // domains that have any snapshots ("cannot delete inactive
+    // domain with N snapshots"), which surprised the 2026-05-16
+    // demo when `vm checkpoint` had been called.
     await this.exec(this.argv(["destroy", name]), {
       timeoutMs: VIRSH_LIFECYCLE_TIMEOUT_MS,
     });
-    const result = await this.run(["undefine", name, "--remove-all-storage"], {
-      timeoutMs: VIRSH_LIFECYCLE_TIMEOUT_MS,
-    });
+    const result = await this.run(
+      [
+        "undefine",
+        name,
+        "--remove-all-storage",
+        "--snapshots-metadata",
+        "--checkpoints-metadata",
+        "--nvram",
+      ],
+      { timeoutMs: VIRSH_LIFECYCLE_TIMEOUT_MS },
+    );
     if (result.exitCode !== 0) {
       throw new LibvirtBackendError(
         "command_failed",

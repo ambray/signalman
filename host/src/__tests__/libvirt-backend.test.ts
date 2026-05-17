@@ -275,17 +275,37 @@ describe("LibvirtBackend integration", () => {
       "  <target><path>/var/lib/libvirt/images</path></target>\n" +
       "</pool>";
     type VirshCall = { args: string[] };
-    type QemuImgCall = { args: string[] };
+
+    /**
+     * Build a backend whose `exec` dispatches on the virsh verb.
+     * vol-path is special-cased to synthesize a pool-aware path so
+     * assertions on the resolved disk location don't need a fixture.
+     */
     function buildCreateBackend(opts: {
-      virshResponses?: Partial<Record<string, { stdout?: string; stderr?: string; exitCode?: number }>>;
-      qemuImgResult?: { stdout?: string; stderr?: string; exitCode?: number };
+      virshResponses?: Partial<
+        Record<string, { stdout?: string; stderr?: string; exitCode?: number }>
+      >;
+      storagePool?: string;
+      synthesizedPoolPath?: string;
     }) {
       const virshCalls: VirshCall[] = [];
-      const qemuImgCalls: QemuImgCall[] = [];
+      const poolPath = opts.synthesizedPoolPath ?? "/var/lib/libvirt/images";
       const backend = new LibvirtBackend({
+        storagePool: opts.storagePool,
         exec: async (args) => {
           virshCalls.push({ args });
           const verb = args[0];
+          // vol-path lookup: synthesize the path libvirt would have
+          // returned (pool path + volume name) unless the test
+          // explicitly overrides the response.
+          if (verb === "vol-path" && !opts.virshResponses?.["vol-path"]) {
+            const volName = args[args.length - 1];
+            return {
+              stdout: `${poolPath}/${volName}\n`,
+              stderr: "",
+              exitCode: 0,
+            };
+          }
           const r = opts.virshResponses?.[verb];
           return {
             stdout: r?.stdout ?? "",
@@ -293,20 +313,12 @@ describe("LibvirtBackend integration", () => {
             exitCode: r?.exitCode ?? 0,
           };
         },
-        qemuImgExec: async (args) => {
-          qemuImgCalls.push({ args });
-          return {
-            stdout: opts.qemuImgResult?.stdout ?? "",
-            stderr: opts.qemuImgResult?.stderr ?? "",
-            exitCode: opts.qemuImgResult?.exitCode ?? 0,
-          };
-        },
       });
-      return { backend, virshCalls, qemuImgCalls };
+      return { backend, virshCalls };
     }
 
-    it("resolves the pool, calls qemu-img with backing file, then virsh define", async () => {
-      const { backend, virshCalls, qemuImgCalls } = buildCreateBackend({
+    it("validates the pool, creates a libvirt-managed volume via vol-create-as, then defines the domain", async () => {
+      const { backend, virshCalls } = buildCreateBackend({
         virshResponses: {
           "pool-dumpxml": { stdout: POOL_XML },
         },
@@ -316,27 +328,56 @@ describe("LibvirtBackend integration", () => {
         template: "/var/lib/libvirt/templates/ubuntu-noble.qcow2",
         memoryMB: 4096,
         cpus: 4,
+        diskGB: 10,
       });
       expect(handle).toEqual({
         id: "vm-new",
         name: "vm-new",
         backend: "libvirt",
       });
+      // Sequence: pool-dumpxml → vol-create-as → vol-path → define
       expect(virshCalls[0].args).toEqual(["pool-dumpxml", "default"]);
-      expect(qemuImgCalls[0].args).toEqual([
-        "create",
-        "-f",
+      const volCreate = virshCalls.find((c) => c.args[0] === "vol-create-as");
+      expect(volCreate).toBeDefined();
+      expect(volCreate!.args).toEqual([
+        "vol-create-as",
+        "default",
+        "vm-new.qcow2",
+        "10G",
+        "--format",
         "qcow2",
-        "-F",
-        "qcow2",
-        "-b",
+        "--backing-vol",
         "/var/lib/libvirt/templates/ubuntu-noble.qcow2",
-        "/var/lib/libvirt/images/vm-new.qcow2",
+        "--backing-vol-format",
+        "qcow2",
+      ]);
+      const volPath = virshCalls.find((c) => c.args[0] === "vol-path");
+      expect(volPath).toBeDefined();
+      expect(volPath!.args).toEqual([
+        "vol-path",
+        "--pool",
+        "default",
+        "vm-new.qcow2",
       ]);
       const defineCall = virshCalls.find((c) => c.args[0] === "define");
       expect(defineCall).toBeDefined();
       expect(defineCall!.args.length).toBe(2);
       expect(path.isAbsolute(defineCall!.args[1])).toBe(true);
+    });
+
+    it("defaults diskGB when the caller omits it", async () => {
+      const { backend, virshCalls } = buildCreateBackend({
+        virshResponses: { "pool-dumpxml": { stdout: POOL_XML } },
+      });
+      await backend.createVM({
+        name: "vm-x",
+        template: "/abs/tpl.qcow2",
+      });
+      const volCreate = virshCalls.find((c) => c.args[0] === "vol-create-as");
+      expect(volCreate).toBeDefined();
+      // DEFAULT_DISK_GB sized capacity arg, format `${N}G`.
+      const capacityArg = volCreate!.args[3];
+      expect(capacityArg).toMatch(/^\d+G$/);
     });
 
     it("rejects when config.template is missing", async () => {
@@ -360,7 +401,7 @@ describe("LibvirtBackend integration", () => {
       ).rejects.toMatchObject({ code: "invalid_argument" });
     });
 
-    it("rejects out-of-range memory or cpus with invalid_argument", async () => {
+    it("rejects out-of-range memory, cpus, or diskGB with invalid_argument", async () => {
       const { backend } = buildCreateBackend({
         virshResponses: { "pool-dumpxml": { stdout: POOL_XML } },
       });
@@ -376,6 +417,13 @@ describe("LibvirtBackend integration", () => {
           name: "vm-new",
           template: "/abs/tpl.qcow2",
           cpus: 999,
+        }),
+      ).rejects.toMatchObject({ code: "invalid_argument" });
+      await expect(
+        backend.createVM({
+          name: "vm-new",
+          template: "/abs/tpl.qcow2",
+          diskGB: 0,
         }),
       ).rejects.toMatchObject({ code: "invalid_argument" });
     });
@@ -400,12 +448,30 @@ describe("LibvirtBackend integration", () => {
       });
     });
 
-    it("surfaces command_failed when qemu-img create fails", async () => {
+    it("surfaces command_failed when vol-create-as fails", async () => {
       const { backend } = buildCreateBackend({
-        virshResponses: { "pool-dumpxml": { stdout: POOL_XML } },
-        qemuImgResult: {
-          stderr: "qemu-img: Could not open backing file",
-          exitCode: 1,
+        virshResponses: {
+          "pool-dumpxml": { stdout: POOL_XML },
+          "vol-create-as": {
+            stderr:
+              "error: Failed to create vol vm-new.qcow2: backing image not found",
+            exitCode: 1,
+          },
+        },
+      });
+      await expect(
+        backend.createVM({
+          name: "vm-new",
+          template: "/abs/tpl.qcow2",
+        }),
+      ).rejects.toMatchObject({ code: "command_failed" });
+    });
+
+    it("surfaces command_failed when vol-path returns empty", async () => {
+      const { backend } = buildCreateBackend({
+        virshResponses: {
+          "pool-dumpxml": { stdout: POOL_XML },
+          "vol-path": { stdout: "", exitCode: 0 },
         },
       });
       await expect(
@@ -435,32 +501,22 @@ describe("LibvirtBackend integration", () => {
     });
 
     it("honors a custom storagePool option", async () => {
-      const calls: VirshCall[] = [];
-      const qcalls: QemuImgCall[] = [];
-      const backend = new LibvirtBackend({
+      const { backend, virshCalls } = buildCreateBackend({
         storagePool: "ssd-pool",
-        exec: async (args) => {
-          calls.push({ args });
-          if (args[0] === "pool-dumpxml") {
-            return {
-              stdout:
-                "<pool><target><path>/mnt/ssd/images</path></target></pool>",
-              stderr: "",
-              exitCode: 0,
-            };
-          }
-          return { stdout: "", stderr: "", exitCode: 0 };
-        },
-        qemuImgExec: async (args) => {
-          qcalls.push({ args });
-          return { stdout: "", stderr: "", exitCode: 0 };
+        synthesizedPoolPath: "/mnt/ssd/images",
+        virshResponses: {
+          "pool-dumpxml": {
+            stdout:
+              "<pool><target><path>/mnt/ssd/images</path></target></pool>",
+          },
         },
       });
       await backend.createVM({ name: "vm-x", template: "/abs/tpl.qcow2" });
-      expect(calls[0].args).toEqual(["pool-dumpxml", "ssd-pool"]);
-      expect(qcalls[0].args[qcalls[0].args.length - 1]).toBe(
-        "/mnt/ssd/images/vm-x.qcow2",
-      );
+      const volCreate = virshCalls.find((c) => c.args[0] === "vol-create-as");
+      expect(volCreate!.args[1]).toBe("ssd-pool");
+      // vol-path synthesized to /mnt/ssd/images/vm-x.qcow2 by the stub.
+      const defineCall = virshCalls.find((c) => c.args[0] === "define");
+      expect(defineCall).toBeDefined();
     });
   });
 
