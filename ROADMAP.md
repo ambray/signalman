@@ -1256,18 +1256,23 @@ Prompts: [`ws9-signing-service.md`](docs/workstreams/prompts/ws9-signing-service
 
 #### Cohort scope summary
 
-- **WS9 (Signing service)** — introduce a `SigningProvider` abstraction
-  so release-manifest signing, registry re-signing, and (after WS8
-  merges) the service-side CA-key signing all route through one
-  versioned interface. `LocalDiskProvider` keeps the existing on-disk
-  PEM flow for v0.4.x-compatible classical-only keys; **new keys
-  default to hybrid Ed25519 + ML-DSA-65 (NIST FIPS 204) for
-  post-quantum readiness**. `AwsKmsProvider` ships in v0.5;
-  **detached-operator signing, Azure KV / GCP KMS providers, and HSM
-  / TPM providers are deferred to v0.6+**. Design-gated. Closes WS8's
-  deferred TPM/HSM scope. See
+- **WS9 (Signing service)** — **SHIPPED v0.5.0 (M0–M4 + M6 closure,
+  2026-05-17).** `SigningProvider` abstraction over key custody;
+  `LocalDiskProvider` (classical Ed25519 + ECDSA P-256 + ML-DSA-65 +
+  **hybrid Ed25519+ML-DSA-65 as the default for new keys, NIST FIPS
+  204 post-quantum-ready**) and `AwsKmsProvider` (classical ECDSA
+  P-256) both ship. Migrations 0090 (`signing_provider_key`) + 0091
+  (`signing_nonce`); audit-log `signing.*` action codes; replay-dedup
+  runtime via signing_nonce PK uniqueness; full `signalman signing`
+  CLI (`providers list`, `keys list|add|revoke|rotate`, `verify`,
+  `nonce-sweep`) + matching MCP tools. **M5 (route
+  `service/src/tls.rs` through provider) deferred to v0.5.1** —
+  gated on WS8 merge. **v0.6+ deferrals**: detached-operator signing
+  (Q3), Azure KV / GCP KMS providers, HSM / TPM providers, hybrid
+  via AWS KMS, auto-rotation scheduler. See
   [`docs/design/signing-service.md`](docs/design/signing-service.md)
-  §Resolved decisions for the locked v0.5 surface.
+  §Deviations from §Locked design for the as-shipped vs as-locked
+  diff.
 - **WS10 (Registry OCI distribution spec v1.1)** — close
   [`registry/ROADMAP.md`](registry/ROADMAP.md) §v0.1.2: add `/v2/*`
   route surface alongside `/v1/*`, OCI manifest + image-index media

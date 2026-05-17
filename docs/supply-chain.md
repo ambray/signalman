@@ -79,23 +79,56 @@ Operational guardrails:
 - Re-check the pin before bumping it, and prefer `--locked` so
   transitive versions stay constrained by the crate's lockfile.
 
-## Release-artifact signing (Ed25519)
+## Release-artifact signing
 
-Every release row written by the build executor optionally carries
-an Ed25519 signature over the canonical manifest JSON. Verification
-is part of the operator surface and shipped with the host CLI.
+Every release row written by the build executor optionally carries a
+signature over the canonical manifest JSON. v0.4.x signed Ed25519
+only; **v0.5.0 (WS9) introduces a `SigningProvider` abstraction that
+decouples "what to sign" from "how the key material is held"**.
+Verification is part of the operator surface and shipped with the
+host CLI + MCP.
 
-### Key model
+See [`docs/design/signing-service.md`](design/signing-service.md) for
+the full design (interface shape, hybrid PQ strategy, provider
+matrix, deferred items).
 
-- **One-CA-many-VMs** at v0.1.x; the cert-pin registry is the seed
-  for per-VM identity certs in a follow-up.
-- Signing keys are operator-managed; the default key file lives at
-  `~/.signalman/keys/signing.{pub,key}`. The CLI never copies the
-  private key off the operator's host.
-- Fingerprint format: first 16 hex chars of `sha256(DER(public key))`.
-  Surfaces as the `signed_by` column on every release this key signs.
+### Key model — providers, not just on-disk keys
+
+The signing layer is now a **provider abstraction**, not a single
+key-on-disk model. v0.5.0 ships two providers:
+
+| Provider | Trust posture | Algorithms (v0.5.0) | Notes |
+|---|---|---|---|
+| `LocalDiskProvider` | Private key on operator's host (PEM for classical; FIPS 204 raw bytes for ML-DSA-65). Same v0.4.x trust posture for the legacy `~/.signalman/keys/signing.{pub,key}` layout. | Ed25519, ECDSA P-256, ML-DSA-65, **hybrid Ed25519+ML-DSA-65 (default for new keys)** | Default. Hybrid is the default for any new key created via `signalman signing keys add` — operator opts to classical-only with `--algorithm ed25519 \| ecdsa-p256-sha256`. |
+| `AwsKmsProvider` | Private key never leaves AWS KMS. Sign goes through `kms:Sign`; verify is fully local against cached SPKI bytes. | ECDSA P-256 (classical-only in v0.5.0) | Operators with regulated key-storage requirements register existing KMS keys via `signalman signing keys add --provider aws-kms --key-id <ARN>`. Hybrid via AWS KMS is deferred (region-dependent for both Ed25519 and ML-DSA-65). |
+
+**Quantum safety:** Ed25519 and ECDSA P-256 are NOT quantum-safe. New
+keys created via `LocalDiskProvider` default to **hybrid Ed25519 +
+ML-DSA-65 (NIST FIPS 204)** — every `sign()` against a hybrid key
+emits two signatures in the envelope, and verifiers in `transition`
+mode (the default) accept either. See the design doc §Quantum safety
+for the rationale + verifier-mode semantics.
+
+**Legacy compatibility:** the v0.4.x layout (`~/.signalman/keys/signing.{pub,key}`)
+keeps working unchanged. The `default` alias under `LocalDiskProvider`
+resolves to those files; `signalman release build --sign --key ...`
+and `signalman release verify` continue to work as before.
+
+**Fingerprint format (unchanged):** first 16 hex chars of
+`sha256(<public-key-bytes>)`. Surfaces as the `signed_by` column on
+every release row this key signs.
+
+**Audit + replay-dedup:** every `sign()` op through a provider with
+audit + nonce-dedup wired records `signing.requested` +
+`signing.completed` (or `signing.failed`) audit rows. The
+`signing_nonce` table rejects replayed `(org_id, actor_cn, nonce)`
+tuples within the 60s skew window. The `signing_provider_key`
+catalog (migration 0090) stores cached public-key bytes so verify
+never needs cloud-KMS access.
 
 ### Operator workflow
+
+#### Legacy classical-only path (v0.4.x compat, still works)
 
 ```bash
 # 1. Generate a keypair (default output ~/.signalman/keys/signing.*).
@@ -113,6 +146,65 @@ signalman release build --product myapp --tag v1.0.0 \
 signalman release verify <release-id> \
   --public-key ~/.signalman/keys/signing.pub
 ```
+
+#### v0.5.0 multi-provider workflow
+
+```bash
+# Generate a hybrid (Ed25519 + ML-DSA-65) key — the v0.5.0 default.
+signalman signing keys add \
+  --provider local-disk --alias release-prod
+# → Registered 2 catalog row(s): one Ed25519 + one ML-DSA-65 sharing a pair_id.
+
+# Generate a classical-only key (opt out of PQ — explicitly NOT quantum-safe).
+signalman signing keys add \
+  --provider local-disk --alias release-classical --algorithm ed25519
+
+# Register an existing AWS KMS key (ECDSA P-256).
+signalman signing keys add \
+  --provider aws-kms --key-id arn:aws:kms:us-east-1:123:key/abc \
+  --alias release-prod-kms
+
+# List + revoke + rotate.
+signalman signing keys list [--provider local-disk] [--include-revoked]
+signalman signing keys revoke <fingerprint-or-alias> --reason "key compromised"
+signalman signing keys rotate <fingerprint-or-alias>
+
+# Verify against the catalog (looks up keys by fingerprint).
+signalman signing verify path/to/envelope.json [--mode transition|strict|classical-only]
+
+# Sweep replay-dedup nonce table (operator janitor; default cutoff 24h).
+signalman signing nonce-sweep [--older-than-hours N]
+```
+
+#### Switching providers
+
+The signing layer is provider-agnostic: a release signed by
+`LocalDiskProvider` verifies through `AwsKmsProvider` and vice versa,
+as long as the catalog row carries the matching public-key bytes.
+Migrating from local-disk to AWS KMS for new releases is a registration
+flip — no code change at any call site:
+
+```bash
+# Today: classical-only on-disk key signs releases.
+signalman signing keys list
+# → 0123456789abcdef  ed25519  local-disk  release-prod  active
+
+# Operator stands up an AWS KMS ECDSA P-256 key and registers it.
+signalman signing keys add \
+  --provider aws-kms --key-id arn:aws:kms:us-east-1:...:key/abc \
+  --alias release-prod-kms
+
+# New releases sign against the KMS key (operator picks per release-build
+# invocation). Old releases keep verifying against the local-disk row.
+# Both rows are in the catalog; verify() finds the right key by
+# fingerprint regardless of which provider produced the signature.
+```
+
+`AwsKmsProvider.verify()` is fully local — uses cached SPKI bytes from
+the catalog, NO KMS round-trip. This is the "verify anywhere"
+property: third-party verifiers (CI, registry mirrors, audit
+consumers) can verify cloud-KMS-produced signatures without any AWS
+credentials of their own.
 
 ### Canonical manifest shape
 

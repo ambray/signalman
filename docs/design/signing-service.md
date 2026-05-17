@@ -1,8 +1,28 @@
 # Signing Service
 
-**Status:** design proposal (2026-05-16) — **§Open product questions resolved 2026-05-16**; §Locked design below is operator-approved and not re-litigated in implementation PRs.
+**Status:** **shipped in v0.5.0** (Milestones M0 → M4 + M6 closure, 2026-05-17). M5 (WS8 CA-key integration) **deferred to v0.5.1** pending WS8 merge; the carry-forward is recorded in §Deviations from §Locked design below.
 **Owner:** WS9 (`docs/workstreams/prompts/ws9-signing-service.md`)
 **Predecessor:** v0.4.x direct on-disk signing — `host/src/control-plane/build/signing.ts`, `registry/src/signing.ts`, `service/src/tls.rs` (CA-key + denylist signing path). This doc is the v0.5.0+ progression that introduces a provider abstraction over key-material custody.
+
+## Deviations from §Locked design (recorded during execution, 2026-05-17)
+
+The implementation matched §Locked design with these operator-approved adjustments:
+
+1. **ML-DSA library swap (M1b)** — operator originally picked `liboqs-node` in §Resolved decisions Q2. Mid-execution verification found `liboqs-node` ships **no prebuilt Windows binaries** (would have required a C toolchain + liboqs C library inside the signalman MSI). Swapped to `@noble/post-quantum@0.6.1` (Paul Miller's audited Noble crypto suite, pure JS). Trade-off: ~5–10× slower than native (irrelevant for the signing workloads Signalman runs); zero install friction on every supported OS.
+
+2. **Milestone scope re-cuts** — the WS9 prompt bundled "audit + CLI/MCP" into a single M2. Mid-execution split into **M2 = storage + audit + replay-dedup** and **M3 = CLI + MCP surface**. Same total work; each milestone audit-able + coverage-verifiable in a single cycle.
+
+3. **AwsKmsProvider classical-only (M4)** — §Locked design's algorithm matrix for AwsKmsProvider noted Ed25519 was region-dependent. M4 ships ECDSA P-256 only. Ed25519 via AWS KMS, ML-DSA-65 via AWS KMS, and hybrid via AWS KMS (operator-tagged: one KMS key per algorithm OR KMS classical + local-fallback ML-DSA) all deferred to a future milestone.
+
+4. **`verify()` interface evolution (M1b)** — §Locked design's `SigningProvider.verify(env, payload, key, mode?)` accepted a single `PublicKeyRef`. Hybrid envelopes carry two SigEntry rows (one classical + one ml-dsa-65) and each needs its own public key. Signature evolved to `verify(env, payload, keys: readonly PublicKeyRef[], mode?)`. Single-key callers wrap their lone ref in `[ref]`. Backward-compatible at the call sites (legacy shims updated).
+
+5. **M5 (WS8 CA-key integration) deferred to v0.5.1** — the WS9 prompt's M4 (renumbered M5 here) explicitly requires WS8 having merged: "If WS8 has not yet merged when WS9 reaches this milestone, stop and surface to operator." As of 2026-05-17, only the WS8 design doc is on `main`; no `feat/v0.5-identity-certs` branch exists. Operator confirmed proceeding to M6 doc closure and tracking M5 as a v0.5.1 follow-up.
+
+6. **Coverage gate enforced per-milestone, not just at workstream closure** — operator instruction at M2: "verify test coverage is over 80% at every delivery milestone." All five WS9 module files cleared ≥80% lines / ≥70% branches at each milestone boundary (M2, M3, M4) — final numbers in `.workstream-status.md` workstream-closure audit.
+
+7. **Quantum-safety pivot (M0.5)** — design proposal originally framed Q2 (algorithm scope) as Ed25519-only vs add ECDSA P-256. Operator's "make sure the specifics are quantum safe by default" prompted a deeper validation: Ed25519 and ECDSA P-256 are NOT quantum-safe (both fall to Shor's algorithm). Locked stance after that round: **hybrid Ed25519 + ML-DSA-65 default for new keys**; legacy Ed25519 keys remain valid via verifier `classical-only` mode (explicitly NOT quantum-safe). See §Quantum safety below for the full reasoning.
+
+§Locked design otherwise stands. The provider interface, byte-parity invariant for the Ed25519 half, per-call-site canonicalization preservation, replay-protection via mandatory nonce + timestamp, three-way verifier mode, audit-log integration via DI on `LocalDiskProvider`, and the host/registry duplication rule all shipped as specified.
 
 ## Resolved decisions (operator-confirmed 2026-05-16)
 
