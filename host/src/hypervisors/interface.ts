@@ -65,6 +65,30 @@ export interface VMConfig {
   diskBus?: "virtio" | "sata" | "scsi";
   /** Override NIC model. Defaults from osProfile. */
   nicModel?: "virtio" | "e1000e" | "rtl8139";
+
+  /**
+   * Extra read-only CDROM media to attach at domain-define time.
+   * Each entry must be an absolute path to an existing ISO on the
+   * host filesystem; the libvirt backend emits a `<disk
+   * device='cdrom'>` element per entry.
+   *
+   * Common uses on libvirt:
+   *  - **virtio-win.iso** alongside a Windows installer: the
+   *    Windows setup wizard can load virtio storage/NIC drivers
+   *    from the secondary CDROM before the guest disk is
+   *    accessible. Pair with `diskBus: 'sata'` if you'd rather
+   *    skip the driver-loading step entirely.
+   *  - **cloud-init seed ISO** for Ubuntu / Debian / RHEL cloud
+   *    images: the seed ISO carries user-data / meta-data that
+   *    cloud-init consumes on first boot.
+   *  - **Installer ISOs** for OS-from-scratch flows (Win11
+   *    installer, Alpine install media, etc.).
+   *
+   * Backends other than libvirt currently ignore this field
+   * (Hyper-V uses Add-VMDvdDrive separately; Tart attaches by
+   * image definition).
+   */
+  extraCdroms?: string[];
 }
 
 /** Network configuration for a VM. */

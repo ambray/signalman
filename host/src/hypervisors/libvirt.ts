@@ -340,6 +340,36 @@ export function parseDomIfAddrIpv4(raw: string): string | null {
  * (date, time, tz). We join them back together when rebuilding the
  * Date object.
  */
+/**
+ * Parse the `Used memory: <N> KiB` line from `virsh dominfo <name>`
+ * output. Returns the memory in MiB (rounded down), or `null` when
+ * the line is missing or malformed.
+ *
+ * `virsh dominfo` shape:
+ *
+ *   Id:             1
+ *   Name:           test
+ *   ...
+ *   Used memory:    2097152 KiB
+ *
+ * Some libvirt versions emit `Used memory: -` or `0 KiB` for a
+ * domain whose balloon driver isn't reporting yet; those parse as
+ * `0` rather than `null` so the caller can distinguish "no data" from
+ * "balloon hasn't ballooned yet".
+ *
+ * Exported for unit tests.
+ */
+export function parseDomInfoUsedMemoryMB(raw: string): number | null {
+  for (const line of raw.split(/\r?\n/)) {
+    const m = line.match(/^Used memory:\s+(-|\d+)\s*KiB/);
+    if (m) {
+      if (m[1] === "-") return 0;
+      return Math.floor(parseInt(m[1], 10) / 1024);
+    }
+  }
+  return null;
+}
+
 export function parseSnapshotList(raw: string): CheckpointInfo[] {
   const out: CheckpointInfo[] = [];
   for (const line of raw.split(/\r?\n/)) {
@@ -626,6 +656,13 @@ export interface BuildDomainXmlOptions {
   networkName: string;
   /** Resolved profile + override stack. See {@link resolveOsProfileDefaults}. */
   os: OsProfileDefaults;
+  /**
+   * Absolute paths to additional ISO files to attach as read-only
+   * CDROMs. Each entry produces one `<disk device='cdrom'>` element.
+   * Empty / unset means "no extras" (still produces a fully valid
+   * domain).
+   */
+  extraCdroms?: string[];
 }
 
 /**
@@ -731,6 +768,37 @@ export function buildDomainXml(opts: BuildDomainXmlOptions): string {
       `    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>\n`
     : "";
 
+  // ── Extra CDROM media ─────────────────────────────────────────
+  //
+  // Each entry produces one read-only <disk device='cdrom'> on the
+  // implicit q35 SATA controller. We use sda/sdb/... starting after
+  // the primary disk's SATA slot (when the primary is virtio it
+  // doesn't consume any sd* letter, so CDROMs start at sda).
+  //
+  // Operators with virtio-as-primary (the default) get:
+  //   primary disk: vda (virtio)
+  //   extraCdroms[0]: sda (sata, cdrom)
+  //   extraCdroms[1]: sdb (sata, cdrom)
+  //
+  // Operators with sata-as-primary (e.g. Windows install path):
+  //   primary disk: sda (sata)
+  //   extraCdroms[0]: sdb (sata, cdrom)
+  //   extraCdroms[1]: sdc (sata, cdrom)
+  const cdroms = opts.extraCdroms ?? [];
+  const cdromOffset = os.diskBus === "sata" ? 1 : 0;
+  let cdromBlock = "";
+  for (let i = 0; i < cdroms.length; i += 1) {
+    const dev = `sd${String.fromCharCode("a".charCodeAt(0) + cdromOffset + i)}`;
+    const isoPath = xmlEscape(cdroms[i]);
+    cdromBlock +=
+      `    <disk type='file' device='cdrom'>\n` +
+      `      <driver name='qemu' type='raw'/>\n` +
+      `      <source file='${isoPath}'/>\n` +
+      `      <target dev='${dev}' bus='sata'/>\n` +
+      `      <readonly/>\n` +
+      `    </disk>\n`;
+  }
+
   return (
     `<domain type='kvm'>\n` +
     `  <name>${name}</name>\n` +
@@ -747,6 +815,7 @@ export function buildDomainXml(opts: BuildDomainXmlOptions): string {
     `      <source file='${diskPath}'/>\n` +
     `      <target dev='${diskDev}' bus='${os.diskBus}'/>\n` +
     `    </disk>\n` +
+    cdromBlock +
     `    <interface type='network'>\n` +
     `      <source network='${networkName}'/>\n` +
     `      <model type='${os.nicModel}'/>\n` +
@@ -1081,7 +1150,21 @@ export class LibvirtBackend implements HypervisorBackend {
       diskGB,
     );
 
-    // 4. Render the domain XML and hand it to `virsh define` via a
+    // 4. Validate any extra CDROM media. We don't fs.stat (libvirt
+    //    will fail loudly at start time if the path is wrong); we
+    //    just refuse non-absolute paths up front so the operator
+    //    gets a clear error instead of an obscure libvirt one.
+    const extraCdroms = config.extraCdroms ?? [];
+    for (const isoPath of extraCdroms) {
+      if (typeof isoPath !== "string" || !path.isAbsolute(isoPath)) {
+        throw new LibvirtBackendError(
+          "invalid_argument",
+          `createVM: extraCdroms entries must be absolute paths (got '${isoPath}').`,
+        );
+      }
+    }
+
+    // 5. Render the domain XML and hand it to `virsh define` via a
     //    tempfile.
     const xml = buildDomainXml({
       name: safeName,
@@ -1090,6 +1173,7 @@ export class LibvirtBackend implements HypervisorBackend {
       diskPath,
       networkName,
       os: resolvedOs,
+      extraCdroms,
     });
     const xmlDir = await fs.mkdtemp(path.join(os.tmpdir(), "libvirt-define-"));
     const xmlFile = path.join(xmlDir, `${safeName}.xml`);
@@ -1272,6 +1356,17 @@ export class LibvirtBackend implements HypervisorBackend {
     // domains that have any snapshots ("cannot delete inactive
     // domain with N snapshots"), which surprised the 2026-05-16
     // demo when `vm checkpoint` had been called.
+    //
+    // We do NOT pass --delete-storage-volume-snapshots: libvirt's
+    // directory-pool storage backend (the common case) returns
+    // `unsupported flags (0x2) in function
+    // virStorageBackendVolDeleteLocal` when the flag is present,
+    // and the undefine half-completes (domain gone, qcow2 left).
+    // For external-snapshot setups on pool drivers that *do*
+    // support the flag (some iSCSI / ZFS backends), operators can
+    // run `virsh undefine ... --delete-storage-volume-snapshots`
+    // by hand after a regular `vm delete`. See the v0.5 deferred
+    // list in `.workstream-status-ws11.md`.
     await this.exec(this.argv(["destroy", name]), {
       timeoutMs: VIRSH_LIFECYCLE_TIMEOUT_MS,
     });
@@ -1305,6 +1400,7 @@ export class LibvirtBackend implements HypervisorBackend {
     }
     const state = parseDomState(result.stdout);
     let ipAddress: string | undefined;
+    let memoryUsedMB: number | undefined;
     let guestAgentReachable = false;
     if (state === "running") {
       try {
@@ -1318,12 +1414,32 @@ export class LibvirtBackend implements HypervisorBackend {
       // so the orchestrator's parallel guest-readiness waits can
       // actually succeed on libvirt.
       guestAgentReachable = await this.qgaPing(name);
+      // `virsh dominfo` exposes the balloon driver's "Used memory"
+      // value; we surface it as memoryUsedMB so scenario reports +
+      // health checks don't need to shell out separately. virsh
+      // failures here are non-fatal (the field stays undefined).
+      //
+      // Note: libvirt does not expose wall-clock domain uptime
+      // through `virsh dominfo` or `virsh domstats`; `CPU time` is
+      // accumulated CPU work, not boot time. We leave
+      // `VMStatus.uptimeSeconds` undefined for libvirt and document
+      // the limitation rather than synthesizing a misleading value.
+      try {
+        const info = await this.run(["dominfo", name]);
+        if (info.exitCode === 0) {
+          const used = parseDomInfoUsedMemoryMB(info.stdout);
+          if (used !== null) memoryUsedMB = used;
+        }
+      } catch {
+        // Best-effort; leave memoryUsedMB undefined.
+      }
     }
     return {
       handle,
       state,
       ipAddress,
       guestAgentReachable,
+      memoryUsedMB,
     };
   }
 
@@ -1411,11 +1527,18 @@ export class LibvirtBackend implements HypervisorBackend {
     handle: VMHandle,
     hostPath: string,
     guestPath: string,
-    _progress?: ProgressCallback,
+    progress?: ProgressCallback,
   ): Promise<void> {
     const name = sanitizeVmName(handle.name);
     const safeHost = sanitizePath(hostPath);
     const safeGuest = sanitizePath(guestPath);
+
+    // Pre-stat the host file so we know the total bytes up front;
+    // the progress callback contract is `(bytesTransferred,
+    // totalBytes)`, and operators rely on `totalBytes` for progress
+    // bar widths. fs.stat failure here is fatal (we'd be unable to
+    // read the file anyway).
+    const totalBytes = (await fs.stat(safeHost)).size;
 
     // QGA has no single-shot host→guest copy verb; the wire protocol
     // is guest-file-open(mode=w) → repeat guest-file-write(handle,
@@ -1429,10 +1552,16 @@ export class LibvirtBackend implements HypervisorBackend {
       try {
         const buf = Buffer.allocUnsafe(QGA_FILE_CHUNK_BYTES);
         let bytesRead = 0;
+        let bytesTransferred = 0;
+        // Emit a `(0, totalBytes)` callback before the first write
+        // so callers see a starting frame for their progress UI.
+        progress?.(bytesTransferred, totalBytes);
         do {
           ({ bytesRead } = await hostFile.read(buf, 0, buf.length, null));
           if (bytesRead > 0) {
             await this.qgaFileWrite(name, fileHandle, buf.subarray(0, bytesRead));
+            bytesTransferred += bytesRead;
+            progress?.(bytesTransferred, totalBytes);
           }
         } while (bytesRead > 0);
       } finally {
@@ -1456,7 +1585,7 @@ export class LibvirtBackend implements HypervisorBackend {
     handle: VMHandle,
     guestPath: string,
     hostPath: string,
-    _progress?: ProgressCallback,
+    progress?: ProgressCallback,
   ): Promise<void> {
     const name = sanitizeVmName(handle.name);
     const safeHost = sanitizePath(hostPath);
@@ -1467,11 +1596,20 @@ export class LibvirtBackend implements HypervisorBackend {
     // signals eof=true → guest-file-close. The host file is truncated
     // on open so partial-failure leaves it shorter than the source
     // rather than silently mixed-content.
+    //
+    // Progress callback caveat: for guest→host transfers we don't
+    // know the total size in advance — QGA doesn't expose
+    // guest-file-stat, and the data only arrives as it streams.
+    // We pass `bytesTransferred` for *both* arguments of the
+    // callback so progress UIs render as "N bytes (size unknown)"
+    // rather than mis-claiming completion at an arbitrary `total`.
     const fileHandle = await this.qgaFileOpen(name, safeGuest, "r");
     let primaryError: unknown;
     try {
       const hostFile = await fs.open(safeHost, "w");
       try {
+        let bytesTransferred = 0;
+        progress?.(bytesTransferred, bytesTransferred);
         for (;;) {
           const chunk = await this.qgaFileRead(
             name,
@@ -1480,6 +1618,8 @@ export class LibvirtBackend implements HypervisorBackend {
           );
           if (chunk.buf.length > 0) {
             await hostFile.write(chunk.buf);
+            bytesTransferred += chunk.buf.length;
+            progress?.(bytesTransferred, bytesTransferred);
           }
           if (chunk.eof) break;
         }

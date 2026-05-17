@@ -526,6 +526,36 @@ async function cmdVmCreate(args: ParsedArgs): Promise<number> {
   const start = args.flags.has("start");
   const force = args.flags.has("force");
 
+  // CLI-level resource overrides (v0.5 polish). When the template
+  // already has memoryMB / processorCount / diskGB set, these flags
+  // win — handy for quick ad-hoc resizes without editing the YAML.
+  // Parsing is strict: non-integer values usage-error rather than
+  // silently get coerced to NaN by parseInt.
+  const cpusRaw = args.options.get("cpus");
+  const memoryRaw = args.options.get("memory");
+  const diskGbRaw = args.options.get("disk-gb");
+  let cpusOverride: number | undefined;
+  let memoryOverride: number | undefined;
+  let diskGbOverride: number | undefined;
+  if (cpusRaw !== undefined) {
+    cpusOverride = parseInt(cpusRaw, 10);
+    if (!Number.isInteger(cpusOverride) || cpusOverride <= 0) {
+      usageError(`vm create --cpus must be a positive integer (got '${cpusRaw}')`);
+    }
+  }
+  if (memoryRaw !== undefined) {
+    memoryOverride = parseInt(memoryRaw, 10);
+    if (!Number.isInteger(memoryOverride) || memoryOverride <= 0) {
+      usageError(`vm create --memory must be a positive integer in MiB (got '${memoryRaw}')`);
+    }
+  }
+  if (diskGbRaw !== undefined) {
+    diskGbOverride = parseInt(diskGbRaw, 10);
+    if (!Number.isInteger(diskGbOverride) || diskGbOverride <= 0) {
+      usageError(`vm create --disk-gb must be a positive integer (got '${diskGbRaw}')`);
+    }
+  }
+
   const backend = await getCliBackend();
 
   // Resolve the template — agent C's templates.ts populates `vhdxPath`
@@ -596,8 +626,9 @@ async function cmdVmCreate(args: ParsedArgs): Promise<number> {
       template.base_image_path ??
       template.vhdxPath ??
       template.name,
-    cpus: template.processorCount,
-    memoryMB: template.memoryMB,
+    cpus: cpusOverride ?? template.processorCount,
+    memoryMB: memoryOverride ?? template.memoryMB,
+    ...(diskGbOverride !== undefined ? { diskGB: diskGbOverride } : {}),
     network: { switchName: template.networkSwitch },
     ...(template.osProfile !== undefined ? { osProfile: template.osProfile } : {}),
     ...(template.firmware !== undefined ? { firmware: template.firmware } : {}),
@@ -605,6 +636,7 @@ async function cmdVmCreate(args: ParsedArgs): Promise<number> {
     ...(template.tpm !== undefined ? { tpm: template.tpm } : {}),
     ...(template.diskBus !== undefined ? { diskBus: template.diskBus } : {}),
     ...(template.nicModel !== undefined ? { nicModel: template.nicModel } : {}),
+    ...(template.extraCdroms !== undefined ? { extraCdroms: template.extraCdroms } : {}),
   };
   const handle = await backend.createVM(cfg);
 
