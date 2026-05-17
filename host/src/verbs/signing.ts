@@ -113,12 +113,20 @@ export interface KeysAddInput {
    *  display alias (alongside the actual ARN). */
   alias: string;
   /** Algorithm choice. Defaults to "hybrid" (Ed25519 + ML-DSA-65)
-   *  per Q2 resolution. For aws-kms in M4, only `ecdsa-p256-sha256`
-   *  is supported; `hybrid` is rejected. */
+   *  per Q2 resolution. v0.5.1: aws-kms supports `hybrid` (with
+   *  `pqKeyId` or `pqFallback`) in addition to `ecdsa-p256-sha256`. */
   algorithm?: "hybrid" | SigAlgorithm;
   /** For cloud-KMS providers: the cloud-side key id (ARN / vault path).
    *  Local-disk ignores this (the local-disk alias IS the key id). */
   keyId?: string;
+  /** For `aws-kms --algorithm hybrid`: the ARN of a second KMS key
+   *  holding the ML-DSA-65 half. Mutually exclusive with `pqFallback`. */
+  pqKeyId?: string;
+  /** For `aws-kms --algorithm hybrid` without `pqKeyId`: how to
+   *  source the PQ half. v0.5.1: `"local"` generates a local
+   *  `<alias>-mldsa65.{pub,key}` ML-DSA-65 keypair stored under
+   *  `keysDir` (default ~/.signalman/keys). */
+  pqFallback?: "local";
   /** AWS region for aws-kms (defaults to AWS_REGION env var → "us-east-1"). */
   awsRegion?: string;
   /** Test seam: a mocked KMS client for `aws-kms` registration tests. */
@@ -174,19 +182,14 @@ async function addAwsKmsKey(
       "aws-kms registration requires --key-id <ARN>",
     );
   }
-  // Hybrid via AWS KMS is operator-tagged (KMS ML-DSA or local-fallback);
-  // not in M4 scope. Default-hybrid input must be downgraded explicitly.
   const algorithm = input.algorithm ?? "ecdsa-p256-sha256";
   if (algorithm === "hybrid") {
-    throw new SigningError(
-      "algorithm-not-implemented",
-      "hybrid via aws-kms is deferred; pass --algorithm ecdsa-p256-sha256 to register a classical-only KMS key in M4",
-    );
+    return addAwsKmsHybridKey(cp, orgId, input);
   }
   if (algorithm !== "ecdsa-p256-sha256") {
     throw new SigningError(
       "algorithm-not-implemented",
-      `aws-kms in M4 supports ecdsa-p256-sha256 only; got ${algorithm}`,
+      `aws-kms supports ecdsa-p256-sha256 or hybrid (v0.5.1); got ${algorithm}`,
     );
   }
 
@@ -220,6 +223,142 @@ async function addAwsKmsKey(
     },
   });
   return { added: [row] };
+}
+
+/**
+ * v0.5.1 — hybrid via AWS KMS. Two shapes:
+ *
+ *   1. Both halves in KMS: operator supplies `--key-id <classical-arn>`
+ *      AND `--pq-key-id <pq-arn>`. The PQ KMS key must hold an
+ *      ML-DSA-65 key (region-dependent; operator confirms availability).
+ *
+ *   2. KMS classical + local-fallback PQ: operator supplies
+ *      `--key-id <classical-arn>` AND `--pq-fallback local`. We
+ *      generate a fresh ML-DSA-65 keypair locally under
+ *      `<keysDir>/<alias>-mldsa65.{pub,key}` (with MLDA magic per
+ *      M1b layout) and insert a local-disk catalog row for the
+ *      PQ half. Both rows share a `pair_id`.
+ *
+ * Either way: TWO catalog rows linked by pair_id + hybrid_alias.
+ * Verify path is unchanged — runSigningVerify already looks up keys
+ * by fingerprint regardless of which provider holds them.
+ */
+async function addAwsKmsHybridKey(
+  cp: ControlPlane,
+  orgId: string,
+  input: KeysAddInput,
+): Promise<KeysAddResult> {
+  if (!input.keyId) {
+    throw new SigningError(
+      "internal-error",
+      "aws-kms hybrid registration requires --key-id <classical-arn>",
+    );
+  }
+  if (input.pqKeyId && input.pqFallback) {
+    throw new SigningError(
+      "internal-error",
+      "specify either --pq-key-id (second KMS ARN) or --pq-fallback (local generation), not both",
+    );
+  }
+  if (!input.pqKeyId && !input.pqFallback) {
+    throw new SigningError(
+      "internal-error",
+      "aws-kms hybrid registration requires either --pq-key-id <pq-arn> (KMS ML-DSA-65 in your region) or --pq-fallback local (generate a local PQ keypair)",
+    );
+  }
+  if (input.pqKeyId) {
+    // Both-halves-in-KMS path: needs AwsKmsProvider to support
+    // ml-dsa-65 (algorithm gate in fetchPublicKey rejects non-P-256
+    // SPKI today). Deferred to a future milestone gated on AWS KMS
+    // ML-DSA GA confirmation in the operator's region.
+    throw new SigningError(
+      "algorithm-not-implemented",
+      "aws-kms ML-DSA-65 (--pq-key-id) is not yet wired (requires operator-confirmed AWS KMS ML-DSA GA + AwsKmsProvider algorithm-gate update). Use --pq-fallback local for now.",
+    );
+  }
+
+  // Fetch the classical half's public key from KMS.
+  const provider = await buildAwsKmsProvider(cp, orgId, input);
+  const classicalCached = await provider.fetchPublicKey(input.keyId);
+  const pairId = newId();
+
+  // Local-fallback PQ path. Generate ML-DSA-65 keypair via
+  // LocalDiskProvider.generateHybridKey + take only the PQ half.
+  const keysDir =
+    input.keysDir ?? path.join(os.homedir(), ".signalman", "keys");
+  await fs.mkdir(keysDir, { recursive: true });
+  const tmpAlias = `${input.alias}-pq-${Date.now()}`;
+  const local = new LocalDiskProvider({ keysDir });
+  const gen = local.generateHybridKey(tmpAlias);
+  // Discard the classical half we just generated; we only want the
+  // PQ half. Move it to the operator-facing alias name.
+  await fs.rm(gen.classicalKeyPath);
+  await fs.rm(gen.classicalPubPath);
+  const finalPqKeyPath = path.join(keysDir, `${input.alias}-mldsa65.key`);
+  const finalPqPubPath = path.join(keysDir, `${input.alias}-mldsa65.pub`);
+  await fs.rename(gen.pqKeyPath, finalPqKeyPath);
+  await fs.rename(gen.pqPubPath, finalPqPubPath);
+  const pqKeyPath = finalPqKeyPath;
+  const pqPubPath = finalPqPubPath;
+  const pqFingerprint = gen.pqFingerprint;
+  const pqPubBytes = (await fs.readFile(finalPqPubPath)).subarray(4);
+  const pqPublicKeyB64 = Buffer.from(pqPubBytes).toString("base64");
+  const pqKeyIdForCatalog = `${input.alias}-mldsa65`;
+  const pqProviderTag = "local-disk";
+
+  // Insert both rows under the shared pair_id.
+  const classicalRow = await cp.signingProviderKeys.insert({
+    orgId,
+    provider: "aws-kms",
+    keyId: input.keyId,
+    algorithm: "ecdsa-p256-sha256",
+    fingerprint: classicalCached.fingerprint,
+    publicKeyB64: classicalCached.publicKeyDer.toString("base64"),
+    pairId,
+    pairRole: "classical",
+    hybridAlias: input.alias,
+    label: input.label ?? null,
+    addedBy: input.actor,
+  });
+  const pqRow = await cp.signingProviderKeys.insert({
+    orgId,
+    provider: pqProviderTag,
+    keyId: pqKeyIdForCatalog,
+    algorithm: "ml-dsa-65",
+    fingerprint: pqFingerprint,
+    publicKeyB64: pqPublicKeyB64,
+    pairId,
+    pairRole: "post-quantum",
+    hybridAlias: input.alias,
+    label: input.label ?? null,
+    addedBy: input.actor,
+  });
+
+  await writeKeyAddedRow(cp.auditLog, {
+    orgId,
+    actor: input.actor,
+    fingerprint: classicalCached.fingerprint,
+    detail: {
+      provider: "aws-kms",
+      keyId: input.keyId,
+      algorithm: "hybrid",
+      classicalFingerprint: classicalCached.fingerprint,
+      pqFingerprint,
+      pqProvider: pqProviderTag,
+      pairId,
+      hybridAlias: input.alias,
+      label: input.label ?? null,
+    },
+  });
+
+  return {
+    added: [classicalRow, pqRow],
+    pqPath: pqKeyPath,
+    classicalPath: pqPubPath, // misnomer for the both-KMS case; the
+    // operator's classical half is in AWS, not on disk. For
+    // local-fallback the pq path is set; the classical path is the
+    // operator's KMS ARN (recorded in catalog row).
+  };
 }
 
 async function buildAwsKmsProvider(

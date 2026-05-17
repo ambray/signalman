@@ -141,7 +141,10 @@ describe("runSigningKeysAdd: provider=aws-kms", () => {
     });
   });
 
-  it("rejects --algorithm hybrid for aws-kms in M4 (deferred)", async () => {
+  it("hybrid via aws-kms requires --pq-key-id or --pq-fallback (v0.5.1 M7+)", async () => {
+    // v0.5.1 M7 ships hybrid via aws-kms; bare --algorithm hybrid
+    // without specifying the PQ half is rejected with an actionable
+    // message pointing at the two valid forms.
     const { client } = buildMockKms();
     await expect(
       runSigningKeysAdd(cp, orgId, {
@@ -152,10 +155,10 @@ describe("runSigningKeysAdd: provider=aws-kms", () => {
         awsKmsClient: client,
         actor: "test",
       }),
-    ).rejects.toThrow(/hybrid via aws-kms is deferred/);
+    ).rejects.toThrow(/pq-key-id.*pq-fallback|pq-fallback.*pq-key-id/);
   });
 
-  it("rejects --algorithm ed25519 for aws-kms (deferred)", async () => {
+  it("rejects --algorithm ed25519 for aws-kms (Ed25519 via KMS deferred)", async () => {
     const { client } = buildMockKms();
     await expect(
       runSigningKeysAdd(cp, orgId, {
@@ -166,7 +169,7 @@ describe("runSigningKeysAdd: provider=aws-kms", () => {
         awsKmsClient: client,
         actor: "test",
       }),
-    ).rejects.toThrow(/aws-kms in M4 supports ecdsa-p256-sha256 only/);
+    ).rejects.toThrow(/aws-kms supports ecdsa-p256-sha256 or hybrid/);
   });
 
   it("requires --key-id for aws-kms", async () => {
@@ -247,5 +250,178 @@ describe("runSigningKeysAdd: provider=aws-kms", () => {
         actor: "test",
       }),
     ).rejects.toThrow(/not yet supported/);
+  });
+});
+
+// ── v0.5.1 M7: hybrid via aws-kms (KMS classical + local-fallback PQ) ─
+
+describe("runSigningKeysAdd: provider=aws-kms --algorithm hybrid", () => {
+  let cp: ControlPlane;
+  let orgId: string;
+  let tmp: string;
+  beforeEach(async () => {
+    ({ cp, orgId, tmp } = await newCp());
+  });
+  afterEach(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("hybrid with --pq-fallback local: registers two paired catalog rows (aws-kms classical + local-disk PQ)", async () => {
+    const { client, publicKeyDer } = buildMockKms();
+    const arn = "arn:aws:kms:us-east-1:1234:key/abc";
+    const result = await runSigningKeysAdd(cp, orgId, {
+      provider: "aws-kms",
+      alias: "hybrid-prod",
+      algorithm: "hybrid",
+      keyId: arn,
+      pqFallback: "local",
+      keysDir: tmp,
+      awsKmsClient: client,
+      actor: "test",
+    });
+    expect(result.added.length).toBe(2);
+
+    // Classical half (AWS KMS, ECDSA P-256).
+    const classical = result.added.find((r) => r.pairRole === "classical")!;
+    expect(classical.provider).toBe("aws-kms");
+    expect(classical.algorithm).toBe("ecdsa-p256-sha256");
+    expect(classical.keyId).toBe(arn);
+    expect(classical.publicKeyB64).toBe(publicKeyDer.toString("base64"));
+    expect(classical.hybridAlias).toBe("hybrid-prod");
+
+    // PQ half (LocalDisk, ML-DSA-65).
+    const pq = result.added.find((r) => r.pairRole === "post-quantum")!;
+    expect(pq.provider).toBe("local-disk");
+    expect(pq.algorithm).toBe("ml-dsa-65");
+    expect(pq.keyId).toBe("hybrid-prod-mldsa65");
+    expect(pq.hybridAlias).toBe("hybrid-prod");
+
+    // Both rows share the pair_id.
+    expect(classical.pairId).toBe(pq.pairId);
+    expect(classical.pairId).not.toBeNull();
+
+    // PQ key files exist on disk.
+    expect(fs.existsSync(path.join(tmp, "hybrid-prod-mldsa65.key"))).toBe(true);
+    expect(fs.existsSync(path.join(tmp, "hybrid-prod-mldsa65.pub"))).toBe(true);
+
+    // Audit row records hybrid detail.
+    const auditRows = await cp.auditLog.listForOrg(orgId);
+    const added = auditRows.find(
+      (r) => r.action === SIGNING_ACTION_CODES.KEY_ADDED,
+    );
+    expect(added?.detail).toMatchObject({
+      provider: "aws-kms",
+      algorithm: "hybrid",
+      pqProvider: "local-disk",
+      hybridAlias: "hybrid-prod",
+    });
+  });
+
+  it("hybrid with --pq-key-id (both-KMS path) is deferred with a clean error", async () => {
+    const { client } = buildMockKms();
+    await expect(
+      runSigningKeysAdd(cp, orgId, {
+        provider: "aws-kms",
+        alias: "h",
+        algorithm: "hybrid",
+        keyId: "arn:classical",
+        pqKeyId: "arn:pq",
+        awsKmsClient: client,
+        actor: "test",
+      }),
+    ).rejects.toMatchObject({ code: "algorithm-not-implemented" });
+  });
+
+  it("rejects --pq-key-id and --pq-fallback together", async () => {
+    const { client } = buildMockKms();
+    await expect(
+      runSigningKeysAdd(cp, orgId, {
+        provider: "aws-kms",
+        alias: "h",
+        algorithm: "hybrid",
+        keyId: "arn",
+        pqKeyId: "arn-pq",
+        pqFallback: "local",
+        awsKmsClient: client,
+        actor: "test",
+      }),
+    ).rejects.toThrow(/not both/);
+  });
+
+  it("rejects hybrid without --pq-key-id or --pq-fallback", async () => {
+    const { client } = buildMockKms();
+    await expect(
+      runSigningKeysAdd(cp, orgId, {
+        provider: "aws-kms",
+        alias: "h",
+        algorithm: "hybrid",
+        keyId: "arn",
+        awsKmsClient: client,
+        actor: "test",
+      }),
+    ).rejects.toThrow(/pq-key-id.*pq-fallback/);
+  });
+
+  it("end-to-end: hybrid-aws-kms key signs (via HybridProvider composition) and verifies through runSigningVerify", async () => {
+    const { client, privateKey } = buildMockKms();
+    const arn = "arn:aws:kms:us-east-1:1234:key/abc";
+    const added = await runSigningKeysAdd(cp, orgId, {
+      provider: "aws-kms",
+      alias: "e2e",
+      algorithm: "hybrid",
+      keyId: arn,
+      pqFallback: "local",
+      keysDir: tmp,
+      awsKmsClient: client,
+      actor: "test",
+    });
+
+    // Reconstruct the HybridProvider with the same mocked KMS client
+    // + LocalDiskProvider against the keysDir where the PQ half was
+    // written.
+    const { AwsKmsProvider } = await import(
+      "../control-plane/signing/index.js"
+    );
+    const { HybridProvider } = await import(
+      "../control-plane/signing/index.js"
+    );
+    const { LocalDiskProvider: Lp } = await import(
+      "../control-plane/signing/index.js"
+    );
+    const aws = new AwsKmsProvider({
+      region: "us-east-1",
+      credentials: { access_key_id: "k", secret_access_key: "s" },
+      client,
+    });
+    const lp = new Lp({ keysDir: tmp });
+    const hybrid = new HybridProvider({
+      classical: aws,
+      pq: lp,
+      classicalKeyId: arn,
+      pqKeyId: "e2e-mldsa65",
+    });
+    const payload = new TextEncoder().encode("release manifest hybrid");
+    const env = await hybrid.sign({
+      keyId: "ignored",
+      payload,
+      nonce: freshNonce(),
+      requestedAt: new Date().toISOString(),
+      purpose: "test.hybrid-aws-kms.e2e",
+      actor: { kind: "service", cn: "test", orgId },
+    });
+    expect(env.signatures.length).toBe(2);
+
+    // Verify through the catalog-driven runSigningVerify — proves
+    // that hybrid AWS-KMS envelopes verify the same way LocalDisk
+    // hybrid envelopes do, with no AWS access on the verify side.
+    const result = await runSigningVerify(cp, orgId, {
+      envelope: env,
+      payload,
+      mode: "strict",
+    });
+    expect(result.ok).toBe(true);
+    expect(result.matchedKeys.length).toBe(2);
+    void added;
+    void privateKey;
   });
 });

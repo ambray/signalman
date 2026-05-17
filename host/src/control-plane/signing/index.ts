@@ -63,3 +63,6 @@ export type {
   AwsKmsProviderOptions,
   KmsClientLike,
 } from "./providers/aws-kms.js";
+
+export { HybridProvider } from "./providers/hybrid.js";
+export type { HybridProviderOptions } from "./providers/hybrid.js";

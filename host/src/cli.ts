@@ -5112,12 +5112,23 @@ async function cmdSigningKeysAdd(args: ParsedArgs): Promise<number> {
   const label = args.options.get("label");
   const keysDir = args.options.get("keys-dir");
   const format = args.options.get("format");
+  const keyId = args.options.get("key-id");
+  // v0.5.1 hybrid-via-AWS-KMS options:
+  const pqKeyId = args.options.get("pq-key-id");
+  const pqFallbackRaw = args.options.get("pq-fallback");
+  if (pqFallbackRaw !== undefined && pqFallbackRaw !== "local") {
+    usageError(`--pq-fallback must be 'local' (got '${pqFallbackRaw}')`);
+  }
+  const pqFallback = pqFallbackRaw === "local" ? "local" : undefined;
   const result = await withControlPlane(async (cp) => {
     const { defaultOrg } = await cp.init();
     return runSigningKeysAdd(cp, defaultOrg.id, {
       provider,
       alias,
       algorithm,
+      keyId: keyId ?? undefined,
+      pqKeyId: pqKeyId ?? undefined,
+      pqFallback,
       label: label ?? undefined,
       keysDir: keysDir ?? undefined,
       actor: "cli:signing-keys-add",
