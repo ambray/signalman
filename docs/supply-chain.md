@@ -242,7 +242,7 @@ The audit log uses canonical action codes namespaced by entity:
 | `cloud_creds.*` | cloud credentials | `cloud_creds.set`, `cloud_creds.removed` |
 | `cloud_budget.*` | cloud budgets | `cloud_budget.set`, `cloud_budget.exceeded` |
 | `cloud_usage.*` | cloud usage | `cloud_usage.recorded`, `cloud_usage.terminated` |
-| Registry `upload` / `proxy_cache` / `manifest_create` / `security_scan_*` | registry artifacts | (see registry section above) |
+| Registry `upload` / `proxy_cache` / `manifest_create` / `delete` / `security_scan_*` | registry artifacts | WS10 adds `delete` (blob + manifest DELETE handlers, chunked-upload reaper). The OCI manifest PUT emits `upload` + a second `manifest_create` row when the PUT installs a tag pointer (so tag-rotation history is reconstructable from the audit log). |
 
 Every audit row carries `actor` (CLI label, service identity, or
 bearer-token prefix), `entity_type`, `entity_id`, and an optional
@@ -284,9 +284,15 @@ The long-term vision is **signalman becomes its own CI/CD substrate**:
 
 The cargo + npm facades (v0.1.1) close the half of the loop most
 operators reach for first (signalman publishes itself). OCI
-(v0.1.2) closes the container side. Security integration (v0.1.3)
-plugs the scanner adapters in. See `registry/ROADMAP.md` for the
-full forward roadmap.
+(v0.1.2 / v0.5 / WS10, **shipped 2026-05-17**) closes the container
+side: every `docker push` / `docker pull` / `cosign sign|verify`
+ride the same blob store, manifest catalog, audit log, and
+forensic / provenance API as cargo + npm. Pull-through against
+Docker Hub, GHCR, and ECR transparently mirrors public images;
+re-signing on cache write attaches the registry's Ed25519
+attestation to upstream bytes. Security integration (v0.1.3) plugs
+the scanner adapters in. See `registry/ROADMAP.md` for the full
+forward roadmap.
 
 ## Cross-references
 
