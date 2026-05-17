@@ -1004,13 +1004,26 @@ export class LibvirtBackend implements HypervisorBackend {
   async deleteVM(handle: VMHandle): Promise<void> {
     const name = sanitizeVmName(handle.name);
     // Best-effort destroy first (no-op if shut off), then undefine
-    // with --remove-all-storage so backing disks vanish too.
+    // with the full cleanup-flag set so backing disks + snapshot
+    // metadata + checkpoint metadata + nvram all vanish together.
+    // Without --snapshots-metadata libvirt refuses to undefine
+    // domains that have any snapshots ("cannot delete inactive
+    // domain with N snapshots"), which surprised the 2026-05-16
+    // demo when `vm checkpoint` had been called.
     await this.exec(this.argv(["destroy", name]), {
       timeoutMs: VIRSH_LIFECYCLE_TIMEOUT_MS,
     });
-    const result = await this.run(["undefine", name, "--remove-all-storage"], {
-      timeoutMs: VIRSH_LIFECYCLE_TIMEOUT_MS,
-    });
+    const result = await this.run(
+      [
+        "undefine",
+        name,
+        "--remove-all-storage",
+        "--snapshots-metadata",
+        "--checkpoints-metadata",
+        "--nvram",
+      ],
+      { timeoutMs: VIRSH_LIFECYCLE_TIMEOUT_MS },
+    );
     if (result.exitCode !== 0) {
       throw new LibvirtBackendError(
         "command_failed",

@@ -1,7 +1,7 @@
 ---
 name: signalman-create-libvirt-vm
 description: 'Create a new libvirt/KVM VM on a local Linux host via signalman_vm_create. Trigger when the user says "spin up a KVM VM", "create a libvirt domain", "provision a local VM on this Linux box", or any variant of "create a VM" on a host where the libvirt backend is selected. The skill handles libvirt-specific prerequisites (storage pool + template YAML) before invoking the tool. v0.5: backend produces a libvirt-managed qcow2 backing-file volume (vol-create-as) so vm_delete cleans up properly. Cloud VMs use signalman-provision-cloud-vm instead.'
-allowed-tools: mcp__signalman__signalman_vm_create, mcp__signalman__signalman_vm_list, mcp__signalman__signalman_vm_delete, Bash
+allowed-tools: mcp__signalman__signalman_advanced_vm_create, mcp__signalman__signalman_advanced_vm_list, mcp__signalman__signalman_advanced_vm_delete, Bash
 ---
 
 # Create a libvirt/KVM VM

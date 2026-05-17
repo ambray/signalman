@@ -398,14 +398,22 @@ describe("LibvirtBackend argv composition", () => {
     expect(c2[0].args).toEqual(["destroy", "vm-alpha"]);
   });
 
-  it("deleteVM destroys first (best effort) then undefines with --remove-all-storage", async () => {
+  it("deleteVM destroys first (best effort) then undefines with the full cleanup-flag set", async () => {
     const { backend, calls } = makeBackend({});
     await backend.deleteVM(HANDLE);
     expect(calls[0].args).toEqual(["destroy", "vm-alpha"]);
+    // The full flag set covers: disk volume (--remove-all-storage),
+    // snapshot metadata (--snapshots-metadata, required to undefine
+    // domains with any snapshots), checkpoint metadata
+    // (--checkpoints-metadata), and the nvram file (--nvram for
+    // UEFI domains).
     expect(calls[1].args).toEqual([
       "undefine",
       "vm-alpha",
       "--remove-all-storage",
+      "--snapshots-metadata",
+      "--checkpoints-metadata",
+      "--nvram",
     ]);
   });
 
