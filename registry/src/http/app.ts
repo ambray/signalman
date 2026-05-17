@@ -431,6 +431,12 @@ export function buildApp(opts: AppOptions): Router {
       ...(opts.ociCatalogMaxPageSize !== undefined
         ? { catalogMaxPageSize: opts.ociCatalogMaxPageSize }
         : {}),
+      ...(opts.virtualUpstreamFetch
+        ? { virtualUpstreamFetch: opts.virtualUpstreamFetch }
+        : {}),
+      ...(opts.virtualResignPrivateKeyPem
+        ? { virtualResignPrivateKeyPem: opts.virtualResignPrivateKeyPem }
+        : {}),
       ...(opts.ociNow ? { now: opts.ociNow } : {}),
     });
   }

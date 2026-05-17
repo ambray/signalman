@@ -96,6 +96,31 @@ export {
 } from "./jwt.js";
 
 export {
+  proxyOciManifest,
+  proxyOciBlob,
+  type VirtualOciOptions,
+  type ProxiedManifest,
+  type ProxiedBlob,
+} from "./virtual.js";
+
+export {
+  createUpstreamAuthAdapter,
+  dockerHubAuthAdapter,
+  ghcrAuthAdapter,
+  ecrAuthAdapter,
+  type UpstreamAuthAdapter,
+  type UpstreamAuthorizationScope,
+  type UpstreamAuthHeader,
+  type UpstreamFlavor,
+  type DockerHubAdapterOptions,
+  type GhcrAdapterOptions,
+  type EcrAdapterOptions,
+  type AdapterFactoryOptions,
+} from "./upstream-auth.js";
+
+export { signSigV4Request, type SignSigV4Options, type SignedRequest } from "./sigv4.js";
+
+export {
   mountOciRoutes,
   type MountOciOptions,
   type MountedOciHandles,

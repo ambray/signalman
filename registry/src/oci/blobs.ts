@@ -76,6 +76,16 @@ export interface MountOciBlobOptions {
   maxChunkBytes?: number;
   /** Injectable clock (tests). */
   now?: () => Date;
+  /**
+   * WS10 M5 — proxy fallback for GET on cache miss. Wired by
+   * `mount.ts` when a virtual-upstream is configured. Returns either
+   * the fetched bytes (already cached as side-effect) or null.
+   */
+  proxyBlob?: (
+    org: string,
+    repo: string,
+    digestHex: string,
+  ) => Promise<{ digestHex: string; body: Buffer; contentType: string } | null>;
 }
 
 const DEFAULT_MAX_CHUNK_BYTES = 5 * 1024 * 1024 * 1024; // 5 GiB
@@ -123,6 +133,7 @@ export function mountOciBlobRoutes(router: Router, opts: MountOciBlobOptions): v
   const maxChunkBytes = opts.maxChunkBytes ?? DEFAULT_MAX_CHUNK_BYTES;
   const now = opts.now ?? (() => new Date());
   const baseUrl = opts.publicBaseUrl ?? "";
+  const proxyBlob = opts.proxyBlob;
 
   // Order matters: register more-specific routes first. The router
   // walks `routes` in registration order and the first match wins.
@@ -365,7 +376,15 @@ export function mountOciBlobRoutes(router: Router, opts: MountOciBlobOptions): v
         // sha-keyed once cached.
         validateOciRepositoryName(ctx.params.name);
         const hex = validateOciDigest(ctx.params.digest);
-        const stat = await storage.statBlob(hex);
+        let stat = await storage.statBlob(hex);
+        // WS10 M5: proxy-through fallback on cache miss.
+        if (!stat && proxyBlob) {
+          const repo = parseRepositoryParam(ctx.params.name);
+          const proxied = await proxyBlob(repo.org, repo.repo, hex);
+          if (proxied) {
+            stat = await storage.statBlob(hex);
+          }
+        }
         if (!stat) {
           throw new OciError(
             OCI_ERROR_CODES.BLOB_UNKNOWN,
