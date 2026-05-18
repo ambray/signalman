@@ -10,6 +10,7 @@
  */
 
 import { execFile, execFileSync } from "node:child_process";
+import * as fs from "node:fs";
 import { promisify } from "node:util";
 import type {
   CheckpointHandle,
@@ -318,9 +319,41 @@ SELECT * FROM __InstanceModificationEvent WITHIN 1
     const safeName = escapePowerShellArg(sanitizeVmName(config.name));
     const safeSwitch = escapePowerShellArg(sanitizeLabel(switchName));
 
+    // ── extraCdroms (M2 Story 3) ──
+    // Each entry in config.extraCdroms must be an absolute path to an
+    // existing ISO on the host. We validate up front so the PowerShell
+    // invocation gets a clean argv and the operator sees a clear error
+    // before any Hyper-V state changes. M0 Q7 locked default
+    // (2026-05-17): add the ISO(s) as additional DVD drives via
+    // `Add-VMDvdDrive`, without reordering or replacing existing media.
+    const extraCdroms = config.extraCdroms ?? [];
+    const safeIsoPaths: string[] = [];
+    for (const isoPath of extraCdroms) {
+      if (typeof isoPath !== "string" || isoPath.length === 0) {
+        throw new Error(
+          `Hyper-V createVM: extraCdroms entries must be non-empty ` +
+            `strings (got ${typeof isoPath})`,
+        );
+      }
+      if (!fs.existsSync(isoPath)) {
+        throw new Error(
+          `Hyper-V createVM: extraCdroms ISO not found at '${isoPath}'. ` +
+            `Verify the path resolves on the host before re-running.`,
+        );
+      }
+      safeIsoPaths.push(escapePowerShellArg(sanitizePath(isoPath)));
+    }
+    const addDvdDriveLines = safeIsoPaths
+      .map(
+        (safePath) =>
+          `Add-VMDvdDrive -VMName '${safeName}' -Path '${safePath}'`,
+      )
+      .join("\n      ");
+
     const script = `
       $vm = New-VM -Name '${safeName}' -MemoryStartupBytes ${memMB}MB -Generation 2 -SwitchName '${safeSwitch}'
       Set-VMProcessor -VM $vm -Count ${cpus}
+      ${addDvdDriveLines}
       $vm | Select-Object Id, Name | ConvertTo-Json
     `;
 
