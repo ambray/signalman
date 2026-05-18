@@ -44,6 +44,10 @@ import {
   parseResolvedSnapshot,
 } from "./paths.js";
 import { classifyExtension } from "./guards.js";
+import {
+  parseArtifactMetadata,
+  parseSnapshotMetadata,
+} from "./maven-metadata.js";
 
 export interface VirtualMavenOptions {
   storage: RegistryStorage;
@@ -235,6 +239,300 @@ export async function proxyMavenArtifact(
     return true;
   }
   return false;
+}
+
+// ── Metadata pull-through (M2.1) ──────────────────────────────────
+
+/**
+ * Pull-through fetch for `maven-metadata.xml`. Two flavours:
+ *
+ *   - **Artifact-level** (baseVersion === null): fetches the
+ *     upstream's
+ *     `<groupPath>/<artifactId>/maven-metadata.xml` and parses out
+ *     `<versions>`. For each version it stubs a manifest row
+ *     (kind: 'maven', empty blobs, sentinel filename/extension)
+ *     keyed by the version itself. The read path's
+ *     `composeArtifactMetadataForName` aggregates these stubs into
+ *     the on-demand metadata response.
+ *
+ *   - **Snapshot version-level** (baseVersion provided): fetches
+ *     the upstream's
+ *     `<groupPath>/<artifactId>/<baseVersion>/maven-metadata.xml`
+ *     and parses the resolved-snapshot timestamp + per-extension
+ *     `<snapshotVersion>` entries. One stub row per snapshot
+ *     entry, key = `__stub__:<value>:<classifier>:<extension>` so
+ *     real per-file rows (`<artifactId>-<value>.<ext>`) don't
+ *     collide.
+ *
+ * Stub rows carry `mavenMetadata.baseVersion` so the read path can
+ * filter them just like real rows. They carry `filename: ''` and
+ * `extension: ''` as a sentinel — the per-file GET handler treats
+ * stub-only state as a cache miss and falls back to
+ * `proxyMavenArtifact` for lazy blob hydration.
+ *
+ * Returns true when the cache was populated; false when no
+ * upstream covered the request OR every configured upstream
+ * returned a 404 / failure.
+ */
+export async function proxyMavenMetadata(
+  opts: VirtualMavenOptions,
+  org: string,
+  groupId: string,
+  artifactId: string,
+  baseVersion: string | null,
+): Promise<boolean> {
+  const upstreams = opts.index.listVirtualUpstreams({ org, kind: "maven" });
+  if (upstreams.length === 0) return false;
+  const fetcher = opts.fetch ?? defaultFetch;
+  const actor = opts.proxyActor ?? "virtual-maven";
+
+  // Snapshot-version metadata: pull-through respects the
+  // per-upstream snapshot_policy gate.
+  if (baseVersion && isSnapshotVersion(baseVersion)) {
+    const snapAllowed = upstreams.some(
+      (u) => u.config.snapshot_policy === "accept",
+    );
+    if (!snapAllowed) return false;
+  }
+
+  for (const upstream of upstreams) {
+    const matchKey = `${groupId}:${artifactId}`;
+    if (!nameMatchesPatterns(matchKey, upstream.config)) continue;
+    const groupPath = groupId.replace(/\./g, "/");
+    const upstreamPath = baseVersion
+      ? `${trimTrailingSlash(upstream.upstreamUrl)}/${groupPath}/${artifactId}/${baseVersion}/maven-metadata.xml`
+      : `${trimTrailingSlash(upstream.upstreamUrl)}/${groupPath}/${artifactId}/maven-metadata.xml`;
+
+    let resp;
+    try {
+      resp = await fetcher(upstreamPath, {
+        method: "GET",
+        headers: {
+          accept: "application/xml,text/xml,*/*",
+          ...(upstream.config.auth_header_template
+            ? { authorization: upstream.config.auth_header_template }
+            : {}),
+        },
+      });
+    } catch (err) {
+      auditFailure(opts.index, upstream, actor, "metadata_fetch_error", {
+        url: upstreamPath,
+        groupId,
+        artifactId,
+        baseVersion,
+        error: (err as Error).message,
+      });
+      continue;
+    }
+    if (resp.status === 404) continue;
+    if (resp.status >= 400) {
+      auditFailure(opts.index, upstream, actor, "metadata_upstream_error", {
+        url: upstreamPath,
+        groupId,
+        artifactId,
+        baseVersion,
+        status: resp.status,
+      });
+      continue;
+    }
+
+    const xml = resp.body.toString("utf-8");
+    const storageName = mavenManifestName(org, groupId, artifactId);
+
+    if (baseVersion) {
+      let parsed;
+      try {
+        parsed = parseSnapshotMetadata(xml);
+      } catch (err) {
+        auditFailure(opts.index, upstream, actor, "metadata_parse_error", {
+          url: upstreamPath,
+          groupId,
+          artifactId,
+          baseVersion,
+          error: (err as Error).message,
+        });
+        continue;
+      }
+      const entries = parsed.versioning.snapshotVersions ?? [];
+      let stubbed = 0;
+      for (const sv of entries) {
+        const key = `__stub__:${sv.value}:${sv.classifier ?? ""}:${sv.extension}`;
+        const existing = opts.index.getManifest(storageName, key);
+        if (existing) continue;
+        const ts = parsed.versioning.snapshot.timestamp;
+        const buildNum = parsed.versioning.snapshot.buildNumber;
+        // Stub carries the REAL extension so the read path's
+        // composeSnapshotMetadataForBaseVersion includes it in
+        // <snapshotVersions>. `filename: ''` remains the "no blob
+        // yet" sentinel; per-file GETs by filename never match
+        // these stub keys.
+        const meta = {
+          groupId,
+          artifactId,
+          version: sv.value,
+          baseVersion,
+          filename: "",
+          extension: sv.extension,
+          ...(sv.classifier ? { classifier: sv.classifier } : {}),
+          isSnapshot: true,
+          ...(ts
+            ? { snapshot: { timestamp: ts, buildNumber: buildNum } }
+            : {}),
+        };
+        const manifest: Manifest = {
+          name: storageName,
+          version: key,
+          mediaType: "application/vnd.signalman.maven-metadata-stub.v1+json",
+          kind: "maven",
+          blobs: [],
+          mavenMetadata: meta,
+          createdAt: new Date().toISOString(),
+        };
+        const signed = maybeResign(manifest, upstream, opts, actor);
+        const provenance: Provenance = {
+          source: "proxy_cache",
+          upstreamUrl: upstream.upstreamUrl,
+          fetchedAt: manifest.createdAt,
+          fetchedBy: actor,
+        };
+        const canonical = canonicalManifestBytes(signed);
+        try {
+          opts.index.putManifest(signed, canonical, provenance);
+          stubbed++;
+        } catch (err) {
+          auditFailure(opts.index, upstream, actor, "metadata_store_error", {
+            groupId,
+            artifactId,
+            baseVersion,
+            key,
+            error: (err as Error).message,
+          });
+        }
+      }
+      opts.index.appendAuditEntry({
+        action: "proxy_cache",
+        entityType: "manifest",
+        entityId: `${storageName}@maven-metadata.xml:${baseVersion}`,
+        actor,
+        detail: {
+          kind: "maven",
+          phase: "snapshot_metadata_cached",
+          upstream_url: upstream.upstreamUrl,
+          upstream_id: upstream.id,
+          org,
+          groupId,
+          artifactId,
+          baseVersion,
+          stubbed_rows: stubbed,
+        },
+      });
+      return stubbed > 0;
+    }
+
+    // Artifact-level metadata.
+    let parsed;
+    try {
+      parsed = parseArtifactMetadata(xml);
+    } catch (err) {
+      auditFailure(opts.index, upstream, actor, "metadata_parse_error", {
+        url: upstreamPath,
+        groupId,
+        artifactId,
+        error: (err as Error).message,
+      });
+      continue;
+    }
+    let stubbed = 0;
+    for (const version of parsed.versioning.versions) {
+      // Stub key = the version itself. Real filenames begin with
+      // `<artifactId>-`; bare versions never collide with them.
+      const key = version;
+      const existing = opts.index.getManifest(storageName, key);
+      if (existing) continue;
+      const meta = {
+        groupId,
+        artifactId,
+        version,
+        baseVersion: version,
+        filename: "",
+        extension: "",
+        isSnapshot: isSnapshotVersion(version),
+      };
+      const manifest: Manifest = {
+        name: storageName,
+        version: key,
+        mediaType: "application/vnd.signalman.maven-metadata-stub.v1+json",
+        kind: "maven",
+        blobs: [],
+        mavenMetadata: meta,
+        createdAt: new Date().toISOString(),
+      };
+      const signed = maybeResign(manifest, upstream, opts, actor);
+      const provenance: Provenance = {
+        source: "proxy_cache",
+        upstreamUrl: upstream.upstreamUrl,
+        fetchedAt: manifest.createdAt,
+        fetchedBy: actor,
+      };
+      const canonical = canonicalManifestBytes(signed);
+      try {
+        opts.index.putManifest(signed, canonical, provenance);
+        stubbed++;
+      } catch (err) {
+        auditFailure(opts.index, upstream, actor, "metadata_store_error", {
+          groupId,
+          artifactId,
+          version,
+          error: (err as Error).message,
+        });
+      }
+    }
+    opts.index.appendAuditEntry({
+      action: "proxy_cache",
+      entityType: "manifest",
+      entityId: `${storageName}@maven-metadata.xml`,
+      actor,
+      detail: {
+        kind: "maven",
+        phase: "artifact_metadata_cached",
+        upstream_url: upstream.upstreamUrl,
+        upstream_id: upstream.id,
+        org,
+        groupId,
+        artifactId,
+        stubbed_rows: stubbed,
+        versions_seen: parsed.versioning.versions.length,
+      },
+    });
+    return stubbed > 0;
+  }
+  return false;
+}
+
+function maybeResign(
+  manifest: Manifest,
+  upstream: VirtualUpstream,
+  opts: VirtualMavenOptions,
+  actor: string,
+): Manifest {
+  if (!(upstream.config.resign_on_cache && opts.signingPrivateKeyPem)) {
+    return manifest;
+  }
+  try {
+    const sig = signManifest(manifest, opts.signingPrivateKeyPem);
+    return {
+      ...manifest,
+      signature: { signatureB64: sig.signatureB64, signedBy: sig.signedBy },
+    };
+  } catch (err) {
+    auditFailure(opts.index, upstream, actor, "resign_error", {
+      groupId: manifest.mavenMetadata?.groupId,
+      artifactId: manifest.mavenMetadata?.artifactId,
+      version: manifest.mavenMetadata?.version,
+      error: (err as Error).message,
+    });
+    return manifest;
+  }
 }
 
 function deriveBaseVersionFromFilename(

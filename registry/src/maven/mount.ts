@@ -10,7 +10,7 @@ import type { RegistryStorage } from "../types.js";
 import type { UpstreamFetch } from "../cargo/index.js";
 import { mountMavenReadRoutes } from "./read.js";
 import { mountMavenPublishRoutes } from "./publish.js";
-import { proxyMavenArtifact } from "./virtual.js";
+import { proxyMavenArtifact, proxyMavenMetadata } from "./virtual.js";
 import type { MavenSnapshotPolicy } from "./types.js";
 
 export interface MountMavenOptions {
@@ -53,6 +53,7 @@ export function mountMavenRoutes(router: Router, opts: MountMavenOptions): void 
     storage: opts.storage,
     proxyArtifact: (org, groupId, artifactId, baseVersion, filename) =>
       proxyMavenArtifact(virtualOpts, org, groupId, artifactId, baseVersion, filename),
-    // Metadata pull-through is not implemented in M2 — see virtual.ts.
+    proxyMetadata: (org, groupId, artifactId, baseVersion) =>
+      proxyMavenMetadata(virtualOpts, org, groupId, artifactId, baseVersion),
   });
 }
