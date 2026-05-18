@@ -73,3 +73,8 @@ export {
   effectiveRevision,
   type ResolveHfFileOptions,
 } from "./resolve.js";
+
+export {
+  handleLfsBatch,
+  type LfsBatchHandlerOptions,
+} from "./lfs.js";
