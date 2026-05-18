@@ -130,6 +130,17 @@ export interface VmConfig {
    * integration service after restore/start. Defaults to true.
    */
   wait_for_heartbeat?: boolean;
+  /**
+   * Whether the orchestrator waits for the signalman-guest gRPC client
+   * to become reachable. Defaults to true (10-minute deadline).  Set
+   * false for scenarios that only use `vm_run_command` / `vm_copy_file`
+   * via PowerShell Direct and don't need the gRPC channel.
+   *
+   * Added 2026-05-18 as a UX fix: pre-fix every scenario blocked here
+   * for up to 10 minutes when SignalmanGuest was crashed on the VM,
+   * even when the scenario wouldn't have used it.
+   */
+  wait_for_guest_agent?: boolean;
   guest_agent_port: number;
   network?: {
     switch: string;

@@ -157,6 +157,25 @@ export const vmConfigSchema = z
      * require guest agent readiness.
      */
     wait_for_heartbeat: z.boolean().default(true),
+    /**
+     * Whether the orchestrator should wait for the **signalman-guest**
+     * gRPC client to become reachable before running scenario steps.
+     * Defaults to `true` (existing behaviour: 10-minute deadline; throws
+     * if the guest agent never comes up).
+     *
+     * Set `false` for scenarios that use only `vm_run_command` and
+     * `vm_copy_file` (both of which go through PowerShell Direct,
+     * `Invoke-Command -VMName`, and do NOT need the guest-agent gRPC
+     * channel).  Without this flag, those scenarios block for 10
+     * minutes when SignalmanGuest is stopped or crashed on the VM —
+     * even though they wouldn't have used it anyway.
+     *
+     * Steps that DO need the guest agent (e.g. `vm_ui_*`,
+     * `vm_browser_*`, the `vm_copy_file` host_to_guest path when
+     * `pre_started: true` per the chunked-base64 path) will fail
+     * fast with a clear error if invoked while this flag is false.
+     */
+    wait_for_guest_agent: z.boolean().default(true),
     guest_agent_port: z
       .number()
       .int()

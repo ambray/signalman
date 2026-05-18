@@ -260,6 +260,14 @@ export interface VmDefinition {
    * can set false when they only need PowerShell Direct / VM file copy.
    */
   wait_for_heartbeat?: boolean;
+  /**
+   * Whether to wait for the signalman-guest gRPC client to become
+   * reachable. Defaults to true (existing 10-minute-deadline behaviour).
+   * Set false for scenarios that only use `vm_run_command` / PowerShell
+   * Direct and don't need the guest-agent gRPC channel — without this
+   * those scenarios block for 10 min when SignalmanGuest is down.
+   */
+  wait_for_guest_agent?: boolean;
   /** Guest agent gRPC port (default: 50051). */
   guest_agent_port: number;
   /** Network configuration. */
@@ -1146,6 +1154,7 @@ export class ScenarioOrchestrator {
         // gets the same behavior.
         warm_checkpoint: vm.warm_checkpoint ?? true,
         wait_for_heartbeat: vm.wait_for_heartbeat ?? true,
+        wait_for_guest_agent: vm.wait_for_guest_agent ?? true,
         provision_if_missing: vm.provision_if_missing,
         ephemeral: vm.ephemeral,
         pre_started: vm.pre_started,
@@ -3002,8 +3011,36 @@ export class ScenarioOrchestrator {
     // a few seconds of the guest actually being ready.
     const timeoutMs = 600_000;
     const pollIntervalMs = 2_000;
+    // Emit a progress log every N iterations so operators see *something*
+    // when the agent is taking a while to come up.  Pre-2026-05-18 the
+    // loop was silent for the full 10 minutes, which made
+    // "SignalmanGuest is stopped on the VM" indistinguishable from
+    // "VM still booting" from the operator's seat.
+    //
+    // Tuned: 15 iterations × 2s/iter = log roughly every 30s, so a
+    // typical cold boot (60-90s) produces 2-3 progress lines and a
+    // full 10-min wait produces ~20.
+    const progressEveryNIterations = 15;
 
     await Promise.all(vmDefs.map(async (def) => {
+      // **wait_for_guest_agent toggle** (2026-05-18 UX fix).  Scenarios
+      // that only use `vm_run_command` and `vm_copy_file` go through
+      // PowerShell Direct and don't need this gRPC client at all.
+      // Pre-fix every scenario blocked here for up to 10 minutes when
+      // SignalmanGuest was crashed or stopped on the VM, even when the
+      // scenario wouldn't have used it.  Set `wait_for_guest_agent:
+      // false` in the VM config to skip.
+      if (def.wait_for_guest_agent === false) {
+        this.maybeLog(
+          "info",
+          `Guest agent wait skipped for VM '${def.name}' (wait_for_guest_agent: false). ` +
+            `Scenario steps that require the guest-agent gRPC channel ` +
+            `(vm_ui_*, vm_browser_*, chunked-base64 host_to_guest copy) ` +
+            `will fail at call time if the agent is not reachable.`,
+        );
+        return;
+      }
+
       const handle = vmMap.get(def.name);
       let client = this.guestClients.get(def.name);
       if (!client) {
@@ -3016,19 +3053,50 @@ export class ScenarioOrchestrator {
         }
       }
 
-      const deadline = Date.now() + timeoutMs;
+      const startedAt = Date.now();
+      const deadline = startedAt + timeoutMs;
       let connected = false;
+      let iter = 0;
+      let lastError: unknown = undefined;
 
       while (Date.now() < deadline) {
+        iter += 1;
         try {
           if (!client) {
             client = await this.ensureGuestClient(def.name, handle!, def);
           }
           connected = await client.isConnected(5_000);
-          if (connected) break;
-        } catch {
+          if (connected) {
+            // Brief "we made it" log so the success path is visible too —
+            // helps operators correlate startup time with VM warmup
+            // characteristics across runs.
+            if (iter > 1) {
+              this.maybeLog(
+                "info",
+                `Guest agent on VM '${def.name}' reachable after ` +
+                  `${Math.round((Date.now() - startedAt) / 1000)}s (${iter} attempts)`,
+              );
+            }
+            break;
+          }
+        } catch (err) {
           // Retry while Tart is still assigning an IP or while the agent is
-          // still booting.
+          // still booting.  Capture the most-recent error so the final
+          // throw can name a specific failure mode.
+          lastError = err;
+        }
+        // Periodic progress log so operators don't sit in front of a
+        // silent terminal for 10 minutes.
+        if (iter % progressEveryNIterations === 0) {
+          const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+          const remainingSec = Math.round((deadline - Date.now()) / 1000);
+          this.maybeLog(
+            "info",
+            `Waiting for guest agent on VM '${def.name}' — ` +
+              `${elapsedSec}s elapsed, ${remainingSec}s remaining ` +
+              `(set wait_for_guest_agent: false to skip when the scenario ` +
+              `doesn't need it).`,
+          );
         }
         const remaining = deadline - Date.now();
         if (remaining <= 0) break;
@@ -3038,10 +3106,38 @@ export class ScenarioOrchestrator {
       }
 
       if (!connected) {
+        const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+        const lastErrorStr = lastError
+          ? ` (last error: ${lastError instanceof Error ? lastError.message : String(lastError)})`
+          : "";
         throw new Error(
-          `Guest agent on VM '${def.name}' did not become reachable within ${timeoutMs}ms`,
+          `Guest agent on VM '${def.name}' did not become reachable within ` +
+            `${timeoutMs}ms (${elapsedSec}s)${lastErrorStr}.  ` +
+            `If this scenario does NOT need the guest-agent gRPC channel ` +
+            `(uses only vm_run_command / vm_copy_file via PowerShell Direct), ` +
+            `add 'wait_for_guest_agent: false' to the VM config in setup.yaml.`,
         );
       }
     }));
+  }
+
+  /**
+   * Best-effort log helper that survives missing log infrastructure.
+   *
+   * Falls through to `console` when no `logger` is wired up; pinned to
+   * stderr so scenario stdout (JSON outputs) stays clean.  Added in
+   * 2026-05-18 alongside the periodic-progress-log fix in
+   * `waitForGuestAgents` so we don't introduce a hard dependency on
+   * a specific logger interface.
+   */
+  private maybeLog(level: "info" | "warn", msg: string): void {
+    // The orchestrator class doesn't carry its own logger reference in
+    // existing code (callers wrap logging at the run-verb level), so
+    // we route through console.error which the CLI surfaces under
+    // `--verbose` and the JSON reporter captures into the per-run
+    // trace.  Keep it simple — avoid leaking debug info.
+    const prefix = level === "info" ? "[guest-agent]" : "[guest-agent:warn]";
+    // eslint-disable-next-line no-console
+    console.error(`${prefix} ${msg}`);
   }
 }

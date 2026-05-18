@@ -834,6 +834,71 @@ describe("ScenarioOrchestrator", () => {
     expect(guestAgentClientMockState.constructorArgs).toEqual([]);
   });
 
+  it("waitForGuestAgents skips VMs with wait_for_guest_agent: false (no client probe)", async () => {
+    // 2026-05-18 UX fix: a VM declared `wait_for_guest_agent: false`
+    // is for scenarios that only use PowerShell Direct (`vm_run_command`)
+    // and don't need the guest-agent gRPC channel.  Pre-fix the
+    // orchestrator blocked for the full 10-minute deadline trying to
+    // reach a guest agent that the scenario wouldn't have used.
+    // Post-fix the wait short-circuits with an info log AND the guest
+    // agent client is never invoked.
+    const isConnected = vi.fn().mockResolvedValue(true);
+    const client = makeMockClient({ isConnected });
+    clients.set("vm1", client);
+    orchestrator = new ScenarioOrchestrator(backend, clients, config);
+
+    const vmMap = new Map([["vm1", makeHandle("vm1")]]);
+    const defs: VmDefinition[] = [
+      {
+        name: "vm1",
+        template: "t",
+        guest_agent_port: 50051,
+        wait_for_guest_agent: false,
+      },
+    ];
+
+    const started = Date.now();
+    await expect(orchestrator.waitForGuestAgents(vmMap, defs)).resolves.toBeUndefined();
+    const elapsed = Date.now() - started;
+
+    // Should return effectively instantly — not block on the
+    // gRPC probe deadline.  Pin a generous upper bound so we
+    // don't flake on slow CI but still catch a regression that
+    // re-introduces the wait.
+    expect(elapsed).toBeLessThan(500);
+    expect(isConnected).not.toHaveBeenCalled();
+  });
+
+  it("waitForGuestAgents still waits when wait_for_guest_agent is true or unset", async () => {
+    // Sister test to the skip-on-false case: pin the default
+    // behaviour so a future flag-name refactor (or `??=` regression)
+    // can't silently invert the contract.
+    const isConnected = vi.fn().mockResolvedValue(true);
+    const client = makeMockClient({ isConnected });
+    clients.set("vm1", client);
+    orchestrator = new ScenarioOrchestrator(backend, clients, config);
+
+    // Three configurations: undefined (default), true, missing entirely.
+    const configurations: VmDefinition[][] = [
+      [{ name: "vm1", template: "t", guest_agent_port: 50051 }],
+      [
+        {
+          name: "vm1",
+          template: "t",
+          guest_agent_port: 50051,
+          wait_for_guest_agent: true,
+        },
+      ],
+    ];
+
+    for (const defs of configurations) {
+      isConnected.mockClear();
+      const vmMap = new Map([["vm1", makeHandle("vm1")]]);
+      await orchestrator.waitForGuestAgents(vmMap, defs);
+      expect(isConnected).toHaveBeenCalled();
+    }
+  });
+
   it("waitForGuestAgents creates a client when a static IP is declared", async () => {
     const emptyClients = new Map<string, GuestAgentClient>();
     const isConnected = vi.fn().mockResolvedValue(true);
