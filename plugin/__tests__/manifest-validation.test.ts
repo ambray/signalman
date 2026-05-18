@@ -110,8 +110,65 @@ describe("plugin manifest — Story 1 scaffold shape", () => {
   });
 });
 
-// ── Stories 2–5: populated in subsequent commits ────────────────────
-// (skills/, commands/, permissions, README locked-decisions)
+// ── Story 2: skill index for the MVP 6 ──────────────────────────────
+// Per design doc §Stories §Story 2: the manifest does NOT list each
+// skill (the Claude Code plugin spec auto-discovers default
+// `skills/<name>/SKILL.md`). Instead, `plugin/skills/` contains six
+// symlinks to the repo-root `skills/<name>/` directories (Q3 lock).
+// These tests assert all six exist and resolve to a real SKILL.md.
+const MVP_SKILLS = [
+  "signalman-build-from-tag",
+  "signalman-deploy-to-test",
+  "signalman-rollback",
+  "signalman-promote-release",
+  "signalman-query-audit-log",
+  "signalman-register-target",
+] as const;
+
+describe("plugin skill index — Story 2", () => {
+  it("plugin/skills/ directory exists", () => {
+    const skillsDir = join(PLUGIN_ROOT, "skills");
+    expect(existsSync(skillsDir)).toBe(true);
+    expect(statSync(skillsDir).isDirectory()).toBe(true);
+  });
+
+  it("registers exactly the 6 MVP skills (no more, no less)", () => {
+    const skillsDir = join(PLUGIN_ROOT, "skills");
+    const entries = readdirSync(skillsDir).filter((e) => !e.startsWith("."));
+    expect(entries.sort()).toEqual([...MVP_SKILLS].sort());
+  });
+
+  for (const skill of MVP_SKILLS) {
+    it(`skill ${skill} resolves to a real SKILL.md`, () => {
+      const skillMd = join(PLUGIN_ROOT, "skills", skill, "SKILL.md");
+      expect(existsSync(skillMd)).toBe(true);
+      expect(statSync(skillMd).isFile()).toBe(true);
+    });
+
+    it(`skill ${skill} has a non-trivial SKILL.md (frontmatter + body)`, () => {
+      const skillMd = join(PLUGIN_ROOT, "skills", skill, "SKILL.md");
+      const content = readFileSync(skillMd, "utf8");
+      // Anthropic SKILL.md convention: YAML frontmatter `---` + body.
+      expect(content.startsWith("---")).toBe(true);
+      expect(content.length).toBeGreaterThan(100);
+    });
+  }
+
+  it("the canonical repo-root skills tree contains all 6 entries", () => {
+    // Defence-in-depth: the symlinks in plugin/skills/ point to
+    // ../../skills/<name>. If the canonical tree drifts (e.g. a skill
+    // is renamed at repo root), this assertion fails before the
+    // symlink-resolution assertions above produce a misleading "skill
+    // missing" diagnostic.
+    for (const skill of MVP_SKILLS) {
+      const canonicalPath = join(REPO_ROOT, "skills", skill, "SKILL.md");
+      expect(existsSync(canonicalPath)).toBe(true);
+    }
+  });
+});
+
+// ── Stories 3–5: populated in subsequent commits ────────────────────
+// (commands/, permissions, README locked-decisions)
 // See docs/design/v0.5-claude-plugin.md §Stories.
 
 // Helpers used by later stories are exported via module side-effects;
