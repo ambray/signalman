@@ -30,6 +30,10 @@ import { createDefaultExecutor } from "./verbs/default-executor.js";
 import { provisionVM } from "./provisioning/provision.js";
 import { cleanupVM } from "./provisioning/cleanup.js";
 import {
+  bootstrapWin11,
+  BootstrapWin11Error,
+} from "./provisioning/bootstrap-win11.js";
+import {
   reapOrphanedEphemeralResources,
   DEFAULT_MIN_AGE_MS,
 } from "./provisioning/ephemeral-reaper.js";
@@ -673,8 +677,8 @@ async function cmdVm(args: ParsedArgs): Promise<number> {
   const sub = args.positional.shift();
   if (!sub) {
     usageError(
-      "vm requires a subcommand (e.g. start, stop, status, fetch-template, provision, cleanup, install-bundle, " +
-        "delete, pause, resume, wait-heartbeat, set-memory, set-processor, checkpoint, list-checkpoints, " +
+      "vm requires a subcommand (e.g. start, stop, status, fetch-template, provision, bootstrap-win11, cleanup, install-bundle, " +
+        "delete, pause, resume, wait-heartbeat, set-memory, set-processor, set-firmware, checkpoint, list-checkpoints, " +
         "restore, delete-checkpoint)",
     );
   }
@@ -716,6 +720,8 @@ async function cmdVm(args: ParsedArgs): Promise<number> {
       return await cmdVmSetProcessor(args);
     case "set-firmware":
       return await cmdVmSetFirmware(args);
+    case "bootstrap-win11":
+      return await cmdVmBootstrapWin11(args);
     case "checkpoint":
       return await cmdVmCheckpoint(args);
     case "list-checkpoints":
@@ -1077,6 +1083,116 @@ async function cmdVmSetFirmware(args: ParsedArgs): Promise<number> {
     return 0;
   } catch (err) {
     console.error(`signalman vm set-firmware: ${(err as Error).message}`);
+    return 4;
+  }
+}
+
+// ── vm bootstrap-win11 (v0.5 Win11 demo deploy, M1) ────────────────
+//
+// `signalman vm bootstrap-win11 <name> [--template <path-or-name>]
+//   [--msi <path>] [--cert <path>] [--cleanup-on-failure] [--force]
+//   [--checkpoint <label>] [--format json]`
+//
+// 12-step pipeline (template -> firmware-off -> boot -> certs ->
+// testsigning -> reboot -> verify -> MSI -> checkpoint). Idempotent
+// per-phase via the state journal at
+// `.signalman/state/bootstrap-win11/<name>.json`.
+//
+// Q2 locked default: pre-signed MSI only in M1. WS9 inline signing
+// is deferred to v0.6.
+//
+// Exit codes:
+//   0 — success (or already-bootstrapped no-op)
+//   3 — pipeline setup / template / MSI resolution error
+//   4 — infra error (backend rejected an op, VM not found, etc.)
+//   64 — usage error (missing positional, conflicting flags)
+async function cmdVmBootstrapWin11(args: ParsedArgs): Promise<number> {
+  const name = args.positional[0];
+  if (!name) usageError("vm bootstrap-win11 requires <name>");
+  const format = args.options.get("format");
+
+  // Flag validation. The argv parser only recognises a few hard-coded
+  // boolean flags; for the rest we tolerate the options.get() path. We
+  // surface explicit errors for any combination we know to be a
+  // foot-gun.
+  const templateName = args.options.get("template");
+  const msiPath = args.options.get("msi");
+  const msiFromBuild = args.options.get("msi-from-build");
+  const certPath = args.options.get("cert") ?? process.env.SIGNALMAN_TEST_SIGNING_CERT;
+  const checkpointLabel = args.options.get("checkpoint");
+  const bindAddr = args.options.get("bind-addr");
+  const authToken = args.options.get("auth-token");
+
+  // `--msi-from-build` is reserved for v0.6 (see Q2 locked default).
+  // Surface a structured usage error if the operator passes it today
+  // so they don't silently get pre-signed-only behavior.
+  if (msiFromBuild !== undefined) {
+    usageError(
+      "vm bootstrap-win11: --msi-from-build is deferred to v0.6 (WS9 inline signing). " +
+        "Pass --msi <path-to-pre-signed.msi> in M1.",
+    );
+  }
+
+  const backend = await getCliBackend();
+  try {
+    const result = await bootstrapWin11(backend, {
+      vmName: name,
+      templateName,
+      msiPath,
+      testSigningCertPath: certPath,
+      checkpointLabel,
+      force: args.flags.has("force"),
+      cleanupOnFailure: args.flags.has("cleanup-on-failure"),
+      bindAddr,
+      authToken,
+      onProgress: (e) => {
+        // Stream progress to stderr so --format json on stdout stays
+        // parseable. Phase events are the operator's main visibility
+        // into the pipeline's progression.
+        if (e.kind === "phase_start") {
+          process.stderr.write(`[bootstrap-win11:${e.phase}] ${e.message}\n`);
+        } else if (e.kind === "phase_complete") {
+          process.stderr.write(
+            `[bootstrap-win11:${e.phase}] complete${e.detail ? `: ${e.detail}` : ""}\n`,
+          );
+        } else if (e.kind === "phase_skip") {
+          process.stderr.write(`[bootstrap-win11:skip:${e.phase}] ${e.reason}\n`);
+        } else {
+          process.stderr.write(`[bootstrap-win11:warn] ${e.message}\n`);
+        }
+      },
+    });
+    if (format === "json") {
+      emitJson({
+        vmName: result.vmName,
+        checkpointLabel: result.checkpointLabel,
+        alreadyBootstrapped: result.alreadyBootstrapped,
+        durationMs: result.durationMs,
+        lastCompletedPhase: result.state.lastCompletedPhase ?? null,
+      });
+    } else {
+      const verb = result.alreadyBootstrapped ? "already bootstrapped" : "bootstrapped";
+      process.stdout.write(
+        `VM '${result.vmName}' ${verb} (checkpoint: '${result.checkpointLabel}', ${result.durationMs} ms)\n`,
+      );
+    }
+    return 0;
+  } catch (err) {
+    if (err instanceof BootstrapWin11Error) {
+      console.error(
+        `signalman vm bootstrap-win11: failed at phase '${err.phase}': ${err.message}`,
+      );
+      if (err.remediation.length > 0) {
+        console.error("");
+        console.error("Remediation:");
+        for (const r of err.remediation) console.error(`  - ${r}`);
+      }
+      // resolve_msi / resolve_template errors are pipeline setup
+      // problems (exit 3); the rest are infra (exit 4).
+      const setupPhases = ["resolve_template", "resolve_msi"];
+      return setupPhases.includes(err.phase) ? 3 : 4;
+    }
+    console.error(`signalman vm bootstrap-win11: ${(err as Error).message}`);
     return 4;
   }
 }
