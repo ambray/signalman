@@ -96,3 +96,8 @@ export {
   proxyHfLfsBatch,
   type VirtualHfOptions,
 } from "./virtual.js";
+
+export {
+  mountHfRoutes,
+  type MountHfOptions,
+} from "./mount.js";

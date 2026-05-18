@@ -43,6 +43,12 @@ export default defineConfig({
           branches: 80,
           statements: 80,
         },
+        "src/hf/**/*.ts": {
+          lines: 80,
+          functions: 80,
+          branches: 80,
+          statements: 80,
+        },
       },
       exclude: [
         "**/__tests__/**",

@@ -57,6 +57,7 @@ import { publicKeyPemFromPrivate } from "../oci/jwt.js";
 import { mountPypiRoutes } from "../pypi/index.js";
 import { mountMavenRoutes } from "../maven/index.js";
 import { mountNugetRoutes } from "../nuget/index.js";
+import { mountHfRoutes } from "../hf/mount.js";
 
 const VERSION = "0.0.1";
 const DEFAULT_BLOB_MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5 GiB
@@ -507,6 +508,28 @@ export function buildApp(opts: AppOptions): Router {
       ...(opts.blobMaxBytes !== undefined
         ? { maxBodyBytes: opts.blobMaxBytes }
         : {}),
+      ...(opts.publicBaseUrl ? { publicBaseUrl: opts.publicBaseUrl } : {}),
+      ...(opts.virtualUpstreamFetch
+        ? { virtualUpstreamFetch: opts.virtualUpstreamFetch }
+        : {}),
+      ...(opts.virtualResignPrivateKeyPem
+        ? { virtualResignPrivateKeyPem: opts.virtualResignPrivateKeyPem }
+        : {}),
+    });
+  }
+
+  // ── HuggingFace Hub facade (WS13 M4) ───────────────────────────
+  //
+  // Mounts the /hf/<org>/<repo>/* surface alongside cargo + npm +
+  // OCI + PyPI + Maven + NuGet. Reuses the virtualUpstreamFetch +
+  // virtualResignPrivateKeyPem knobs; HF shares the same operator-
+  // configured upstream table and re-sign key. Operator publish is
+  // the flattened-tarball path (Q3 lock — chunked upload deferred
+  // to M4.1); full git push is v0.7 stretch per the WS13 prompt.
+  if (idxStorage.index) {
+    mountHfRoutes(router, {
+      storage,
+      index: idxStorage.index,
       ...(opts.publicBaseUrl ? { publicBaseUrl: opts.publicBaseUrl } : {}),
       ...(opts.virtualUpstreamFetch
         ? { virtualUpstreamFetch: opts.virtualUpstreamFetch }
