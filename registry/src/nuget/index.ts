@@ -64,4 +64,18 @@ export {
   type MountNugetRegistrationOptions,
 } from "./registration.js";
 
-// Publish / virtual / mount land in chunk 3.
+export {
+  mountNugetPublishRoutes,
+  type MountNugetPublishOptions,
+} from "./publish.js";
+
+export {
+  proxyNugetNupkg,
+  proxyNugetVersionIndex,
+  type VirtualNugetOptions,
+} from "./virtual.js";
+
+export {
+  mountNugetRoutes,
+  type MountNugetOptions,
+} from "./mount.js";

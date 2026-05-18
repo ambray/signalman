@@ -56,6 +56,7 @@ import { mountOciRoutes, type MountedOciHandles } from "../oci/mount.js";
 import { publicKeyPemFromPrivate } from "../oci/jwt.js";
 import { mountPypiRoutes } from "../pypi/index.js";
 import { mountMavenRoutes } from "../maven/index.js";
+import { mountNugetRoutes } from "../nuget/index.js";
 
 const VERSION = "0.0.1";
 const DEFAULT_BLOB_MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5 GiB
@@ -482,6 +483,31 @@ export function buildApp(opts: AppOptions): Router {
       ...(opts.blobMaxBytes !== undefined
         ? { maxBodyBytes: opts.blobMaxBytes }
         : {}),
+      ...(opts.virtualUpstreamFetch
+        ? { virtualUpstreamFetch: opts.virtualUpstreamFetch }
+        : {}),
+      ...(opts.virtualResignPrivateKeyPem
+        ? { virtualResignPrivateKeyPem: opts.virtualResignPrivateKeyPem }
+        : {}),
+    });
+  }
+
+  // ── NuGet facade (WS13 M3) ─────────────────────────────────────
+  //
+  // Mounts the /nuget/<org>/* surface (v3 service-index +
+  // flat-container + registration + publish) alongside cargo + npm
+  // + OCI + PyPI + Maven. Reuses the virtualUpstreamFetch +
+  // virtualResignPrivateKeyPem knobs; NuGet shares the same operator-
+  // configured upstream table and re-sign key. v2 OData legacy is
+  // out of scope at v0.6 per the M0 gate.
+  if (idxStorage.index) {
+    mountNugetRoutes(router, {
+      storage,
+      index: idxStorage.index,
+      ...(opts.blobMaxBytes !== undefined
+        ? { maxBodyBytes: opts.blobMaxBytes }
+        : {}),
+      ...(opts.publicBaseUrl ? { publicBaseUrl: opts.publicBaseUrl } : {}),
       ...(opts.virtualUpstreamFetch
         ? { virtualUpstreamFetch: opts.virtualUpstreamFetch }
         : {}),
