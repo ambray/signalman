@@ -226,13 +226,13 @@ async function composeArtifactMetadataForName(
 ): Promise<string | null> {
   const rows = await storage.listManifestVersions(storageName);
   if (rows.length === 0) return null;
-  // Pull unique baseVersions from the row keys (`<baseVersion>/<filename>`).
+  // Pull unique baseVersions from each row's mavenMetadata projection.
   const baseVersions = new Set<string>();
   let lastUpdated = "";
   for (const r of rows) {
-    const slash = r.version.indexOf("/");
-    if (slash <= 0) continue;
-    baseVersions.add(r.version.slice(0, slash));
+    const manifest = await storage.getManifest(r.name, r.version);
+    if (!manifest || !manifest.mavenMetadata) continue;
+    baseVersions.add(manifest.mavenMetadata.baseVersion);
     if (r.createdAt > lastUpdated) lastUpdated = r.createdAt;
   }
   if (baseVersions.size === 0) return null;
@@ -262,9 +262,27 @@ async function composeSnapshotMetadataForBaseVersion(
     return null;
   }
   const rows = await storage.listManifestVersions(storageName);
-  // Filter to rows under this baseVersion.
-  const versionPrefix = `${baseVersion}/`;
-  const inScope = rows.filter((r) => r.version.startsWith(versionPrefix));
+  if (rows.length === 0) return null;
+  // Filter to rows under this baseVersion by loading each row's
+  // projection. (We can't infer baseVersion from the filename
+  // alone — release filenames like `demo-1.0.0.jar` have a
+  // baseVersion identical to the version, but snapshot filenames
+  // like `demo-1.0.0-20260517.120000-1.jar` need the row's
+  // mavenMetadata.baseVersion to recover the `<base>-SNAPSHOT`
+  // form.)
+  type RowWithManifest = {
+    name: string;
+    version: string;
+    createdAt: string;
+    manifest: Manifest;
+  };
+  const inScope: RowWithManifest[] = [];
+  for (const r of rows) {
+    const manifest = await storage.getManifest(r.name, r.version);
+    if (!manifest || !manifest.mavenMetadata) continue;
+    if (manifest.mavenMetadata.baseVersion !== baseVersion) continue;
+    inScope.push({ name: r.name, version: r.version, createdAt: r.createdAt, manifest });
+  }
   if (inScope.length === 0) return null;
   // Walk the metadata to find the highest resolved snapshot
   // (timestamp + buildNumber) and the per-extension snapshotVersions
@@ -279,8 +297,8 @@ async function composeSnapshotMetadataForBaseVersion(
     updated?: string;
   }> = new Map();
   for (const r of inScope) {
-    const manifest = await storage.getManifest(r.name, r.version);
-    if (!manifest || !manifest.mavenMetadata) continue;
+    const manifest = r.manifest;
+    if (!manifest.mavenMetadata) continue;
     const m = manifest.mavenMetadata;
     if (r.createdAt > lastUpdated) lastUpdated = r.createdAt;
     if (m.snapshot) {

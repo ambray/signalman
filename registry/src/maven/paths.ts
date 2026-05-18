@@ -478,9 +478,18 @@ export function parseMavenManifestName(
 
 /**
  * Compose the per-row manifest.version key.
- * `<baseVersion>/<filename>`. The slash inside the version string
- * is permitted by the manifest schema; this is the same trick the
- * cargo facade uses for `<crate>/<version>.crate`.
+ *
+ * Within a (groupId, artifactId) namespace, the filename uniquely
+ * identifies the file: `demo-1.0.0.jar` and `demo-1.0.0-sources.jar`
+ * are distinct rows, and snapshot rows embed the resolved
+ * timestamped version
+ * (`demo-1.0.0-20260517.120000-1.jar`) so concurrent snapshot
+ * publishes don't collide.
+ *
+ * Note: `baseVersion` is recorded on `mavenMetadata.baseVersion`
+ * (the row-side projection) for fast filter-by-baseVersion in the
+ * read path. We do NOT prepend it to the version key because the
+ * manifest schema forbids `/` in version strings.
  */
 export function mavenManifestVersion(baseVersion: string, filename: string): string {
   validateMavenVersion(baseVersion);
@@ -496,7 +505,7 @@ export function mavenManifestVersion(baseVersion: string, filename: string): str
       "filename must not contain '/'",
     );
   }
-  return `${baseVersion}/${filename}`;
+  return filename;
 }
 
 function truncate(s: unknown): string {

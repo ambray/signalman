@@ -40,6 +40,7 @@ import {
   type OciManifestMetadata,
   type Provenance,
   type PypiManifestMetadata,
+  type MavenManifestMetadata,
   validateManifestName,
   validateManifestVersion,
 } from "../types.js";
@@ -87,6 +88,8 @@ interface ManifestRow {
   oci_metadata_json: string | null;
   // WS13 M1 (v0.6 PyPI facade):
   pypi_metadata_json: string | null;
+  // WS13 M2 (v0.6 Maven facade):
+  maven_metadata_json: string | null;
 }
 
 interface BlobRow {
@@ -178,8 +181,8 @@ export class SqliteManifestIndex {
            name, version, media_type, blobs_json, annotations_json,
            signature_b64, signed_by, canonical_bytes, created_at,
            kind, provenance_json, cargo_metadata_json, npm_metadata_json,
-           oci_metadata_json, pypi_metadata_json
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           oci_metadata_json, pypi_metadata_json, maven_metadata_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.name,
@@ -197,6 +200,7 @@ export class SqliteManifestIndex {
         input.npmMetadata ? JSON.stringify(input.npmMetadata) : null,
         input.ociMetadata ? JSON.stringify(input.ociMetadata) : null,
         input.pypiMetadata ? JSON.stringify(input.pypiMetadata) : null,
+        input.mavenMetadata ? JSON.stringify(input.mavenMetadata) : null,
       );
     return {
       ...input,
@@ -634,7 +638,7 @@ export class SqliteManifestIndex {
         `SELECT name, version, media_type, blobs_json, annotations_json,
                 signature_b64, signed_by, canonical_bytes, created_at,
                 kind, provenance_json, cargo_metadata_json, npm_metadata_json,
-                oci_metadata_json, pypi_metadata_json
+                oci_metadata_json, pypi_metadata_json, maven_metadata_json
          FROM manifest
          WHERE name = ? AND version = ?`,
       )
@@ -666,6 +670,9 @@ function rowToManifest(row: ManifestRow): Manifest {
   const pypiMetadata: PypiManifestMetadata | undefined = row.pypi_metadata_json
     ? (JSON.parse(row.pypi_metadata_json) as PypiManifestMetadata)
     : undefined;
+  const mavenMetadata: MavenManifestMetadata | undefined = row.maven_metadata_json
+    ? (JSON.parse(row.maven_metadata_json) as MavenManifestMetadata)
+    : undefined;
   // WS6 wave-3 (M10): only surface `kind` when the row actually
   // recorded a non-default value, so v0.4.0 manifests round-trip
   // signature-compatible.
@@ -682,6 +689,7 @@ function rowToManifest(row: ManifestRow): Manifest {
     ...(npmMetadata ? { npmMetadata } : {}),
     ...(ociMetadata ? { ociMetadata } : {}),
     ...(pypiMetadata ? { pypiMetadata } : {}),
+    ...(mavenMetadata ? { mavenMetadata } : {}),
     createdAt: row.created_at,
   };
 }
