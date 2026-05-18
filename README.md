@@ -317,6 +317,19 @@ catalog talks to via a stable HTTP contract. Ships its own binary
 See `registry/README.md` for the package scope and
 `docs/supply-chain.md` for the bootstrap-from-signalman vision.
 
+### Claude Code plugin (`plugin/`) — v0.5.x (MVP v0.1.0)
+Conversational operator surface for the host MCP server. Packages the
+day-2 SRE skill set (build-from-tag, deploy-to-test, rollback, promote
+release, query audit log, register target) plus the `/signalman-status`
+slash command (synthesises recent releases, pending promotions,
+failing probes, stale runners, optional cloud budget into a ~10-line
+answer). Ships a permissions preset (`PERMISSIONS.md`) that auto-allows
+read-only verbs, prompts for state-changing ones, and denies key/cert
+operations. Install locally with `claude --plugin-dir ./plugin`. See
+`plugin/README.md` for install + `plugin/ROADMAP.md` for the v0.2.0
+(full 44-skill index + incident-responder subagent) and v1.0.0
+(open-core split) outlook.
+
 ## Quick Start
 
 > New operators: see [docs/bootstrap.md](docs/bootstrap.md) for the

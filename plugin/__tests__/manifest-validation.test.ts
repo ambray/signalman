@@ -384,8 +384,95 @@ describe("plugin permission preset — Story 4", () => {
 });
 
 // ── Story 5: README + locked decisions ──────────────────────────────
-// Populated in next commit. See docs/design/v0.5-claude-plugin.md
-// §Stories §Story 5.
+//
+// Per design doc §Stories §Story 5: plugin/README.md must document
+// install (marketplace + git-URL self-host), uninstall, what's
+// included (6 skills + slash command + MCP + permission preset),
+// version-compat matrix, and the 5 locked decisions inline (so
+// contributors don't re-litigate Q1-Q5).
+
+const README_PATH = join(PLUGIN_ROOT, "README.md");
+const TESTING_PATH = join(PLUGIN_ROOT, "TESTING.md");
+const REPO_README_PATH = join(REPO_ROOT, "README.md");
+
+function readReadme(): string {
+  return readFileSync(README_PATH, "utf8");
+}
+
+describe("plugin README — Story 5", () => {
+  it("README.md and TESTING.md both exist at plugin root", () => {
+    expect(existsSync(README_PATH)).toBe(true);
+    expect(existsSync(TESTING_PATH)).toBe(true);
+  });
+
+  it("README documents the install paths — both marketplace and git-URL self-host (Q1 lock)", () => {
+    const r = readReadme();
+    // Q1 lock: BOTH channels documented.
+    expect(r).toMatch(/--plugin-dir/);
+    expect(r).toMatch(/git\+https/);
+    // Marketplace channel acknowledged (even if listing TBD).
+    expect(r.toLowerCase()).toMatch(/marketplace/);
+  });
+
+  it("README documents uninstall", () => {
+    const r = readReadme();
+    expect(r.toLowerCase()).toMatch(/uninstall/);
+    expect(r).toMatch(/claude plugin uninstall/);
+  });
+
+  it("README lists all 6 MVP skills by name", () => {
+    const r = readReadme();
+    for (const skill of MVP_SKILLS) {
+      expect(r).toContain(skill);
+    }
+  });
+
+  it("README mentions the /signalman-status slash command", () => {
+    const r = readReadme();
+    expect(r).toContain("/signalman-status");
+  });
+
+  it("README mentions the MCP server registration", () => {
+    const r = readReadme();
+    expect(r.toLowerCase()).toMatch(/mcp/);
+  });
+
+  it("README documents the version-compat matrix (plugin <-> host)", () => {
+    const r = readReadme();
+    expect(r.toLowerCase()).toMatch(/version compat|version-compat|compatibility/);
+    // The matrix should at minimum mention host version.
+    expect(r).toMatch(/host/i);
+  });
+
+  it("README documents all 5 locked decisions inline (Q1-Q5)", () => {
+    const r = readReadme();
+    // The 5 locked decisions per docs/design/v0.5-claude-plugin.md
+    // §"Locked product questions (operator-authorised 2026-05-17)".
+    // Assert each lock's keyword phrase appears so the README stays
+    // authoritative if contributors edit the design doc.
+    expect(r.toLowerCase()).toMatch(/distribution channel|distribution.*both|marketplace.*git/);
+    expect(r.toLowerCase()).toMatch(/day-2|day.2.sre|sre.flavoring/);
+    expect(r.toLowerCase()).toMatch(/skill.location|repo.root|symlink/);
+    expect(r.toLowerCase()).toMatch(/telemetry/);
+    expect(r.toLowerCase()).toMatch(/subagent|incident.responder/);
+  });
+
+  it("README points at the ROADMAP for v0.2.0 + v1.0.0 outlook", () => {
+    const r = readReadme();
+    expect(r).toMatch(/ROADMAP/);
+  });
+
+  it("repo-root README.md cross-links to plugin/ per Story 5", () => {
+    expect(existsSync(REPO_README_PATH)).toBe(true);
+    const r = readFileSync(REPO_README_PATH, "utf8");
+    // Story 5 mandates a one-line addition. We require the literal
+    // path `plugin/` appears and the Claude-plugin context is
+    // mentioned (so a future cross-ref restructure can't silently
+    // drop the entry).
+    expect(r).toMatch(/plugin\//);
+    expect(r.toLowerCase()).toMatch(/claude code plugin|claude plugin/);
+  });
+});
 
 // Helpers used by later stories are exported via module side-effects;
 // re-import within each describe block as needed.
