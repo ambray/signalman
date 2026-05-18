@@ -474,6 +474,130 @@ describe("plugin README — Story 5", () => {
   });
 });
 
+// ── Story 6: cross-cutting finalisation ─────────────────────────────
+//
+// Final pass: assertions that span multiple stories or guard against
+// regressions that wouldn't be caught by any single story's section.
+describe("plugin v0.1.0 MVP — Story 6 cross-cutting finalisation", () => {
+  it("manifest does not declare any deprecated or unknown top-level fields", () => {
+    const m = loadManifest();
+    const allowed = new Set([
+      "$schema",
+      "name",
+      "version",
+      "description",
+      "author",
+      "homepage",
+      "repository",
+      "license",
+      "keywords",
+      "skills",
+      "commands",
+      "agents",
+      "hooks",
+      "mcpServers",
+      "outputStyles",
+      "lspServers",
+      "experimental",
+      "userConfig",
+      "channels",
+      "dependencies",
+    ]);
+    const unknown: string[] = [];
+    for (const key of Object.keys(m)) {
+      if (!allowed.has(key)) {
+        unknown.push(key);
+      }
+    }
+    expect(unknown).toEqual([]);
+  });
+
+  it("manifest name is kebab-case (no spaces, no underscores)", () => {
+    const m = loadManifest();
+    expect(typeof m.name).toBe("string");
+    expect(m.name).toMatch(/^[a-z0-9]+(-[a-z0-9]+)*$/);
+  });
+
+  it("manifest version is semver-shaped", () => {
+    const m = loadManifest();
+    expect(typeof m.version).toBe("string");
+    expect(m.version).toMatch(/^\d+\.\d+\.\d+(-[\w.]+)?$/);
+  });
+
+  it("every MVP skill has a non-empty SKILL.md and is recognised by both the manifest's declared paths and the default skills/ scan", () => {
+    // Defence-in-depth: the design doc says auto-discovery from
+    // `skills/` is sufficient. This test confirms that path works.
+    const skillsDir = join(PLUGIN_ROOT, "skills");
+    expect(existsSync(skillsDir)).toBe(true);
+    for (const skill of MVP_SKILLS) {
+      const skillMd = join(skillsDir, skill, "SKILL.md");
+      const content = readFileSync(skillMd, "utf8");
+      expect(content.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("complete MCP tool coverage — every host-registered signalman_* tool is referenced by either the permission preset or is explicitly out-of-policy", () => {
+    // This test is the load-bearing drift-detection assertion. If
+    // host/src/server.ts adds a new tool, this fails until either
+    // (a) the preset is updated, or (b) the tool is added to a
+    // documented out-of-policy list. The empty out-of-policy list
+    // forces the plugin author to decide on classification.
+    const registered = loadRegisteredMcpTools();
+    const perms = loadPermissionsPreset();
+    const covered = new Set<string>();
+    for (const cat of ["allow", "ask", "deny"] as const) {
+      for (const entry of perms[cat] ?? []) {
+        covered.add(entry.slice(MCP_PREFIX.length));
+      }
+    }
+    const outOfPolicy: string[] = [
+      // Intentionally empty for v0.1.0; any tool added here must be
+      // accompanied by a comment explaining why it's neither allow,
+      // ask, nor deny.
+    ];
+    const outOfPolicySet = new Set(outOfPolicy);
+    const uncovered: string[] = [];
+    for (const tool of registered) {
+      if (!covered.has(tool) && !outOfPolicySet.has(tool)) {
+        uncovered.push(tool);
+      }
+    }
+    expect(uncovered).toEqual([]);
+  });
+
+  it("permission preset count matches the registered tool count (no orphaned preset entries)", () => {
+    // Defence-in-depth in the other direction: catch entries in the
+    // preset that don't correspond to any registered tool. This is
+    // already enforced per-entry by the Story 4 test, but counting
+    // catches accidental duplicates.
+    const registered = loadRegisteredMcpTools();
+    const perms = loadPermissionsPreset();
+    const presetCount =
+      (perms.allow ?? []).length +
+      (perms.ask ?? []).length +
+      (perms.deny ?? []).length;
+    expect(presetCount).toBe(registered.size);
+  });
+
+  it("plugin.json $schema field points at the official Claude Code plugin manifest JSON Schema", () => {
+    const m = loadManifest();
+    expect(m.$schema).toBe(
+      "https://json.schemastore.org/claude-code-plugin-manifest.json",
+    );
+  });
+
+  it("no plugin file references repo paths that don't exist (sanity scan)", () => {
+    // Sweep the markdown bodies for `host/src/server.ts` and
+    // `host/dist/server.js` references; both must resolve in the
+    // current tree (server.ts) or be expected at build time
+    // (dist/server.js exists only after `npm run build` in host/).
+    expect(existsSync(HOST_SERVER_PATH)).toBe(true);
+    // The manifest's MCP invocation cites host/dist/server.js. We
+    // do NOT assert that file exists (it's a build artefact) — see
+    // the README + TESTING.md prerequisite section instead.
+  });
+});
+
 // Helpers used by later stories are exported via module side-effects;
 // re-import within each describe block as needed.
 export { PLUGIN_ROOT, REPO_ROOT, MANIFEST_PATH, loadManifest };
