@@ -89,3 +89,10 @@ export {
   parseUstarTar,
   type TarEntry,
 } from "./tar.js";
+
+export {
+  proxyHfRevision,
+  proxyHfResolve,
+  proxyHfLfsBatch,
+  type VirtualHfOptions,
+} from "./virtual.js";
