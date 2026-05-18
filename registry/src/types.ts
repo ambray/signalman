@@ -74,7 +74,7 @@ export interface ManifestSignature {
  * - `oci` — OCI image manifest. (Schema reserved; v0.4.1 in the
  *   WS5 ROADMAP.)
  */
-export type ManifestKind = "generic" | "cargo" | "npm" | "oci" | "pypi" | "maven" | "nuget";
+export type ManifestKind = "generic" | "cargo" | "npm" | "oci" | "pypi" | "maven" | "nuget" | "hf";
 
 /**
  * WS6 wave-3 carve-out #9 (M10): cargo-specific metadata.
@@ -372,6 +372,45 @@ export interface NugetManifestMetadata {
   listed?: boolean;
 }
 
+/**
+ * WS13 M4 (v0.6 HuggingFace facade): per-file row metadata. One
+ * manifest row per file in a revision under
+ * `name = 'hf/<org>/<repo>/<repo_type>'` keyed on
+ * `version = '<revision>/<path>'`. The revision pin makes the same
+ * path under different revisions distinct rows.
+ *
+ * For LFS-tracked files, `sha256` is the content sha (matching the
+ * LFS pointer's `oid sha256:<hex>`); `lfsOid` is the same value with
+ * the `sha256:` prefix preserved for round-tripping. For non-LFS
+ * files, the blob is served raw on `/resolve/<rev>/<path>`.
+ *
+ * The revision-level tree manifest lives in a sibling `hf_revision`
+ * SQLite table — see the M4 audit doc for the rationale (the first
+ * facade to introduce a non-`manifest` companion table).
+ */
+export interface HfManifestMetadata {
+  /** Lowercase org name (validated). */
+  org: string;
+  /** Repo name (validated). */
+  repo: string;
+  /** `'model'`, `'dataset'`, or `'space'`. */
+  repoType: "model" | "dataset" | "space";
+  /** Git SHA-1, tag, or branch name. */
+  revision: string;
+  /** In-repo relative path, POSIX-form (forward-slash), no `..` segments. */
+  path: string;
+  /** Whether the file is LFS-tracked. When true, `/resolve` returns the pointer file. */
+  lfs: boolean;
+  /** Lowercase hex sha256 (64 chars). For LFS files, this matches the LFS OID's hex. */
+  sha256: string;
+  /** Decoded file size in bytes (matches the bytes the blob layer stored). */
+  size: number;
+  /** Optional content-type hint; advisory. */
+  mimeType?: string;
+  /** When `lfs === true`, the canonical LFS OID `sha256:<hex>` (kept verbatim for clients that compare strings). */
+  lfsOid?: string;
+}
+
 export interface Manifest {
   /**
    * Manifest name. Lowercase alphanumeric plus `-`, `_`, `.`, `/`;
@@ -447,6 +486,12 @@ export interface Manifest {
    * projection powers the registration response.
    */
   nugetMetadata?: NugetManifestMetadata;
+  /**
+   * WS13 M4 (v0.6 HuggingFace facade): per-file metadata when
+   * `kind === 'hf'`. One row per file in a revision; the revision-
+   * level tree manifest lives in the sibling `hf_revision` table.
+   */
+  hfMetadata?: HfManifestMetadata;
   /** ISO-8601 UTC timestamp when the manifest was first written. */
   createdAt: string;
 }

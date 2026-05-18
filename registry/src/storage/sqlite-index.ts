@@ -42,6 +42,7 @@ import {
   type PypiManifestMetadata,
   type MavenManifestMetadata,
   type NugetManifestMetadata,
+  type HfManifestMetadata,
   validateManifestName,
   validateManifestVersion,
 } from "../types.js";
@@ -93,6 +94,8 @@ interface ManifestRow {
   maven_metadata_json: string | null;
   // WS13 M3 (v0.6 NuGet facade):
   nuget_metadata_json: string | null;
+  // WS13 M4 (v0.6 HuggingFace facade):
+  hf_metadata_json: string | null;
 }
 
 interface BlobRow {
@@ -185,8 +188,8 @@ export class SqliteManifestIndex {
            signature_b64, signed_by, canonical_bytes, created_at,
            kind, provenance_json, cargo_metadata_json, npm_metadata_json,
            oci_metadata_json, pypi_metadata_json, maven_metadata_json,
-           nuget_metadata_json
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           nuget_metadata_json, hf_metadata_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.name,
@@ -206,6 +209,7 @@ export class SqliteManifestIndex {
         input.pypiMetadata ? JSON.stringify(input.pypiMetadata) : null,
         input.mavenMetadata ? JSON.stringify(input.mavenMetadata) : null,
         input.nugetMetadata ? JSON.stringify(input.nugetMetadata) : null,
+        input.hfMetadata ? JSON.stringify(input.hfMetadata) : null,
       );
     return {
       ...input,
@@ -644,11 +648,173 @@ export class SqliteManifestIndex {
                 signature_b64, signed_by, canonical_bytes, created_at,
                 kind, provenance_json, cargo_metadata_json, npm_metadata_json,
                 oci_metadata_json, pypi_metadata_json, maven_metadata_json,
-                nuget_metadata_json
+                nuget_metadata_json, hf_metadata_json
          FROM manifest
          WHERE name = ? AND version = ?`,
       )
       .get(name, version) as ManifestRow | undefined;
+  }
+
+  // ── HF revision rows (WS13 M4) ────────────────────────────────
+
+  /**
+   * Insert (or no-op on identical re-insert of) a per-revision tree
+   * manifest. Throws `MANIFEST_EXISTS` when the (org, repo, repo_type,
+   * revision) tuple is already present with different files_json.
+   *
+   * The append-only semantic mirrors Maven release artifacts: a
+   * revision id is a commitment, not a label.
+   */
+  putHfRevision(input: HfRevisionInsert): HfRevisionRow {
+    const existing = this.getHfRevision(
+      input.org,
+      input.repo,
+      input.repoType,
+      input.revision,
+    );
+    const filesJson = JSON.stringify(input.files);
+    const createdAt = input.createdAt ?? this.now().toISOString();
+    if (existing) {
+      // Identical re-put is a no-op success. Different files_json or
+      // different root_tree_digest collides 409.
+      if (
+        existing.rootTreeDigest === input.rootTreeDigest &&
+        JSON.stringify(existing.files) === filesJson
+      ) {
+        return existing;
+      }
+      throw new RegistryError(
+        REGISTRY_ERROR_CODES.MANIFEST_EXISTS,
+        `hf revision ${input.org}/${input.repo}/${input.repoType}@${input.revision} already exists with different content`,
+      );
+    }
+    this.db
+      .prepare(
+        `INSERT INTO hf_revision
+           (org, repo, repo_type, revision, root_tree_digest, parent_revision,
+            files_json, provenance_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.org,
+        input.repo,
+        input.repoType,
+        input.revision,
+        input.rootTreeDigest,
+        input.parentRevision ?? null,
+        filesJson,
+        input.provenance ? JSON.stringify(input.provenance) : null,
+        createdAt,
+      );
+    return {
+      org: input.org,
+      repo: input.repo,
+      repoType: input.repoType,
+      revision: input.revision,
+      rootTreeDigest: input.rootTreeDigest,
+      ...(input.parentRevision ? { parentRevision: input.parentRevision } : {}),
+      files: input.files,
+      ...(input.provenance ? { provenance: input.provenance } : {}),
+      createdAt,
+    };
+  }
+
+  /**
+   * Fetch a per-revision row by composite key. Returns null when the
+   * row is unknown.
+   */
+  getHfRevision(
+    org: string,
+    repo: string,
+    repoType: HfRepoType,
+    revision: string,
+  ): HfRevisionRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT org, repo, repo_type, revision, root_tree_digest,
+                parent_revision, files_json, provenance_json, created_at
+         FROM hf_revision
+         WHERE org = ? AND repo = ? AND repo_type = ? AND revision = ?`,
+      )
+      .get(org, repo, repoType, revision) as HfRevisionDbRow | undefined;
+    if (!row) return null;
+    return rowToHfRevision(row);
+  }
+
+  /**
+   * List revisions for a repo, newest-first by `created_at`. Returns
+   * an empty array when the repo has no revisions.
+   */
+  listHfRevisions(
+    org: string,
+    repo: string,
+    repoType: HfRepoType,
+  ): HfRevisionRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT org, repo, repo_type, revision, root_tree_digest,
+                parent_revision, files_json, provenance_json, created_at
+         FROM hf_revision
+         WHERE org = ? AND repo = ? AND repo_type = ?
+         ORDER BY created_at DESC`,
+      )
+      .all(org, repo, repoType) as unknown as HfRevisionDbRow[];
+    return rows.map(rowToHfRevision);
+  }
+
+  /**
+   * Update (overwrite) the files_json + root_tree_digest of an
+   * existing revision row. Used by the `main` sentinel row: each
+   * publish updates `revision='main'` to point at the latest tree.
+   *
+   * Non-`main` revisions are append-only — operators rotate via a
+   * new revision string. The caller enforces that policy; this method
+   * is the raw mutator.
+   */
+  updateHfRevision(input: HfRevisionInsert): HfRevisionRow {
+    const existing = this.getHfRevision(
+      input.org,
+      input.repo,
+      input.repoType,
+      input.revision,
+    );
+    if (!existing) {
+      return this.putHfRevision(input);
+    }
+    const filesJson = JSON.stringify(input.files);
+    const createdAt = input.createdAt ?? this.now().toISOString();
+    this.db
+      .prepare(
+        `UPDATE hf_revision
+         SET root_tree_digest = ?,
+             parent_revision = ?,
+             files_json = ?,
+             provenance_json = ?,
+             created_at = ?
+         WHERE org = ? AND repo = ? AND repo_type = ? AND revision = ?`,
+      )
+      .run(
+        input.rootTreeDigest,
+        input.parentRevision ?? null,
+        filesJson,
+        input.provenance ? JSON.stringify(input.provenance) : null,
+        createdAt,
+        input.org,
+        input.repo,
+        input.repoType,
+        input.revision,
+      );
+    return {
+      org: input.org,
+      repo: input.repo,
+      repoType: input.repoType,
+      revision: input.revision,
+      rootTreeDigest: input.rootTreeDigest,
+      ...(input.parentRevision ? { parentRevision: input.parentRevision } : {}),
+      files: input.files,
+      ...(input.provenance ? { provenance: input.provenance } : {}),
+      createdAt,
+    };
   }
 }
 
@@ -682,6 +848,9 @@ function rowToManifest(row: ManifestRow): Manifest {
   const nugetMetadata: NugetManifestMetadata | undefined = row.nuget_metadata_json
     ? (JSON.parse(row.nuget_metadata_json) as NugetManifestMetadata)
     : undefined;
+  const hfMetadata: HfManifestMetadata | undefined = row.hf_metadata_json
+    ? (JSON.parse(row.hf_metadata_json) as HfManifestMetadata)
+    : undefined;
   // WS6 wave-3 (M10): only surface `kind` when the row actually
   // recorded a non-default value, so v0.4.0 manifests round-trip
   // signature-compatible.
@@ -700,6 +869,74 @@ function rowToManifest(row: ManifestRow): Manifest {
     ...(pypiMetadata ? { pypiMetadata } : {}),
     ...(mavenMetadata ? { mavenMetadata } : {}),
     ...(nugetMetadata ? { nugetMetadata } : {}),
+    ...(hfMetadata ? { hfMetadata } : {}),
+    createdAt: row.created_at,
+  };
+}
+
+// ── HF revision types (WS13 M4) ─────────────────────────────────────
+
+export type HfRepoType = "model" | "dataset" | "space";
+
+export interface HfRevisionFile {
+  path: string;
+  sha256: string;
+  size: number;
+  lfs: boolean;
+  mimeType?: string;
+}
+
+export interface HfRevisionInsert {
+  org: string;
+  repo: string;
+  repoType: HfRepoType;
+  revision: string;
+  rootTreeDigest: string;
+  parentRevision?: string;
+  files: HfRevisionFile[];
+  provenance?: Record<string, unknown>;
+  /** Optional override; tests pin this. Defaults to `now()`. */
+  createdAt?: string;
+}
+
+export interface HfRevisionRow {
+  org: string;
+  repo: string;
+  repoType: HfRepoType;
+  revision: string;
+  rootTreeDigest: string;
+  parentRevision?: string;
+  files: HfRevisionFile[];
+  provenance?: Record<string, unknown>;
+  createdAt: string;
+}
+
+interface HfRevisionDbRow {
+  org: string;
+  repo: string;
+  repo_type: HfRepoType;
+  revision: string;
+  root_tree_digest: string;
+  parent_revision: string | null;
+  files_json: string;
+  provenance_json: string | null;
+  created_at: string;
+}
+
+function rowToHfRevision(row: HfRevisionDbRow): HfRevisionRow {
+  const files = JSON.parse(row.files_json) as HfRevisionFile[];
+  const provenance = row.provenance_json
+    ? (JSON.parse(row.provenance_json) as Record<string, unknown>)
+    : undefined;
+  return {
+    org: row.org,
+    repo: row.repo,
+    repoType: row.repo_type,
+    revision: row.revision,
+    rootTreeDigest: row.root_tree_digest,
+    ...(row.parent_revision ? { parentRevision: row.parent_revision } : {}),
+    files,
+    ...(provenance ? { provenance } : {}),
     createdAt: row.created_at,
   };
 }
@@ -714,6 +951,7 @@ export type VirtualUpstreamKind =
   | "pip"
   | "pypi"
   | "nuget"
+  | "huggingface"
   | "helm";
 
 /**
@@ -780,6 +1018,16 @@ export interface VirtualUpstreamConfig {
   snapshot_policy?: "reject" | "accept";
   accept_signatures?: boolean;
   accept_checksums?: boolean;
+  /**
+   * WS13 M4 — HF-only knobs. Read by the HF publish / virtual layer;
+   * ignored by other facades.
+   *   - `hf_max_blob_bytes`: per-blob hard cap (Q1 lock); default
+   *     50 GB (`HF_DEFAULT_MAX_BLOB_BYTES`).
+   *   - `hf_lfs_threshold_bytes`: files larger than this are stored
+   *     LFS-style on publish; default 5 MiB (`HF_DEFAULT_LFS_THRESHOLD`).
+   */
+  hf_max_blob_bytes?: number;
+  hf_lfs_threshold_bytes?: number;
 }
 
 export interface VirtualUpstream {
