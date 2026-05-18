@@ -55,6 +55,7 @@ import { mountForensicRoutes } from "./forensic.js";
 import { mountOciRoutes, type MountedOciHandles } from "../oci/mount.js";
 import { publicKeyPemFromPrivate } from "../oci/jwt.js";
 import { mountPypiRoutes } from "../pypi/index.js";
+import { mountMavenRoutes } from "../maven/index.js";
 
 const VERSION = "0.0.1";
 const DEFAULT_BLOB_MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5 GiB
@@ -455,6 +456,32 @@ export function buildApp(opts: AppOptions): Router {
       index: idxStorage.index,
       ...(idxStorage.blobStore ? { blobStore: idxStorage.blobStore } : {}),
       ...(opts.publicBaseUrl ? { publicBaseUrl: opts.publicBaseUrl } : {}),
+      ...(opts.virtualUpstreamFetch
+        ? { virtualUpstreamFetch: opts.virtualUpstreamFetch }
+        : {}),
+      ...(opts.virtualResignPrivateKeyPem
+        ? { virtualResignPrivateKeyPem: opts.virtualResignPrivateKeyPem }
+        : {}),
+    });
+  }
+
+  // ── Maven facade (WS13 M2) ─────────────────────────────────────
+  //
+  // Mounts the /maven/<org>/* surface alongside cargo + npm + OCI +
+  // PyPI. Reuses the virtualUpstreamFetch + virtualResignPrivateKeyPem
+  // knobs already plumbed through; Maven shares the same operator-
+  // configured upstream table and re-sign key. Default snapshot
+  // policy is 'reject' per M0-locked decision; operators flip to
+  // 'accept' per-org via virtual_upstream.config.snapshot_policy or
+  // per-registry via the buildApp option (not yet exposed; tracked
+  // for v0.6.1).
+  if (idxStorage.index) {
+    mountMavenRoutes(router, {
+      storage,
+      index: idxStorage.index,
+      ...(opts.blobMaxBytes !== undefined
+        ? { maxBodyBytes: opts.blobMaxBytes }
+        : {}),
       ...(opts.virtualUpstreamFetch
         ? { virtualUpstreamFetch: opts.virtualUpstreamFetch }
         : {}),
