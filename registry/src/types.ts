@@ -74,7 +74,7 @@ export interface ManifestSignature {
  * - `oci` — OCI image manifest. (Schema reserved; v0.4.1 in the
  *   WS5 ROADMAP.)
  */
-export type ManifestKind = "generic" | "cargo" | "npm" | "oci" | "pypi" | "maven";
+export type ManifestKind = "generic" | "cargo" | "npm" | "oci" | "pypi" | "maven" | "nuget";
 
 /**
  * WS6 wave-3 carve-out #9 (M10): cargo-specific metadata.
@@ -325,6 +325,53 @@ export interface MavenManifestMetadata {
   contentType?: string;
 }
 
+/**
+ * WS13 M3 (v0.6 NuGet facade): per-package row metadata. One manifest
+ * row per uploaded NuGet package version (.nupkg) under
+ * `name = 'nuget/<org>/<lower-id>'` keyed on `version = '<lower-version>'`.
+ *
+ * NuGet identifiers are case-insensitive; we normalise to lowercase
+ * for storage to match the canonical flat-container URL convention.
+ * The nuspec projection (description / dependencies / tags / etc.)
+ * powers the registration response. `packageHash` is the SemVer 2
+ * base64-encoded SHA-512 of the nupkg bytes — clients that opt in to
+ * SemVer 2 verify this against the downloaded blob.
+ */
+export interface NugetManifestMetadata {
+  /** Lowercase canonical id (e.g. `newtonsoft.json`). */
+  id: string;
+  /** Normalised version (e.g. `13.0.3`). */
+  version: string;
+  /** Operator-supplied id casing (preserved for audit/display). */
+  originalId?: string;
+  /** Operator-supplied version casing (preserved for audit). */
+  originalVersion?: string;
+  authors?: string;
+  description?: string;
+  summary?: string;
+  title?: string;
+  tags?: string[];
+  projectUrl?: string;
+  licenseUrl?: string;
+  licenseExpression?: string;
+  iconUrl?: string;
+  requireLicenseAcceptance?: boolean;
+  dependencyGroups?: Array<{
+    targetFramework?: string;
+    dependencies?: Array<{ id: string; range?: string }>;
+  }>;
+  /** Aggregate target frameworks across all dependency groups. */
+  targetFrameworks?: string[];
+  /** Base64-encoded SHA-512 of the .nupkg bytes (NuGet v3 catalog). */
+  packageHash: string;
+  packageHashAlgorithm: "SHA512";
+  packageSize: number;
+  /** ISO-8601 UTC publish timestamp. */
+  published?: string;
+  /** Operator-controlled listing flag (default true). */
+  listed?: boolean;
+}
+
 export interface Manifest {
   /**
    * Manifest name. Lowercase alphanumeric plus `-`, `_`, `.`, `/`;
@@ -394,6 +441,12 @@ export interface Manifest {
    * sources/javadoc/.asc/.sha1/.md5/.sha256/.sha512 file.
    */
   mavenMetadata?: MavenManifestMetadata;
+  /**
+   * WS13 M3 (v0.6 NuGet facade): per-package-version metadata when
+   * `kind === 'nuget'`. One row per uploaded .nupkg; the nuspec
+   * projection powers the registration response.
+   */
+  nugetMetadata?: NugetManifestMetadata;
   /** ISO-8601 UTC timestamp when the manifest was first written. */
   createdAt: string;
 }
