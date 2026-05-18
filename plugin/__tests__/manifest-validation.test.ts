@@ -167,8 +167,68 @@ describe("plugin skill index — Story 2", () => {
   });
 });
 
-// ── Stories 3–5: populated in subsequent commits ────────────────────
-// (commands/, permissions, README locked-decisions)
+// ── Story 3: /signalman-status slash command ────────────────────────
+describe("plugin slash commands — Story 3", () => {
+  it("manifest declares the commands array", () => {
+    const m = loadManifest();
+    expect(Array.isArray(m.commands)).toBe(true);
+    expect((m.commands as unknown[]).length).toBeGreaterThan(0);
+  });
+
+  it("declares /signalman-status at ./commands/signalman-status.md", () => {
+    const m = loadManifest();
+    const commands = m.commands as string[];
+    expect(commands).toContain("./commands/signalman-status.md");
+  });
+
+  it("the slash command file exists on disk", () => {
+    const m = loadManifest();
+    for (const cmd of m.commands as string[]) {
+      // Strip leading "./" for join.
+      const relative = cmd.replace(/^\.\//, "");
+      const absolute = join(PLUGIN_ROOT, relative);
+      expect(existsSync(absolute)).toBe(true);
+      expect(statSync(absolute).isFile()).toBe(true);
+    }
+  });
+
+  it("the /signalman-status command has YAML frontmatter with name + description", () => {
+    const cmdPath = join(PLUGIN_ROOT, "commands", "signalman-status.md");
+    const content = readFileSync(cmdPath, "utf8");
+    expect(content.startsWith("---")).toBe(true);
+    // Capture frontmatter block.
+    const fmEnd = content.indexOf("\n---", 3);
+    expect(fmEnd).toBeGreaterThan(0);
+    const fm = content.slice(3, fmEnd);
+    expect(fm).toMatch(/name:\s*signalman-status/);
+    expect(fm).toMatch(/description:\s*\S/);
+  });
+
+  it("the /signalman-status body documents all 5 sub-queries (releases, promotions, probes, runners, budget)", () => {
+    const cmdPath = join(PLUGIN_ROOT, "commands", "signalman-status.md");
+    const body = readFileSync(cmdPath, "utf8");
+    // The design doc §Story 3 mandates the 5 synthesis sub-queries.
+    // Assert each MCP tool call the playbook is supposed to invoke
+    // appears textually in the markdown body.
+    expect(body).toMatch(/signalman_release_list/);
+    expect(body).toMatch(/signalman_promotion_approvals/);
+    expect(body).toMatch(/signalman_health_history/);
+    expect(body).toMatch(/signalman_runner_list/);
+    expect(body).toMatch(/signalman_budget_get/);
+  });
+
+  it("the /signalman-status body documents Q2 lock (day-2 SRE flavoring)", () => {
+    const cmdPath = join(PLUGIN_ROOT, "commands", "signalman-status.md");
+    const body = readFileSync(cmdPath, "utf8");
+    // Per Q2 lock: leads with what's broken/pending/stale, not
+    // what's healthy. This assertion catches accidental flavor
+    // drift in future edits.
+    expect(body.toLowerCase()).toMatch(/broken|pending|stale|failing/);
+  });
+});
+
+// ── Stories 4–5: populated in subsequent commits ────────────────────
+// (permissions, README locked-decisions)
 // See docs/design/v0.5-claude-plugin.md §Stories.
 
 // Helpers used by later stories are exported via module side-effects;
