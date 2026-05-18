@@ -62,3 +62,14 @@ export {
   parseRangeHeader,
   type ByteRange,
 } from "./guards.js";
+
+export {
+  serveHfBlob,
+  type ServeHfBlobOptions,
+} from "./blobs.js";
+
+export {
+  resolveHfFile,
+  effectiveRevision,
+  type ResolveHfFileOptions,
+} from "./resolve.js";
