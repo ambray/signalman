@@ -74,7 +74,7 @@ export interface ManifestSignature {
  * - `oci` — OCI image manifest. (Schema reserved; v0.4.1 in the
  *   WS5 ROADMAP.)
  */
-export type ManifestKind = "generic" | "cargo" | "npm" | "oci" | "pypi";
+export type ManifestKind = "generic" | "cargo" | "npm" | "oci" | "pypi" | "maven";
 
 /**
  * WS6 wave-3 carve-out #9 (M10): cargo-specific metadata.
@@ -287,6 +287,44 @@ export interface PypiManifestMetadata {
   obsoletes_dist?: string[];
 }
 
+/**
+ * WS13 M2 (v0.6 Maven facade): per-artifact row metadata. One manifest row
+ * per uploaded Maven file (jar / pom / war / ear / module / sources jar /
+ * javadoc jar / .asc signature / per-extension checksum) under
+ * `name = 'maven/<org>/<groupId>/<artifactId>'` keyed on
+ * `version = '<baseVersion>/<filename>'`. The composite version key lets
+ * multiple files at the same GAV (main jar + sources jar + .pom +
+ * checksums + signatures) share the GAV but get distinct manifest rows.
+ *
+ * Snapshot artifacts carry both `version` (the resolved-snapshot
+ * form, e.g. `1.2.3-20260517.123456-1`) and `baseVersion`
+ * (`1.2.3-SNAPSHOT`). For releases the two are identical.
+ */
+export interface MavenManifestMetadata {
+  groupId: string;
+  artifactId: string;
+  /** Resolved version (timestamped for snapshots; plain for releases). */
+  version: string;
+  /** Path-segment version (`<base>-SNAPSHOT` for snapshots). */
+  baseVersion: string;
+  filename: string;
+  /** May be a multi-suffix form like `jar.sha1`, `pom.asc`. */
+  extension: string;
+  classifier?: string;
+  isSnapshot: boolean;
+  /** Present only on resolved snapshot artifacts. */
+  snapshot?: {
+    timestamp: string;
+    buildNumber: number;
+  };
+  /** When this row is a checksum file, the filename of the artifact it covers. */
+  checksumOf?: string;
+  /** When this row is a `.asc` signature file, the filename of the artifact it signs. */
+  signatureOf?: string;
+  /** Operator-asserted; defaults are applied at write time. */
+  contentType?: string;
+}
+
 export interface Manifest {
   /**
    * Manifest name. Lowercase alphanumeric plus `-`, `_`, `.`, `/`;
@@ -350,6 +388,12 @@ export interface Manifest {
    * file's PEP 440 version + PEP 345 metadata + PEP 491 wheel tags.
    */
   pypiMetadata?: PypiManifestMetadata;
+  /**
+   * WS13 M2 (v0.6 Maven facade): per-artifact metadata when
+   * `kind === 'maven'`. One row per uploaded jar/pom/war/ear/module/
+   * sources/javadoc/.asc/.sha1/.md5/.sha256/.sha512 file.
+   */
+  mavenMetadata?: MavenManifestMetadata;
   /** ISO-8601 UTC timestamp when the manifest was first written. */
   createdAt: string;
 }

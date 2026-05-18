@@ -744,6 +744,23 @@ export interface VirtualUpstreamConfig {
   /** Docker-Hub-only overrides. */
   token_endpoint?: string;
   token_service?: string;
+  /**
+   * WS13 M2 — Maven-only knobs. Read by the Maven publish/virtual
+   * layer; ignored by other facades.
+   *   - `snapshot_policy`: 'reject' (default — Maven Central
+   *     behaviour) refuses any `-SNAPSHOT` PUT; 'accept' lets them
+   *     through.
+   *   - `accept_signatures`: when true (default), `.asc` GPG
+   *     signatures are stored verbatim without server-side
+   *     verification (Maven Central's behaviour).
+   *   - `accept_checksums`: when true (default), `.sha1` / `.md5`
+   *     / `.sha256` / `.sha512` payloads are accepted and stored;
+   *     when false, the server computes checksums on-demand from
+   *     the stored blob and never persists client-supplied checksums.
+   */
+  snapshot_policy?: "reject" | "accept";
+  accept_signatures?: boolean;
+  accept_checksums?: boolean;
 }
 
 export interface VirtualUpstream {
