@@ -227,9 +227,165 @@ describe("plugin slash commands — Story 3", () => {
   });
 });
 
-// ── Stories 4–5: populated in subsequent commits ────────────────────
-// (permissions, README locked-decisions)
-// See docs/design/v0.5-claude-plugin.md §Stories.
+// ── Story 4: permission preset ──────────────────────────────────────
+//
+// The plugin manifest cannot carry a `permissions` block (the Claude
+// Code plugin reference allows only `agent` + `subagentStatusLine` in
+// plugin-scoped settings.json). We ship the preset as:
+//
+//   - `PERMISSIONS.md` (rationale + copy-pasteable JSON)
+//   - `settings.json.example` (machine-readable for direct copy)
+//
+// The test parses settings.json.example and asserts every entry
+// references an MCP tool name actually registered in
+// `host/src/server.ts`. Drift detection: a host-side rename without
+// a preset update fails CI before reaching users.
+
+const HOST_SERVER_PATH = join(REPO_ROOT, "host", "src", "server.ts");
+const PERMISSIONS_JSON_PATH = join(PLUGIN_ROOT, "settings.json.example");
+const PERMISSIONS_MD_PATH = join(PLUGIN_ROOT, "PERMISSIONS.md");
+
+/** Extract MCP tool names registered via `server.tool("...", ...)` literals. */
+function loadRegisteredMcpTools(): Set<string> {
+  const src = readFileSync(HOST_SERVER_PATH, "utf8");
+  // Match: server.tool("signalman_xxx", ...
+  // The regex deliberately requires the `"signalman_` prefix to avoid
+  // catching dynamic registrations or unrelated string literals.
+  const matches = src.matchAll(/server\.tool\(\s*"(signalman_[a-z0-9_]+)"/g);
+  const tools = new Set<string>();
+  for (const m of matches) {
+    tools.add(m[1]);
+  }
+  return tools;
+}
+
+interface PermissionsBlock {
+  allow?: string[];
+  ask?: string[];
+  deny?: string[];
+}
+
+function loadPermissionsPreset(): PermissionsBlock {
+  const raw = readFileSync(PERMISSIONS_JSON_PATH, "utf8");
+  const parsed = JSON.parse(raw) as { permissions: PermissionsBlock };
+  return parsed.permissions;
+}
+
+const MCP_PREFIX = "mcp__signalman__";
+
+describe("plugin permission preset — Story 4", () => {
+  it("settings.json.example exists at plugin root", () => {
+    expect(existsSync(PERMISSIONS_JSON_PATH)).toBe(true);
+  });
+
+  it("PERMISSIONS.md documentation exists at plugin root", () => {
+    expect(existsSync(PERMISSIONS_MD_PATH)).toBe(true);
+  });
+
+  it("settings.json.example is parseable JSON with all 3 category arrays", () => {
+    const perms = loadPermissionsPreset();
+    expect(Array.isArray(perms.allow)).toBe(true);
+    expect(Array.isArray(perms.ask)).toBe(true);
+    expect(Array.isArray(perms.deny)).toBe(true);
+    // Each category must be non-empty per the design doc's
+    // operator-authorised category split.
+    expect((perms.allow ?? []).length).toBeGreaterThan(0);
+    expect((perms.ask ?? []).length).toBeGreaterThan(0);
+    expect((perms.deny ?? []).length).toBeGreaterThan(0);
+  });
+
+  it("every preset entry uses the mcp__signalman__ prefix (signalman MCP server, not other servers)", () => {
+    const perms = loadPermissionsPreset();
+    const all = [...(perms.allow ?? []), ...(perms.ask ?? []), ...(perms.deny ?? [])];
+    for (const entry of all) {
+      expect(entry.startsWith(MCP_PREFIX)).toBe(true);
+    }
+  });
+
+  it("every preset entry references a real MCP tool registered in host/src/server.ts", () => {
+    const registered = loadRegisteredMcpTools();
+    // Sanity: we should have parsed a non-trivial number of tools.
+    expect(registered.size).toBeGreaterThan(50);
+
+    const perms = loadPermissionsPreset();
+    const all = [...(perms.allow ?? []), ...(perms.ask ?? []), ...(perms.deny ?? [])];
+    const missing: string[] = [];
+    for (const entry of all) {
+      const toolName = entry.slice(MCP_PREFIX.length);
+      if (!registered.has(toolName)) {
+        missing.push(`${entry} → tool '${toolName}' not registered in host/src/server.ts`);
+      }
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it("no preset entry appears in more than one category (deny/ask/allow are disjoint)", () => {
+    const perms = loadPermissionsPreset();
+    const seen = new Map<string, string>();
+    for (const cat of ["allow", "ask", "deny"] as const) {
+      for (const entry of perms[cat] ?? []) {
+        const prev = seen.get(entry);
+        if (prev) {
+          throw new Error(`${entry} appears in both ${prev} and ${cat}`);
+        }
+        seen.set(entry, cat);
+      }
+    }
+    // No throw == pass.
+    expect(seen.size).toBeGreaterThan(0);
+  });
+
+  it("category split matches design doc §Stories §Story 4 intent — destructive verbs are denied", () => {
+    const perms = loadPermissionsPreset();
+    const denyTools = new Set(
+      (perms.deny ?? []).map((e) => e.slice(MCP_PREFIX.length)),
+    );
+    // Per the design doc + ROADMAP: key generation, rotate-certs,
+    // cloud-creds remove must be in deny.
+    expect(denyTools.has("signalman_key_generate")).toBe(true);
+    expect(denyTools.has("signalman_signing_keys_rotate")).toBe(true);
+    expect(denyTools.has("signalman_creds_remove")).toBe(true);
+  });
+
+  it("category split — state-changing verbs are in ask", () => {
+    const perms = loadPermissionsPreset();
+    const askTools = new Set(
+      (perms.ask ?? []).map((e) => e.slice(MCP_PREFIX.length)),
+    );
+    // Per the design doc + ROADMAP: build, deploy, promote approve,
+    // rollback, cloud-creds set must be in ask.
+    expect(askTools.has("signalman_release_build")).toBe(true);
+    expect(askTools.has("signalman_release_deploy")).toBe(true);
+    expect(askTools.has("signalman_release_rollback")).toBe(true);
+    expect(askTools.has("signalman_promotion_approve")).toBe(true);
+    expect(askTools.has("signalman_creds_set")).toBe(true);
+  });
+
+  it("category split — read-only verbs are allow", () => {
+    const perms = loadPermissionsPreset();
+    const allowTools = new Set(
+      (perms.allow ?? []).map((e) => e.slice(MCP_PREFIX.length)),
+    );
+    // Per the design doc + ROADMAP: list, get, status, audit query,
+    // forensic verbs must be in allow.
+    expect(allowTools.has("signalman_list")).toBe(true);
+    expect(allowTools.has("signalman_release_list")).toBe(true);
+    expect(allowTools.has("signalman_status")).toBe(true);
+    expect(allowTools.has("signalman_audit_query")).toBe(true);
+    expect(allowTools.has("signalman_health_history")).toBe(true);
+  });
+
+  it("PERMISSIONS.md references the three category names (allow/ask/deny) for operator clarity", () => {
+    const md = readFileSync(PERMISSIONS_MD_PATH, "utf8");
+    expect(md).toMatch(/allow/);
+    expect(md).toMatch(/ask/);
+    expect(md).toMatch(/deny/);
+  });
+});
+
+// ── Story 5: README + locked decisions ──────────────────────────────
+// Populated in next commit. See docs/design/v0.5-claude-plugin.md
+// §Stories §Story 5.
 
 // Helpers used by later stories are exported via module side-effects;
 // re-import within each describe block as needed.
