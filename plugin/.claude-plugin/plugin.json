@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "signalman",
+  "version": "0.1.0",
+  "description": "Signalman: conversational operator surface for tag-driven release lifecycle (build, deploy, promote, rollback, audit) across libvirt/KVM, docker, k8s, and cloud targets. Wraps the host MCP server and ships day-2 SRE skills.",
+  "author": {
+    "name": "Signalman contributors",
+    "url": "https://github.com/ambray/signalman"
+  },
+  "homepage": "https://github.com/ambray/signalman/tree/main/plugin",
+  "repository": "https://github.com/ambray/signalman",
+  "license": "Apache-2.0",
+  "keywords": [
+    "signalman",
+    "release-pipeline",
+    "deployment",
+    "sre",
+    "mcp",
+    "libvirt",
+    "kubernetes",
+    "audit"
+  ],
+  "commands": [
+    "./commands/signalman-status.md"
+  ],
+  "mcpServers": {
+    "signalman": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PROJECT_DIR}/host/dist/server.js"
+      ]
+    }
+  }
+}

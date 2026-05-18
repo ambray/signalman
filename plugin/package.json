@@ -1,0 +1,10 @@
+{
+  "name": "@signalman/plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Signalman Claude Code plugin: scaffolding for vitest-driven manifest validation. The plugin itself is consumed by Claude Code via .claude-plugin/plugin.json; this package.json exists only to host the manifest-validation test runner.",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  }
+}
