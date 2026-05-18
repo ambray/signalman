@@ -175,7 +175,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
         key === "cleanup-on-failure" ||
         key === "wait-guest" ||
         key === "remote" ||
-        key === "sign"
+        key === "sign" ||
+        key === "skip-seed-iso"
       ) {
         flags.add(key);
         if (eq >= 0) {
@@ -1123,6 +1124,28 @@ async function cmdVmBootstrapWin11(args: ParsedArgs): Promise<number> {
   const bindAddr = args.options.get("bind-addr");
   const authToken = args.options.get("auth-token");
 
+  // M2 (2026-05-17) — Unattended.xml inputs. Defaults are the M0
+  // Q-locks: en-US locale, UTC tz, signalman admin, AutoLogonCount=3.
+  // adminPassword falls back to SIGNALMAN_ADMIN_PASS env when not
+  // explicitly passed.
+  const locale = args.options.get("locale");
+  const timezone = args.options.get("timezone");
+  const adminUsername = args.options.get("admin-user");
+  const adminPassword =
+    args.options.get("admin-pass") ?? process.env.SIGNALMAN_ADMIN_PASS;
+  const autoLogonCountRaw = args.options.get("auto-logon-count");
+  let autoLogonCount: number | undefined;
+  if (autoLogonCountRaw !== undefined) {
+    const parsed = parseInt(autoLogonCountRaw, 10);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      usageError(
+        `vm bootstrap-win11: --auto-logon-count must be a positive integer (got '${autoLogonCountRaw}')`,
+      );
+    }
+    autoLogonCount = parsed;
+  }
+  const skipSeedIso = args.flags.has("skip-seed-iso");
+
   // `--msi-from-build` is reserved for v0.6 (see Q2 locked default).
   // Surface a structured usage error if the operator passes it today
   // so they don't silently get pre-signed-only behavior.
@@ -1145,6 +1168,14 @@ async function cmdVmBootstrapWin11(args: ParsedArgs): Promise<number> {
       cleanupOnFailure: args.flags.has("cleanup-on-failure"),
       bindAddr,
       authToken,
+      skipSeedIso,
+      unattended: {
+        locale,
+        timezone,
+        adminUsername,
+        adminPassword,
+        autoLogonCount,
+      },
       onProgress: (e) => {
         // Stream progress to stderr so --format json on stdout stays
         // parseable. Phase events are the operator's main visibility

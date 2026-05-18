@@ -163,6 +163,37 @@ describe("parseArgs (bootstrap-win11 flag surface)", () => {
     const r = parseArgs(["my-vm", "--force=true"]);
     expect(r.flags.has("force")).toBe(true);
   });
+
+  // ── M2: Unattended.xml CLI flags ──────────────────────────────
+  it("captures --locale <value>", () => {
+    const r = parseArgs(["my-vm", "--locale", "de-DE"]);
+    expect(r.options.get("locale")).toBe("de-DE");
+  });
+
+  it("captures --timezone <value>", () => {
+    const r = parseArgs(["my-vm", "--timezone", "America/Los_Angeles"]);
+    expect(r.options.get("timezone")).toBe("America/Los_Angeles");
+  });
+
+  it("captures --admin-user <value>", () => {
+    const r = parseArgs(["my-vm", "--admin-user", "admin"]);
+    expect(r.options.get("admin-user")).toBe("admin");
+  });
+
+  it("captures --admin-pass <value>", () => {
+    const r = parseArgs(["my-vm", "--admin-pass", "P@ss"]);
+    expect(r.options.get("admin-pass")).toBe("P@ss");
+  });
+
+  it("captures --auto-logon-count <int>", () => {
+    const r = parseArgs(["my-vm", "--auto-logon-count", "5"]);
+    expect(r.options.get("auto-logon-count")).toBe("5");
+  });
+
+  it("captures --skip-seed-iso as a boolean flag", () => {
+    const r = parseArgs(["my-vm", "--skip-seed-iso"]);
+    expect(r.flags.has("skip-seed-iso")).toBe(true);
+  });
 });
 
 // ── End-to-end CLI invocations (subprocess) ───────────────────────
@@ -201,5 +232,30 @@ describe("signalman vm bootstrap-win11 (end-to-end usage paths)", () => {
     // help (the existing help text only enumerates root verbs); just
     // that --help still works after the wire-up.
     expect(stdout.length).toBeGreaterThan(0);
+  });
+
+  it("usage error (exit 64) when --auto-logon-count is not a positive integer", async () => {
+    const { exitCode, stderr } = await runCli([
+      "vm",
+      "bootstrap-win11",
+      "my-vm",
+      "--auto-logon-count",
+      "abc",
+    ]);
+    expect(exitCode).toBe(64);
+    expect(stderr).toContain("--auto-logon-count");
+    expect(stderr).toContain("positive integer");
+  });
+
+  it("usage error (exit 64) when --auto-logon-count is zero", async () => {
+    const { exitCode, stderr } = await runCli([
+      "vm",
+      "bootstrap-win11",
+      "my-vm",
+      "--auto-logon-count",
+      "0",
+    ]);
+    expect(exitCode).toBe(64);
+    expect(stderr).toContain("--auto-logon-count");
   });
 });

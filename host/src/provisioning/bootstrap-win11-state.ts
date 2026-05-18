@@ -38,12 +38,19 @@ export const CURRENT_STATE_VERSION = 1 as const;
 export const MAX_SUPPORTED_STATE_VERSION = 1 as const;
 
 /**
- * The 12 pipeline phases per design doc §M1. Order is canonical;
+ * The pipeline phases per design doc §M1 + M2. Order is canonical;
  * `nextPhase(p)` returns the successor.
+ *
+ * M2 (2026-05-17) inserts `compose_seed_iso` between `create_vm`
+ * and `set_firmware`. The phase name is intentionally NOT `step_2_5`
+ * — the spec calls for the phase to land BEFORE `set_firmware` and
+ * AFTER `create_vm` so the create-VM call gets `extraCdroms`
+ * populated, and `compose_seed_iso` is what the journal records.
  */
 export type BootstrapPhase =
   | "resolve_template"
   | "acquire_lock"
+  | "compose_seed_iso"
   | "create_vm"
   | "set_firmware"
   | "boot_vm"
@@ -59,6 +66,7 @@ export type BootstrapPhase =
 export const PHASE_ORDER: readonly BootstrapPhase[] = [
   "resolve_template",
   "acquire_lock",
+  "compose_seed_iso",
   "create_vm",
   "set_firmware",
   "boot_vm",
@@ -118,6 +126,24 @@ export interface BootstrapState {
     error: string;
     failedAt: string;
   };
+  /**
+   * M2 (2026-05-17) — absolute path to the seed ISO composed at
+   * phase `compose_seed_iso`. Persisted so cleanup (phase
+   * `checkpoint` or cleanup-on-failure) can detach + delete the
+   * file even on a resume after partial failure. `null` when no
+   * seed ISO was ever composed (legacy state files / pipelines
+   * that opted out).
+   */
+  seedIsoPath?: string | null;
+  /**
+   * M2 (2026-05-17) — true once the seed ISO has been attached to
+   * the VM (via `extraCdroms` passed to `createVM`). Required for
+   * the cleanup contract: cleanup detaches via `removeIsoFromVm`
+   * only when this flag is true (so a partial-failure path that
+   * composed the ISO but never reached createVM doesn't try to
+   * detach a non-attached media).
+   */
+  seedIsoAttached?: boolean;
 }
 
 // ── Path composition ──────────────────────────────────────────────
@@ -243,6 +269,12 @@ function normalizeState(parsed: unknown, source: string): BootstrapState {
       ? (o.lastCompletedPhase as BootstrapPhase)
       : undefined;
   const lastFailure = isLastFailure(o.lastFailure) ? o.lastFailure : undefined;
+  // M2 additive fields. Forward-compat: missing/typo'd values become
+  // null / false defaults so legacy state files keep loading.
+  const seedIsoPath =
+    typeof o.seedIsoPath === "string" ? o.seedIsoPath : null;
+  const seedIsoAttached =
+    typeof o.seedIsoAttached === "boolean" ? o.seedIsoAttached : false;
   return {
     stateVersion: CURRENT_STATE_VERSION,
     vmName,
@@ -253,6 +285,8 @@ function normalizeState(parsed: unknown, source: string): BootstrapState {
     phases,
     lastCompletedPhase,
     lastFailure,
+    seedIsoPath,
+    seedIsoAttached,
   };
 }
 
@@ -299,6 +333,8 @@ export function newState(opts: {
     startedAt: now,
     lastUpdatedAt: now,
     phases: [],
+    seedIsoPath: null,
+    seedIsoAttached: false,
   };
 }
 

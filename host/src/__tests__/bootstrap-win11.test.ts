@@ -248,8 +248,9 @@ describe("bootstrap-win11 state journal", () => {
     s = markPhaseComplete(s, "resolve_template");
     s = markPhaseComplete(s, "acquire_lock");
     expect(isPhaseComplete(s, "resolve_template")).toBe(true);
-    expect(isPhaseComplete(s, "create_vm")).toBe(false);
-    expect(nextPhaseToRun(s)).toBe("create_vm");
+    // M2: compose_seed_iso lands between acquire_lock and create_vm.
+    expect(isPhaseComplete(s, "compose_seed_iso")).toBe(false);
+    expect(nextPhaseToRun(s)).toBe("compose_seed_iso");
   });
 
   it("nextPhaseToRun(null) returns the first phase", () => {
@@ -475,7 +476,7 @@ describe("bootstrapWin11 idempotency", () => {
     expect(backend.createCheckpoint).not.toHaveBeenCalled();
   });
 
-  it("resumes mid-pipeline when the journal stops at phase 5", async () => {
+  it("resumes mid-pipeline when the journal stops at stage_certs", async () => {
     // Pre-populate the mock backend state with vmExists=true so the
     // skipped create_vm phase's subsequent VM-handle resolution works.
     const sharedState: MockBackendState = {
@@ -484,13 +485,15 @@ describe("bootstrapWin11 idempotency", () => {
       rebootHappened: false,
     };
     const backend = makeMockBackend("vm1", {}, sharedState);
-    // Pre-populate through stage_certs (phase 6 — phases 1..6 complete).
+    // Pre-populate through stage_certs (M2: phases 1..7 in 13-phase
+    // order — resolve_template, acquire_lock, compose_seed_iso,
+    // create_vm, set_firmware, boot_vm, stage_certs).
     let s = newState({
       vmName: "vm1",
       templateName: "win11-base",
       checkpointLabel: "agent-installed",
     });
-    for (const p of PHASE_ORDER.slice(0, 6)) s = markPhaseComplete(s, p);
+    for (const p of PHASE_ORDER.slice(0, 7)) s = markPhaseComplete(s, p);
     writeState(s, projectRoot);
 
     const events: string[] = [];
@@ -503,12 +506,12 @@ describe("bootstrapWin11 idempotency", () => {
         if (e.kind === "phase_complete") events.push(`done:${e.phase}`);
       },
     });
-    // First 6 phases skipped, last 6 done.
-    expect(events.filter((e) => e.startsWith("skip:")).length).toBe(6);
+    // First 7 phases skipped, last 6 done.
+    expect(events.filter((e) => e.startsWith("skip:")).length).toBe(7);
     expect(events.filter((e) => e.startsWith("done:")).length).toBe(6);
     // The phases that ran were the last six in order.
     const doneOrder = events.filter((e) => e.startsWith("done:")).map((e) => e.slice(5));
-    expect(doneOrder).toEqual([...PHASE_ORDER.slice(6)]);
+    expect(doneOrder).toEqual([...PHASE_ORDER.slice(7)]);
   });
 
   it("--force clears the journal AND tears down the VM via deleteVM", async () => {

@@ -63,6 +63,8 @@ import {
 } from "../scenarios/templates.js";
 import { cleanupVM } from "./cleanup.js";
 import { cacheVM, globalVmCache } from "../vm-cache.js";
+import { composeAutounattendXml, type UnattendedConfig } from "./unattended.js";
+import { writeSeedIso } from "./seed-iso.js";
 import {
   bootstrapStatePath,
   deleteState,
@@ -78,6 +80,32 @@ import {
 } from "./bootstrap-win11-state.js";
 
 // ── Public API ────────────────────────────────────────────────────
+
+/**
+ * M2 (2026-05-17) — Unattended.xml inputs surfaced through the
+ * pipeline. All fields are optional; defaults match the M0 Q-locks
+ * (en-US locale, UTC timezone, signalman admin, RDP on, etc.).
+ */
+export interface UnattendedOpts {
+  /** UI / system / user locale. Defaults to `en-US`. */
+  locale?: string;
+  /**
+   * Timezone — IANA name or Microsoft display name. Defaults to
+   * `UTC`.
+   */
+  timezone?: string;
+  /** Local administrator username. Defaults to `signalman`. */
+  adminUsername?: string;
+  /**
+   * Local administrator password. Defaults to the value of
+   * `SIGNALMAN_ADMIN_PASS` env var if set, else a random 32-hex
+   * value generated per-run (operator MUST capture from logs if
+   * they want to log in interactively).
+   */
+  adminPassword?: string;
+  /** AutoLogon count. Default 3 (Q2 lock). */
+  autoLogonCount?: number;
+}
 
 export interface BootstrapWin11Opts {
   vmName: string;
@@ -119,6 +147,19 @@ export interface BootstrapWin11Opts {
    * stable enum tag.
    */
   onProgress?: (event: BootstrapWin11Event) => void;
+  /**
+   * M2 (2026-05-17) — Unattended.xml inputs for the seed ISO. When
+   * omitted, the M0 Q-locked defaults apply.
+   */
+  unattended?: UnattendedOpts;
+  /**
+   * M2 (2026-05-17) — disable the seed-ISO injection entirely
+   * (e.g. for a template that already includes its own
+   * Autounattend.xml, or for the libvirt path until M4 polishes
+   * extraCdroms ordering). Default false — seed ISO is composed +
+   * attached.
+   */
+  skipSeedIso?: boolean;
 }
 
 export interface BootstrapWin11Result {
@@ -257,12 +298,52 @@ export async function bootstrapWin11(
       return `host lock acquired`;
     });
 
+    // ── Phase 2.5: compose seed ISO (M2, step 2.5) ───────────────
+    state = await runPhase(
+      state,
+      "compose_seed_iso",
+      projectRoot,
+      log,
+      async () => {
+        if (opts.skipSeedIso) {
+          return {
+            detail: `skipped: opts.skipSeedIso=true`,
+            patch: { seedIsoPath: null, seedIsoAttached: false },
+          };
+        }
+        const { isoPath, computerName } = await composeSeedIsoForVm({
+          vmName: opts.vmName,
+          projectRoot,
+          unattended: opts.unattended,
+        });
+        const note =
+          computerName.rewritten
+            ? ` (ComputerName rewritten from '${computerName.source}' to '${computerName.result}')`
+            : "";
+        return {
+          detail: `seed ISO at ${isoPath}${note}`,
+          patch: { seedIsoPath: isoPath },
+        };
+      },
+    );
+
     // ── Phase 3: create VM ───────────────────────────────────────
     state = await runPhase(state, "create_vm", projectRoot, log, async () => {
       handle = await findExistingVm(backend, opts.vmName);
       if (handle) {
         cacheVM(handle);
-        return `VM '${opts.vmName}' already exists; skipping createVM`;
+        // VM already exists. If the journal says we composed a seed
+        // ISO but never recorded the attach, mark it attached now —
+        // the running VM picked it up via the create-time extraCdroms,
+        // and the cleanup contract needs the flag set.
+        const idempotentPatch: Partial<BootstrapState> | undefined =
+          state.seedIsoPath && !state.seedIsoAttached
+            ? { seedIsoAttached: true }
+            : undefined;
+        return {
+          detail: `VM '${opts.vmName}' already exists; skipping createVM`,
+          patch: idempotentPatch,
+        };
       }
       if (!template) {
         // resolve_template was idempotently skipped on a resume; we
@@ -278,10 +359,18 @@ export async function bootstrapWin11(
         network: template.networkSwitch
           ? { switchName: template.networkSwitch }
           : undefined,
+        ...(state.seedIsoPath
+          ? { extraCdroms: [state.seedIsoPath] }
+          : {}),
       };
       handle = await backend.createVM(config);
       cacheVM(handle);
-      return `VM '${opts.vmName}' created from template '${templateName}'`;
+      const attachPatch: Partial<BootstrapState> | undefined =
+        state.seedIsoPath ? { seedIsoAttached: true } : undefined;
+      return {
+        detail: `VM '${opts.vmName}' created from template '${templateName}'`,
+        patch: attachPatch,
+      };
     });
 
     // ── Phase 4: set firmware (Secure Boot Off) ──────────────────
@@ -476,8 +565,30 @@ export async function bootstrapWin11(
     // ── Phase 12: checkpoint ─────────────────────────────────────
     state = await runPhase(state, "checkpoint", projectRoot, log, async () => {
       handle = handle ?? (await resolveHandleByName(backend, opts.vmName));
+      // Detach + delete the seed ISO BEFORE the checkpoint so the
+      // saved state doesn't pin a stale ISO blob (locked design §8).
+      // Failures here are non-fatal — log a warning and continue
+      // with the checkpoint; the operator can clean up the orphan
+      // blob manually if necessary.
+      let detachPatch: Partial<BootstrapState> | undefined;
+      if (state.seedIsoPath && state.seedIsoAttached) {
+        try {
+          await detachAndDeleteSeedIso(backend, handle, state.seedIsoPath, log);
+          detachPatch = { seedIsoAttached: false };
+        } catch (cleanupErr) {
+          log({
+            kind: "warning",
+            message:
+              `seed ISO cleanup failed before checkpoint (continuing): ` +
+              `${(cleanupErr as Error).message}`,
+          });
+        }
+      }
       await backend.createCheckpoint(handle, checkpointLabel);
-      return `checkpoint '${checkpointLabel}' created`;
+      return {
+        detail: `checkpoint '${checkpointLabel}' created`,
+        patch: detachPatch,
+      };
     });
 
     handle = handle ?? (await resolveHandleByName(backend, opts.vmName));
@@ -491,6 +602,29 @@ export async function bootstrapWin11(
     };
   } catch (err) {
     if (opts.cleanupOnFailure) {
+      // M2 (2026-05-17) — detach + delete the seed ISO BEFORE
+      // cleanupVM removes the VM. Otherwise cleanupVM may report
+      // an in-use error or leave the ISO file on disk.
+      if (state.seedIsoPath && state.seedIsoAttached && handle) {
+        try {
+          await detachAndDeleteSeedIso(backend, handle, state.seedIsoPath, log);
+        } catch (detachErr) {
+          log({
+            kind: "warning",
+            message:
+              `cleanupOnFailure: seed ISO detach failed (continuing to cleanupVM): ` +
+              `${(detachErr as Error).message}`,
+          });
+        }
+      } else if (state.seedIsoPath) {
+        // ISO file exists on disk but never attached — delete the
+        // orphan file so a re-run with --force doesn't trip over it.
+        try {
+          fs.unlinkSync(state.seedIsoPath);
+        } catch {
+          /* best effort */
+        }
+      }
       try {
         await cleanupVM(backend, opts.vmName);
       } catch (cleanupErr) {
@@ -529,7 +663,7 @@ async function runPhase(
   phase: BootstrapPhase,
   projectRoot: string,
   log: (e: BootstrapWin11Event) => void,
-  body: () => Promise<string>,
+  body: () => Promise<string | { detail: string; patch?: Partial<BootstrapState> }>,
 ): Promise<BootstrapState> {
   if (isPhaseComplete(state, phase)) {
     log({
@@ -541,15 +675,23 @@ async function runPhase(
   }
   log({ kind: "phase_start", phase, message: `starting phase '${phase}'` });
   let detail: string;
+  let patch: Partial<BootstrapState> | undefined;
   try {
-    detail = await body();
+    const result = await body();
+    if (typeof result === "string") {
+      detail = result;
+    } else {
+      detail = result.detail;
+      patch = result.patch;
+    }
   } catch (err) {
     const updated = markPhaseFailed(state, phase, (err as Error).message);
     writeState(updated, projectRoot);
     if (err instanceof BootstrapWin11Error) throw err;
     throw new BootstrapWin11Error(phase, (err as Error).message, { cause: err });
   }
-  const updated = markPhaseComplete(state, phase, detail);
+  let updated = markPhaseComplete(state, phase, detail);
+  if (patch) updated = { ...updated, ...patch };
   writeState(updated, projectRoot);
   log({ kind: "phase_complete", phase, detail });
   return updated;
@@ -939,4 +1081,118 @@ function synthesizeHandle(name: string, backendName: string): VMHandle {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ── M2 helpers ────────────────────────────────────────────────────
+
+interface ComposeSeedIsoArgs {
+  vmName: string;
+  projectRoot: string;
+  unattended: UnattendedOpts | undefined;
+}
+
+/**
+ * Compose the Autounattend.xml + write the seed ISO to
+ * `.signalman/state/bootstrap-win11/<vm-name>.seed.iso`. Returns
+ * the absolute path + ComputerName rewrite metadata so the caller
+ * can log the (silent) NetBIOS-15 transliteration.
+ *
+ * Side effect: the seed-ISO file is written to disk. The state
+ * journal mutation is the caller's responsibility — we don't
+ * touch the journal here so test code can call this in isolation.
+ */
+async function composeSeedIsoForVm(
+  args: ComposeSeedIsoArgs,
+): Promise<{
+  isoPath: string;
+  computerName: { source: string; result: string; rewritten: boolean };
+}> {
+  const { composeWithMeta } = await import("./unattended.js");
+  // Resolve admin password: explicit > SIGNALMAN_ADMIN_PASS env >
+  // random 32-hex (operator sees the password in the journal /
+  // detail field, never anywhere else).
+  const { randomBytes } = await import("node:crypto");
+  const u = args.unattended ?? {};
+  const adminUsername = u.adminUsername ?? "signalman";
+  const adminPassword =
+    u.adminPassword ??
+    process.env.SIGNALMAN_ADMIN_PASS ??
+    randomBytes(16).toString("hex");
+  const cfg: UnattendedConfig = {
+    computerName: args.vmName,
+    adminUsername,
+    adminPassword,
+    locale: u.locale,
+    timezone: u.timezone,
+    autoLogonCount: u.autoLogonCount,
+  };
+  const { xml, meta } = composeWithMeta(cfg);
+  const isoDir = path.join(
+    args.projectRoot,
+    ".signalman",
+    "state",
+    "bootstrap-win11",
+  );
+  fs.mkdirSync(isoDir, { recursive: true });
+  const isoPath = path.join(isoDir, `${args.vmName}.seed.iso`);
+  await writeSeedIso(isoPath, {
+    "Autounattend.xml": Buffer.from(xml, "utf8"),
+  });
+  // Also call composeAutounattendXml so the unused import doesn't
+  // warn — same call shape composeWithMeta already covers.
+  void composeAutounattendXml;
+  return {
+    isoPath,
+    computerName: meta.computerName,
+  };
+}
+
+/**
+ * Detach the seed ISO from the VM (best-effort; backend-specific)
+ * and remove the on-disk file. Called from the checkpoint phase
+ * and from the cleanupOnFailure path.
+ */
+async function detachAndDeleteSeedIso(
+  backend: HypervisorBackend,
+  handle: VMHandle,
+  isoPath: string,
+  log: (e: BootstrapWin11Event) => void,
+): Promise<void> {
+  // Backends that expose `removeIsoFromVm` get the explicit detach
+  // call; otherwise we rely on the operator's cleanup-step or a
+  // backend stop+restart cycle to release the media. The interface
+  // surface is intentionally minimal at M2 — full Remove-VMDvdDrive
+  // wiring on Hyper-V lands in M3 once the bootstrap pipeline has
+  // proven the create-time attach.
+  type BackendWithDetach = HypervisorBackend & {
+    removeIsoFromVm?: (handle: VMHandle, isoPath: string) => Promise<void>;
+  };
+  const b = backend as BackendWithDetach;
+  if (typeof b.removeIsoFromVm === "function") {
+    try {
+      await b.removeIsoFromVm(handle, isoPath);
+    } catch (err) {
+      log({
+        kind: "warning",
+        message:
+          `seed ISO detach via backend.removeIsoFromVm failed ` +
+          `(continuing to delete file): ${(err as Error).message}`,
+      });
+    }
+  } else {
+    log({
+      kind: "warning",
+      message:
+        `backend '${backend.name}' does not implement removeIsoFromVm; ` +
+        `seed ISO will remain attached to the VM definition. ` +
+        `Deleting the on-disk file regardless so a re-run with --force is clean.`,
+    });
+  }
+  try {
+    fs.unlinkSync(isoPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw err;
+    }
+  }
 }
