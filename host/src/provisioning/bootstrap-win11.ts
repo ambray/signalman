@@ -363,7 +363,14 @@ export async function bootstrapWin11(
       // The shutdown returns immediately; wait for the VM to go down
       // and come back. We don't have a clean "wait for reboot" RPC,
       // so we poll for heartbeat to drop and re-establish.
-      await waitForReboot(backend, handle);
+      // Tests can shorten the drop-poll window via
+      // SIGNALMAN_BOOTSTRAP_WIN11_REBOOT_DROP_MS to keep wall-clock
+      // bounded when the mock backend never reports a drop.
+      const dropMs = parseInt(
+        process.env.SIGNALMAN_BOOTSTRAP_WIN11_REBOOT_DROP_MS ?? "10000",
+        10,
+      );
+      await waitForReboot(backend, handle, dropMs);
       return `VM '${opts.vmName}' rebooted and heartbeat restored`;
     });
 
@@ -747,31 +754,47 @@ async function waitForVmReady(
 /**
  * After issuing `shutdown /r /t 0`, wait for the VM to go down and
  * come back. We don't have a clean "the shutdown took effect" RPC, so:
- *   1. Poll for heartbeat to drop (state != running, or
- *      guestAgentReachable=false). 60-second deadline because
- *      shutdown /r is usually < 30s for a Win11 reboot init.
+ *   1. Poll briefly for heartbeat to drop (state != running, or
+ *      guestAgentReachable=false). Short deadline so a fast-reboot
+ *      (or a mocked one) doesn't dominate wall-clock; if we don't
+ *      observe a drop within this window we assume the reboot was
+ *      faster than our polling cadence and proceed to step 2.
  *   2. Poll for heartbeat to recover (state=running + ready). 5-minute
  *      deadline matches waitForVmReady.
  *
- * If step 1 never observes a drop we still proceed to step 2 — the
- * shutdown may have been so fast we missed the window. Step 2's
- * deadline is the real failure surface.
+ * `dropTimeoutMs` is parameterised for tests so the suite doesn't pay
+ * a real-time deadline penalty when the mock backend reports the VM
+ * as healthy throughout.
  */
 async function waitForReboot(
   backend: HypervisorBackend,
   handle: VMHandle,
+  dropTimeoutMs: number = 10_000,
 ): Promise<void> {
-  const dropDeadline = Date.now() + 60_000;
+  const dropDeadline = Date.now() + dropTimeoutMs;
+  let observedDrop = false;
   while (Date.now() < dropDeadline) {
     try {
       const status = await backend.getStatus(handle);
-      if (status.state !== "running" || !status.guestAgentReachable) break;
+      if (status.state !== "running" || !status.guestAgentReachable) {
+        observedDrop = true;
+        break;
+      }
     } catch {
       // backend transient error during reboot — that's fine, count as a drop.
+      observedDrop = true;
       break;
     }
-    await sleep(2_000);
+    await sleep(500);
   }
+  // If we never observed a drop, the reboot was either too fast for
+  // our cadence to catch OR the mock backend reports it as
+  // continuously healthy. Either way, proceed to waitForVmReady which
+  // is the real readiness gate. (In production, the more common case
+  // is that we miss the drop on the first poll iteration because
+  // shutdown /r /t 0 returns instantly + Windows takes a few seconds
+  // to actually pull the rug.)
+  void observedDrop;
   await waitForVmReady(backend, handle);
 }
 

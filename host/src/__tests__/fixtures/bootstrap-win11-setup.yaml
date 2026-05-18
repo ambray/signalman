@@ -1,0 +1,68 @@
+# Example scenario fixture for `signalman vm bootstrap-win11`
+# (v0.5-win11-deploy M1).
+#
+# CANONICAL LOCATION: This file is conceptually the
+# `examples/bootstrap-win11/setup.yaml` referenced by docs/design/
+# v0.5-win11-demo-deploy.md §M1. It's parked here under the test
+# fixtures dir so the scenarios-loader test surface picks it up
+# while the v0.6 follow-up that adds top-level `examples/bootstrap-win11/`
+# is still pending. Operator copy/paste path is:
+#
+#   mkdir -p examples/bootstrap-win11
+#   cp host/src/__tests__/fixtures/bootstrap-win11-setup.yaml \
+#      examples/bootstrap-win11/setup.yaml
+#
+# This is a one-shot bootstrap scenario rather than a recurring test:
+# it takes an empty `Win11_test` VM and produces a checkpoint named
+# `agent-installed` (the canonical exit state of bootstrap-win11).
+# After that checkpoint exists, downstream scenarios `pre_started: true`
+# against the same VM name and restore-from-checkpoint inside their
+# steps.
+#
+# Production bootstrap is driven by the CLI directly:
+#
+#   signalman vm bootstrap-win11 Win11_test \
+#     --template win11-base \
+#     --msi build/signalman-guest-test-signed.msi \
+#     --cert ${SIGNALMAN_TEST_SIGNING_CERT}
+#
+# Gating env vars for the system lane (Q10 locked default):
+#   SIGNALMAN_WIN11_DEMO_TESTS=1
+#   SIGNALMAN_WIN11_TEMPLATE_VHDX=/abs/path/to/win11-base.vhdx
+#   SIGNALMAN_TEST_SIGNING_CERT=/abs/path/to/test-signing-cert.pfx
+
+name: "Bootstrap Win11 demo VM (system lane)"
+version: "1.0"
+tags: ["windows", "hyperv", "bootstrap", "win11", "demo", "system"]
+
+vms:
+  - name: Win11_test
+    template: win11-base
+    # `bootstrap-win11` brings the VM up itself — the scenario must NOT
+    # pre-start it, otherwise the create_vm phase no-ops on an
+    # operator-managed VM whose state the bootstrap pipeline doesn't
+    # own.
+    pre_started: false
+    guest_agent_port: 50051
+    # Per-VM credentials (b0ec24c). The bootstrap-win11 pipeline routes
+    # `vm exec` (bcdedit) + `vm copy-file` (MSI) through
+    # `withGuestCredentials` so these creds reach Invoke-Command
+    # -Credential without needing global config changes.
+    credentials:
+      username: test
+      # Use ${secret:...} substitution rather than checking the
+      # password into YAML. SIGNALMAN_SECRET_WIN11_TEST_PASSWORD (or
+      # WIN11_TEST_PASSWORD) is resolved at scenario-load time by
+      # substituteRuntimeRefsDeep.
+      password: ${secret:WIN11_TEST_PASSWORD}
+
+capabilities:
+  vms: ["Win11_test"]
+
+setup: []
+
+teardown: []
+
+checkpoints:
+  before_test: false
+  on_failure: false

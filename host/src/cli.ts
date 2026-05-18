@@ -149,7 +149,7 @@ export interface ParsedArgs {
   params: Record<string, string>;
 }
 
-function parseArgs(argv: string[]): ParsedArgs {
+export function parseArgs(argv: string[]): ParsedArgs {
   const positional: string[] = [];
   const flags = new Set<string>();
   const options = new Map<string, string>();
