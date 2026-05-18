@@ -46,6 +46,22 @@ export {
 
 export { extractNuspecFromNupkg, parseNuspec } from "./guards.js";
 
-// Routing-layer exports — populated in chunk 2 (service-index +
-// flat-container + registration) and chunk 3 (publish + virtual +
-// mount). Each module re-exports through this barrel once it lands.
+export {
+  composeServiceIndex,
+  mountNugetServiceIndexRoute,
+  type MountNugetServiceIndexOptions,
+} from "./service-index.js";
+
+export {
+  mountNugetFlatContainerRoutes,
+  type MountNugetFlatContainerOptions,
+} from "./flat-container.js";
+
+export {
+  composeRegistrationIndex,
+  composeRegistrationLeaf,
+  mountNugetRegistrationRoutes,
+  type MountNugetRegistrationOptions,
+} from "./registration.js";
+
+// Publish / virtual / mount land in chunk 3.
