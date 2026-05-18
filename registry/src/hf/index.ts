@@ -78,3 +78,14 @@ export {
   handleLfsBatch,
   type LfsBatchHandlerOptions,
 } from "./lfs.js";
+
+export {
+  publishHfTarball,
+  type HfPublishInput,
+  type HfPublishResult,
+} from "./publish.js";
+
+export {
+  parseUstarTar,
+  type TarEntry,
+} from "./tar.js";
